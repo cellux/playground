@@ -1,0 +1,25 @@
+{:paths
+ ["src/main"]
+
+ :deps
+ {ring/ring-core {:mvn/version "1.8.1"}
+  ring/ring-jetty-adapter {:mvn/version "1.8.1"}
+  http-kit/http-kit {:mvn/version "2.4.0"}
+  com.github.jnr/jnr-ffi {:mvn/version "2.2.0"}}
+
+ :aliases
+ {:cljs
+  {:extra-deps
+   {org.clojure/clojurescript {:mvn/version "1.10.764"}}}
+
+  :cljs.dev
+  {:main-opts ["-m" "cljs.main"
+               "-co" "cljs-opts.edn"
+               "-w" "src/main"
+               "-c" "rb.explores.clojurescript"]}
+
+  :cljs.release
+  {:main-opts ["-m" "cljs.main"
+               "-co" "cljs-opts.edn"
+               "-O" "advanced"
+               "-c" "rb.explores.clojurescript"]}}}
