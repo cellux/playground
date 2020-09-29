@@ -1,6 +1,6 @@
 (ns rb.explores.cowbells
   (:require [cowbells.core :as cb
-             :refer [defpattern defpattern*
+             :refer [defpattern defpattern* defpattern<
                      stop restart clear dump play]]
             [cowbells.pattern :as pattern]))
 
@@ -41,3 +41,8 @@
     [:seq
      ~@(for [d (range 15)]
          [:seq [:degree (- 14 d)] 1])]])
+
+(defpattern< plonk
+  [:bind {:shift -3 :velocity 60}
+   [:program 0]
+   [:seq [:degree 3] 1/4 [:degree 5] 1/4]])

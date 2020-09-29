@@ -23,39 +23,63 @@
   (alter-var-root
    #'transport
    (fn [transport]
-     (when (transport-active?)
-       (transport :stop))
-     :stopped)))
+     (if (transport-active?)
+       (transport :stop)
+       :stopped))))
 
 (defn restart
   ([config]
    (stop)
    (start config))
   ([]
-   (when (transport-active?)
-     (restart (transport :config)))))
+   (if (transport-active?)
+     (restart (transport :config))
+     :inactive-transport)))
 
 (defn clear
   []
-  (when (transport-active?)
-    (transport :clear)))
+  (if (transport-active?)
+    (transport :clear)
+    :inactive-transport))
 
 (defn dump
   []
-  (when (transport-active?)
-    (transport :dump)))
+  (if (transport-active?)
+    (transport :dump)
+    :inactive-transport))
 
 (defn play
   [pf & args]
-  (when (transport-active?)
-    (apply transport :play pf args)))
+  (if (transport-active?)
+    (apply transport :play pf args)
+    :inactive-transport))
 
 (defmacro defpattern
   [name & body]
-  `(def ~name (pattern/compile [:seq ~@body])))
+  (let [result (if (resolve name) :updated :defined)]
+    `(do
+       (def ~name (pattern/compile [:seq ~@body]))
+       ~result)))
 
 (defmacro defpattern*
   [name & body]
   `(do
      (defpattern ~name ~@body)
      (play ~name)))
+
+(defmacro defpattern<
+  [name & body]
+  (let [v (resolve name)
+        [op result] (if (and v
+                             (pattern/pattern-function? (var-get v))
+                             (:looping? (meta v)))
+                      ['defpattern :updated]
+                      ['defpattern* :looping])]
+    `(do
+       ~@(if v `[(alter-meta! #'~name dissoc :looping?)])
+       (~op ~name [:seq ~@body [:sched #'~name]])
+       (if (transport-active?)
+         (do
+           (alter-meta! #'~name assoc :looping? true)
+           ~result)
+         :inactive-transport))))

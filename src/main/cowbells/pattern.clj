@@ -60,7 +60,7 @@
 (defmethod compile-pattern :seq
   [[_ & body]]
   (if (nil? (next body))
-    (compile-pattern (first body))
+    (compile (first body))
     (let [pfs (map compile body)]
       (pfn [pattern bindings]
         (apply-pfs pattern pfs bindings)))))
