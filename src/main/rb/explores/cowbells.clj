@@ -1,32 +1,43 @@
 (ns rb.explores.cowbells
-  (:require [cowbells.core :as cb :refer [deftune deftune*]]
-            [clojure.string :as str])
-  (:import [java.util.concurrent TimeUnit]))
+  (:require [cowbells.core :as cb
+             :refer [defpattern defpattern*
+                     stop restart clear dump play]]
+            [cowbells.pattern :as pattern]))
 
 (def transport-config
-  {:soundfonts
+  {:audio
+   {:driver "pulseaudio"
+    :period-size 1024}
+   :synth
+   {:sample-rate 48000.0}
+   :soundfonts
    [{:name :fluidr3 :path "/usr/share/soundfonts/FluidR3_GM.sf2"}]})
 
-(deftune tune1
+(defn start []
+  (and (fn? (cb/start transport-config)) :started))
+
+(defpattern* tune1
   [:bind {:channel 0
           :root :c-5
-          :degrees :major
+          :scale :major
           :velocity 127}
-   [:loop
+   [:seq
     [:degree [0 2 4]]
     1]
    [:bind {:velocity 64}
-    `[:loop
+    `[:seq
       ~@(for [d [0 2 4]]
           [:seq
            1/2
            [:degree d]])]]])
 
-(deftune c4
+(defpattern* c4
   `[:mix
-    [:seq
-     ~@(for [d (range 15)]
-         [:seq [:degree d] 1])]
+    [:channel 5
+     [:program 4]
+     [:seq
+      ~@(for [d (range 15)]
+          [:seq [:degree d] 1])]]
     [:seq
      ~@(for [d (range 15)]
          [:seq [:degree (- 14 d)] 1])]])
