@@ -35,3 +35,8 @@
   [:bind {:shift -3 :velocity 60}
    [:program 0]
    [:seq [:degree 3] 1/4 [:degree 5] 1/4]])
+
+(defpattern* note-test
+  [:program 50]
+  [:bind {:duration 3 :velocity 80}
+   [:note [:c-4 :e-4]]])

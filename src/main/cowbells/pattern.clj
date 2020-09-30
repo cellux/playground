@@ -4,7 +4,7 @@
    [fluidsynth.core :as fluid])
   (:use
    [cowbells.time :only [beats->ticks]]
-   [cowbells.scale :only [resolve-binding]]))
+   [cowbells.scale :only [resolve-binding resolve-note]]))
 
 (defmacro pfn
   {:style/indent 1}
@@ -115,13 +115,22 @@
 
 (defn add-callback
   [{:keys [position] :as pattern} callback]
-  (update pattern :events conj [position callback]))
+  (if callback
+    (update pattern :events conj [position callback])
+    pattern))
+
+(defn add-callback-after
+  [{:keys [position] :as pattern} delay callback]
+  (if (and delay callback)
+    (update pattern :events conj [(+ position delay) callback])
+    pattern))
 
 (defmethod compile-pattern :program
   [[_ program]]
   (pfn [{:keys [synth] :as pattern}
         {:keys [channel] :as bindings}]
-    (add-callback pattern #(fluid/program-change synth channel program))))
+    (-> pattern
+        (add-callback #(fluid/program-change synth channel program)))))
 
 (defn degree->key
   [{:keys [root scale octave shift] :as bindings} degree]
@@ -140,14 +149,37 @@
     (vec x)
     (vector x)))
 
-(defmethod compile-pattern :degree
-  [[_ degrees]]
-  (let [degrees (ensure-vector degrees)]
+(defmethod compile-pattern :note
+  [[_ notes & [note->key]]]
+  (let [notes (->> notes
+                   ensure-vector
+                   (map (if note->key identity resolve-note)))]
     (pfn [{:keys [synth] :as pattern}
-          {:keys [channel velocity] :as bindings}]
-      (reduce (fn [pattern degree]
-                (let [key (degree->key bindings degree)]
+          {:keys [channel velocity duration] :as bindings}]
+      (let [keys (if note->key
+                   (map (partial note->key bindings) notes)
+                   notes)]
+        (reduce (fn [pattern key]
                   (-> pattern
                       (add-callback
-                       #(fluid/noteon synth channel key velocity)))))
-              pattern degrees))))
+                       #(fluid/noteon synth channel key velocity))
+                      (add-callback-after
+                       (and duration (beats->ticks duration))
+                       #(fluid/noteoff synth channel key))))
+                pattern keys)))))
+
+(defmethod compile-pattern :degree
+  [[_ degrees]]
+  (compile-pattern `[:note ~degrees ~degree->key]))
+
+(defmethod compile-pattern :all-notes-off
+  [[_]]
+  (pfn [{:keys [synth] :as pattern}
+        {:keys [channel] :as bindings}]
+    (add-callback pattern #(fluid/all-notes-off synth channel))))
+
+(defmethod compile-pattern :all-sounds-off
+  [[_]]
+  (pfn [{:keys [synth] :as pattern}
+        {:keys [channel] :as bindings}]
+f    (add-callback pattern #(fluid/all-sounds-off synth channel))))
