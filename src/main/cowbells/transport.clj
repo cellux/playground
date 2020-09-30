@@ -13,6 +13,10 @@
       position
       (- (+ position align) m))))
 
+(defn conjv
+  [v x]
+  (conj (or v []) x))
+
 (defn merge-pattern-queue
   [timeline start-pos]
   (-> (reduce
@@ -20,12 +24,11 @@
          (let [aligned-start-pos (align-position start-pos align)]
            (reduce
             (fn [timeline [position callback :as event]]
-              (-> timeline
-                  ;; avoid scheduling callbacks to start-pos as that's
-                  ;; already in the past
-                  (update (max (+ aligned-start-pos (int position))
-                               (inc start-pos))
-                          conj callback)))
+              ;; avoid scheduling callbacks to start-pos as that's
+              ;; already in the past
+              (let [absolute-pos (+ aligned-start-pos (int position))
+                    adjusted-pos (max absolute-pos (inc start-pos))]
+                (update timeline adjusted-pos conjv callback)))
             timeline events)))
        timeline (:pattern-queue timeline))
       (assoc :pattern-queue [])))
@@ -98,7 +101,7 @@
                        update :pattern-queue
                        conj pattern)
                 :queued)
-        :dump {:bpm @bpm
-               :playing @playing
-               :timeline @timeline
-               :position @position}))))
+        :status {:bpm @bpm
+                 :playing @playing
+                 :timeline @timeline
+                 :position @position}))))

@@ -1,7 +1,26 @@
 (ns cowbells.core
   (:require
+   [clojure.java.io :as jio]
    [cowbells.transport :as transport]
    [cowbells.pattern :as pattern]))
+
+(def possible-default-soundfonts
+  [{:name :fluidr3 :path "/usr/share/soundfonts/FluidR3_GM.sf2"}])
+
+(defn find-existing-soundfonts
+  []
+  (->> possible-default-soundfonts
+       (filter #(.exists (jio/file (:path %))))))
+
+(def default-config
+  {:fluid-settings
+   {:audio
+    {:driver "pulseaudio"
+     :period-size 1024}
+    :synth
+    {:sample-rate 48000.0}}
+   :soundfonts
+   (take 1 (find-existing-soundfonts))})
 
 (def transport nil)
 
@@ -9,14 +28,26 @@
   []
   (fn? transport))
 
+(defn deep-merge
+  "Recursively merges maps."
+  [& maps]
+  (letfn [(m [to from]
+            (if (and (map? from) (not (record? from)))
+              (merge-with m to from)
+              from))]
+    (reduce m maps)))
+
 (defn start
-  [config]
-  (alter-var-root
-   #'transport
-   (fn [transport]
-     (when (transport-active?)
-       (transport :stop))
-     (transport/new config))))
+  ([config]
+   (alter-var-root
+    #'transport
+    (fn [transport]
+      (when (transport-active?)
+        (transport :stop))
+      (transport/new (deep-merge default-config (or config {})))))
+   :started)
+  ([]
+   (start nil)))
 
 (defn stop
   []
@@ -42,10 +73,10 @@
     (transport :clear)
     :inactive-transport))
 
-(defn dump
+(defn status
   []
   (if (transport-active?)
-    (transport :dump)
+    (transport :status)
     :inactive-transport))
 
 (defn play
