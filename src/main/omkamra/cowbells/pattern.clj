@@ -1,10 +1,10 @@
-(ns cowbells.pattern
+(ns omkamra.cowbells.pattern
   (:refer-clojure :exclude [compile])
   (:require
-   [fluidsynth.core :as fluid])
+   [omkamra.fluidsynth.core :as fluid])
   (:use
-   [cowbells.time :only [beats->ticks]]
-   [cowbells.scale :only [resolve-binding resolve-note]]))
+   [omkamra.cowbells.time :only [beats->ticks]]
+   [omkamra.cowbells.scale :only [resolve-binding resolve-note]]))
 
 (defmacro pfn
   {:style/indent 1}

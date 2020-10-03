@@ -1,4 +1,4 @@
-(ns fluidsynth.core
+(ns omkamra.fluidsynth.core
   (:import (jnr.ffi LibraryLoader))
   (:require [clojure.string :as str]))
 

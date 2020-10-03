@@ -1,8 +1,8 @@
-(ns cowbells.core
+(ns omkamra.cowbells.core
   (:require
    [clojure.java.io :as jio]
-   [cowbells.transport :as transport]
-   [cowbells.pattern :as pattern]))
+   [omkamra.cowbells.transport :as transport]
+   [omkamra.cowbells.pattern :as pattern]))
 
 (def possible-default-soundfonts
   [{:name :fluidr3 :path "/usr/share/soundfonts/FluidR3_GM.sf2"}])

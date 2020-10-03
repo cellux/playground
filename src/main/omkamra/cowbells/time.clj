@@ -1,4 +1,4 @@
-(ns cowbells.time
+(ns omkamra.cowbells.time
   (:import [java.util.concurrent TimeUnit]))
 
 (def thread-sleep-precision-ns

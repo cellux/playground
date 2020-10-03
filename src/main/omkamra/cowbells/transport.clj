@@ -1,10 +1,10 @@
-(ns cowbells.transport
+(ns omkamra.cowbells.transport
   (:require
-   [fluidsynth.core :as fluid]
+   [omkamra.fluidsynth.core :as fluid]
    [clojure.stacktrace :refer [print-cause-trace]])
   (:use
-   [cowbells.scale :refer [nao->midi scales]]
-   [cowbells.time :refer [ticks->ns nanosleep]]))
+   [omkamra.cowbells.scale :refer [nao->midi scales]]
+   [omkamra.cowbells.time :refer [ticks->ns nanosleep]]))
 
 (defn align-position
   [position align]

@@ -1,4 +1,4 @@
-(ns cowbells.scale
+(ns omkamra.cowbells.scale
   (:require
    [clojure.string :as str]))
 
