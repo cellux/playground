@@ -1,5 +1,5 @@
 (ns omkamra.cowbells.time
-  (:import [java.util.concurrent TimeUnit]))
+  (:import (java.util.concurrent TimeUnit)))
 
 (def thread-sleep-precision-ns
   (.toNanos TimeUnit/MILLISECONDS 2))
