@@ -1,7 +1,7 @@
-(ns rb.explores.llvm
+(ns rb.explores.llvm.generation
   (:require [clojure.string :as str]
             [clojure.test :refer [is]])
-  (:import [java.nio ByteOrder]))
+  (:import (java.nio ByteOrder)))
 
 (def i1 [:integer 1])
 (def i8 [:integer 8])

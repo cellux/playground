@@ -2,21 +2,21 @@
   (:require
    [clojure.string :as str]
    [insn.core :as insn]
-   [insn.util]))
+   [insn.util :refer [type-desc]]))
 
-(defn build-enum-field-spec
+(defn build-enum-field-descriptor
   [cls field-name]
   {:name field-name
    :type cls
    :flags #{:public :static :final :enum}})
 
-(defn build-enum-spec
+(defn build-enum-descriptor
   [cls field-names]
   {:name cls
    :flags #{:public :final :super :enum}
    :super Enum
    :interfaces ["jnr.ffi.util.EnumMapper$IntegerEnum"]
-   :fields (-> (map #(build-enum-field-spec cls %) field-names)
+   :fields (-> (mapv #(build-enum-field-descriptor cls %) field-names)
                (conj {:name "value"
                       :type :int
                       :flags #{:private :final}})
@@ -39,7 +39,7 @@
               :flags #{:public :static}
               :desc [[cls]]
               :emit [[:getstatic cls "$VALUES" [cls]]
-                     [:invokevirtual (insn.util/type-desc [cls]) "clone" [Object]]
+                     [:invokevirtual (type-desc [cls]) "clone" [Object]]
                      [:checkcast [cls]]
                      [:areturn]]}
              {:name "valueOf"
@@ -57,37 +57,43 @@
                      [:getfield cls "value" :int]
                      [:ireturn]]}
              {:name :clinit
-              :emit (reduce concat
-                            [(->> (for [[findex fname] (map vector (range) field-names)]
-                                    [[:new cls]
+              :emit (->> [(mapcat (fn [name ordinal value]
+                                    (vector
+                                     [:new cls]
                                      [:dup]
-                                     [:ldc (name fname)]
-                                     [:ldc findex]
-                                     [:ldc findex]
+                                     [:ldc name]
+                                     [:ldc ordinal]
+                                     [:ldc value]
                                      [:invokespecial cls :init [String :int :int :void]]
-                                     [:putstatic cls (name fname) cls]])
-                                  (apply concat))
-                             [[:ldc (count field-names)]
-                              [:anewarray cls]]
-                             (->> (for [[findex fname] (map vector (range) field-names)]
-                                    [[:dup]
-                                     [:ldc findex]
-                                     [:getstatic cls (name fname) cls]
-                                     [:aastore]])
-                                  (apply concat))
-                             [[:putstatic cls "$VALUES" [cls]]
-                              [:return]]])}]})
+                                     [:putstatic cls name cls]))
+                                  field-names (range) (range))
+                          [[:ldc (count field-names)]
+                           [:anewarray cls]]
+                          (mapcat (fn [name ordinal]
+                                    (vector
+                                     [:dup]
+                                     [:ldc ordinal]
+                                     [:getstatic cls name cls]
+                                     [:aastore]))
+                                  field-names (range))
+                          [[:putstatic cls "$VALUES" [cls]]
+                           [:return]]]
+                         (apply concat)
+                         (vec))}]})
+
+(defn qualified-name?
+  [s]
+  (>= (.indexOf s (int \.)) 0))
 
 (defn qualified-class-name
   [class-name]
   (let [s (name class-name)]
-    (if (.contains s ".")
+    (if (qualified-name? s)
       s
       (str (munge (ns-name *ns*)) "." s))))
 
 (defmacro defenum
-  [name field-names]
-  (let [cls (qualified-class-name name)]
-    `(insn/define (build-enum-spec
-                   ~cls
-                   '~field-names))))
+  [enum-name & field-specs]
+  (let [cls (qualified-class-name enum-name)
+        t (build-enum-descriptor cls (map name field-specs))]
+    `(insn/define ~t)))
