@@ -5,7 +5,8 @@
  {ring/ring-core {:mvn/version "1.8.1"}
   ring/ring-jetty-adapter {:mvn/version "1.8.1"}
   http-kit/http-kit {:mvn/version "2.4.0"}
-  com.github.jnr/jnr-ffi {:mvn/version "2.2.0"}}
+  com.github.jnr/jnr-ffi {:mvn/version "2.2.0"}
+  insn/insn {:mvn/version "0.2.1"}}
 
  :aliases
  {:cljs
