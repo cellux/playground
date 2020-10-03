@@ -1,10 +1,9 @@
 (ns omkamra.cowbells.pattern
   (:refer-clojure :exclude [compile])
   (:require
-   [omkamra.fluidsynth.core :as fluid])
-  (:use
-   [omkamra.cowbells.time :only [beats->ticks]]
-   [omkamra.cowbells.scale :only [resolve-binding resolve-note]]))
+   [omkamra.fluidsynth.core :as fluid]
+   [omkamra.cowbells.time :refer [beats->ticks]]
+   [omkamra.cowbells.scale :refer [resolve-binding resolve-note]]))
 
 (defmacro pfn
   {:style/indent 1}
@@ -182,4 +181,4 @@
   [[_]]
   (pfn [{:keys [synth] :as pattern}
         {:keys [channel] :as bindings}]
-f    (add-callback pattern #(fluid/all-sounds-off synth channel))))
+    (add-callback pattern #(fluid/all-sounds-off synth channel))))

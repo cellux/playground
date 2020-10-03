@@ -1,8 +1,7 @@
 (ns omkamra.cowbells.transport
   (:require
+   [clojure.stacktrace :refer [print-cause-trace]]
    [omkamra.fluidsynth.core :as fluid]
-   [clojure.stacktrace :refer [print-cause-trace]])
-  (:use
    [omkamra.cowbells.scale :refer [nao->midi scales]]
    [omkamra.cowbells.time :refer [ticks->ns nanosleep]]))
 
