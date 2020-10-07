@@ -7,7 +7,13 @@
   http-kit/http-kit {:mvn/version "2.4.0"}
   com.github.jnr/jnr-ffi {:mvn/version "2.2.0"}
   io.kubernetes/client-java {:mvn/version "10.0.0"}
-  org.clojure/java.data {:mvn/version "1.0.86"}}
+  org.clojure/java.data {:mvn/version "1.0.86"}
+  com.jcraft/jsch {:mvn/version "0.1.55"}
+  com.jcraft/jsch.agentproxy.core {:mvn/version "0.0.9"}
+  com.jcraft/jsch.agentproxy.jsch {:mvn/version "0.0.9"}
+  com.jcraft/jsch.agentproxy.sshagent {:mvn/version "0.0.9"}
+  com.jcraft/jsch.agentproxy.connector-factory {:mvn/version "0.0.9"}
+  com.jcraft/jsch.agentproxy.usocket-jna {:mvn/version "0.0.9"}}
 
  :aliases
  {:cljs

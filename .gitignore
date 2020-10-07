@@ -2,3 +2,4 @@
 /.nrepl-port
 /resources/
 *.log
+/src/*/rb/private/
