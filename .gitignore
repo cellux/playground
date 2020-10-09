@@ -4,3 +4,4 @@
 /resources/
 *.log
 *.class
+/src/*/rb/private/
