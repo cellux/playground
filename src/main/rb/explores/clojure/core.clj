@@ -1,97 +1,96 @@
 (ns rb.explores.clojure.core
-  (:require [clojure.test :refer [is]])
   (:require [clojure.string :as str]))
 
 ;; Clojure version
-(is (= #{:major :minor :incremental :qualifier}
-       (apply hash-set (keys *clojure-version*))))
+(assert (= #{:major :minor :incremental :qualifier}
+           (apply hash-set (keys *clojure-version*))))
 
 ;; command line arguments
-(is (seq? *command-line-args*))
+(assert (seq? *command-line-args*))
 
 ;; stdin / stdout / stderr
-(is (instance? java.io.Reader *in*))
-(is (instance? java.io.Writer *out*))
-(is (instance? java.io.Writer *err*))
+(assert (instance? java.io.Reader *in*))
+(assert (instance? java.io.Writer *out*))
+(assert (instance? java.io.Writer *err*))
 
 ;; path of the file being evaluated
-(is (string? *file*))
+(assert (string? *file*))
 
 ;; current namespace
-(is (instance? clojure.lang.Namespace *ns*))
+(assert (instance? clojure.lang.Namespace *ns*))
 
 ;; equality
 
-(is (= 2 (+ 1 1)) "One plus one shall be two")
-(is (not= 3 (+ 1 1)) "One plus one shall not be three")
+(assert (= 2 (+ 1 1)) "One plus one shall be two")
+(assert (not= 3 (+ 1 1)) "One plus one shall not be three")
 
-(is (= nil nil))
-(is (= [1 2 3] '(1 2 3)))
-(is (not= [1 2 3] #{1 2 3}))
-(is (= (conj [1 2 3] 4) (cons 1 '(2 3 4))))
-(is (= (assoc {:a 3 :b 4} :c 5)
+(assert (= nil nil))
+(assert (= [1 2 3] '(1 2 3)))
+(assert (not= [1 2 3] #{1 2 3}))
+(assert (= (conj [1 2 3] 4) (cons 1 '(2 3 4))))
+(assert (= (assoc {:a 3 :b 4} :c 5)
        (assoc {:a 3 :c 5} :b 4)))
 
-(is (identical? nil nil))
-(is (not (identical? [1 2 3] [1 2 3])))
+(assert (identical? nil nil))
+(assert (not (identical? [1 2 3] [1 2 3])))
 (let [v [1 2 3] a v b v]
-  (is (identical? a b)))
+  (assert (identical? a b)))
 
-(is (= 5 10/2))
-(is (= 30/9 10/3))
+(assert (= 5 10/2))
+(assert (= 30/9 10/3))
 
-(is (not= 5 5.0))
-(is (== 5 5.0))
+(assert (not= 5 5.0))
+(assert (== 5 5.0))
 
 ;; arithmetic
 
-(is (= 5 (+ 3 2)))
-(is (= 10 (+ 3 2 5)))
+(assert (= 5 (+ 3 2)))
+(assert (= 10 (+ 3 2 5)))
 
-(is (= -5 (- 5)))
+(assert (= -5 (- 5)))
 
-(is (= 1 (- 3 2)))
-(is (= -4 (- 3 2 5)))
+(assert (= 1 (- 3 2)))
+(assert (= -4 (- 3 2 5)))
 
-(is (= 6 (* 3 2)))
-(is (= 30 (* 3 2 5)))
+(assert (= 6 (* 3 2)))
+(assert (= 30 (* 3 2 5)))
 
-(is (= 1/4 (/ 4)))
-(is (= 3 (/ 6 2)))
-(is (= 3/4 (/ 6 2 4)))
-(is (not= 0.75 (/ 6 2 4)))
+(assert (= 1/4 (/ 4)))
+(assert (= 3 (/ 6 2)))
+(assert (= 3/4 (/ 6 2 4)))
+(assert (not= 0.75 (/ 6 2 4)))
 
-(is (= 0.75 (/ 6.0 2 4)))
-(is (= 0.75 (/ 6 2.0 4)))
-(is (= 0.75 (/ 6 2 4.0)))
+(assert (= 0.75 (/ 6.0 2 4)))
+(assert (= 0.75 (/ 6 2.0 4)))
+(assert (= 0.75 (/ 6 2 4.0)))
 
 ;; ordering comparisons
 
-(is (< 3 4))
-(is (< 3 4 5))
-(is (<= 3 3 4))
-(is (>= 3 3 2))
-(is (> 3 2))
+(assert (< 3 4))
+(assert (< 3 4 5))
+(assert (<= 3 3 4))
+(assert (>= 3 3 2))
+(assert (> 3 2))
 
 ;; threading macros
 
-(is (= 2 (-> [1 [2 3 4] {:a 3 :b 5 :c 9}]
+(assert (= 2 (-> [1 [2 3 4] {:a 3 :b 5 :c 9}]
              second
              first)))
 
-(is (= 5 (-> [1 [2 3 4] {:a 3 :b 5 :c 9}]
+(assert (= 5 (-> [1 [2 3 4] {:a 3 :b 5 :c 9}]
              (nth 2)
              :b)))
 
-(is (= "Apple, Orange, Blueberry"
+(assert (= "Apple, Orange, Blueberry"
        (->> ["apple" "orange" "blueberry"]
             (map str/capitalize)
             (str/join ", "))))
 
 ;; method and field chaining
 
-(is (= "4d2" (.. Integer (toHexString 1234))))
-(is (pos-int? (.. System (getProperties) (get "os.name") length)))
+(assert (= "4d2" (.. Integer (toHexString 1234))))
+(assert (pos-int? (.. System (getProperties) (get "os.name") length)))
 
 ;; taps
 
@@ -103,7 +102,9 @@
     (tap> "world")
     (finally
       (remove-tap tap-fn)))
-  (is (= ["hello" "world"] @messages)))
+  ;; we cannot safely assert that @messages hold both strings because
+  ;; the tap handlers are invoked asynchronously
+  #_(assert (= ["hello" "world"] @messages)))
 
 ;; atoms
 
@@ -124,5 +125,42 @@
     (swap! x * 5/2)
     (finally
       (remove-watch x watch-fn)))
-  (is (= 3 @count))
-  (is (= 10 @sum)))
+  (assert (= 3 @count))
+  (assert (= 10 @sum)))
+
+;; if we read the same symbol twice, we get two different symbols
+;; (equal by value but not the same object)
+
+(let [foo '[^int x ^long x]]
+  (assert (= (first foo) (second foo)))
+  (assert (not (identical? (first foo) (second foo))))
+  (assert (symbol? (:tag (meta (first foo)))))
+  (assert (= 'int (:tag (meta (first foo)))))
+  (assert (symbol? (:tag (meta (second foo)))))
+  (assert (= 'long (:tag (meta (second foo))))))
+
+;; type hints result in a tag which is a symbol
+
+(let [foo '[^java.lang.Object x]]
+  (assert (symbol? (:tag (meta (first foo)))))
+  (assert (= 'java.lang.Object (:tag (meta (first foo))))))
+
+(let [foo '[^Object x]]
+  (assert (symbol? (:tag (meta (first foo)))))
+  (assert (= 'Object (:tag (meta (first foo))))))
+
+(defn make-object
+  ^Object []
+  (Object.))
+
+;; function metadata is placed on the var, not on the fn
+(assert (nil? (meta make-object)))
+(assert (map? (meta #'make-object)))
+(assert (every? #{:arglists :line :column :file :name :ns}
+                (keys (meta #'make-object))))
+
+;; the ^Object type hint is placed on the first arglist
+(let [arglist-meta (meta (first (:arglists (meta #'make-object))))]
+  ;; the tag is still a symbol (naming a class) but the class has been
+  ;; apparently resolved by some hidden magic
+  (assert (= {:tag 'java.lang.Object} arglist-meta) arglist-meta))
