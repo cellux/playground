@@ -4,4 +4,5 @@
 /resources/
 *.log
 *.class
+*.java
 /src/*/rb/private/
