@@ -35,7 +35,7 @@
 
 (defn build-mcjit-compiler-options
   [opts]
-  (let [options (api/create-struct LLVMMCJITCompilerOptions)
+  (let [options (api/make-struct LLVMMCJITCompilerOptions)
         size (jnr.ffi.Struct/size options)]
     (.LLVMInitializeMCJITCompilerOptions
      $llvm (jnr.ffi.Struct/getMemory options) size)

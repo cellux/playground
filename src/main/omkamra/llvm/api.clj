@@ -234,7 +234,7 @@
 
 (define-target-initializers $llvm-init)
 
-(defmacro create-struct
+(defmacro make-struct
   [struct-name]
   `(new ~struct-name (.getRuntime $llvm)))
 
