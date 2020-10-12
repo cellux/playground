@@ -37,7 +37,7 @@
   "LLVM"
   ;; Core.h
   (^void
-   LLVMDisposeMessage [^{:tag String In true} Message])
+   LLVMDisposeMessage [^{:tag Pointer In true} Message])
 
   (^Pointer
    LLVMContextCreate)
