@@ -1,7 +1,7 @@
-(ns rb.explores.jsch.session
+(ns omkamra.jsch.session
   (:require
    [clojure.java.io :as jio]
-   [rb.explores.jsch.channel :as channel]))
+   [omkamra.jsch.channel :as channel]))
 
 (defn new
   [{:keys [jsch] :as client} host]

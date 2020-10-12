@@ -1,21 +1,31 @@
-(ns rb.explores.jsch.client
+(ns omkamra.jsch.client
   (:require
    [clojure.java.io :as jio]
-   [rb.explores.jsch.agentproxy.ssh-agent :as ssh-agent]
-   [rb.explores.jsch.session :as session])
+   [omkamra.jsch.agentproxy.ssh-agent :as ssh-agent]
+   [omkamra.jsch.session :as session])
   (:import
    (com.jcraft.jsch JSch ConfigRepository OpenSSHConfig)))
 
 (defn get-ssh-agent-identity-repository
   []
-  (ssh-agent/get-repo))
+  (ssh-agent/get-identity-repository))
+
+(defn resolve-ssh-config-file
+  [filename]
+  (let [user-home (System/getenv "HOME")
+        config-file (jio/file user-home ".ssh" filename)]
+    (when (.exists config-file)
+      (.getPath config-file))))
 
 (defn get-openssh-config-repository
   []
-  (let [user-home (System/getenv "HOME")
-        user-ssh-config-file (jio/file user-home ".ssh/config")]
-    (when (.exists user-ssh-config-file)
-      (OpenSSHConfig/parseFile (.getPath user-ssh-config-file)))))
+  (when-let [config-file (resolve-ssh-config-file "config")]
+    (OpenSSHConfig/parseFile config-file)))
+
+(defn set-known-hosts-if-exists
+  [jsch hosts-file]
+  (when hosts-file
+    (.setKnownHosts jsch hosts-file)))
 
 (defn new
   ([config]
@@ -23,15 +33,18 @@
                                (get-openssh-config-repository)
                                (ConfigRepository/nullConfig))
          identity-repository (or (:identity-repository config)
-                                 (ssh-agent/get-repo))]
+                                 (ssh-agent/get-identity-repository))
+         known-hosts-file (resolve-ssh-config-file "known_hosts")]
      {:config config
       :config-repository config-repository
       :identity-repository identity-repository
+      :known-hosts-file known-hosts-file
       :jsch (doto (JSch.)
               (.setConfigRepository config-repository)
-              (.setIdentityRepository identity-repository))}))
+              (.setIdentityRepository identity-repository)
+              (set-known-hosts-if-exists known-hosts-file))}))
   ([]
-   (rb.explores.jsch.client/new {})))
+   (omkamra.jsch.client/new {})))
 
 (defn get-identity-names
   [client]

@@ -1,5 +1,6 @@
-(ns rb.explores.jsch
-  (:require [rb.explores.jsch.client :as client]))
+(ns omkamra.jsch
+  (:import (com.jcraft.jsch JSch))
+  (:require [omkamra.jsch.client :as client]))
 
 (def version JSch/VERSION)
 

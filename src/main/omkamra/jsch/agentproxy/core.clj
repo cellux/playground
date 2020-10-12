@@ -1,8 +1,8 @@
-(ns rb.explores.jsch.agentproxy.core
+(ns omkamra.jsch.agentproxy.core
   (:import
    (com.jcraft.jsch.agentproxy RemoteIdentityRepository)))
 
-(defn get-repo
+(defn get-identity-repository
   [connector]
   (RemoteIdentityRepository. connector))
 

@@ -1,4 +1,4 @@
-(ns rb.explores.jsch.channel)
+(ns omkamra.jsch.channel)
 
 (defn new
   [session type]
