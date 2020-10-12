@@ -1,7 +1,7 @@
 (ns omkamra.cowbells.pattern
   (:refer-clojure :exclude [compile])
   (:require
-   [omkamra.fluidsynth.core :as fluid]
+   [omkamra.fluidsynth.synth :as synth]
    [omkamra.cowbells.time :refer [beats->ticks]]
    [omkamra.cowbells.scale :refer [resolve-binding resolve-note]]))
 
@@ -129,7 +129,7 @@
   (pfn [{:keys [synth] :as pattern}
         {:keys [channel] :as bindings}]
     (-> pattern
-        (add-callback #(fluid/program-change synth channel program)))))
+        (add-callback #(synth/program-change synth channel program)))))
 
 (defn degree->key
   [{:keys [root scale octave shift] :as bindings} degree]
@@ -161,10 +161,10 @@
         (reduce (fn [pattern key]
                   (-> pattern
                       (add-callback
-                       #(fluid/noteon synth channel key velocity))
+                       #(synth/noteon synth channel key velocity))
                       (add-callback-after
                        (and duration (beats->ticks duration))
-                       #(fluid/noteoff synth channel key))))
+                       #(synth/noteoff synth channel key))))
                 pattern keys)))))
 
 (defmethod compile-pattern :degree
@@ -175,10 +175,10 @@
   [[_]]
   (pfn [{:keys [synth] :as pattern}
         {:keys [channel] :as bindings}]
-    (add-callback pattern #(fluid/all-notes-off synth channel))))
+    (add-callback pattern #(synth/all-notes-off synth channel))))
 
 (defmethod compile-pattern :all-sounds-off
   [[_]]
   (pfn [{:keys [synth] :as pattern}
         {:keys [channel] :as bindings}]
-    (add-callback pattern #(fluid/all-sounds-off synth channel))))
+    (add-callback pattern #(synth/all-sounds-off synth channel))))

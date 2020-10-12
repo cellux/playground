@@ -1,5 +1,5 @@
 (ns rb.explores.cowbells
-  (:require [omkamra.cowbells.core :as cb
+  (:require [omkamra.cowbells :as cb
              :refer [defpattern defpattern* defpattern<]]
             [omkamra.cowbells.pattern :as pattern]))
 
@@ -8,6 +8,7 @@
           :root :c-5
           :scale :major
           :velocity 127}
+   [:program 0]
    [:seq
     [:degree [0 2 4]]
     1]

@@ -1,7 +1,9 @@
 (ns omkamra.cowbells.transport
   (:require
    [clojure.stacktrace :refer [print-cause-trace]]
-   [omkamra.fluidsynth.core :as fluid]
+   [omkamra.fluidsynth.settings :as fluid-settings]
+   [omkamra.fluidsynth.synth :as fluid-synth]
+   [omkamra.fluidsynth.audio.driver :as fluid-audio-driver]
    [omkamra.cowbells.scale :refer [nao->midi scales]]
    [omkamra.cowbells.time :refer [ticks->ns nanosleep]]))
 
@@ -43,16 +45,16 @@
 (defn load-soundfonts
   [synth soundfonts]
   (-> (for [{:keys [name path] :as sf} soundfonts]
-        (assoc sf :sfont (fluid/sfload synth path)))
+        (assoc sf :sfont (fluid-synth/sfload synth path)))
       doall))
 
 (defn new
   [config]
-  (let [fluid-settings (fluid/make-settings (:fluid-settings config))
-        fluid-synth (fluid/make-synth fluid-settings)
+  (let [fluid-settings (fluid-settings/new (:fluid-settings config))
+        fluid-synth (fluid-synth/new fluid-settings)
         fluid-soundfonts (load-soundfonts fluid-synth
                                           (:soundfonts config))
-        fluid-driver (fluid/make-audio-driver fluid-synth)
+        fluid-audio-driver (fluid-audio-driver/new fluid-synth)
         bpm (atom (get config :bpm 120))
         playing (atom true)
         timeline (atom {})
@@ -78,9 +80,9 @@
                      (print-cause-trace e)
                      :crashed)
                    (finally
-                     (fluid/delete-audio-driver fluid-driver)
-                     (fluid/delete-synth fluid-synth)
-                     (fluid/delete-settings fluid-settings))))]
+                     (fluid-audio-driver/delete fluid-audio-driver)
+                     (fluid-synth/delete fluid-synth)
+                     (fluid-settings/delete fluid-settings))))]
     (fn transport [action & args]
       (case action
         :config config

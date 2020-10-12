@@ -1,8 +1,9 @@
-(ns omkamra.cowbells.core
+(ns omkamra.cowbells
   (:require
    [clojure.java.io :as jio]
    [omkamra.cowbells.transport :as transport]
-   [omkamra.cowbells.pattern :as pattern]))
+   [omkamra.cowbells.pattern :as pattern]
+   [omkamra.clojure.util :refer [deep-merge]]))
 
 (def possible-default-soundfonts
   [{:name :fluidr3 :path "/usr/share/soundfonts/FluidR3_GM.sf2"}])
@@ -27,15 +28,6 @@
 (defn transport-active?
   []
   (fn? transport))
-
-(defn deep-merge
-  "Recursively merges maps."
-  [& maps]
-  (letfn [(m [to from]
-            (if (and (map? from) (not (record? from)))
-              (merge-with m to from)
-              from))]
-    (reduce m maps)))
 
 (defn start
   ([config]
