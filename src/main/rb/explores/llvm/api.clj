@@ -4,20 +4,20 @@
            (jnr.ffi.annotations In Out LongLong)
            (jnr.ffi.byref PointerByReference))
   (:require [clojure.string :as str]
-            [omkamra.jnr.util :refer [define-enum define-struct define-library]]))
+            [omkamra.jnr :as jnr]))
 
-(define-enum LLVMVerifierFailureAction
+(jnr/define-enum LLVMVerifierFailureAction
   LLVMAbortProcessAction,
   LLVMPrintMessageAction,
   LLVMReturnStatusAction)
 
-(define-enum LLVMCodeGenOptLevel
+(jnr/define-enum LLVMCodeGenOptLevel
   LLVMCodeGenLevelNone,
   LLVMCodeGenLevelLess,
   LLVMCodeGenLevelDefault,
   LLVMCodeGenLevelAggressive)
 
-(define-enum LLVMCodeModel
+(jnr/define-enum LLVMCodeModel
   LLVMCodeModelDefault,
   LLVMCodeModelJITDefault,
   LLVMCodeModelTiny,
@@ -26,14 +26,14 @@
   LLVMCodeModelMedium,
   LLVMCodeModelLarge)
 
-(define-struct LLVMMCJITCompilerOptions
+(jnr/define-struct LLVMMCJITCompilerOptions
   [^uint OptLevel]
   [^LLVMCodeModel CodeModel]
   [^int NoFramePointerElim]
   [^int EnableFastISel]
   [^Pointer MCJMM])
 
-(define-library $llvm
+(jnr/define-library $llvm
   "LLVM"
   ;; Core.h
   (^void
