@@ -1,5 +1,5 @@
-(ns rb.explores.llvm.buffer
-  (:require [rb.explores.llvm.api :refer [$llvm ok? check]])
+(ns omkamra.llvm.buffer
+  (:require [omkamra.llvm.api :refer [$llvm ok? check]])
   (:import (jnr.ffi.byref PointerByReference)
            (java.nio.charset Charset)))
 

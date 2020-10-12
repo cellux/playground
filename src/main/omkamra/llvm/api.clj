@@ -1,4 +1,4 @@
-(ns rb.explores.llvm.api
+(ns omkamra.llvm.api
   (:import (jnr.ffi LibraryLoader Pointer Struct)
            (jnr.ffi.types size_t)
            (jnr.ffi.annotations In Out LongLong)
@@ -206,7 +206,7 @@
 (defmacro define-target-initializers
   [library-name]
   `(do
-     (define-library ~library-name
+     (omkamra.jnr/define-library ~library-name
        "LLVM"
        ~@(for [target all-targets
                subsystem all-subsystems]

@@ -1,5 +1,5 @@
-(ns rb.explores.llvm.context
-  (:require [rb.explores.llvm.api :refer [$llvm ok?]]))
+(ns omkamra.llvm.context
+  (:require [omkamra.llvm.api :refer [$llvm ok?]]))
 
 (defn create
   []

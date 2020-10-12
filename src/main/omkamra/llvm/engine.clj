@@ -1,9 +1,9 @@
-(ns rb.explores.llvm.engine
-  (:require [rb.explores.llvm.api :as api :refer [$llvm ok? check]])
+(ns omkamra.llvm.engine
+  (:require [omkamra.llvm.api :as api :refer [$llvm ok? check]])
   (:import (jnr.ffi.byref PointerByReference)
-           (rb.explores.llvm.api LLVMMCJITCompilerOptions
-                                 LLVMCodeGenOptLevel
-                                 LLVMCodeModel)))
+           (omkamra.llvm.api LLVMMCJITCompilerOptions
+                             LLVMCodeGenOptLevel
+                             LLVMCodeModel)))
 
 (defn create
   [module]

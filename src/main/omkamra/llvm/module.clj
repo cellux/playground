@@ -1,6 +1,6 @@
-(ns rb.explores.llvm.module
-  (:require [rb.explores.llvm.api :refer [$llvm ok? check]]
-            [rb.explores.llvm.buffer :as buffer])
+(ns omkamra.llvm.module
+  (:require [omkamra.llvm.api :refer [$llvm ok? check]]
+            [omkamra.llvm.buffer :as buffer])
   (:import (jnr.ffi.byref PointerByReference)))
 
 (defn create
