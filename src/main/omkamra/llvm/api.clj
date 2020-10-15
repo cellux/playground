@@ -234,11 +234,11 @@
 
 (define-target-initializers $llvm-init)
 
+(LLVMInitializeNativeTarget)
+
 (defmacro make-struct
   [struct-name]
   `(new ~struct-name (.getRuntime $llvm)))
-
-(LLVMInitializeNativeTarget)
 
 (defn ok?
   [return-value]

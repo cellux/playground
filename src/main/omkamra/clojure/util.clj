@@ -1,6 +1,6 @@
 (ns omkamra.clojure.util)
 
-(defmacro define-macro-alias
+(defmacro defalias
   [name target]
   `(do
      (def ~name #'~target)
