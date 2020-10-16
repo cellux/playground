@@ -16,7 +16,11 @@
   com.jcraft/jsch.agentproxy.connector-factory {:mvn/version "0.0.9"}
   com.jcraft/jsch.agentproxy.usocket-jna {:mvn/version "0.0.9"}
   quil/quil {:mvn/version "3.1.0"}
-  org.python/jython-standalone {:mvn/version "2.7.2"}}
+  org.python/jython-standalone {:mvn/version "2.7.2"}
+  clj-commons/clj-yaml {:mvn/version "0.7.2"}
+  clj-http {:mvn/version "3.10.3"}
+  org.bouncycastle/bcprov-jdk15on {:mvn/version "1.66"}
+  org.bouncycastle/bcpkix-jdk15on {:mvn/version "1.66"}}
 
  :aliases
  {:cljs
