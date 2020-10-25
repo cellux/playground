@@ -7,7 +7,7 @@
   http-kit/http-kit {:mvn/version "2.4.0"}
   com.github.jnr/jnr-ffi {:mvn/version "2.2.0"}
   insn/insn {:mvn/version "0.2.1"}
-  io.kubernetes/client-java {:mvn/version "10.0.0"}
+  ;; io.kubernetes/client-java {:mvn/version "10.0.0"}
   org.clojure/java.data {:mvn/version "1.0.86"}
   com.jcraft/jsch {:mvn/version "0.1.55"}
   com.jcraft/jsch.agentproxy.core {:mvn/version "0.0.9"}
@@ -18,9 +18,12 @@
   quil/quil {:mvn/version "3.1.0"}
   org.python/jython-standalone {:mvn/version "2.7.2"}
   clj-commons/clj-yaml {:mvn/version "0.7.2"}
-  clj-http {:mvn/version "3.10.3"}
+  clj-http/clj-http {:mvn/version "3.10.3"}
   org.bouncycastle/bcprov-jdk15on {:mvn/version "1.66"}
-  org.bouncycastle/bcpkix-jdk15on {:mvn/version "1.66"}}
+  org.bouncycastle/bcpkix-jdk15on {:mvn/version "1.66"}
+  martian/martian {:mvn/version "0.1.14"}
+  martian-httpkit/martian-httpkit {:mvn/version "0.1.14"}
+  com.github.jhg023/Pbbl {:mvn/version "1.0.2"}}
 
  :aliases
  {:cljs
