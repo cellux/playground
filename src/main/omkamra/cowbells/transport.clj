@@ -4,37 +4,12 @@
    [omkamra.fluidsynth.settings :as fluid-settings]
    [omkamra.fluidsynth.synth :as fluid-synth]
    [omkamra.fluidsynth.audio.driver :as fluid-audio-driver]
+   [omkamra.clojure.util :refer [switch!]]
    [omkamra.cowbells.scale :refer [nao->midi scales]]
-   [omkamra.cowbells.time :refer [ticks->ns nanosleep]]))
+   [omkamra.cowbells.time :refer [ticks->ns nanosleep]]
+   [omkamra.cowbells.timeline :refer [merge-pattern-queue]]))
 
-(defn align-position
-  [position align]
-  (let [m (mod position align)]
-    (if (zero? m)
-      position
-      (- (+ position align) m))))
-
-(defn conjv
-  [v x]
-  (conj (or v []) x))
-
-(defn merge-pattern-queue
-  [timeline start-pos]
-  (-> (reduce
-       (fn [timeline {:keys [align events] :as pattern}]
-         (let [aligned-start-pos (align-position start-pos align)]
-           (reduce
-            (fn [timeline [position callback :as event]]
-              ;; avoid scheduling callbacks to start-pos as that's
-              ;; already in the past
-              (let [absolute-pos (+ aligned-start-pos (int position))
-                    adjusted-pos (max absolute-pos (inc start-pos))]
-                (update timeline adjusted-pos conjv callback)))
-            timeline events)))
-       timeline (:pattern-queue timeline))
-      (assoc :pattern-queue [])))
-
-(def initial-bindings
+(def default-bindings
   {:channel 0
    :root (nao->midi :c-5)
    :scale (scales :major)
@@ -59,6 +34,7 @@
         playing (atom true)
         timeline (atom {})
         position (atom 0)
+        pattern-queue (atom [])
         player (future
                  (try
                    (loop [pos @position
@@ -68,7 +44,8 @@
                          (when-let [callbacks (get tl pos)]
                            (doseq [cb callbacks]
                              (cb)))
-                         (swap! timeline merge-pattern-queue pos)
+                         (let [pq (switch! pattern-queue [])]
+                           (swap! timeline merge-pattern-queue pos pq))
                          (let [tick-duration (ticks->ns 1 @bpm)
                                elapsed (- (System/nanoTime) tick-start)
                                remaining (- tick-duration elapsed)]
@@ -88,21 +65,25 @@
         :config config
         :synth fluid-synth
         :soundfonts fluid-soundfonts
-        :stop (do (reset! playing false) @player)
-        :clear (do (reset! timeline {}) :cleared)
+        :stop (do
+                (reset! playing false)
+                @player)
+        :clear (do
+                 (reset! timeline {})
+                 (reset! pattern-queue [])
+                 :cleared)
         :play (let [[pf bindings] args
                     init-pattern {:transport transport
                                   :synth fluid-synth
                                   :position 0
                                   :align 1
                                   :events []}
-                    pattern (pf init-pattern
-                                (merge initial-bindings bindings))]
-                (swap! timeline
-                       update :pattern-queue
-                       conj pattern)
+                    init-bindings (merge default-bindings bindings)
+                    pattern (pf init-pattern init-bindings)]
+                (swap! pattern-queue conj pattern)
                 :queued)
         :status {:bpm @bpm
                  :playing @playing
                  :timeline @timeline
-                 :position @position}))))
+                 :position @position
+                 :pattern-queue @pattern-queue}))))

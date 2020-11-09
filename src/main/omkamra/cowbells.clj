@@ -5,12 +5,12 @@
    [omkamra.cowbells.pattern :as pattern]
    [omkamra.clojure.util :refer [deep-merge]]))
 
-(def possible-default-soundfonts
+(def default-soundfonts
   [{:name :fluidr3 :path "/usr/share/soundfonts/FluidR3_GM.sf2"}])
 
 (defn find-existing-soundfonts
   []
-  (->> possible-default-soundfonts
+  (->> default-soundfonts
        (filter #(.exists (jio/file (:path %))))))
 
 (def default-config

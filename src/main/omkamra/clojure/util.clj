@@ -20,3 +20,12 @@
               (merge-with m to from)
               from))]
     (reduce m maps)))
+
+(defn switch!
+  "Sets the value of atom to new-val. Returns the previous value."
+  [atom new-val]
+  (let [old-val  @atom
+        success? (compare-and-set! atom old-val new-val)]
+    (if success?
+      old-val
+      (recur atom new-val))))

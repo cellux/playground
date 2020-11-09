@@ -12,7 +12,7 @@
 
 (defn pattern-function?
   [x]
-  (and (fn? x) 
+  (and (fn? x)
        (:pattern? (meta x))))
 
 (defn pattern-form?
@@ -28,7 +28,8 @@
     (pattern-form? x) (compile-pattern x)
     (number? x) (compile-pattern [:wait x])
     (var? x) (compile-pattern [:var x])
-    (pattern-function? x) x))
+    (pattern-function? x) x
+    :else (throw (ex-info "unable to compile" {:value x}))))
 
 (defmethod compile-pattern :align
   [[_ align]]
@@ -94,7 +95,7 @@
       ;; position - 1: P is merged into the timeline
       ;; position - 0: all events in P are executed
       ;;
-      ;; transport/merge-pattern-queue takes care of ensuring that
+      ;; timeline/merge-pattern-queue takes care of ensuring that
       ;; sched-pos never goes back to the past
       (let [sched-pos (- position 2)
             callback #(future (transport :play pf bindings))]
