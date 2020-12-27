@@ -23,7 +23,8 @@
   org.bouncycastle/bcpkix-jdk15on {:mvn/version "1.66"}
   martian/martian {:mvn/version "0.1.14"}
   martian-httpkit/martian-httpkit {:mvn/version "0.1.14"}
-  com.github.jhg023/Pbbl {:mvn/version "1.0.2"}}
+  com.github.jhg023/Pbbl {:mvn/version "1.0.2"}
+  midje/midje {:mvn/version "1.9.9"}}
 
  :aliases
  {:cljs
