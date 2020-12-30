@@ -105,3 +105,7 @@
 (defn add-recv-callback
   [conn callback]
   (transport/add-recv-callback conn callback))
+
+(defn close
+  [conn]
+  (transport/close conn))

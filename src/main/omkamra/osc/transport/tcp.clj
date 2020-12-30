@@ -28,6 +28,31 @@
         (dissoc :new))
     callbacks))
 
+(defn start-receiver
+  [transport]
+  (future
+    (try
+      (loop [osc-packet (transport/recv transport)
+             cbs (swap! (.callbacks transport) activate-new-cbs)]
+        (let [next-cbs
+              (loop [active-cbs (:active cbs)
+                     next-cbs []]
+                (if-let [cb (first active-cbs)]
+                  (case (cb (.rewind osc-packet))
+                    :done (into next-cbs active-cbs)
+                    :remove (into next-cbs (next active-cbs))
+                    (recur (next active-cbs)
+                           (conj next-cbs cb)))
+                  next-cbs))]
+          (recur (transport/recv transport)
+                 (swap! (.callbacks transport)
+                        #(-> (assoc % :active next-cbs)
+                             activate-new-cbs)))))
+      (catch ClosedByInterruptException _)
+      (catch AsynchronousCloseException _)
+      (catch Throwable t
+        (println t)))))
+
 (defrecord TcpTransport [^SocketChannel channel
                          ^ByteBufferPool bufpool
                          callbacks
@@ -52,31 +77,7 @@
           (.give bufpool size-buf)))))
   (add-recv-callback [this callback]
     (swap! callbacks update :new conj callback)
-    (swap!
-     receiver
-     #(or % (future
-              (try
-                (loop [osc-packet (transport/recv this)
-                       callbacks (swap! callbacks activate-new-cbs)]
-                  (let [next-cbs
-                        (loop [cbs (:active callbacks)
-                               next-cbs []]
-                          (if-let [cb (first cbs)]
-                            (case (cb osc-packet)
-                              :done (into next-cbs cbs)
-                              :remove (into next-cbs (next cbs))
-                              (recur (next cbs)
-                                     (conj next-cbs cb)))
-                            next-cbs))]
-                    (recur (transport/recv this)
-                           (swap! callbacks
-                                  assoc :active next-cbs))))
-                (catch ClosedByInterruptException _)
-                (catch AsynchronousCloseException _)
-                (catch Throwable t
-                  (println t))
-                (finally
-                  (.reset receiver nil)))))))
+    (swap! receiver #(or % (start-receiver this))))
   (close [_] (.close channel)))
 
 (defn connect

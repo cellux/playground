@@ -1,7 +1,6 @@
 (ns rb.explores.osc
   (:require
-   [omkamra.osc :as osc]
-   [omkamra.osc.transport :as transport]))
+   [omkamra.osc :as osc]))
 
 (defn test-sync
   []
