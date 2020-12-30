@@ -19,5 +19,5 @@
         invoker (Invoker/getInstance)]
     (.invokeI0 invoker cc hello1)
     (engine/dispose ee)
-    ;; do not dispose the module as it was owned by ee.
+    ;; do not dispose the module as its ownership was transferred to ee
     (context/dispose ctx)))
