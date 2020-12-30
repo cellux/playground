@@ -29,16 +29,16 @@
  :aliases
  {:cljs
   {:extra-deps
-   {org.clojure/clojurescript {:mvn/version "1.10.764"}}}
+   {org.clojure/clojurescript {:mvn/version "1.10.773"}}}
 
   :cljs.dev
-  {:main-opts ["-m" "cljs.main"
-               "-co" "cljs-opts.edn"
-               "-w" "src/main"
-               "-c" "rb.explores.clojurescript"]}
+  {:main-opts ["--main" "cljs.main"
+               "--compile-opts" "cljs-opts.edn"
+               "--watch" "src/main"
+               "--compile" "rb.explores.clojurescript"]}
 
   :cljs.release
-  {:main-opts ["-m" "cljs.main"
-               "-co" "cljs-opts.edn"
-               "-O" "advanced"
-               "-c" "rb.explores.clojurescript"]}}}
+  {:main-opts ["--main" "cljs.main"
+               "--compile-opts" "cljs-opts.edn"
+               "--optimizations" "advanced"
+               "--compile" "rb.explores.clojurescript"]}}}
