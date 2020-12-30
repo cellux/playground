@@ -327,6 +327,8 @@
   (if (nil? value) "null"
       (throw (ex-info "invalid pointer literal" {:value value}))))
 
+(declare render-typed-value)
+
 (defmethod render-literal :array
   [[_ elt size] value]
   (cond
