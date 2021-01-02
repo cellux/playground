@@ -306,9 +306,9 @@
     :else (throw (ex-info "invalid type" {:type t}))))
 
 (m/facts
- (extract-type-tag [:integer 8]) => :integer
- (extract-type-tag [:named-struct :t]) => :named-struct
- (extract-type-tag :void) => :void)
+ (m/fact (extract-type-tag [:integer 8]) => :integer)
+ (m/fact (extract-type-tag [:named-struct :t]) => :named-struct)
+ (m/fact (extract-type-tag :void) => :void))
 
 (defmulti render-literal (fn [type value] (extract-type-tag type)))
 
@@ -338,14 +338,14 @@
     (format "[ %s ]" (str/join ", " (map render-typed-value value)))))
 
 (m/facts
- (render-literal :void :void) => "void"
- (render-literal [:integer 32] 1234) => "1234"
- (render-literal [:integer 1] true) => "true"
- (render-literal [:integer 1] false) => "false"
- (render-literal [:integer 1] 0) => "0"
- (render-literal [:integer 1] 1) => "1"
- (render-literal [:ptr [:integer 8]] nil) => "null"
- (render-literal [:array [:integer 8]] "Hello, world\n\0") => "c\"Hello, world\\0A\\00\"")
+ (m/fact (render-literal :void :void) => "void")
+ (m/fact (render-literal [:integer 32] 1234) => "1234")
+ (m/fact (render-literal [:integer 1] true) => "true")
+ (m/fact (render-literal [:integer 1] false) => "false")
+ (m/fact (render-literal [:integer 1] 0) => "0")
+ (m/fact (render-literal [:integer 1] 1) => "1")
+ (m/fact (render-literal [:ptr [:integer 8]] nil) => "null")
+ (m/fact (render-literal [:array [:integer 8]] "Hello, world\n\0") => "c\"Hello, world\\0A\\00\""))
 
 (declare render-expr)
 
@@ -376,13 +376,16 @@
           (str/join ", " (map render-typed-value indices))))
 
 (m/facts
- (render-expr {:op :getelementptr
-               :inbounds true
-               :type [:array [:array [:integer 32] 3] 4]
-               :ptr {:type [:ptr [:array [:array [:integer 32] 3] 4]] :name :matrix}
-               :indices [{:type [:integer 64] :value 0}
-                         {:type [:integer 64] :name :idxprom}]})
- => "getelementptr inbounds ([4 x [3 x i32]], [4 x [3 x i32]]* %matrix, i64 0, i64 %idxprom)")
+ (m/fact
+  (render-expr
+   {:op :getelementptr
+    :inbounds true
+    :type [:array [:array [:integer 32] 3] 4]
+    :ptr {:type [:ptr [:array [:array [:integer 32] 3] 4]]
+          :name :matrix}
+    :indices [{:type [:integer 64] :value 0}
+              {:type [:integer 64] :name :idxprom}]})
+  => "getelementptr inbounds ([4 x [3 x i32]], [4 x [3 x i32]]* %matrix, i64 0, i64 %idxprom)"))
 
 (defmulti render-instruction :op)
 
@@ -391,13 +394,16 @@
   (format "ret %s" (render-typed-value value)))
 
 (m/facts
- (render-instruction {:op :ret
-                      :value {:type [:integer 32] :value 0}})
- => "ret i32 0"
-
- (render-instruction {:op :ret
-                      :value {:type :void :value :void}})
- => "ret void")
+ (m/fact
+  (render-instruction
+   {:op :ret
+    :value {:type [:integer 32] :value 0}})
+  => "ret i32 0")
+ (m/fact
+  (render-instruction
+   {:op :ret
+    :value {:type :void :value :void}})
+  => "ret void"))
 
 (defmethod render-instruction :br
   [{:keys [cond dest else]}]
@@ -409,15 +415,18 @@
     (format "br %s" (render-typed-value dest))))
 
 (m/facts
- (render-instruction {:op :br
-                      :dest {:type :label :name :for.cond}})
- => "br label %for.cond"
-
- (render-instruction {:op :br
-                      :cond {:type [:integer 1] :name :cmp}
-                      :dest {:type :label :name :for.body}
-                      :else {:type :label :name :for.end8}})
- => "br i1 %cmp, label %for.body, label %for.end8")
+ (m/fact
+  (render-instruction
+   {:op :br
+    :dest {:type :label :name :for.cond}})
+  => "br label %for.cond")
+ (m/fact
+  (render-instruction
+   {:op :br
+    :cond {:type [:integer 1] :name :cmp}
+    :dest {:type :label :name :for.body}
+    :else {:type :label :name :for.end8}})
+  => "br i1 %cmp, label %for.body, label %for.end8"))
 
 (defmethod render-instruction :switch
   [{:keys [value dest cases]}]
@@ -432,13 +441,18 @@
                (str/join " "))))
 
 (m/facts
- (render-instruction {:op :switch
-                      :value {:type [:integer 32] :name 2}
-                      :dest {:type :label :name :sw.default}
-                      :cases [[{:type [:integer 32] :value 1} {:type :label :name :sw.bb}]
-                              [{:type [:integer 32] :value 2} {:type :label :name :sw.bb1}]
-                              [{:type [:integer 32] :value 3} {:type :label :name :sw.bb3}]]})
- => "switch i32 %2, label %sw.default [ i32 1, label %sw.bb i32 2, label %sw.bb1 i32 3, label %sw.bb3 ]")
+ (m/fact
+  (render-instruction
+   {:op :switch
+    :value {:type [:integer 32] :name 2}
+    :dest {:type :label :name :sw.default}
+    :cases [[{:type [:integer 32] :value 1}
+             {:type :label :name :sw.bb}]
+            [{:type [:integer 32] :value 2}
+             {:type :label :name :sw.bb1}]
+            [{:type [:integer 32] :value 3}
+             {:type :label :name :sw.bb3}]]})
+  => "switch i32 %2, label %sw.default [ i32 1, label %sw.bb i32 2, label %sw.bb1 i32 3, label %sw.bb3 ]"))
 
 (defmacro define-unary-op
   [op opts]
@@ -468,31 +482,36 @@
 (define-binary-op add [nsw nuw])
 
 (m/facts
- (render-instruction {:name :inc
-                      :op :add
-                      :nsw true
-                      :lhs {:type [:integer 32] :name 6}
-                      :rhs {:type [:integer 32] :value 1}})
- => "%inc = add nsw i32 %6, 1"
-
- (render-instruction {:name :add
-                      :op :add
-                      :nsw true
-                      :lhs {:type [:integer 32] :name 1}
-                      :rhs {:type [:integer 32] :name 0}})
- => "%add = add nsw i32 %1, %0")
+ (m/fact
+  (render-instruction
+   {:name :inc
+    :op :add
+    :nsw true
+    :lhs {:type [:integer 32] :name 6}
+    :rhs {:type [:integer 32] :value 1}})
+  => "%inc = add nsw i32 %6, 1")
+ (m/fact
+  (render-instruction
+   {:name :add
+    :op :add
+    :nsw true
+    :lhs {:type [:integer 32] :name 1}
+    :rhs {:type [:integer 32] :name 0}})
+  => "%add = add nsw i32 %1, %0"))
 
 (define-binary-op fadd [])
 
 (define-binary-op sub [nsw nuw])
 
 (m/facts
- (render-instruction {:name :sub
-                      :op :sub
-                      :nsw true
-                      :lhs {:type [:integer 32] :name 0}
-                      :rhs {:type [:integer 32] :value 1}})
- => "%sub = sub nsw i32 %0, 1")
+ (m/fact
+  (render-instruction
+   {:name :sub
+    :op :sub
+    :nsw true
+    :lhs {:type [:integer 32] :name 0}
+    :rhs {:type [:integer 32] :value 1}})
+  => "%sub = sub nsw i32 %0, 1"))
 
 (define-binary-op fsub [])
 
@@ -513,11 +532,13 @@
 (define-binary-op sdiv [exact])
 
 (m/facts
- (render-instruction {:name :div
-                      :op :sdiv
-                      :lhs {:type [:integer 32] :name 6}
-                      :rhs {:type [:integer 32] :name 7}})
- => "%div = sdiv i32 %6, %7")
+ (m/fact
+  (render-instruction
+   {:name :div
+    :op :sdiv
+    :lhs {:type [:integer 32] :name 6}
+    :rhs {:type [:integer 32] :name 7}})
+  => "%div = sdiv i32 %6, %7"))
 
 (define-binary-op fdiv [])
 
@@ -526,72 +547,86 @@
 (define-binary-op srem [])
 
 (m/facts
- (render-instruction {:name :rem
-                      :op :srem
-                      :lhs {:type [:integer 32] :name 8}
-                      :rhs {:type [:integer 32] :name 9}})
- => "%rem = srem i32 %8, %9")
+ (m/fact
+  (render-instruction
+   {:name :rem
+    :op :srem
+    :lhs {:type [:integer 32] :name 8}
+    :rhs {:type [:integer 32] :name 9}})
+  => "%rem = srem i32 %8, %9"))
 
 (define-binary-op frem [])
 
 (define-binary-op shl [nsw nuw])
 
 (m/facts
- (render-instruction {:name :shl
-                      :op :shl
-                      :lhs {:type [:integer 32] :name 21}
-                      :rhs {:type [:integer 32] :value 3}})
- => "%shl = shl i32 %21, 3")
+ (m/fact
+  (render-instruction
+   {:name :shl
+    :op :shl
+    :lhs {:type [:integer 32] :name 21}
+    :rhs {:type [:integer 32] :value 3}})
+  => "%shl = shl i32 %21, 3"))
 
 (define-binary-op lshr [exact])
 
 (define-binary-op ashr [exact])
 
 (m/facts
- (render-instruction {:name :shr
-                      :op :ashr
-                      :lhs {:type [:integer 32] :name 22}
-                      :rhs {:type [:integer 32] :value 3}})
- => "%shr = ashr i32 %22, 3")
+ (m/fact
+  (render-instruction
+   {:name :shr
+    :op :ashr
+    :lhs {:type [:integer 32] :name 22}
+    :rhs {:type [:integer 32] :value 3}})
+  => "%shr = ashr i32 %22, 3"))
 
 (define-binary-op and [])
 
 (m/facts
- (render-instruction {:name :and
-                      :op :and
-                      :lhs {:type [:integer 32] :name 14}
-                      :rhs {:type [:integer 32] :name 15}})
- => "%and = and i32 %14, %15")
+ (m/fact
+  (render-instruction
+   {:name :and
+    :op :and
+    :lhs {:type [:integer 32] :name 14}
+    :rhs {:type [:integer 32] :name 15}})
+  => "%and = and i32 %14, %15"))
 
 (define-binary-op or [])
 
 (m/facts
- (render-instruction {:name :or
-                      :op :or
-                      :lhs {:type [:integer 32] :name 16}
-                      :rhs {:type [:integer 32] :name 17}})
- => "%or = or i32 %16, %17")
+ (m/fact
+  (render-instruction
+   {:name :or
+    :op :or
+    :lhs {:type [:integer 32] :name 16}
+    :rhs {:type [:integer 32] :name 17}})
+  => "%or = or i32 %16, %17"))
 
 (define-binary-op xor [])
 
 (m/facts
- (render-instruction {:name :xor
-                      :op :xor
-                      :lhs {:type [:integer 32] :name 18}
-                      :rhs {:type [:integer 32] :name 19}})
- => "%xor = xor i32 %18, %19"
-
- (render-instruction {:name :neg
-                      :op :xor
-                      :lhs {:type [:integer 32] :name 20}
-                      :rhs {:type [:integer 32] :value -1}})
- => "%neg = xor i32 %20, -1"
-
- (render-instruction {:name :lnot
-                      :op :xor
-                      :lhs {:type [:integer 1] :name :tobool6}
-                      :rhs {:type [:integer 1] :value true}})
- => "%lnot = xor i1 %tobool6, true")
+ (m/fact
+  (render-instruction
+   {:name :xor
+    :op :xor
+    :lhs {:type [:integer 32] :name 18}
+    :rhs {:type [:integer 32] :name 19}})
+  => "%xor = xor i32 %18, %19")
+ (m/fact
+  (render-instruction
+   {:name :neg
+    :op :xor
+    :lhs {:type [:integer 32] :name 20}
+    :rhs {:type [:integer 32] :value -1}})
+  => "%neg = xor i32 %20, -1")
+ (m/fact
+  (render-instruction
+   {:name :lnot
+    :op :xor
+    :lhs {:type [:integer 1] :name :tobool6}
+    :rhs {:type [:integer 1] :value true}})
+  => "%lnot = xor i1 %tobool6, true"))
 
 (defmethod render-instruction :alloca
   [{:keys [name type address-space array-size align]}]
@@ -601,47 +636,55 @@
           align))
 
 (m/facts
- (render-instruction {:name :retval
-                      :op :alloca
-                      :type [:integer 32]
-                      :align 4})
- => "%retval = alloca i32, align 4"
- 
- (render-instruction {:name :argv.addr
-                      :op :alloca
-                      :type [:ptr [:ptr [:integer 8]]]
-                      :align 8})
- => "%argv.addr = alloca i8**, align 8"
-
- (render-instruction {:name :matrix
-                      :op :alloca
-                      :type [:array [:array [:integer 32] 3] 4]
-                      :align 16})
- => "%matrix = alloca [4 x [3 x i32]], align 16"
-
- (render-instruction {:name :f
-                      :op :alloca
-                      :type :float
-                      :align 4})
- => "%f = alloca float, align 4"
-
- (render-instruction {:name :d
-                      :op :alloca
-                      :type :double
-                      :align 8})
- => "%d = alloca double, align 8"
-
- (render-instruction {:name :ld
-                      :op :alloca
-                      :type :x86_fp80
-                      :align 16})
- => "%ld = alloca x86_fp80, align 16"
-
- (render-instruction {:name :ifn1
-                      :op :alloca
-                      :type [:ptr [:fn [:integer 32] [[:integer 32]]]]
-                      :align 8})
- => "%ifn1 = alloca i32 (i32)*, align 8")
+ (m/fact
+  (render-instruction
+   {:name :retval
+    :op :alloca
+    :type [:integer 32]
+    :align 4})
+  => "%retval = alloca i32, align 4")
+ (m/fact
+  (render-instruction
+   {:name :argv.addr
+    :op :alloca
+    :type [:ptr [:ptr [:integer 8]]]
+    :align 8})
+  => "%argv.addr = alloca i8**, align 8")
+ (m/fact
+  (render-instruction
+   {:name :matrix
+    :op :alloca
+    :type [:array [:array [:integer 32] 3] 4]
+    :align 16})
+  => "%matrix = alloca [4 x [3 x i32]], align 16")
+ (m/fact
+  (render-instruction
+   {:name :f
+    :op :alloca
+    :type :float
+    :align 4})
+  => "%f = alloca float, align 4")
+ (m/fact
+  (render-instruction
+   {:name :d
+    :op :alloca
+    :type :double
+    :align 8})
+  => "%d = alloca double, align 8")
+ (m/fact
+  (render-instruction
+   {:name :ld
+    :op :alloca
+    :type :x86_fp80
+    :align 16})
+  => "%ld = alloca x86_fp80, align 16")
+ (m/fact
+  (render-instruction
+   {:name :ifn1
+    :op :alloca
+    :type [:ptr [:fn [:integer 32] [[:integer 32]]]]
+    :align 8})
+  => "%ifn1 = alloca i32 (i32)*, align 8"))
 
 (defmethod render-instruction :load
   [{:keys [name type ptr align]}]
@@ -652,19 +695,21 @@
           align))
 
 (m/facts
- (render-instruction {:name 0
-                      :op :load
-                      :type [:integer 32]
-                      :ptr {:type [:ptr [:integer 32]] :name :i}
-                      :align 4})
- => "%0 = load i32, i32* %i, align 4"
-
- (render-instruction {:name 1
-                      :op :load
-                      :type [:integer 32]
-                      :ptr {:type [:ptr [:integer 32]] :name 'sum}
-                      :align 4})
- => "%1 = load i32, i32* @sum, align 4")
+ (m/fact
+  (render-instruction
+   {:name 0
+    :op :load
+    :type [:integer 32]
+    :ptr {:type [:ptr [:integer 32]] :name :i}
+    :align 4})
+  => "%0 = load i32, i32* %i, align 4")
+ (m/fact
+  (render-instruction {:name 1
+                       :op :load
+                       :type [:integer 32]
+                       :ptr {:type [:ptr [:integer 32]] :name 'sum}
+                       :align 4})
+  => "%1 = load i32, i32* @sum, align 4"))
 
 (defmethod render-instruction :store
   [{:keys [name val ptr align]}]
@@ -674,35 +719,41 @@
           align))
 
 (m/facts
- (render-instruction {:op :store
-                      :val {:type [:integer 32] :value 0}
-                      :ptr {:type [:ptr [:integer 32]] :name :retval}
-                      :align 4})
- => "store i32 0, i32* %retval, align 4"
-
- (render-instruction {:op :store
-                      :val {:type [:integer 8] :value -56}
-                      :ptr {:type [:ptr [:integer 8]] :name :c3}
-                      :align 1})
- => "store i8 -56, i8* %c3, align 1"
-
- (render-instruction {:op :store
-                      :val {:type [:integer 32] :name :argc}
-                      :ptr {:type [:ptr [:integer 32]] :name :argc.addr}
-                      :align 4})
- => "store i32 %argc, i32* %argc.addr, align 4"
- 
- (render-instruction {:op :store
-                      :val {:type [:ptr [:ptr [:integer 8]]] :name :argv}
-                      :ptr {:type [:ptr [:ptr [:ptr [:integer 8]]]] :name :argv.addr}
-                      :align 8})
- => "store i8** %argv, i8*** %argv.addr, align 8"
-
- (render-instruction {:op :store
-                      :val {:type [:ptr [:integer 8]] :value nil}
-                      :ptr {:type [:ptr [:ptr [:integer 8]]] :name :ptr}
-                      :align 8})
- => "store i8* null, i8** %ptr, align 8")
+ (m/fact
+  (render-instruction
+   {:op :store
+    :val {:type [:integer 32] :value 0}
+    :ptr {:type [:ptr [:integer 32]] :name :retval}
+    :align 4})
+  => "store i32 0, i32* %retval, align 4")
+ (m/fact
+  (render-instruction
+   {:op :store
+    :val {:type [:integer 8] :value -56}
+    :ptr {:type [:ptr [:integer 8]] :name :c3}
+    :align 1})
+  => "store i8 -56, i8* %c3, align 1")
+ (m/fact
+  (render-instruction
+   {:op :store
+    :val {:type [:integer 32] :name :argc}
+    :ptr {:type [:ptr [:integer 32]] :name :argc.addr}
+    :align 4})
+  => "store i32 %argc, i32* %argc.addr, align 4")
+ (m/fact
+  (render-instruction
+   {:op :store
+    :val {:type [:ptr [:ptr [:integer 8]]] :name :argv}
+    :ptr {:type [:ptr [:ptr [:ptr [:integer 8]]]] :name :argv.addr}
+    :align 8})
+  => "store i8** %argv, i8*** %argv.addr, align 8")
+ (m/fact
+  (render-instruction
+   {:op :store
+    :val {:type [:ptr [:integer 8]] :value nil}
+    :ptr {:type [:ptr [:ptr [:integer 8]]] :name :ptr}
+    :align 8})
+  => "store i8* null, i8** %ptr, align 8"))
 
 (defmacro define-conversion-op
   [op]
@@ -718,42 +769,50 @@
 (define-conversion-op zext)
 
 (m/facts
- (render-instruction {:name :conv2
-                      :op :zext
-                      :value {:type [:integer 8] :name 2}
-                      :dest-type [:integer 32]})
- => "%conv2 = zext i8 %2 to i32")
+ (m/fact
+  (render-instruction
+   {:name :conv2
+    :op :zext
+    :value {:type [:integer 8] :name 2}
+    :dest-type [:integer 32]})
+  => "%conv2 = zext i8 %2 to i32"))
 
 (define-conversion-op sext)
 
 (m/facts
- (render-instruction {:name :idxprom
-                      :op :sext
-                      :value {:type [:integer 32] :name 4}
-                      :dest-type [:integer 64]})
- => "%idxprom = sext i32 %4 to i64")
+ (m/fact
+  (render-instruction
+   {:name :idxprom
+    :op :sext
+    :value {:type [:integer 32] :name 4}
+    :dest-type [:integer 64]})
+  => "%idxprom = sext i32 %4 to i64"))
 
 (define-conversion-op fptrunc)
 
 (define-conversion-op fpext)
 
 (m/facts
- (render-instruction {:name :conv11
-                      :op :fpext
-                      :value {:type :float :name 16}
-                      :dest-type :double})
- => "%conv11 = fpext float %16 to double")
+ (m/fact
+  (render-instruction
+   {:name :conv11
+    :op :fpext
+    :value {:type :float :name 16}
+    :dest-type :double})
+  => "%conv11 = fpext float %16 to double"))
 
 (define-conversion-op fptoui)
 
 (define-conversion-op fptosi)
 
 (m/facts
- (render-instruction {:name :conv
-                      :op :fptosi
-                      :value {:type :float :name 3}
-                      :dest-type [:integer 32]})
- => "%conv = fptosi float %3 to i32")
+ (m/fact
+  (render-instruction
+   {:name :conv
+    :op :fptosi
+    :value {:type :float :name 3}
+    :dest-type [:integer 32]})
+  => "%conv = fptosi float %3 to i32"))
 
 (define-conversion-op uitofp)
 (define-conversion-op sitofp)
@@ -764,11 +823,13 @@
 (define-conversion-op bitcast)
 
 (m/facts
- (render-instruction {:name :c
-                      :op :bitcast
-                      :value {:type [:ptr [:named-struct :union.u]] :name :tmp}
-                      :dest-type [:ptr [:integer 8]]})
- => "%c = bitcast %union.u* %tmp to i8*")
+ (m/fact
+  (render-instruction
+   {:name :c
+    :op :bitcast
+    :value {:type [:ptr [:named-struct :union.u]] :name :tmp}
+    :dest-type [:ptr [:integer 8]]})
+  => "%c = bitcast %union.u* %tmp to i8*"))
 
 (define-conversion-op addrspacecast)
 
@@ -785,26 +846,30 @@
           (render-value rhs)))
 
 (m/facts
- (render-instruction {:name :cmp
-                      :op :icmp
-                      :pred :slt
-                      :lhs {:type [:integer 32] :name 0}
-                      :rhs {:type [:integer 32] :value 4}})
- => "%cmp = icmp slt i32 %0, 4"
-
- (render-instruction {:name :cmp1
-                      :op :icmp
-                      :pred :eq
-                      :lhs {:type [:integer 32] :name 1}
-                      :rhs {:type [:integer 32] :value 5}})
- => "%cmp1 = icmp eq i32 %1, 5"
-
- (render-instruction {:name :tobool
-                      :op :icmp
-                      :pred :ne
-                      :lhs {:type [:integer 32] :name 23}
-                      :rhs {:type [:integer 32] :value 0}})
- => "%tobool = icmp ne i32 %23, 0")
+ (m/fact
+  (render-instruction
+   {:name :cmp
+    :op :icmp
+    :pred :slt
+    :lhs {:type [:integer 32] :name 0}
+    :rhs {:type [:integer 32] :value 4}})
+  => "%cmp = icmp slt i32 %0, 4")
+ (m/fact
+  (render-instruction
+   {:name :cmp1
+    :op :icmp
+    :pred :eq
+    :lhs {:type [:integer 32] :name 1}
+    :rhs {:type [:integer 32] :value 5}})
+  => "%cmp1 = icmp eq i32 %1, 5")
+ (m/fact
+  (render-instruction
+   {:name :tobool
+    :op :icmp
+    :pred :ne
+    :lhs {:type [:integer 32] :name 23}
+    :rhs {:type [:integer 32] :value 0}})
+  => "%tobool = icmp ne i32 %23, 0"))
 
 (defmethod render-instruction :fcmp
   [{:keys [name pred lhs rhs]}]
@@ -826,19 +891,26 @@
                (str/join ", "))))
 
 (m/facts
- (render-instruction {:name 25
-                      :op :phi
-                      :type [:integer 1]
-                      :values {{:type :label :name :entry} {:type [:integer 1] :value false}
-                               {:type :label :name :land.rhs} {:type [:integer 1] :name :tobool3}}})
- => "%25 = phi i1 [ false, %entry ], [ %tobool3, %land.rhs ]"
-
- (render-instruction {:name 28
-                      :op :phi
-                      :type [:integer 1]
-                      :values {{:type :label :name :land.end} {:type [:integer 1] :value true}
-                               {:type :label :name :lor.rhs} {:type [:integer 1] :name :tobool5}}})
- => "%28 = phi i1 [ true, %land.end ], [ %tobool5, %lor.rhs ]")
+ (m/fact
+  (render-instruction
+   {:name 25
+    :op :phi
+    :type [:integer 1]
+    :values {{:type :label :name :entry}
+             {:type [:integer 1] :value false}
+             {:type :label :name :land.rhs}
+             {:type [:integer 1] :name :tobool3}}})
+  => "%25 = phi i1 [ false, %entry ], [ %tobool3, %land.rhs ]")
+ (m/fact
+  (render-instruction
+   {:name 28
+    :op :phi
+    :type [:integer 1]
+    :values {{:type :label :name :land.end}
+             {:type [:integer 1] :value true}
+             {:type :label :name :lor.rhs}
+             {:type [:integer 1] :name :tobool5}}})
+  => "%28 = phi i1 [ true, %land.end ], [ %tobool5, %lor.rhs ]"))
 
 (defmethod render-instruction :select
   [{:keys [name cond then else]}]
@@ -849,12 +921,14 @@
           (render-typed-value else)))
 
 (m/facts
- (render-instruction {:name :cond
-                      :op :select
-                      :cond {:type [:integer 1] :name :cmp17}
-                      :then {:type [:integer 32] :value 1}
-                      :else {:type [:integer 32] :value 0}})
- => "%cond = select i1 %cmp17, i32 1, i32 0")
+ (m/fact
+  (render-instruction
+   {:name :cond
+    :op :select
+    :cond {:type [:integer 1] :name :cmp17}
+    :then {:type [:integer 32] :value 1}
+    :else {:type [:integer 32] :value 0}})
+  => "%cond = select i1 %cmp17, i32 1, i32 0"))
 
 (defn render-callee
   [callee]
@@ -874,34 +948,40 @@
             (str/join ", " (map render-typed-value args)))))
 
 (m/facts
- (render-instruction {:op :call
-                      :type :void
-                      :callee {:type :void :name 'add}
-                      :args [{:type [:integer 32] :name 0}]})
- => "call void @add(i32 %0)"
-
- (render-instruction {:name :call
-                      :op :call
-                      :type [:integer 32]
-                      :callee {:type [:integer 32] :name 1}
-                      :args [{:type [:integer 32] :value 0}]})
- => "%call = call i32 %1(i32 0)"
-
- (render-instruction {:name :call
-                      :op :call
-                      :type [:fn [:integer 32] [[:ptr [:integer 8]] :&]]
-                      :callee {:type [:fn [:integer 32] [[:ptr [:integer 8]] :&]] :name 'printf}
-                      :args [{:type [:ptr [:integer 8]]
-                              :value {:op :getelementptr
-                                      :inbounds true
-                                      :type [:array [:integer 8] 21]
-                                      :ptr {:type [:ptr [:array [:integer 8] 21]] :name '.str}
-                                      :indices [{:type [:integer 64] :value 0}
-                                                {:type [:integer 64] :value 0}]}}
-                             {:type [:integer 32] :name :conv}
-                             {:type [:integer 32] :name :conv1}
-                             {:type [:integer 32] :name :conv2}]})
- => "%call = call i32 (i8*, ...) @printf(i8* getelementptr inbounds ([21 x i8], [21 x i8]* @.str, i64 0, i64 0), i32 %conv, i32 %conv1, i32 %conv2)")
+ (m/fact
+  (render-instruction
+   {:op :call
+    :type :void
+    :callee {:type :void :name 'add}
+    :args [{:type [:integer 32] :name 0}]})
+  => "call void @add(i32 %0)")
+ (m/fact
+  (render-instruction
+   {:name :call
+    :op :call
+    :type [:integer 32]
+    :callee {:type [:integer 32] :name 1}
+    :args [{:type [:integer 32] :value 0}]})
+  => "%call = call i32 %1(i32 0)")
+ (m/fact
+  (render-instruction
+   {:name :call
+    :op :call
+    :type [:fn [:integer 32] [[:ptr [:integer 8]] :&]]
+    :callee {:type [:fn [:integer 32] [[:ptr [:integer 8]] :&]]
+             :name 'printf}
+    :args [{:type [:ptr [:integer 8]]
+            :value {:op :getelementptr
+                    :inbounds true
+                    :type [:array [:integer 8] 21]
+                    :ptr {:type [:ptr [:array [:integer 8] 21]]
+                          :name '.str}
+                    :indices [{:type [:integer 64] :value 0}
+                              {:type [:integer 64] :value 0}]}}
+           {:type [:integer 32] :name :conv}
+           {:type [:integer 32] :name :conv1}
+           {:type [:integer 32] :name :conv2}]})
+  => "%call = call i32 (i8*, ...) @printf(i8* getelementptr inbounds ([21 x i8], [21 x i8]* @.str, i64 0, i64 0), i32 %conv, i32 %conv1, i32 %conv2)"))
 
 (defmethod render-instruction :getelementptr
   [{:keys [name type ptr indices inbounds]}]
@@ -913,14 +993,17 @@
           (str/join ", " (map render-typed-value indices))))
 
 (m/facts
- (render-instruction {:name :arrayidx
-                      :op :getelementptr
-                      :inbounds true
-                      :type [:array [:array [:integer 32] 3] 4]
-                      :ptr {:type [:ptr [:array [:array [:integer 32] 3] 4]] :name :matrix}
-                      :indices [{:type [:integer 64] :value 0}
-                                {:type [:integer 64] :name :idxprom}]})
- => "%arrayidx = getelementptr inbounds [4 x [3 x i32]], [4 x [3 x i32]]* %matrix, i64 0, i64 %idxprom")
+ (m/fact
+  (render-instruction
+   {:name :arrayidx
+    :op :getelementptr
+    :inbounds true
+    :type [:array [:array [:integer 32] 3] 4]
+    :ptr {:type [:ptr [:array [:array [:integer 32] 3] 4]]
+          :name :matrix}
+    :indices [{:type [:integer 64] :value 0}
+              {:type [:integer 64] :name :idxprom}]})
+  => "%arrayidx = getelementptr inbounds [4 x [3 x i32]], [4 x [3 x i32]]* %matrix, i64 0, i64 %idxprom"))
 
 (defn render-basic-block
   [block]
@@ -930,18 +1013,20 @@
       (printf "  %s\n" (render-instruction i)))))
 
 (m/facts
- (render-basic-block {:name :entry
-                      :instructions
-                      [{:name :retval
-                        :op :alloca
-                        :type [:integer 32]
-                        :align 4}
-                       {:op :ret
-                        :value {:type [:integer 32] :value 0}}]})
- => "entry:
+ (m/fact
+  (render-basic-block
+   {:name :entry
+    :instructions
+    [{:name :retval
+      :op :alloca
+      :type [:integer 32]
+      :align 4}
+     {:op :ret
+      :value {:type [:integer 32] :value 0}}]})
+  => "entry:
   %retval = alloca i32, align 4
   ret i32 0
-")
+"))
 
 (def known-linkages
   {:external "external"
@@ -1000,10 +1085,14 @@
       (printf " %s" (render-name name)))))
 
 (m/facts
- (render-function-parameter {:type [:integer 32] :name :argc})
- => "i32 %argc"
- (render-function-parameter {:type [:ptr [:ptr [:integer 8]]] :name :argv})
- => "i8** %argv")
+ (m/fact
+  (render-function-parameter
+   {:type [:integer 32] :name :argc})
+  => "i32 %argc")
+ (m/fact
+  (render-function-parameter
+   {:type [:ptr [:ptr [:integer 8]]] :name :argv})
+  => "i8** %argv"))
 
 (defn render-unnamed-addr
   [unnamed-addr]
@@ -1070,21 +1159,25 @@
       (printf "%s " (render-attributes attrs)))))
 
 (m/facts
- (render-global {:name 'add.z
-                 :linkage :internal
-                 :type [:integer 32]
-                 :initializer {:type [:integer 32] :value 8}
-                 :align 4})
- => "@add.z = internal global i32 8, align 4"
-
- (render-global {:name '.str
-                 :linkage :private
-                 :unnamed-addr :global
-                 :constant true
-                 :type [:array [:integer 8] 15]
-                 :initializer {:type [:array [:integer 8]] :value "Hello, world!\n\0"}
-                 :align 1})
- => "@.str = private unnamed_addr constant [15 x i8] c\"Hello, world!\\0A\\00\", align 1")
+ (m/fact
+  (render-global
+   {:name 'add.z
+    :linkage :internal
+    :type [:integer 32]
+    :initializer {:type [:integer 32] :value 8}
+    :align 4})
+  => "@add.z = internal global i32 8, align 4")
+ (m/fact
+  (render-global
+   {:name '.str
+    :linkage :private
+    :unnamed-addr :global
+    :constant true
+    :type [:array [:integer 8] 15]
+    :initializer {:type [:array [:integer 8]]
+                  :value "Hello, world!\n\0"}
+    :align 1})
+  => "@.str = private unnamed_addr constant [15 x i8] c\"Hello, world!\\0A\\00\", align 1"))
 
 (defn render-function
   [{:keys [name linkage dso-local visibility dll-storage-class
@@ -1129,34 +1222,37 @@
       (print "}\n"))))
 
 (m/facts
- (render-function {:name 'main
-                   :dso-local true
-                   :result-type [:integer 32]
-                   :params [{:type [:integer 32] :name :argc}
-                            {:type [:ptr [:ptr [:integer 8]]] :name :argv}]
-                   :function-attrs 0
-                   :blocks
-                   [{:name :entry
-                     :instructions
-                     [{:name :retval
-                       :op :alloca
-                       :type [:integer 32]
-                       :align 4}
-                      {:op :ret
-                       :value {:type [:integer 32] :value 0}}]}]})
- => "define dso_local i32 @main(i32 %argc, i8** %argv) #0 {
+ (m/fact
+  (render-function
+   {:name 'main
+    :dso-local true
+    :result-type [:integer 32]
+    :params [{:type [:integer 32] :name :argc}
+             {:type [:ptr [:ptr [:integer 8]]] :name :argv}]
+    :function-attrs 0
+    :blocks
+    [{:name :entry
+      :instructions
+      [{:name :retval
+        :op :alloca
+        :type [:integer 32]
+        :align 4}
+       {:op :ret
+        :value {:type [:integer 32] :value 0}}]}]})
+  => "define dso_local i32 @main(i32 %argc, i8** %argv) #0 {
 entry:
   %retval = alloca i32, align 4
   ret i32 0
 }
-"
- 
- (render-function {:name 'printf
-                   :result-type [:integer 32]
-                   :params [{:type [:ptr [:integer 8]]}
-                            {:type :&}]
-                   :function-attrs 1})
- => "declare i32 @printf(i8*, ...) #1")
+")
+ (m/fact
+  (render-function
+   {:name 'printf
+    :result-type [:integer 32]
+    :params [{:type [:ptr [:integer 8]]}
+             {:type :&}]
+    :function-attrs 1})
+  => "declare i32 @printf(i8*, ...) #1"))
 
 (defn render-module
   [{:keys [data-layout
