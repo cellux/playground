@@ -283,10 +283,10 @@
     :double "double"
     :x86_fp80 "x86_fp80"
     :fp128 "fp128"
-    :ppc-fp128 "ppc_fp128"
+    :ppc_fp128 "ppc_fp128"
     :label "label"
     :md "metadata"
-    :x86-mmx "x86_mmx"
+    :x86_mmx "x86_mmx"
     :token "token"
     :& "..."
     (throw (ex-info "invalid type" {:type t}))))
