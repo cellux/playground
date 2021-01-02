@@ -1,11 +1,19 @@
 (ns omkamra.llvm.ir
+  (:refer-clojure :rename {and clj-and
+                           or clj-or
+                           load clj-load})
   (:require [midje.sweet :as m])
   (:require [clojure.string :as str])
   (:import (java.nio ByteOrder))
   (:import (com.kenai.jffi Platform Platform$OS Platform$CPU)))
 
-(defn platform-byte-order
-  []
+(def i1 [:integer 1])
+(def i8 [:integer 8])
+(def i16 [:integer 16])
+(def i32 [:integer 32])
+(def i64 [:integer 64])
+
+(def platform-byte-order
   (condp = (ByteOrder/nativeOrder)
     ByteOrder/BIG_ENDIAN :big-endian
     ByteOrder/LITTLE_ENDIAN :little-endian))
@@ -22,16 +30,15 @@
    Platform$OS/AIX :aix
    Platform$OS/ZLINUX :zos})
 
-(defn platform-os
-  []
-  (let [platform (Platform/getPlatform)
-        os (.getOS platform)]
-    (or (known-operating-systems os)
-        (throw (ex-info "unknown operating system" {:os os})))))
+(def platform (Platform/getPlatform))
 
-(defn platform-object-format
-  []
-  (case (platform-os)
+(def platform-os
+  (let [os (.getOS platform)]
+    (clj-or (known-operating-systems os)
+            (throw (ex-info "unknown operating system" {:os os})))))
+
+(def platform-object-format
+  (case platform-os
     (:linux :solaris :freebsd :netbsd :openbsd :dragonfly) :elf
     :darwin :mach-o
     :windows :coff))
@@ -48,69 +55,63 @@
    Platform$CPU/ARM :arm
    Platform$CPU/AARCH64 :aarch64})
 
-(defn platform-arch
-  []
-  (let [platform (Platform/getPlatform)
-        cpu (.getCPU platform)]
-    (or (known-cpu-architectures cpu)
-        (throw (ex-info "unknown CPU architecture" {:cpu cpu})))))
+(def platform-arch
+  (let [cpu (.getCPU platform)]
+    (clj-or (known-cpu-architectures cpu)
+            (throw (ex-info "unknown CPU architecture" {:cpu cpu})))))
 
-(defn platform-mangling-mode
-  []
-  (case (platform-object-format)
+(def platform-mangling-mode
+  (case platform-object-format
     :elf :elf
     :mach-o :mach-o
-    :coff (case (platform-arch)
+    :coff (case platform-arch
             :i386 :windows-x86-coff
             :x86_64 :windows-coff)))
 
-(defn platform-pointer-layout
-  []
-  (let [size (.addressSize (Platform/getPlatform))]
-    {:size size :abi size}))
+(def platform-address-size
+  (.addressSize platform))
 
-(defn platform-integer-layout
-  []
-  (let [os (platform-os)
-        pointer-size (:size (platform-pointer-layout))]
-    [{:size 64 :abi (if (or (= pointer-size 64) (= os :windows)) 64 32)}]))
+(def platform-pointer-layout
+  {:size platform-address-size :abi platform-address-size})
 
-(defn platform-float-layout
-  []
-  (let [os (platform-os)
-        pointer-size (:size (platform-pointer-layout))]
-    (-> []
-        (conj {:size 64 :abi (if (or (= pointer-size 64) (= os :windows)) 64 32)})
-        (conj {:size 80 :abi (if (or (= pointer-size 64) (= os :darwin)) 128 32)}))))
+(def platform-integer-layout
+  [{:size 64
+    :abi (if (clj-or (= platform-address-size 64)
+                     (= platform-os :windows))
+           64 32)}])
 
-(defn platform-legal-int-widths
-  []
-  (case (:size (platform-pointer-layout))
+(def platform-float-layout
+  (-> []
+      (conj {:size 64 :abi (if (clj-or (= platform-address-size 64)
+                                       (= platform-os :windows))
+                             64 32)})
+      (conj {:size 80 :abi (if (clj-or (= platform-address-size 64)
+                                       (= platform-os :darwin))
+                             128 32)})))
+
+(def platform-legal-int-widths
+  (case platform-address-size
     32 [8 16 32]
     64 [8 16 32 64]))
 
-(defn platform-natural-stack-alignment
-  []
-  (let [os (platform-os)
-        pointer-size (:size (platform-pointer-layout))]
-    (if (and (= 32 pointer-size) (= os :windows))
-      32
-      128)))
+(def platform-natural-stack-alignment
+  (if (clj-and (= platform-address-size 32)
+               (= platform-os :windows))
+    32 128))
 
-(defn platform-data-layout
-  []
-  {:byte-order (platform-byte-order)
-   :mangling-mode (platform-mangling-mode)
-   :pointer-layout (platform-pointer-layout)
-   :float-layout (platform-float-layout)
-   :legal-int-widths (platform-legal-int-widths)
-   :natural-stack-alignment (platform-natural-stack-alignment)})
+(def platform-data-layout
+  {:byte-order platform-byte-order
+   :mangling-mode platform-mangling-mode
+   :pointer-layout platform-pointer-layout
+   :integer-layout platform-integer-layout
+   :float-layout platform-float-layout
+   :legal-int-widths platform-legal-int-widths
+   :natural-stack-alignment platform-natural-stack-alignment})
 
-(defn platform-target-triple
-  []
-  {:arch (platform-arch)
+(def platform-target-triple
+  {:arch platform-arch
    :vendor :unknown
-   :os (platform-os)
+   :os platform-os
    :env :unknown})
 
 (defmulti render-data-layout-item first)
@@ -134,16 +135,22 @@
 (defmethod render-data-layout-item :pointer-layout
   [[_ {:keys [address-space size abi pref idx]}]]
   (format "p%d:%d:%d:%d:%d"
-          (or address-space 0)
+          (clj-or address-space 0)
           size
           abi
-          (or pref abi)
-          (or idx size)))
+          (clj-or pref abi)
+          (clj-or idx size)))
+
+(defmethod render-data-layout-item :integer-layout
+  [[_ size-descriptors]]
+  (->> (for [{:keys [size abi pref]} size-descriptors]
+         (format "i%d:%d:%d" size abi (clj-or pref abi)))
+       (str/join "-")))
 
 (defmethod render-data-layout-item :float-layout
   [[_ size-descriptors]]
   (->> (for [{:keys [size abi pref]} size-descriptors]
-         (format "f%d:%d:%d" size abi (or pref abi)))
+         (format "f%d:%d:%d" size abi (clj-or pref abi)))
        (str/join "-")))
 
 (defmethod render-data-layout-item :legal-int-widths
@@ -178,7 +185,7 @@
       (cond
         (= b (byte \\))
         (print "\\\\")
-        (and (<= 0x20 b 0x7e) (not= b (byte \")))
+        (clj-and (<= 0x20 b 0x7e) (not= b (byte \")))
         (print (char b))
         :else
         (printf "\\%02X" b)))))
@@ -190,17 +197,17 @@
 (defn identifier-part?
   [ch]
   (let [b (int ch)]
-    (or (<= 0x61 b 0x7a)
-        (<= 0x41 b 0x5a)
-        (<= 0x30 b 0x39)
-        (== 0x2d b)
-        (== 0x2e b)
-        (== 0x5f b))))
+    (clj-or (<= 0x61 b 0x7a)
+            (<= 0x41 b 0x5a)
+            (<= 0x30 b 0x39)
+            (== 0x2d b)
+            (== 0x2e b)
+            (== 0x5f b))))
 
 (defn needs-quoting?
   [name]
-  (or (digit? (first name))
-      (not (every? identifier-part? name))))
+  (clj-or (digit? (first name))
+          (not (every? identifier-part? name))))
 
 (defn render-quoted-string
   [s]
@@ -209,7 +216,7 @@
            escape-byte-string)
        \"))
 
-(defn render-name-string-without-prefix
+(defn render-name-string
   [name-string]
   (if (needs-quoting? name-string)
     (render-quoted-string name-string)
@@ -219,10 +226,22 @@
   [x]
   (cond
     (integer? x) (str \% x)
-    (keyword? x) (str \% (render-name-string-without-prefix (name x)))
-    (symbol? x) (str \@ (render-name-string-without-prefix (name x)))))
+    (keyword? x) (str \% (render-name-string (name x)))
+    (symbol? x) (str \@ (render-name-string (name x)))))
+
+(defn named-type
+  [name type]
+  {:kind :type
+   :name name
+   :type type})
+
+(defn named-type?
+  [t]
+  (clj-and (map? t) (= :type (:kind t))))
 
 (declare render-type)
+
+(def complex-type? vector?)
 
 (defmulti render-complex-type first)
 
@@ -269,9 +288,7 @@
   [t]
   "opaque")
 
-(defmethod render-complex-type :named-struct
-  [[_ name]]
-  (render-name name))
+(def simple-type? keyword?)
 
 (defn render-simple-type
   [t]
@@ -294,21 +311,26 @@
 (defn render-type
   [t]
   (cond
-    (keyword? t) (render-simple-type t)
-    (vector? t) (render-complex-type t)
+    (simple-type? t) (render-simple-type t)
+    (complex-type? t) (render-complex-type t)
+    (named-type? t) (render-name (:name t))
     :else (throw (ex-info "invalid type" {:type t}))))
 
 (defn extract-type-tag
   [t]
   (cond
-    (keyword? t) t
-    (vector? t) (first t)
+    (simple-type? t) t
+    (complex-type? t) (first t)
+    (named-type? t) (recur (:type t))
     :else (throw (ex-info "invalid type" {:type t}))))
 
 (m/facts
- (m/fact (extract-type-tag [:integer 8]) => :integer)
- (m/fact (extract-type-tag [:named-struct :t]) => :named-struct)
- (m/fact (extract-type-tag :void) => :void))
+ (m/fact (extract-type-tag :float) => :float)
+ (m/fact (extract-type-tag i8) => :integer)
+ (m/fact (extract-type-tag [:packed-struct :t]) => :packed-struct)
+ (m/fact (extract-type-tag :void) => :void)
+ (m/fact (extract-type-tag (named-type 'T [:struct [i32 [:ptr i8]]]))
+         => :struct))
 
 (defmulti render-literal (fn [type value] (extract-type-tag type)))
 
@@ -318,7 +340,7 @@
 
 (defmethod render-literal :integer
   [[_ size] value]
-  (if (and (= size 1) (boolean? value))
+  (if (clj-and (= size 1) (boolean? value))
     (str value)
     (format "%d" value)))
 
@@ -332,32 +354,33 @@
 (defmethod render-literal :array
   [[_ elt size] value]
   (cond
-    (and (= elt [:integer 8]) (string? value))
+    (clj-and (= elt i8) (string? value))
     (str \c (render-quoted-string value))
+
     (vector? value)
     (format "[ %s ]" (str/join ", " (map render-typed-value value)))))
 
 (m/facts
  (m/fact (render-literal :void :void) => "void")
- (m/fact (render-literal [:integer 32] 1234) => "1234")
- (m/fact (render-literal [:integer 1] true) => "true")
- (m/fact (render-literal [:integer 1] false) => "false")
- (m/fact (render-literal [:integer 1] 0) => "0")
- (m/fact (render-literal [:integer 1] 1) => "1")
- (m/fact (render-literal [:ptr [:integer 8]] nil) => "null")
- (m/fact (render-literal [:array [:integer 8]] "Hello, world\n\0") => "c\"Hello, world\\0A\\00\""))
-
-(declare render-expr)
+ (m/fact (render-literal i32 1234) => "1234")
+ (m/fact (render-literal i1 true) => "true")
+ (m/fact (render-literal i1 false) => "false")
+ (m/fact (render-literal i1 0) => "0")
+ (m/fact (render-literal i1 1) => "1")
+ (m/fact (render-literal [:ptr i8] nil) => "null")
+ (m/fact (render-literal [:array i8] "Hello, world\n\0") => "c\"Hello, world\\0A\\00\""))
 
 (defn render-typed-value
   [{:keys [type name value]}]
-  (if name
+  (cond
+    name
     (format "%s %s" (render-type type) (render-name name))
-    (if (map? value)
-      (format "%s %s" (render-type type) (render-expr value))
-      (if (= :void type)
-        "void"
-        (format "%s %s" (render-type type) (render-literal type value))))))
+
+    (= :void type)
+    "void"
+
+    :else
+    (format "%s %s" (render-type type) (render-literal type value))))
 
 (defn render-value
   [{:keys [type name value]}]
@@ -365,45 +388,59 @@
     (render-name name)
     (render-literal type value)))
 
-(defmulti render-expr :op)
-
-(defmethod render-expr :getelementptr
-  [{:keys [type ptr indices inbounds]}]
-  (format "getelementptr%s (%s, %s, %s)"
-          (if inbounds " inbounds" "")
-          (render-type type)
-          (render-typed-value ptr)
-          (str/join ", " (map render-typed-value indices))))
+(defn const
+  [type value]
+  {:kind :const
+   :type type
+   :value value})
 
 (m/facts
  (m/fact
-  (render-expr
-   {:op :getelementptr
-    :inbounds true
-    :type [:array [:array [:integer 32] 3] 4]
-    :ptr {:type [:ptr [:array [:array [:integer 32] 3] 4]]
-          :name :matrix}
-    :indices [{:type [:integer 64] :value 0}
-              {:type [:integer 64] :name :idxprom}]})
-  => "getelementptr inbounds ([4 x [3 x i32]], [4 x [3 x i32]]* %matrix, i64 0, i64 %idxprom)"))
+  (render-typed-value (const i64 1234)) => "i64 1234")
+ (m/fact
+  (render-value (const i64 1234)) => "1234"))
+
+(def void {:type :void :value :void})
 
 (defmulti render-instruction :op)
 
+(defn ret
+  ([value]
+   {:kind :instruction
+    :op :ret
+    :value value})
+  ([]
+   {:kind :instruction
+    :op :ret}))
+
 (defmethod render-instruction :ret
   [{:keys [value]}]
-  (format "ret %s" (render-typed-value value)))
+  (if value
+    (format "ret %s" (render-typed-value value))
+    "ret void"))
 
 (m/facts
  (m/fact
   (render-instruction
-   {:op :ret
-    :value {:type [:integer 32] :value 0}})
-  => "ret i32 0")
+   (ret (const i32 0))) => "ret i32 0")
  (m/fact
   (render-instruction
-   {:op :ret
-    :value {:type :void :value :void}})
-  => "ret void"))
+   (ret void)) => "ret void")
+ (m/fact
+  (render-instruction
+   (ret)) => "ret void"))
+
+(defn br
+  ([dest]
+   {:kind :instruction
+    :op :br
+    :dest dest})
+  ([cond dest else]
+   {:kind :instruction
+    :op :br
+    :cond cond
+    :dest dest
+    :else else}))
 
 (defmethod render-instruction :br
   [{:keys [cond dest else]}]
@@ -417,16 +454,22 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:op :br
-    :dest {:type :label :name :for.cond}})
+   (br {:type :label :name :for.cond}))
   => "br label %for.cond")
  (m/fact
   (render-instruction
-   {:op :br
-    :cond {:type [:integer 1] :name :cmp}
-    :dest {:type :label :name :for.body}
-    :else {:type :label :name :for.end8}})
+   (br {:type i1 :name :cmp}
+       {:type :label :name :for.body}
+       {:type :label :name :for.end8}))
   => "br i1 %cmp, label %for.body, label %for.end8"))
+
+(defn switch
+  [value dest cases]
+  {:kind :instruction
+   :op :switch
+   :value value
+   :dest dest
+   :cases cases})
 
 (defmethod render-instruction :switch
   [{:keys [value dest cases]}]
@@ -443,60 +486,74 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:op :switch
-    :value {:type [:integer 32] :name 2}
-    :dest {:type :label :name :sw.default}
-    :cases [[{:type [:integer 32] :value 1}
+   (switch {:type i32 :name 2}
+           {:type :label :name :sw.default}
+           [[(const i32 1)
              {:type :label :name :sw.bb}]
-            [{:type [:integer 32] :value 2}
+            [(const i32 2)
              {:type :label :name :sw.bb1}]
-            [{:type [:integer 32] :value 3}
-             {:type :label :name :sw.bb3}]]})
+            [(const i32 3)
+             {:type :label :name :sw.bb3}]]))
   => "switch i32 %2, label %sw.default [ i32 1, label %sw.bb i32 2, label %sw.bb1 i32 3, label %sw.bb3 ]"))
 
 (defmacro define-unary-op
   [op opts]
-  `(defmethod render-instruction ~(keyword op)
-     [{:keys [~'name ~'value ~@opts]}]
-     (with-out-str
-       (print (render-name ~'name))
-       (print (str " = " ~(name op)))
-       ~@(for [opt opts] `(when ~opt
-                            (print ~(str " " (name opt)))))
-       (print (str " " (render-typed-value ~'value))))))
+  `(do
+     (defn ~op
+       [~'value ~'opts]
+       (assoc ~'opts
+              :kind :instruction
+              :op ~(keyword op)
+              :value ~'value
+              :type (:type ~'value)))
+     (defmethod render-instruction ~(keyword op)
+       [{:keys [~'name ~'value ~@opts]}]
+       (with-out-str
+         (print (render-name ~'name))
+         (print (str " = " ~(name op)))
+         ~@(for [opt opts] `(when ~opt
+                              (print ~(str " " (name opt)))))
+         (print (str " " (render-typed-value ~'value)))))))
 
 (define-unary-op fneg [])
 
 (defmacro define-binary-op
   [op opts]
-  `(defmethod render-instruction ~(keyword op)
-     [{:keys [~'name ~'lhs ~'rhs ~@opts]}]
-     (with-out-str
-       (print (render-name ~'name))
-       (print (str " = " ~(name op)))
-       ~@(for [opt opts] `(when ~opt
-                            (print ~(str " " (name opt)))))
-       (print (str " " (render-typed-value ~'lhs)))
-       (print (str ", " (render-value ~'rhs))))))
+  `(do
+     (defn ~op
+       [~'lhs ~'rhs ~'opts]
+       (assoc ~'opts
+              :kind :instruction
+              :op ~(keyword op)
+              :lhs ~'lhs
+              :rhs ~'rhs
+              :type (:type ~'lhs)))
+     (defmethod render-instruction ~(keyword op)
+       [{:keys [~'name ~'lhs ~'rhs ~@opts]}]
+       (with-out-str
+         (print (render-name ~'name))
+         (print (str " = " ~(name op)))
+         ~@(for [opt opts] `(when ~opt
+                              (print ~(str " " (name opt)))))
+         (print (str " " (render-typed-value ~'lhs)))
+         (print (str ", " (render-value ~'rhs)))))))
 
 (define-binary-op add [nsw nuw])
 
 (m/facts
  (m/fact
   (render-instruction
-   {:name :inc
-    :op :add
-    :nsw true
-    :lhs {:type [:integer 32] :name 6}
-    :rhs {:type [:integer 32] :value 1}})
+   (add {:type i32 :name 6}
+        (const i32 1)
+        {:nsw true
+         :name :inc}))
   => "%inc = add nsw i32 %6, 1")
  (m/fact
   (render-instruction
-   {:name :add
-    :op :add
-    :nsw true
-    :lhs {:type [:integer 32] :name 1}
-    :rhs {:type [:integer 32] :name 0}})
+   (add {:type i32 :name 1}
+        {:type i32 :name 0}
+        {:nsw true
+         :name :add}))
   => "%add = add nsw i32 %1, %0"))
 
 (define-binary-op fadd [])
@@ -506,11 +563,10 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name :sub
-    :op :sub
-    :nsw true
-    :lhs {:type [:integer 32] :name 0}
-    :rhs {:type [:integer 32] :value 1}})
+   (sub {:type i32 :name 0}
+        (const i32 1)
+        {:nsw true
+         :name :sub}))
   => "%sub = sub nsw i32 %0, 1"))
 
 (define-binary-op fsub [])
@@ -518,11 +574,11 @@
 (define-binary-op mul [nsw nuw])
 
 (m/facts
- (render-instruction {:name :mul
-                      :op :mul
-                      :nsw true
-                      :lhs {:type [:integer 32] :name 2}
-                      :rhs {:type [:integer 32] :name 3}})
+ (render-instruction
+  (mul {:type i32 :name 2}
+       {:type i32 :name 3}
+       {:nsw true
+        :name :mul}))
  => "%mul = mul nsw i32 %2, %3")
 
 (define-binary-op fmul [])
@@ -534,10 +590,9 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name :div
-    :op :sdiv
-    :lhs {:type [:integer 32] :name 6}
-    :rhs {:type [:integer 32] :name 7}})
+   (sdiv {:type i32 :name 6}
+         {:type i32 :name 7}
+         {:name :div}))
   => "%div = sdiv i32 %6, %7"))
 
 (define-binary-op fdiv [])
@@ -549,10 +604,9 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name :rem
-    :op :srem
-    :lhs {:type [:integer 32] :name 8}
-    :rhs {:type [:integer 32] :name 9}})
+   (srem {:type i32 :name 8}
+         {:type i32 :name 9}
+         {:name :rem}))
   => "%rem = srem i32 %8, %9"))
 
 (define-binary-op frem [])
@@ -562,10 +616,9 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name :shl
-    :op :shl
-    :lhs {:type [:integer 32] :name 21}
-    :rhs {:type [:integer 32] :value 3}})
+   (shl {:type i32 :name 21}
+        (const i32 3)
+        {:name :shl}))
   => "%shl = shl i32 %21, 3"))
 
 (define-binary-op lshr [exact])
@@ -575,10 +628,9 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name :shr
-    :op :ashr
-    :lhs {:type [:integer 32] :name 22}
-    :rhs {:type [:integer 32] :value 3}})
+   (ashr {:type i32 :name 22}
+         (const i32 3)
+         {:name :shr}))
   => "%shr = ashr i32 %22, 3"))
 
 (define-binary-op and [])
@@ -586,10 +638,9 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name :and
-    :op :and
-    :lhs {:type [:integer 32] :name 14}
-    :rhs {:type [:integer 32] :name 15}})
+   (and {:type i32 :name 14}
+        {:type i32 :name 15}
+        {:name :and}))
   => "%and = and i32 %14, %15"))
 
 (define-binary-op or [])
@@ -597,10 +648,9 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name :or
-    :op :or
-    :lhs {:type [:integer 32] :name 16}
-    :rhs {:type [:integer 32] :name 17}})
+   (or {:type i32 :name 16}
+       {:type i32 :name 17}
+       {:name :or}))
   => "%or = or i32 %16, %17"))
 
 (define-binary-op xor [])
@@ -608,161 +658,176 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name :xor
-    :op :xor
-    :lhs {:type [:integer 32] :name 18}
-    :rhs {:type [:integer 32] :name 19}})
+   (xor {:type i32 :name 18}
+        {:type i32 :name 19}
+        {:name :xor}))
   => "%xor = xor i32 %18, %19")
  (m/fact
   (render-instruction
-   {:name :neg
-    :op :xor
-    :lhs {:type [:integer 32] :name 20}
-    :rhs {:type [:integer 32] :value -1}})
+   (xor {:type i32 :name 20}
+        (const i32 -1)
+        {:name :neg}))
   => "%neg = xor i32 %20, -1")
  (m/fact
   (render-instruction
-   {:name :lnot
-    :op :xor
-    :lhs {:type [:integer 1] :name :tobool6}
-    :rhs {:type [:integer 1] :value true}})
+   (xor {:type i1 :name :tobool6}
+        (const i1 true)
+        {:name :lnot}))
   => "%lnot = xor i1 %tobool6, true"))
 
+(defn alloca
+  [object-type opts]
+  (assoc opts
+         :kind :instruction
+         :op :alloca
+         :object-type object-type
+         :type [:ptr object-type]))
+
 (defmethod render-instruction :alloca
-  [{:keys [name type address-space array-size align]}]
+  [{:keys [name object-type address-space array-size align]}]
   (format "%s = alloca %s, align %d"
           (render-name name)
-          (render-type type)
+          (render-type object-type)
           align))
 
 (m/facts
  (m/fact
   (render-instruction
-   {:name :retval
-    :op :alloca
-    :type [:integer 32]
-    :align 4})
+   (alloca i32 {:align 4 :name :retval}))
   => "%retval = alloca i32, align 4")
  (m/fact
   (render-instruction
-   {:name :argv.addr
-    :op :alloca
-    :type [:ptr [:ptr [:integer 8]]]
-    :align 8})
+   (alloca [:ptr [:ptr i8]] {:align 8 :name :argv.addr}))
   => "%argv.addr = alloca i8**, align 8")
  (m/fact
   (render-instruction
-   {:name :matrix
-    :op :alloca
-    :type [:array [:array [:integer 32] 3] 4]
-    :align 16})
+   (alloca [:array [:array i32 3] 4] {:align 16 :name :matrix}))
   => "%matrix = alloca [4 x [3 x i32]], align 16")
  (m/fact
   (render-instruction
-   {:name :f
-    :op :alloca
-    :type :float
-    :align 4})
+   (alloca :float {:align 4 :name :f}))
   => "%f = alloca float, align 4")
  (m/fact
   (render-instruction
-   {:name :d
-    :op :alloca
-    :type :double
-    :align 8})
+   (alloca :double {:align 8 :name :d}))
   => "%d = alloca double, align 8")
  (m/fact
   (render-instruction
-   {:name :ld
-    :op :alloca
-    :type :x86_fp80
-    :align 16})
+   (alloca :x86_fp80 {:align 16 :name :ld}))
   => "%ld = alloca x86_fp80, align 16")
  (m/fact
   (render-instruction
-   {:name :ifn1
-    :op :alloca
-    :type [:ptr [:fn [:integer 32] [[:integer 32]]]]
-    :align 8})
+   (let [ftype [:fn i32 [i32]]]
+     (alloca [:ptr ftype] {:align 8 :name :ifn1})))
   => "%ifn1 = alloca i32 (i32)*, align 8"))
 
+(defn load
+  [target opts]
+  (assoc opts
+         :kind :instruction
+         :op :load
+         :object-type (:object-type target)
+         :ptr target
+         :type (:type target)))
+
 (defmethod render-instruction :load
-  [{:keys [name type ptr align]}]
+  [{:keys [name object-type ptr align]}]
   (format "%s = load %s, %s, align %d"
           (render-name name)
-          (render-type type)
+          (render-type object-type)
           (render-typed-value ptr)
           align))
 
 (m/facts
  (m/fact
   (render-instruction
-   {:name 0
-    :op :load
-    :type [:integer 32]
-    :ptr {:type [:ptr [:integer 32]] :name :i}
-    :align 4})
+   (load {:object-type i32
+          :type [:ptr i32]
+          :name :i}
+         {:align 4 :name 0}))
   => "%0 = load i32, i32* %i, align 4")
  (m/fact
-  (render-instruction {:name 1
-                       :op :load
-                       :type [:integer 32]
-                       :ptr {:type [:ptr [:integer 32]] :name 'sum}
-                       :align 4})
+  (render-instruction
+   (load {:object-type i32
+          :type [:ptr i32]
+          :name 'sum}
+         {:align 4 :name 1}))
   => "%1 = load i32, i32* @sum, align 4"))
 
+(defn store
+  [value target opts]
+  (assoc opts
+         :kind :instruction
+         :op :store
+         :value value
+         :ptr target))
+
 (defmethod render-instruction :store
-  [{:keys [name val ptr align]}]
+  [{:keys [name value ptr align]}]
   (format "store %s, %s, align %d"
-          (render-typed-value val)
+          (render-typed-value value)
           (render-typed-value ptr)
           align))
 
 (m/facts
  (m/fact
   (render-instruction
-   {:op :store
-    :val {:type [:integer 32] :value 0}
-    :ptr {:type [:ptr [:integer 32]] :name :retval}
-    :align 4})
+   (store (const i32 0)
+          {:type [:ptr i32]
+           :object-type i32
+           :name :retval}
+          {:align 4}))
   => "store i32 0, i32* %retval, align 4")
  (m/fact
   (render-instruction
-   {:op :store
-    :val {:type [:integer 8] :value -56}
-    :ptr {:type [:ptr [:integer 8]] :name :c3}
-    :align 1})
+   (store (const i8 -56)
+          {:type [:ptr i8]
+           :object-type :i8
+           :name :c3}
+          {:align 1}))
   => "store i8 -56, i8* %c3, align 1")
  (m/fact
   (render-instruction
-   {:op :store
-    :val {:type [:integer 32] :name :argc}
-    :ptr {:type [:ptr [:integer 32]] :name :argc.addr}
-    :align 4})
+   (store {:type i32 :name :argc}
+          {:type [:ptr i32]
+           :object-type i32
+           :name :argc.addr}
+          {:align 4}))
   => "store i32 %argc, i32* %argc.addr, align 4")
  (m/fact
   (render-instruction
-   {:op :store
-    :val {:type [:ptr [:ptr [:integer 8]]] :name :argv}
-    :ptr {:type [:ptr [:ptr [:ptr [:integer 8]]]] :name :argv.addr}
-    :align 8})
+   (store {:type [:ptr [:ptr i8]] :name :argv}
+          {:type [:ptr [:ptr [:ptr i8]]]
+           :object-type [:ptr [:ptr i8]]
+           :name :argv.addr}
+          {:align 8}))
   => "store i8** %argv, i8*** %argv.addr, align 8")
  (m/fact
   (render-instruction
-   {:op :store
-    :val {:type [:ptr [:integer 8]] :value nil}
-    :ptr {:type [:ptr [:ptr [:integer 8]]] :name :ptr}
-    :align 8})
+   (store (const [:ptr i8] nil)
+          {:type [:ptr [:ptr i8]]
+           :object-type [:ptr i8]
+           :name :ptr}
+          {:align 8}))
   => "store i8* null, i8** %ptr, align 8"))
 
 (defmacro define-conversion-op
   [op]
-  `(defmethod render-instruction ~(keyword op)
-     [{:keys [~'name ~'value ~'dest-type]}]
-     (format ~(str "%s = " op " %s to %s")
-             (render-name ~'name)
-             (render-typed-value ~'value)
-             (render-type ~'dest-type))))
+  `(do
+     (defn ~op
+       [~'value ~'dest-type ~'opts]
+       (assoc ~'opts
+              :kind :instruction
+              :op ~(keyword op)
+              :value ~'value
+              :dest-type ~'dest-type
+              :type ~'dest-type))
+     (defmethod render-instruction ~(keyword op)
+       [{:keys [~'name ~'value ~'dest-type]}]
+       (format ~(str "%s = " op " %s to %s")
+               (render-name ~'name)
+               (render-typed-value ~'value)
+               (render-type ~'dest-type)))))
 
 (define-conversion-op trunc)
 
@@ -771,10 +836,7 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name :conv2
-    :op :zext
-    :value {:type [:integer 8] :name 2}
-    :dest-type [:integer 32]})
+   (zext {:type i8 :name 2} i32 {:name :conv2}))
   => "%conv2 = zext i8 %2 to i32"))
 
 (define-conversion-op sext)
@@ -782,10 +844,7 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name :idxprom
-    :op :sext
-    :value {:type [:integer 32] :name 4}
-    :dest-type [:integer 64]})
+   (sext {:type i32 :name 4} i64 {:name :idxprom}))
   => "%idxprom = sext i32 %4 to i64"))
 
 (define-conversion-op fptrunc)
@@ -795,10 +854,7 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name :conv11
-    :op :fpext
-    :value {:type :float :name 16}
-    :dest-type :double})
+   (fpext {:type :float :name 16} :double {:name :conv11}))
   => "%conv11 = fpext float %16 to double"))
 
 (define-conversion-op fptoui)
@@ -808,10 +864,7 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name :conv
-    :op :fptosi
-    :value {:type :float :name 3}
-    :dest-type [:integer 32]})
+   (fptosi {:type :float :name 3} i32 {:name :conv}))
   => "%conv = fptosi float %3 to i32"))
 
 (define-conversion-op uitofp)
@@ -825,10 +878,10 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name :c
-    :op :bitcast
-    :value {:type [:ptr [:named-struct :union.u]] :name :tmp}
-    :dest-type [:ptr [:integer 8]]})
+   (let [union-type (named-type :union.u [:struct [[:ptr i8]]])]
+     (bitcast {:type [:ptr union-type] :name :tmp}
+              [:ptr i8]
+              {:name :c})))
   => "%c = bitcast %union.u* %tmp to i8*"))
 
 (define-conversion-op addrspacecast)
@@ -836,6 +889,16 @@
 (defn render-predicate
   [pred]
   (name pred))
+
+(defn icmp
+  [pred lhs rhs opts]
+  (assoc opts
+         :kind :instruction
+         :op :icmp
+         :pred pred
+         :lhs lhs
+         :rhs rhs
+         :type i1))
 
 (defmethod render-instruction :icmp
   [{:keys [name pred lhs rhs]}]
@@ -848,28 +911,26 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name :cmp
-    :op :icmp
-    :pred :slt
-    :lhs {:type [:integer 32] :name 0}
-    :rhs {:type [:integer 32] :value 4}})
+   (icmp :slt {:type i32 :name 0} (const i32 4) {:name :cmp}))
   => "%cmp = icmp slt i32 %0, 4")
  (m/fact
   (render-instruction
-   {:name :cmp1
-    :op :icmp
-    :pred :eq
-    :lhs {:type [:integer 32] :name 1}
-    :rhs {:type [:integer 32] :value 5}})
+   (icmp :eq {:type i32 :name 1} (const i32 5) {:name :cmp1}))
   => "%cmp1 = icmp eq i32 %1, 5")
  (m/fact
   (render-instruction
-   {:name :tobool
-    :op :icmp
-    :pred :ne
-    :lhs {:type [:integer 32] :name 23}
-    :rhs {:type [:integer 32] :value 0}})
+   (icmp :ne {:type i32 :name 23} (const i32 0) {:name :tobool}))
   => "%tobool = icmp ne i32 %23, 0"))
+
+(defn fcmp
+  [pred lhs rhs opts]
+  (assoc opts
+         :kind :instruction
+         :op :fcmp
+         :pred pred
+         :lhs lhs
+         :rhs rhs
+         :type i1))
 
 (defmethod render-instruction :fcmp
   [{:keys [name pred lhs rhs]}]
@@ -878,6 +939,15 @@
           (render-predicate pred)
           (render-typed-value lhs)
           (render-value rhs)))
+
+(defn phi
+  [values opts]
+  (assoc opts
+         :kind :instruction
+         :op :phi
+         :type (let [[label value] (first values)]
+                 (:type value))
+         :values values))
 
 (defmethod render-instruction :phi
   [{:keys [name type values]}]
@@ -893,24 +963,30 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name 25
-    :op :phi
-    :type [:integer 1]
-    :values {{:type :label :name :entry}
-             {:type [:integer 1] :value false}
-             {:type :label :name :land.rhs}
-             {:type [:integer 1] :name :tobool3}}})
+   (phi {{:type :label :name :entry}
+         (const i1 false)
+         {:type :label :name :land.rhs}
+         {:type i1 :name :tobool3}}
+        {:name 25}))
   => "%25 = phi i1 [ false, %entry ], [ %tobool3, %land.rhs ]")
  (m/fact
   (render-instruction
-   {:name 28
-    :op :phi
-    :type [:integer 1]
-    :values {{:type :label :name :land.end}
-             {:type [:integer 1] :value true}
-             {:type :label :name :lor.rhs}
-             {:type [:integer 1] :name :tobool5}}})
+   (phi {{:type :label :name :land.end}
+         {:type i1 :value true}
+         {:type :label :name :lor.rhs}
+         {:type i1 :name :tobool5}}
+        {:name 28}))
   => "%28 = phi i1 [ true, %land.end ], [ %tobool5, %lor.rhs ]"))
+
+(defn select
+  [cond then else opts]
+  (assoc opts
+         :kind :instruction
+         :op :select
+         :cond cond
+         :then then
+         :else else
+         :type (:type then)))
 
 (defmethod render-instruction :select
   [{:keys [name cond then else]}]
@@ -923,106 +999,154 @@
 (m/facts
  (m/fact
   (render-instruction
-   {:name :cond
-    :op :select
-    :cond {:type [:integer 1] :name :cmp17}
-    :then {:type [:integer 32] :value 1}
-    :else {:type [:integer 32] :value 0}})
+   (select {:type i1 :name :cmp17}
+           (const i32 1)
+           (const i32 0)
+           {:name :cond}))
   => "%cond = select i1 %cmp17, i32 1, i32 0"))
 
-(defn render-callee
-  [callee]
-  (render-name (:name callee)))
+(defn result-type
+  [f]
+  (second (:type f)))
+
+(defn vararg?
+  [f]
+  (let [[_ result-type param-types] (:type f)]
+    (= :& (last param-types))))
+
+(defn call
+  ([callee args opts]
+   (assoc opts
+          :kind :instruction
+          :op :call
+          :callee callee
+          :args args
+          :type (result-type callee)))
+  ([callee args]
+   (call callee args nil)))
 
 (defmethod render-instruction :call
-  [{:keys [name type callee args]}]
-  (if name
-    (format "%s = call %s %s(%s)"
-            (render-name name)
-            (render-type type)
-            (render-callee callee)
-            (str/join ", " (map render-typed-value args)))
-    (format "call %s %s(%s)"
-            (render-type type)
-            (render-callee callee)
-            (str/join ", " (map render-typed-value args)))))
+  [{:keys [name callee args]}]
+  (let [type-str (render-type (if (vararg? callee)
+                                (:type callee)
+                                (result-type callee)))
+        callee-name (render-name (:name callee))]
+    (if name
+      (format "%s = call %s %s(%s)"
+              (render-name name)
+              type-str
+              callee-name
+              (str/join ", " (map render-typed-value args)))
+      (format "call %s %s(%s)"
+              type-str
+              callee-name
+              (str/join ", " (map render-typed-value args))))))
 
 (m/facts
  (m/fact
   (render-instruction
-   {:op :call
-    :type :void
-    :callee {:type :void :name 'add}
-    :args [{:type [:integer 32] :name 0}]})
+   (call {:type [:fn :void [i32]] :name 'add}
+         [{:type i32 :name 0}]))
   => "call void @add(i32 %0)")
  (m/fact
   (render-instruction
-   {:name :call
-    :op :call
-    :type [:integer 32]
-    :callee {:type [:integer 32] :name 1}
-    :args [{:type [:integer 32] :value 0}]})
-  => "%call = call i32 %1(i32 0)")
+   (call {:type [:fn i32 [i32]] :name 1}
+         [(const i32 0)]
+         {:name :call}))
+  => "%call = call i32 %1(i32 0)"))
+
+(defn sanitize-gep-index
+  [index]
+  (cond (integer? index) (const i32 index)
+        (map? index) index
+        :else (throw (ex-info "invalid gep index" {:index index}))))
+
+(defn infer-element-type
+  [type indices]
+  (if (seq indices)
+    (case (extract-type-tag type)
+      :ptr
+      (let [[_ elt] type]
+        (recur elt (rest indices)))
+      
+      (:array :vector)
+      (let [[_ elt size] type]
+        (recur elt (rest indices)))
+
+      (:struct :packed-struct)
+      (let [[_ element-types] type]
+        (recur (nth element-types (:value (first indices)))
+               (rest indices))))
+    type))
+
+(m/facts
  (m/fact
-  (render-instruction
-   {:name :call
-    :op :call
-    :type [:fn [:integer 32] [[:ptr [:integer 8]] :&]]
-    :callee {:type [:fn [:integer 32] [[:ptr [:integer 8]] :&]]
-             :name 'printf}
-    :args [{:type [:ptr [:integer 8]]
-            :value {:op :getelementptr
-                    :inbounds true
-                    :type [:array [:integer 8] 21]
-                    :ptr {:type [:ptr [:array [:integer 8] 21]]
-                          :name '.str}
-                    :indices [{:type [:integer 64] :value 0}
-                              {:type [:integer 64] :value 0}]}}
-           {:type [:integer 32] :name :conv}
-           {:type [:integer 32] :name :conv1}
-           {:type [:integer 32] :name :conv2}]})
-  => "%call = call i32 (i8*, ...) @printf(i8* getelementptr inbounds ([21 x i8], [21 x i8]* @.str, i64 0, i64 0), i32 %conv, i32 %conv1, i32 %conv2)"))
+  (infer-element-type [:ptr [:array [:struct [i32 i8 i16]] 10]]
+                      [{:type i32 :value 0}
+                       {:type i32 :name :index}
+                       {:type i32 :value 1}])
+  => i8))
+
+(defn getelementptr
+  [target indices opts]
+  (let [target-type (:type target)]
+    (assert (vector? target-type))
+    (assert (= :ptr (first target-type)))
+    (let [[_ base-type] target-type
+          indices (map sanitize-gep-index indices)]
+      (assoc opts
+             :kind :instruction
+             :op :getelementptr
+             :base-type base-type
+             :ptr target
+             :indices indices
+             :type [:ptr (infer-element-type (:type target) indices)]))))
 
 (defmethod render-instruction :getelementptr
-  [{:keys [name type ptr indices inbounds]}]
+  [{:keys [name base-type ptr indices inbounds]}]
   (format "%s = getelementptr%s %s, %s, %s"
           (render-name name)
           (if inbounds " inbounds" "")
-          (render-type type)
+          (render-type base-type)
           (render-typed-value ptr)
           (str/join ", " (map render-typed-value indices))))
 
 (m/facts
  (m/fact
   (render-instruction
-   {:name :arrayidx
-    :op :getelementptr
-    :inbounds true
-    :type [:array [:array [:integer 32] 3] 4]
-    :ptr {:type [:ptr [:array [:array [:integer 32] 3] 4]]
-          :name :matrix}
-    :indices [{:type [:integer 64] :value 0}
-              {:type [:integer 64] :name :idxprom}]})
+   (let [matrix (alloca [:array [:array i32 3] 4]
+                        {:align 8 :name :matrix})]
+     (getelementptr matrix
+                    [{:type i64 :value 0}
+                     {:type i64 :name :idxprom}]
+                    {:inbounds true
+                     :name :arrayidx})))
   => "%arrayidx = getelementptr inbounds [4 x [3 x i32]], [4 x [3 x i32]]* %matrix, i64 0, i64 %idxprom"))
 
+(defn basic-block
+  [name]
+  {:kind :basic-block
+   :name name
+   :type :label
+   :instructions []})
+
+(defn add-instruction
+  [block instruction]
+  (update block :instructions conj instruction))
+
 (defn render-basic-block
-  [block]
+  [{:keys [name instructions]}]
   (with-out-str
-    (printf "%s:\n" (name (:name block)))
-    (doseq [i (:instructions block)]
+    (printf "%s:\n" (clojure.core/name name))
+    (doseq [i instructions]
       (printf "  %s\n" (render-instruction i)))))
 
 (m/facts
  (m/fact
   (render-basic-block
-   {:name :entry
-    :instructions
-    [{:name :retval
-      :op :alloca
-      :type [:integer 32]
-      :align 4}
-     {:op :ret
-      :value {:type [:integer 32] :value 0}}]})
+   (-> (basic-block :entry)
+       (add-instruction (alloca i32 {:align 4 :name :retval}))
+       (add-instruction (ret (const i32 0)))))
   => "entry:
   %retval = alloca i32, align 4
   ret i32 0
@@ -1043,8 +1167,8 @@
 
 (defn render-linkage
   [linkage]
-  (or (known-linkages linkage)
-      (throw (ex-info "invalid linkage" {:linkage linkage}))))
+  (clj-or (known-linkages linkage)
+          (throw (ex-info "invalid linkage" {:linkage linkage}))))
 
 (defn render-visibility
   [visibility]
@@ -1069,11 +1193,24 @@
     (string? key) (format "\"%s\"=\"%s\"" key value)
     :else (throw (ex-info "cannot render attribute" {:key key :value value}))))
 
+(defn attribute-group
+  [attrs]
+  attrs)
+
 (defn render-attributes
   [attrs]
   (if (integer? attrs)
     (format "#%d" attrs)
     (str/join " " (map render-attribute attrs))))
+
+(defn param
+  ([name type attrs]
+   {:kind :function-parameter
+    :name name
+    :type type
+    :attrs attrs})
+  ([name type]
+   (param name type nil)))
 
 (defn render-function-parameter
   [{:keys [name type attrs]}]
@@ -1087,11 +1224,10 @@
 (m/facts
  (m/fact
   (render-function-parameter
-   {:type [:integer 32] :name :argc})
-  => "i32 %argc")
+   (param :argc i32)) => "i32 %argc")
  (m/fact
   (render-function-parameter
-   {:type [:ptr [:ptr [:integer 8]]] :name :argv})
+   (param :argv [:ptr [:ptr i8]]))
   => "i8** %argv"))
 
 (defn render-unnamed-addr
@@ -1116,8 +1252,17 @@
   [comdat]
   (throw (UnsupportedOperationException.)))
 
+(defn global
+  [name type opts]
+  (assoc opts
+         :kind :global
+         :name name
+         :object-type type
+         :type [:ptr type]))
+
 (defn render-global
-  [{:keys [name type linkage dso-local visibility dll-storage-class
+  [{:keys [name object-type linkage
+           dso-local visibility dll-storage-class
            thread-local-model unnamed-addr address-space
            externally-initialized constant initializer
            section partition comdat align metadata attrs]}]
@@ -1144,7 +1289,7 @@
     (when externally-initialized
       (print "externally_initialized "))
     (print (if constant "constant " "global "))
-    (printf "%s" (render-type type))
+    (printf "%s" (render-type object-type))
     (when initializer
       (printf " %s" (render-value initializer)))
     (when section
@@ -1161,23 +1306,45 @@
 (m/facts
  (m/fact
   (render-global
-   {:name 'add.z
-    :linkage :internal
-    :type [:integer 32]
-    :initializer {:type [:integer 32] :value 8}
-    :align 4})
+   (global 'add.z i32
+           {:initializer (const i32 8)
+            :linkage :internal
+            :align 4}))
   => "@add.z = internal global i32 8, align 4")
  (m/fact
   (render-global
-   {:name '.str
-    :linkage :private
-    :unnamed-addr :global
-    :constant true
-    :type [:array [:integer 8] 15]
-    :initializer {:type [:array [:integer 8]]
-                  :value "Hello, world!\n\0"}
-    :align 1})
+   (global '.str [:array i8 15]
+           {:linkage :private
+            :unnamed-addr :global
+            :constant true
+            :initializer (const [:array i8] "Hello, world!\n\0")
+            :align 1}))
   => "@.str = private unnamed_addr constant [15 x i8] c\"Hello, world!\\0A\\00\", align 1"))
+
+(defn sanitize-param
+  [param]
+  (cond
+    (map? param) param
+    (clj-or (simple-type? param)
+            (complex-type? param)) {:type param}
+    :else (throw (ex-info "invalid function parameter" {:param param}))))
+
+(defn function
+  ([name result-type params opts]
+   (let [params (map sanitize-param params)]
+     (assoc opts
+            :kind :function
+            :name name
+            :result-type result-type
+            :type [:fn result-type (map :type params)]
+            :params params)))
+  ([name result-type params]
+   (function name result-type params nil)))
+
+(defn add-basic-block
+  [f bb]
+  (let [blocks (assoc (:blocks f) (:name bb) bb)]
+    (assoc-in f :blocks blocks)))
 
 (defn render-function
   [{:keys [name linkage dso-local visibility dll-storage-class
@@ -1186,7 +1353,7 @@
            section comdat align gc prefix prologue personality
            metadata blocks] :as f}]
   (with-out-str
-    (print (if blocks "define " "declare "))
+    (print (if (seq blocks) "define " "declare "))
     (when linkage
       (printf "%s " (render-linkage linkage)))
     (when dso-local
@@ -1201,7 +1368,7 @@
       (printf "%s " (render-attributes result-attrs)))
     (printf "%s " (render-type result-type))
     (printf "%s(" (render-name name))
-    (print (str/join ", " (map render-function-parameter (or params []))))
+    (print (str/join ", " (map render-function-parameter (clj-or params []))))
     (print ")")
     (when unnamed-addr
       (printf " %s" (render-unnamed-addr unnamed-addr)))
@@ -1215,7 +1382,7 @@
       (printf " %s" (render-comdat comdat)))
     (when align
       (printf " align %d" align))
-    (when blocks
+    (when (seq blocks)
       (print " {\n")
       (doseq [block blocks]
         (print (render-basic-block block)))
@@ -1224,21 +1391,17 @@
 (m/facts
  (m/fact
   (render-function
-   {:name 'main
-    :dso-local true
-    :result-type [:integer 32]
-    :params [{:type [:integer 32] :name :argc}
-             {:type [:ptr [:ptr [:integer 8]]] :name :argv}]
-    :function-attrs 0
-    :blocks
-    [{:name :entry
-      :instructions
-      [{:name :retval
-        :op :alloca
-        :type [:integer 32]
-        :align 4}
-       {:op :ret
-        :value {:type [:integer 32] :value 0}}]}]})
+   (let [bb (-> (basic-block :entry)
+                (add-instruction (alloca i32 {:align 4
+                                              :name :retval}))
+                (add-instruction (ret (const i32 0))))]
+     (function 'main
+               i32
+               [(param :argc i32)
+                (param :argv [:ptr [:ptr i8]])]
+               {:dso-local true
+                :function-attrs 0
+                :blocks [bb]})))
   => "define dso_local i32 @main(i32 %argc, i8** %argv) #0 {
 entry:
   %retval = alloca i32, align 4
@@ -1247,12 +1410,21 @@ entry:
 ")
  (m/fact
   (render-function
-   {:name 'printf
-    :result-type [:integer 32]
-    :params [{:type [:ptr [:integer 8]]}
-             {:type :&}]
-    :function-attrs 1})
+   (function 'printf i32 [[:ptr i8] :&] {:function-attrs 1}))
   => "declare i32 @printf(i8*, ...) #1"))
+
+(defn module
+  []
+  {:data-layout (platform-data-layout)
+   :target-triple (platform-target-triple)
+   :types {}
+   :globals {}
+   :functions {}
+   :attribute-groups {}})
+
+(defn add-function
+  [m f]
+  (update m :functions assoc (:name f) f))
 
 (defn render-module
   [{:keys [data-layout
