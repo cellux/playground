@@ -164,3 +164,13 @@
   ;; the tag is still a symbol (naming a class) but the class has been
   ;; apparently resolved by some hidden magic
   (assert (= {:tag 'java.lang.Object} arglist-meta) arglist-meta))
+
+;; redefinition of a function preserves the var
+
+(defn test-fn [] 5)
+(def test-fn-var-1 #'test-fn)
+
+(defn test-fn [] 6)
+(def test-fn-var-2 #'test-fn)
+
+(assert (= test-fn-var-1 test-fn-var-2))
