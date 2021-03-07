@@ -77,6 +77,12 @@
     (apply transport :play pf args)
     :inactive-transport))
 
+(defn bpm!
+  [value]
+  (if (transport-active?)
+    (transport :bpm! value)
+    :inactive-transport))
+
 (defmacro defpattern
   [name & body]
   (let [result (if (resolve name) :updated :defined)]

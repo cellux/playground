@@ -1,7 +1,6 @@
 (ns rb.explores.cowbells
   (:require [omkamra.cowbells :as cb
-             :refer [defpattern defpattern* defpattern<]]
-            [omkamra.cowbells.pattern :as pattern]))
+             :refer [defpattern defpattern* defpattern<]]))
 
 (defpattern* tune1
   [:bind {:channel 0
@@ -66,3 +65,12 @@
    [:degree 6]
    1
    [:degree 2]])
+
+(defpattern* bass
+  [:channel 1
+   [:program 16]
+   [:bind {:duration 4}
+    [:degree -3] 4
+    [:degree -2] 4
+    [:degree -5] 4
+    [:degree -7] 4]])

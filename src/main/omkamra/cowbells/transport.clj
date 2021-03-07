@@ -15,7 +15,8 @@
    :scale (scales :major)
    :velocity 96
    :octave 0
-   :shift 0})
+   :shift 0
+   :bmul 1})
 
 (defn load-soundfonts
   [synth soundfonts]
@@ -82,6 +83,7 @@
                     pattern (pf init-pattern init-bindings)]
                 (swap! pattern-queue conj pattern)
                 :queued)
+        :bpm! (reset! bpm (first args))
         :status {:bpm @bpm
                  :playing @playing
                  :timeline @timeline

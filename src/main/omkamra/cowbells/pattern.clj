@@ -29,17 +29,20 @@
     (number? x) (compile-pattern [:wait x])
     (var? x) (compile-pattern [:var x])
     (pattern-function? x) x
+    (sequential? x) (compile-pattern (apply vector :seq (map compile x)))
     :else (throw (ex-info "unable to compile" {:value x}))))
 
 (defmethod compile-pattern :align
   [[_ align]]
   (pfn [pattern bindings]
-    (assoc pattern :align (beats->ticks align))))
+    (let [bmul (:bmul bindings)]
+      (assoc pattern :align (beats->ticks (* align bmul))))))
 
 (defmethod compile-pattern :wait
   [[_ beats]]
   (pfn [pattern bindings]
-    (update pattern :position + (beats->ticks beats))))
+    (let [bmul (:bmul bindings)]
+      (update pattern :position + (beats->ticks (* beats bmul))))))
 
 (defmethod compile-pattern :var
   [[_ v]]
@@ -155,7 +158,7 @@
                    ensure-vector
                    (map (if note->key identity resolve-note)))]
     (pfn [{:keys [synth] :as pattern}
-          {:keys [channel velocity duration] :as bindings}]
+          {:keys [channel velocity duration bmul] :as bindings}]
       (let [keys (if note->key
                    (map (partial note->key bindings) notes)
                    notes)]
@@ -164,13 +167,17 @@
                       (add-callback
                        #(synth/noteon synth channel key velocity))
                       (add-callback-after
-                       (and duration (beats->ticks duration))
+                       (and duration (beats->ticks (* duration bmul)))
                        #(synth/noteoff synth channel key))))
                 pattern keys)))))
 
+(defmethod compile-pattern :nw
+  [[_ note wait]]
+  (compile-pattern [:seq [:note note] [:wait wait]]))
+
 (defmethod compile-pattern :degree
   [[_ degrees]]
-  (compile-pattern `[:note ~degrees ~degree->key]))
+  (compile-pattern [:note degrees degree->key]))
 
 (defmethod compile-pattern :all-notes-off
   [[_]]
