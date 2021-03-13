@@ -1,5 +1,6 @@
 (ns rb.explores.llvm.test
   (:require
+   [omkamra.llvm.ir :as ir :refer [i8 i32]]
    [omkamra.llvm.api :as api]
    [omkamra.llvm.context :as context]
    [omkamra.llvm.buffer :as buffer]
@@ -21,3 +22,4 @@
     (engine/dispose ee)
     ;; do not dispose the module as its ownership was transferred to ee
     (context/dispose ctx)))
+

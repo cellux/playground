@@ -1,10 +1,9 @@
 (ns omkamra.llvm.ir
-  (:refer-clojure :rename {and clj-and
-                           or clj-or
-                           load clj-load})
+  (:require [clojure.core :as clj])
   (:require [midje.sweet :as m])
   (:require [clojure.string :as str])
   (:import (java.nio ByteOrder))
+  (:import (java.util IdentityHashMap))
   (:import (com.kenai.jffi Platform Platform$OS Platform$CPU)))
 
 (def i1 [:integer 1])
@@ -34,7 +33,7 @@
 
 (def platform-os
   (let [os (.getOS platform)]
-    (clj-or (known-operating-systems os)
+    (clj/or (known-operating-systems os)
             (throw (ex-info "unknown operating system" {:os os})))))
 
 (def platform-object-format
@@ -57,7 +56,7 @@
 
 (def platform-arch
   (let [cpu (.getCPU platform)]
-    (clj-or (known-cpu-architectures cpu)
+    (clj/or (known-cpu-architectures cpu)
             (throw (ex-info "unknown CPU architecture" {:cpu cpu})))))
 
 (def platform-mangling-mode
@@ -76,16 +75,16 @@
 
 (def platform-integer-layout
   [{:size 64
-    :abi (if (clj-or (= platform-address-size 64)
+    :abi (if (clj/or (= platform-address-size 64)
                      (= platform-os :windows))
            64 32)}])
 
 (def platform-float-layout
   (-> []
-      (conj {:size 64 :abi (if (clj-or (= platform-address-size 64)
+      (conj {:size 64 :abi (if (clj/or (= platform-address-size 64)
                                        (= platform-os :windows))
                              64 32)})
-      (conj {:size 80 :abi (if (clj-or (= platform-address-size 64)
+      (conj {:size 80 :abi (if (clj/or (= platform-address-size 64)
                                        (= platform-os :darwin))
                              128 32)})))
 
@@ -95,7 +94,7 @@
     64 [8 16 32 64]))
 
 (def platform-natural-stack-alignment
-  (if (clj-and (= platform-address-size 32)
+  (if (clj/and (= platform-address-size 32)
                (= platform-os :windows))
     32 128))
 
@@ -135,22 +134,22 @@
 (defmethod render-data-layout-item :pointer-layout
   [[_ {:keys [address-space size abi pref idx]}]]
   (format "p%d:%d:%d:%d:%d"
-          (clj-or address-space 0)
+          (clj/or address-space 0)
           size
           abi
-          (clj-or pref abi)
-          (clj-or idx size)))
+          (clj/or pref abi)
+          (clj/or idx size)))
 
 (defmethod render-data-layout-item :integer-layout
   [[_ size-descriptors]]
   (->> (for [{:keys [size abi pref]} size-descriptors]
-         (format "i%d:%d:%d" size abi (clj-or pref abi)))
+         (format "i%d:%d:%d" size abi (clj/or pref abi)))
        (str/join "-")))
 
 (defmethod render-data-layout-item :float-layout
   [[_ size-descriptors]]
   (->> (for [{:keys [size abi pref]} size-descriptors]
-         (format "f%d:%d:%d" size abi (clj-or pref abi)))
+         (format "f%d:%d:%d" size abi (clj/or pref abi)))
        (str/join "-")))
 
 (defmethod render-data-layout-item :legal-int-widths
@@ -185,7 +184,7 @@
       (cond
         (= b (byte \\))
         (print "\\\\")
-        (clj-and (<= 0x20 b 0x7e) (not= b (byte \")))
+        (clj/and (<= 0x20 b 0x7e) (not= b (byte \")))
         (print (char b))
         :else
         (printf "\\%02X" b)))))
@@ -197,7 +196,7 @@
 (defn identifier-part?
   [ch]
   (let [b (int ch)]
-    (clj-or (<= 0x61 b 0x7a)
+    (clj/or (<= 0x61 b 0x7a)
             (<= 0x41 b 0x5a)
             (<= 0x30 b 0x39)
             (== 0x2d b)
@@ -206,7 +205,7 @@
 
 (defn needs-quoting?
   [name]
-  (clj-or (digit? (first name))
+  (clj/or (digit? (first name))
           (not (every? identifier-part? name))))
 
 (defn render-quoted-string
@@ -237,7 +236,7 @@
 
 (defn named-type?
   [t]
-  (clj-and (map? t) (= :type (:kind t))))
+  (clj/and (map? t) (= :type (:kind t))))
 
 (declare render-type)
 
@@ -340,7 +339,7 @@
 
 (defmethod render-literal :integer
   [[_ size] value]
-  (if (clj-and (= size 1) (boolean? value))
+  (if (clj/and (= size 1) (boolean? value))
     (str value)
     (format "%d" value)))
 
@@ -354,7 +353,7 @@
 (defmethod render-literal :array
   [[_ elt size] value]
   (cond
-    (clj-and (= elt i8) (string? value))
+    (clj/and (= elt i8) (string? value))
     (str \c (render-quoted-string value))
 
     (vector? value)
@@ -370,23 +369,36 @@
  (m/fact (render-literal [:ptr i8] nil) => "null")
  (m/fact (render-literal [:array i8] "Hello, world\n\0") => "c\"Hello, world\\0A\\00\""))
 
+(def
+  ^{:private true
+    :dynamic true
+    :doc "Integer names for unnamed values like function parameters,
+     basic blocks or instructions."}
+  *names-of-the-unnamed* {})
+
+(defn find-name-of
+  [x]
+  (or (:name x) (get *names-of-the-unnamed* x)))
+
 (defn render-typed-value
-  [{:keys [type name value]}]
-  (cond
-    name
-    (format "%s %s" (render-type type) (render-name name))
+  [{:keys [type value] :as obj}]
+  (let [name (find-name-of obj)]
+    (cond
+      name
+      (format "%s %s" (render-type type) (render-name name))
 
-    (= :void type)
-    "void"
+      (= :void type)
+      "void"
 
-    :else
-    (format "%s %s" (render-type type) (render-literal type value))))
+      :else
+      (format "%s %s" (render-type type) (render-literal type value)))))
 
 (defn render-value
-  [{:keys [type name value]}]
-  (if name
-    (render-name name)
-    (render-literal type value)))
+  [{:keys [type value] :as obj}]
+  (let [name (find-name-of obj)]
+    (if name
+      (render-name name)
+      (render-literal type value))))
 
 (defn const
   [type value]
@@ -507,13 +519,14 @@
               :value ~'value
               :type (:type ~'value)))
      (defmethod render-instruction ~(keyword op)
-       [{:keys [~'name ~'value ~@opts]}]
-       (with-out-str
-         (print (render-name ~'name))
-         (print (str " = " ~(name op)))
-         ~@(for [opt opts] `(when ~opt
-                              (print ~(str " " (name opt)))))
-         (print (str " " (render-typed-value ~'value)))))))
+       [{:keys [~'value ~@opts] :as ~'i}]
+       (let [~'name (find-name-of ~'i)]
+         (with-out-str
+           (print (render-name ~'name))
+           (print (str " = " ~(name op)))
+           ~@(for [opt opts] `(when ~opt
+                                (print ~(str " " (name opt)))))
+           (print (str " " (render-typed-value ~'value))))))))
 
 (define-unary-op fneg [])
 
@@ -529,14 +542,15 @@
               :rhs ~'rhs
               :type (:type ~'lhs)))
      (defmethod render-instruction ~(keyword op)
-       [{:keys [~'name ~'lhs ~'rhs ~@opts]}]
-       (with-out-str
-         (print (render-name ~'name))
-         (print (str " = " ~(name op)))
-         ~@(for [opt opts] `(when ~opt
-                              (print ~(str " " (name opt)))))
-         (print (str " " (render-typed-value ~'lhs)))
-         (print (str ", " (render-value ~'rhs)))))))
+       [{:keys [~'lhs ~'rhs ~@opts] :as ~'i}]
+       (let [~'name (find-name-of ~'i)]
+         (with-out-str
+           (print (render-name ~'name))
+           (print (str " = " ~(name op)))
+           ~@(for [opt opts] `(when ~opt
+                                (print ~(str " " (name opt)))))
+           (print (str " " (render-typed-value ~'lhs)))
+           (print (str ", " (render-value ~'rhs))))))))
 
 (define-binary-op add [nsw nuw])
 
@@ -684,11 +698,12 @@
          :type [:ptr object-type]))
 
 (defmethod render-instruction :alloca
-  [{:keys [name object-type address-space array-size align]}]
-  (format "%s = alloca %s, align %d"
-          (render-name name)
-          (render-type object-type)
-          align))
+  [{:keys [object-type address-space array-size align] :as i}]
+  (let [name (find-name-of i)]
+    (format "%s = alloca %s, align %d"
+            (render-name name)
+            (render-type object-type)
+            align)))
 
 (m/facts
  (m/fact
@@ -731,12 +746,13 @@
          :type (:type target)))
 
 (defmethod render-instruction :load
-  [{:keys [name object-type ptr align]}]
-  (format "%s = load %s, %s, align %d"
-          (render-name name)
-          (render-type object-type)
-          (render-typed-value ptr)
-          align))
+  [{:keys [object-type ptr align] :as i}]
+  (let [name (find-name-of i)]
+    (format "%s = load %s, %s, align %d"
+            (render-name name)
+            (render-type object-type)
+            (render-typed-value ptr)
+            align)))
 
 (m/facts
  (m/fact
@@ -763,7 +779,7 @@
          :ptr target))
 
 (defmethod render-instruction :store
-  [{:keys [name value ptr align]}]
+  [{:keys [value ptr align]}]
   (format "store %s, %s, align %d"
           (render-typed-value value)
           (render-typed-value ptr)
@@ -823,11 +839,12 @@
               :dest-type ~'dest-type
               :type ~'dest-type))
      (defmethod render-instruction ~(keyword op)
-       [{:keys [~'name ~'value ~'dest-type]}]
-       (format ~(str "%s = " op " %s to %s")
-               (render-name ~'name)
-               (render-typed-value ~'value)
-               (render-type ~'dest-type)))))
+       [{:keys [~'value ~'dest-type] :as ~'i}]
+       (let [~'name (find-name-of ~'i)]
+         (format ~(str "%s = " op " %s to %s")
+                 (render-name ~'name)
+                 (render-typed-value ~'value)
+                 (render-type ~'dest-type))))))
 
 (define-conversion-op trunc)
 
@@ -901,12 +918,13 @@
          :type i1))
 
 (defmethod render-instruction :icmp
-  [{:keys [name pred lhs rhs]}]
-  (format "%s = icmp %s %s, %s"
-          (render-name name)
-          (render-predicate pred)
-          (render-typed-value lhs)
-          (render-value rhs)))
+  [{:keys [pred lhs rhs] :as i}]
+  (let [name (find-name-of i)]
+    (format "%s = icmp %s %s, %s"
+            (render-name name)
+            (render-predicate pred)
+            (render-typed-value lhs)
+            (render-value rhs))))
 
 (m/facts
  (m/fact
@@ -933,12 +951,13 @@
          :type i1))
 
 (defmethod render-instruction :fcmp
-  [{:keys [name pred lhs rhs]}]
-  (format "%s = fcmp %s %s, %s"
-          (render-name name)
-          (render-predicate pred)
-          (render-typed-value lhs)
-          (render-value rhs)))
+  [{:keys [pred lhs rhs] :as i}]
+  (let [name (find-name-of i)]
+    (format "%s = fcmp %s %s, %s"
+            (render-name name)
+            (render-predicate pred)
+            (render-typed-value lhs)
+            (render-value rhs))))
 
 (defn phi
   [values opts]
@@ -950,15 +969,16 @@
          :values values))
 
 (defmethod render-instruction :phi
-  [{:keys [name type values]}]
-  (format "%s = phi %s %s"
-          (render-name name)
-          (render-type type)
-          (->> values
-               (map #(format "[ %s, %s ]"
-                             (render-value (second %))
-                             (render-value (first %))))
-               (str/join ", "))))
+  [{:keys [type values] :as i}]
+  (let [name (find-name-of i)]
+    (format "%s = phi %s %s"
+            (render-name name)
+            (render-type type)
+            (->> values
+                 (map #(format "[ %s, %s ]"
+                               (render-value (second %))
+                               (render-value (first %))))
+                 (str/join ", ")))))
 
 (m/facts
  (m/fact
@@ -989,12 +1009,13 @@
          :type (:type then)))
 
 (defmethod render-instruction :select
-  [{:keys [name cond then else]}]
-  (format "%s = select %s, %s, %s"
-          (render-name name)
-          (render-typed-value cond)
-          (render-typed-value then)
-          (render-typed-value else)))
+  [{:keys [cond then else] :as i}]
+  (let [name (find-name-of i)]
+    (format "%s = select %s, %s, %s"
+            (render-name name)
+            (render-typed-value cond)
+            (render-typed-value then)
+            (render-typed-value else))))
 
 (m/facts
  (m/fact
@@ -1007,7 +1028,8 @@
 
 (defn result-type
   [f]
-  (second (:type f)))
+  (let [[_ result-type param-types] (:type f)]
+    result-type))
 
 (defn vararg?
   [f]
@@ -1026,11 +1048,12 @@
    (call callee args nil)))
 
 (defmethod render-instruction :call
-  [{:keys [name callee args]}]
-  (let [type-str (render-type (if (vararg? callee)
+  [{:keys [callee args] :as i}]
+  (let [name (find-name-of i)
+        type-str (render-type (if (vararg? callee)
                                 (:type callee)
                                 (result-type callee)))
-        callee-name (render-name (:name callee))]
+        callee-name (render-name (find-name-of callee))]
     (if name
       (format "%s = call %s %s(%s)"
               (render-name name)
@@ -1103,13 +1126,14 @@
              :type [:ptr (infer-element-type (:type target) indices)]))))
 
 (defmethod render-instruction :getelementptr
-  [{:keys [name base-type ptr indices inbounds]}]
-  (format "%s = getelementptr%s %s, %s, %s"
-          (render-name name)
-          (if inbounds " inbounds" "")
-          (render-type base-type)
-          (render-typed-value ptr)
-          (str/join ", " (map render-typed-value indices))))
+  [{:keys [base-type ptr indices inbounds] :as i}]
+  (let [name (find-name-of i)]
+    (format "%s = getelementptr%s %s, %s, %s"
+            (render-name name)
+            (if inbounds " inbounds" "")
+            (render-type base-type)
+            (render-typed-value ptr)
+            (str/join ", " (map render-typed-value indices)))))
 
 (m/facts
  (m/fact
@@ -1124,22 +1148,27 @@
   => "%arrayidx = getelementptr inbounds [4 x [3 x i32]], [4 x [3 x i32]]* %matrix, i64 0, i64 %idxprom"))
 
 (defn basic-block
-  [name]
-  {:kind :basic-block
-   :name name
-   :type :label
-   :instructions []})
+  ([name]
+   {:kind :basic-block
+    :name name
+    :type :label
+    :instructions []})
+  ([]
+   (basic-block nil)))
 
 (defn add-instruction
   [block instruction]
   (update block :instructions conj instruction))
 
 (defn render-basic-block
-  [{:keys [name instructions]}]
-  (with-out-str
-    (printf "%s:\n" (clojure.core/name name))
-    (doseq [i instructions]
-      (printf "  %s\n" (render-instruction i)))))
+  [{:keys [instructions] :as block}]
+  (let [name (find-name-of block)]
+    (with-out-str
+      (if (integer? name)
+        (printf "%d:\n" name)
+        (printf "%s:\n" (clojure.core/name name)))
+      (doseq [i instructions]
+        (printf "  %s\n" (render-instruction i))))))
 
 (m/facts
  (m/fact
@@ -1167,7 +1196,7 @@
 
 (defn render-linkage
   [linkage]
-  (clj-or (known-linkages linkage)
+  (clj/or (known-linkages linkage)
           (throw (ex-info "invalid linkage" {:linkage linkage}))))
 
 (defn render-visibility
@@ -1213,13 +1242,14 @@
    (param name type nil)))
 
 (defn render-function-parameter
-  [{:keys [name type attrs]}]
-  (with-out-str
-    (printf "%s" (render-type type))
-    (when attrs
-      (printf " %s" (render-attributes attrs)))
-    (when name
-      (printf " %s" (render-name name)))))
+  [{:keys [type attrs] :as param}]
+  (let [name (find-name-of param)]
+    (with-out-str
+      (printf "%s" (render-type type))
+      (when attrs
+        (printf " %s" (render-attributes attrs)))
+      (when name
+        (printf " %s" (render-name name))))))
 
 (m/facts
  (m/fact
@@ -1227,8 +1257,13 @@
    (param :argc i32)) => "i32 %argc")
  (m/fact
   (render-function-parameter
-   (param :argv [:ptr [:ptr i8]]))
-  => "i8** %argv"))
+   (param 5 i32)) => "i32 %5")
+ (m/fact
+  (render-function-parameter
+   (param :argv [:ptr [:ptr i8]])) => "i8** %argv")
+ (m/fact
+  (render-function-parameter
+   (param nil [:ptr [:ptr i8]])) => "i8**"))
 
 (defn render-unnamed-addr
   [unnamed-addr]
@@ -1325,7 +1360,7 @@
   [param]
   (cond
     (map? param) param
-    (clj-or (simple-type? param)
+    (clj/or (simple-type? param)
             (complex-type? param)) {:type param}
     :else (throw (ex-info "invalid function parameter" {:param param}))))
 
@@ -1337,14 +1372,31 @@
             :name name
             :result-type result-type
             :type [:fn result-type (map :type params)]
-            :params params)))
+            :params params
+            :blocks [])))
   ([name result-type params]
    (function name result-type params nil)))
 
 (defn add-basic-block
   [f bb]
-  (let [blocks (assoc (:blocks f) (:name bb) bb)]
-    (assoc-in f :blocks blocks)))
+  (update f :blocks conj bb))
+
+(def
+  ^{:private true}
+  ops-with-no-name
+  #{:ret :br :switch :indirectbr :resume
+    :catchret :cleanupret :unreachable
+    :store :fence})
+
+(defn needs-generated-name?
+  [obj]
+  (case (:kind obj)
+    :function-parameter (not (:name obj))
+    :basic-block (not (:name obj))
+    :instruction (not (clj/or (:name obj)
+                              (ops-with-no-name (:op obj))
+                              (clj/and (= (:op obj) :call)
+                                       (not= (:type obj) :void))))))
 
 (defn render-function
   [{:keys [name linkage dso-local visibility dll-storage-class
@@ -1352,41 +1404,62 @@
            unnamed-addr address-space function-attrs
            section comdat align gc prefix prologue personality
            metadata blocks] :as f}]
-  (with-out-str
-    (print (if (seq blocks) "define " "declare "))
-    (when linkage
-      (printf "%s " (render-linkage linkage)))
-    (when dso-local
-      (printf "dso_local "))
-    (when visibility
-      (printf "%s " (render-visibility visibility)))
-    (when dll-storage-class
-      (printf "%s " (render-dll-storage-class dll-storage-class)))
-    (when cconv
-      (printf "%s " (render-calling-convention cconv)))
-    (when result-attrs
-      (printf "%s " (render-attributes result-attrs)))
-    (printf "%s " (render-type result-type))
-    (printf "%s(" (render-name name))
-    (print (str/join ", " (map render-function-parameter (clj-or params []))))
-    (print ")")
-    (when unnamed-addr
-      (printf " %s" (render-unnamed-addr unnamed-addr)))
-    (when address-space
-      (printf " %s" (render-address-space address-space)))
-    (when function-attrs
-      (printf " %s" (render-attributes function-attrs)))
-    (when section
-      (printf " %s" (render-section section)))
-    (when comdat
-      (printf " %s" (render-comdat comdat)))
-    (when align
-      (printf " align %d" align))
-    (when (seq blocks)
-      (print " {\n")
-      (doseq [block blocks]
-        (print (render-basic-block block)))
-      (print "}\n"))))
+  (let [definition? (if (seq blocks) true false)
+        next-name (let [counter (atom 0)]
+                    (fn []
+                      (let [name @counter]
+                        (swap! counter inc)
+                        name)))]
+    (binding [*names-of-the-unnamed*
+              (if definition?
+                (reduce
+                 (fn [names obj]
+                   (when (needs-generated-name? obj)
+                     (.put names obj (next-name)))
+                   names)
+                 (IdentityHashMap.)
+                 (concat
+                  params
+                  (mapcat #(cons % (:instructions %)) blocks)))
+                {})]
+      (with-out-str
+        (print (if definition? "define " "declare "))
+        (when linkage
+          (printf "%s " (render-linkage linkage)))
+        (when dso-local
+          (printf "dso_local "))
+        (when visibility
+          (printf "%s " (render-visibility visibility)))
+        (when dll-storage-class
+          (printf "%s " (render-dll-storage-class dll-storage-class)))
+        (when cconv
+          (printf "%s " (render-calling-convention cconv)))
+        (when result-attrs
+          (printf "%s " (render-attributes result-attrs)))
+        (printf "%s " (render-type result-type))
+        (printf "%s(" (render-name name))
+        (print
+         (->> params
+              (map render-function-parameter)
+              (str/join ", ")))
+        (print ")")
+        (when unnamed-addr
+          (printf " %s" (render-unnamed-addr unnamed-addr)))
+        (when address-space
+          (printf " %s" (render-address-space address-space)))
+        (when function-attrs
+          (printf " %s" (render-attributes function-attrs)))
+        (when section
+          (printf " %s" (render-section section)))
+        (when comdat
+          (printf " %s" (render-comdat comdat)))
+        (when align
+          (printf " align %d" align))
+        (when definition?
+          (print " {\n")
+          (doseq [block blocks]
+            (print (render-basic-block block)))
+          (print "}\n"))))))
 
 (m/facts
  (m/fact
@@ -1394,14 +1467,14 @@
    (let [bb (-> (basic-block :entry)
                 (add-instruction (alloca i32 {:align 4
                                               :name :retval}))
-                (add-instruction (ret (const i32 0))))]
-     (function 'main
-               i32
-               [(param :argc i32)
-                (param :argv [:ptr [:ptr i8]])]
-               {:dso-local true
-                :function-attrs 0
-                :blocks [bb]})))
+                (add-instruction (ret (const i32 0))))
+         f (function 'main
+                     i32
+                     [(param :argc i32)
+                      (param :argv [:ptr [:ptr i8]])]
+                     {:dso-local true
+                      :function-attrs 0})]
+     (add-basic-block f bb)))
   => "define dso_local i32 @main(i32 %argc, i8** %argv) #0 {
 entry:
   %retval = alloca i32, align 4
@@ -1415,8 +1488,8 @@ entry:
 
 (defn module
   []
-  {:data-layout (platform-data-layout)
-   :target-triple (platform-target-triple)
+  {:data-layout platform-data-layout
+   :target-triple platform-target-triple
    :types {}
    :globals {}
    :functions {}
@@ -1448,3 +1521,71 @@ entry:
       (printf "attributes #%d = { %s }\n"
               k
               (str/join " " (map render-attribute v))))))
+
+(m/facts
+ (m/fact
+  (let [str (global '.str [:array i8 15]
+                    {:initializer "Hello, world\n\0"
+                     :align 1})
+        argc (param :argc i32)
+        argv (param :argv [:ptr [:ptr i8]])
+        retval (alloca i32 {:align 4})
+        argc-addr (alloca i32 {:align 4})
+        argv-addr (alloca [:ptr [:ptr i8]] {:align 4})
+        printf (function 'printf i32 [[:ptr i8] :&])
+        pstr (getelementptr str [0 0] {:inbounds true})
+        call (call printf [pstr])
+        entry (-> (basic-block :entry)
+                  (add-instruction retval)
+                  (add-instruction argc-addr)
+                  (add-instruction argv-addr)
+                  (add-instruction (store (const i32 0) retval {:align 4}))
+                  (add-instruction (store argc argc-addr {:align 4}))
+                  (add-instruction (store argv argv-addr {:align 8}))
+                  (add-instruction pstr)
+                  (add-instruction call)
+                  (add-instruction (ret (const i32 0))))
+        attrs (attribute-group
+               {:noinline true
+                :nounwind true
+                :sspstrong true
+                :uwtable true
+                "correctly-rounded-divide-sqrt-fp-math" "false"})
+        main (-> (function 'main i32
+                           [(param :argc i32)
+                            (param :argv [:ptr [:ptr i8]])]
+                           {:dso-local true
+                            :function-attrs attrs})
+                 (add-basic-block entry))]
+    (-> (module)
+        (assoc :data-layout
+               {:byte-order :little-endian,
+                :mangling-mode :elf,
+                :pointer-layout {:size 32, :abi 32},
+                :integer-layout [{:size 64, :abi 32}],
+                :float-layout [{:size 64, :abi 32} {:size 80, :abi 32}],
+                :legal-int-widths [8 16 32],
+                :natural-stack-alignment 128}
+               :target-triple
+               {:arch :i386,
+                :vendor :unknown,
+                :os :linux,
+                :env :unknown})
+        (add-function main)
+        (render-module)))
+  => "target datalayout = e-m:e-p0:32:32:32:32-i64:32:32-f64:32:32-f80:32:32-n8:16:32-S128
+target triple = i386-unknown-linux-unknown
+define dso_local i32 @main(i32 %argc, i8** %argv) noinline nounwind sspstrong uwtable \"correctly-rounded-divide-sqrt-fp-math\"=\"false\" {
+entry:
+  %0 = alloca i32, align 4
+  %1 = alloca i32, align 4
+  %2 = alloca i8**, align 4
+  store i32 0, i32* %0, align 4
+  store i32 %argc, i32* %1, align 4
+  store i8** %argv, i8*** %2, align 8
+  %3 = getelementptr inbounds [15 x i8], [15 x i8]* @.str, i32 0, i32 0
+  call i32 (i8*, ...) @printf(i8* %3)
+  ret i32 0
+}
+
+"))
