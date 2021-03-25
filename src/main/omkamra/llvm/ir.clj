@@ -240,6 +240,26 @@
 
 (declare render-type)
 
+(def simple-type? keyword?)
+
+(defn render-simple-type
+  [t]
+  (case t
+    :void "void"
+    :half "half"
+    :bfloat "bfloat"
+    :float "float"
+    :double "double"
+    :x86_fp80 "x86_fp80"
+    :fp128 "fp128"
+    :ppc_fp128 "ppc_fp128"
+    :label "label"
+    :md "metadata"
+    :x86_mmx "x86_mmx"
+    :token "token"
+    :& "..."
+    (throw (ex-info "invalid type" {:type t}))))
+
 (def complex-type? vector?)
 
 (defmulti render-complex-type first)
@@ -286,26 +306,6 @@
 (defmethod render-complex-type :opaque-struct
   [t]
   "opaque")
-
-(def simple-type? keyword?)
-
-(defn render-simple-type
-  [t]
-  (case t
-    :void "void"
-    :half "half"
-    :bfloat "bfloat"
-    :float "float"
-    :double "double"
-    :x86_fp80 "x86_fp80"
-    :fp128 "fp128"
-    :ppc_fp128 "ppc_fp128"
-    :label "label"
-    :md "metadata"
-    :x86_mmx "x86_mmx"
-    :token "token"
-    :& "..."
-    (throw (ex-info "invalid type" {:type t}))))
 
 (defn render-type
   [t]
@@ -1156,7 +1156,7 @@
   ([]
    (basic-block nil)))
 
-(defn add-instruction
+(defn add-i
   [block instruction]
   (update block :instructions conj instruction))
 
@@ -1166,7 +1166,7 @@
     (with-out-str
       (if (integer? name)
         (printf "%d:\n" name)
-        (printf "%s:\n" (clojure.core/name name)))
+        (printf "%s:\n" (clj/name name)))
       (doseq [i instructions]
         (printf "  %s\n" (render-instruction i))))))
 
@@ -1174,8 +1174,8 @@
  (m/fact
   (render-basic-block
    (-> (basic-block :entry)
-       (add-instruction (alloca i32 {:align 4 :name :retval}))
-       (add-instruction (ret (const i32 0)))))
+       (add-i (alloca i32 {:align 4 :name :retval}))
+       (add-i (ret (const i32 0)))))
   => "entry:
   %retval = alloca i32, align 4
   ret i32 0
@@ -1377,7 +1377,7 @@
   ([name result-type params]
    (function name result-type params nil)))
 
-(defn add-basic-block
+(defn add-bb
   [f bb]
   (update f :blocks conj bb))
 
@@ -1465,16 +1465,15 @@
  (m/fact
   (render-function
    (let [bb (-> (basic-block :entry)
-                (add-instruction (alloca i32 {:align 4
-                                              :name :retval}))
-                (add-instruction (ret (const i32 0))))
+                (add-i (alloca i32 {:align 4 :name :retval}))
+                (add-i (ret (const i32 0))))
          f (function 'main
                      i32
                      [(param :argc i32)
                       (param :argv [:ptr [:ptr i8]])]
                      {:dso-local true
                       :function-attrs 0})]
-     (add-basic-block f bb)))
+     (add-bb f bb)))
   => "define dso_local i32 @main(i32 %argc, i8** %argv) #0 {
 entry:
   %retval = alloca i32, align 4
@@ -1495,7 +1494,7 @@ entry:
    :functions {}
    :attribute-groups {}})
 
-(defn add-function
+(defn add-fn
   [m f]
   (update m :functions assoc (:name f) f))
 
@@ -1536,15 +1535,15 @@ entry:
         pstr (getelementptr str [0 0] {:inbounds true})
         call (call printf [pstr])
         entry (-> (basic-block :entry)
-                  (add-instruction retval)
-                  (add-instruction argc-addr)
-                  (add-instruction argv-addr)
-                  (add-instruction (store (const i32 0) retval {:align 4}))
-                  (add-instruction (store argc argc-addr {:align 4}))
-                  (add-instruction (store argv argv-addr {:align 8}))
-                  (add-instruction pstr)
-                  (add-instruction call)
-                  (add-instruction (ret (const i32 0))))
+                  (add-i retval)
+                  (add-i argc-addr)
+                  (add-i argv-addr)
+                  (add-i (store (const i32 0) retval {:align 4}))
+                  (add-i (store argc argc-addr {:align 4}))
+                  (add-i (store argv argv-addr {:align 8}))
+                  (add-i pstr)
+                  (add-i call)
+                  (add-i (ret (const i32 0))))
         attrs (attribute-group
                {:noinline true
                 :nounwind true
@@ -1556,7 +1555,7 @@ entry:
                             (param :argv [:ptr [:ptr i8]])]
                            {:dso-local true
                             :function-attrs attrs})
-                 (add-basic-block entry))]
+                 (add-bb entry))]
     (-> (module)
         (assoc :data-layout
                {:byte-order :little-endian,
@@ -1571,7 +1570,7 @@ entry:
                 :vendor :unknown,
                 :os :linux,
                 :env :unknown})
-        (add-function main)
+        (add-fn main)
         (render-module)))
   => "target datalayout = e-m:e-p0:32:32:32:32-i64:32:32-f64:32:32-f80:32:32-n8:16:32-S128
 target triple = i386-unknown-linux-unknown
