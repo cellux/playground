@@ -1,4 +1,5 @@
 (ns omkamra.llvm.ir
+  (:refer-clojure :exclude [and or load])
   (:require [clojure.core :as clj])
   (:require [midje.sweet :as m])
   (:require [clojure.string :as str])
@@ -378,7 +379,7 @@
 
 (defn find-name-of
   [x]
-  (or (:name x) (get *names-of-the-unnamed* x)))
+  (clj/or (:name x) (get *names-of-the-unnamed* x)))
 
 (defn render-typed-value
   [{:keys [type value] :as obj}]
