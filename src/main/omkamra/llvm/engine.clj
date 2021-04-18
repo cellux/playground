@@ -74,6 +74,10 @@
      :enable-fast-isel false
      :mcjmm (jnr.ffi.Address/valueOf 0)})))
 
+(defn add-module
+  [engine mod]
+  (.LLVMAddModule $llvm engine mod))
+
 (defn get-global-value-address
   [engine name]
   (.LLVMGetGlobalValueAddress $llvm engine name))

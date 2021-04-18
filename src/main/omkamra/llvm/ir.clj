@@ -1148,6 +1148,16 @@
                      :name :arrayidx})))
   => "%arrayidx = getelementptr inbounds [4 x [3 x i32]], [4 x [3 x i32]]* %matrix, i64 0, i64 %idxprom"))
 
+(def
+  ^{:private true}
+  terminator-ops
+  #{:ret :br :switch :indirectbr :invoke :callbr
+    :resume :catchswitch :catchret :cleanupret})
+
+(defn terminator?
+  [instr]
+  (terminator-ops (:op instr)))
+
 (defn basic-block
   ([name]
    {:kind :basic-block
@@ -1296,6 +1306,10 @@
          :object-type type
          :type [:ptr type]))
 
+(defn add-global
+  [m g]
+  (update m :globals assoc (:name g) g))
+
 (defn render-global
   [{:keys [name object-type linkage
            dso-local visibility dll-storage-class
@@ -1374,13 +1388,19 @@
             :result-type result-type
             :type [:fn result-type (map :type params)]
             :params params
-            :blocks [])))
+            :blocks nil)))
   ([name result-type params]
    (function name result-type params nil)))
 
+(defn add-function
+  [m f]
+  (update m :functions assoc (:name f) f))
+
 (defn add-bb
   [f bb]
-  (update f :blocks conj bb))
+  (if (nil? (:blocks f))
+    (assoc f :blocks (vector bb))
+    (update f :blocks conj bb)))
 
 (def
   ^{:private true}
@@ -1405,7 +1425,7 @@
            unnamed-addr address-space function-attrs
            section comdat align gc prefix prologue personality
            metadata blocks] :as f}]
-  (let [definition? (if (seq blocks) true false)
+  (let [definition? (if (nil? blocks) false true)
         next-name (let [counter (atom 0)]
                     (fn []
                       (let [name @counter]
@@ -1495,10 +1515,6 @@ entry:
    :functions {}
    :attribute-groups {}})
 
-(defn add-fn
-  [m f]
-  (update m :functions assoc (:name f) f))
-
 (defn render-module
   [{:keys [data-layout
            target-triple
@@ -1507,8 +1523,8 @@ entry:
            functions
            attribute-groups]}]
   (with-out-str
-    (printf "target datalayout = %s\n" (render-data-layout data-layout))
-    (printf "target triple = %s\n" (render-target-triple target-triple))
+    (printf "target datalayout = \"%s\"\n" (render-data-layout data-layout))
+    (printf "target triple = \"%s\"\n" (render-target-triple target-triple))
     (doseq [[k v] types]
       (printf "%s = type %s\n"
               (render-name k)
@@ -1571,10 +1587,10 @@ entry:
                 :vendor :unknown,
                 :os :linux,
                 :env :unknown})
-        (add-fn main)
+        (add-function main)
         (render-module)))
-  => "target datalayout = e-m:e-p0:32:32:32:32-i64:32:32-f64:32:32-f80:32:32-n8:16:32-S128
-target triple = i386-unknown-linux-unknown
+  => "target datalayout = \"e-m:e-p0:32:32:32:32-i64:32:32-f64:32:32-f80:32:32-n8:16:32-S128\"
+target triple = \"i386-unknown-linux-unknown\"
 define dso_local i32 @main(i32 %argc, i8** %argv) noinline nounwind sspstrong uwtable \"correctly-rounded-divide-sqrt-fp-math\"=\"false\" {
 entry:
   %0 = alloca i32, align 4

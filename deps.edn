@@ -24,7 +24,8 @@
   martian/martian {:mvn/version "0.1.14"}
   martian-httpkit/martian-httpkit {:mvn/version "0.1.14"}
   com.github.jhg023/Pbbl {:mvn/version "1.0.2"}
-  midje/midje {:mvn/version "1.9.9"}}
+  midje/midje {:mvn/version "1.9.9"}
+  com.clojure-goes-fast/clj-java-decompiler {:mvn/version "0.3.0"}}
 
  :aliases
  {:cljs
