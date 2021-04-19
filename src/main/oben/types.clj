@@ -8,7 +8,7 @@
   `(def ~name
      (memoize
       (fn [~@args]
-        (-> {:kind ::TYPE
+        (-> {:kind :oben/TYPE
              :uses #{}}
             (merge (do ~@body))
             (assoc :class ~(keyword (str (ns-name *ns*))
@@ -16,7 +16,7 @@
 
 (defn type?
   [t]
-  (and (map? t) (= (:kind t) ::TYPE)))
+  (and (map? t) (= (:kind t) :oben/TYPE)))
 
 (def type-of (comp :type meta))
 (def typeclass-of (comp :class :type meta))
@@ -41,7 +41,7 @@
   {:size size})
 
 (m/facts
- (m/fact (Int 32) => {:kind ::TYPE :class ::Int :size 32 :uses #{}}))
+ (m/fact (Int 32) => {:kind :oben/TYPE :class ::Int :size 32 :uses #{}}))
 
 (defmethod compile ::Int
   [t]

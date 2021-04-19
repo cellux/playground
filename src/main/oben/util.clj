@@ -13,7 +13,9 @@
                           (ns-resolve (the-ns 'oben.core)
                                       sym-without-ns))
                         (clj/resolve sym))]
-         (var-get v))
+         (let [value (var-get v)]
+           (or (and (fn? value) (:oben/FNODE (meta value)))
+               value)))
        (throw (ex-info "cannot resolve symbol" {:sym sym}))))
   ([sym]
    (resolve sym {})))
