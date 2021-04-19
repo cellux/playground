@@ -1,5 +1,5 @@
 (ns oben.types
-  (:refer-clojure :exclude [compile defmulti])
+  (:refer-clojure :exclude [compile])
   (:require [clojure.core :as clj])
   (:require [midje.sweet :as m]))
 
@@ -29,10 +29,6 @@
 (defmacro with-type
   [t x]
   `(with-meta ~x {:type ~t}))
-
-(defmacro defmulti
-  [name]
-  `(clj/defmulti ~name params->typeclasses))
 
 (clj/defmulti compile :class)
 

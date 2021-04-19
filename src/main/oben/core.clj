@@ -52,7 +52,7 @@
                 add-function-to-module
                 set-ir)))))))
 
-(t/defmulti +)
+(oben/defmulti +)
 
 (defmethod + [::t/Int ::t/Int]
   [x y]
