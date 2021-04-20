@@ -82,10 +82,6 @@
       (fn [ctx]
         (ctx/store-ir ctx (ir/const (t/compile type) x))))))
 
-(defn variable
-  [sym env]
-  (u/resolve sym env))
-
 (defn fnode?
   [x]
   (and (node? x) (t/has-typeclass? ::t/Fn x)))
@@ -129,7 +125,7 @@
       (constant &form)
 
       (symbol? &form)
-      (variable &form &env)
+      (u/resolve &form &env)
 
       (sequential? &form)
       (let [op (parse &env (first &form))
@@ -138,14 +134,12 @@
                      (fnode? op)
                      (funcall op (map #(parse &env %) args))
 
-                     (instance? clojure.lang.MultiFn op)
-                     (apply op (map #(parse &env %) args))
-
                      (oben-macro? op)
                      (apply op &form &env args)
 
-                     (clojure.core/fn? op)
-                     (apply op args)
+                     (or (fn? op)
+                         (instance? clojure.lang.MultiFn op))
+                     (apply op (map #(parse &env %) args))
 
                      :else (die))]
         (cond
