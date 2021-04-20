@@ -79,12 +79,18 @@
         (dissoc :bb))
     ctx))
 
+(defn ensure-bb
+  [ctx]
+  (update ctx :bb #(or % (ir/basic-block))))
+
+(defn store-ir
+  [ctx ir]
+  (assoc ctx :ir ir))
+
 (defn compile-instruction
   [ctx instruction]
   (assert (:f ctx) "no compiled function")
-  (letfn [(ensure-bb [ctx]
-            (update ctx :bb #(or % (ir/basic-block))))
-          (add-instruction [ctx]
+  (letfn [(add-instruction [ctx]
             (update ctx :bb ir/add-i instruction))
           (flush-if-terminator [ctx]
             (if (ir/terminator? instruction)
@@ -93,7 +99,8 @@
     (-> ctx 
         ensure-bb
         add-instruction
-        flush-if-terminator)))
+        flush-if-terminator
+        (store-ir instruction))))
 
 (defn compiled
   [ctx node]
@@ -107,7 +114,7 @@
     ::t/FP "f"
     "node"))
 
-(defn set-node-name
+(defn store-node-name
   [ctx node]
   (let [name (symbol (str (or (:name (meta node))
                               (node-name-prefix node))
@@ -133,20 +140,20 @@
           ctx
           (update ctx :m ir/add-global (dissoc ir :initializer))))
       ctx)
-    (letfn [(set-compiled [ctx]
+    (letfn [(store-compiled [ctx]
               (update ctx :compiled assoc node (:ir ctx)))]
       (-> ctx
-          (set-node-name node)
+          (store-node-name node)
           node
-          set-compiled))))
+          store-compiled))))
 
 (defn compile-nodes
-  [ctx & nodes]
+  [ctx nodes]
   (reduce compile-node ctx nodes))
 
-(defn use-type
-  [ctx t]
-  (update ctx :types conj t))
+(defn forget-node
+  [ctx node]
+  (dissoc ctx :compiled node))
 
 (defn assemble-module
   [ctx]

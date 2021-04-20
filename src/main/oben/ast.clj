@@ -55,10 +55,19 @@
  (m/fact (float-size Float/MAX_VALUE) => 32)
  (m/fact (float-size Double/MAX_VALUE) => 64))
 
+(defn make-node
+  {:style/indent 1}
+  [type compile & opts]
+  (apply vary-meta compile
+         merge
+         {:kind :oben/NODE}
+         {:type type}
+         opts))
+
 (defn node?
   [x]
-  (and (instance? clojure.lang.IFn x)
-       (t/type? (:type (meta x)))))
+  (and (fn? x) 
+       (= :oben/NODE (:kind (meta x)))))
 
 (defn constant
   [x]
@@ -69,27 +78,28 @@
                (t/FP (float-size x))
                :else
                (throw (ex-info "cannot create constant" {:value x})))]
-    (t/with-type type
+    (make-node type
       (fn [ctx]
-        (assoc ctx :ir (ir/const (t/compile type) x))))))
+        (ctx/store-ir ctx (ir/const (t/compile type) x))))))
 
 (defn variable
   [sym env]
   (u/resolve sym env))
 
-(defn function?
+(defn fnode?
   [x]
   (and (node? x) (t/has-typeclass? ::t/Fn x)))
 
 (defn function-parameter
   [name type]
-  (t/with-type type
+  (make-node type
     (fn [ctx]
-      (assoc ctx :ir (ir/param (keyword name) (t/compile type))))))
+      (ctx/store-ir ctx (ir/param (keyword name) (t/compile type))))))
 
 (defn funcall
   [op args]
-  (t/with-type (:return-type (t/type-of op))
+  (assert (fnode? op))
+  (make-node (:return-type (t/type-of op))
     (fn [ctx]
       (letfn [(compile-args [ctx]
                 (reduce ctx/compile-node ctx args))
@@ -97,33 +107,49 @@
                 (let [ctx (ctx/compile-node ctx op)
                       call-instr (ir/call (ctx/compiled ctx op)
                                           (map #(ctx/compiled ctx %) args))]
-                  (-> ctx
-                      (ctx/compile-instruction call-instr)
-                      (assoc :ir call-instr))))]
+                  (ctx/compile-instruction ctx call-instr)))]
         (-> ctx compile-args compile-call)))))
 
+(defn oben-macro?
+  [x]
+  (and (fn? x) (= :oben/MACRO (:kind (meta x)))))
+
+(defn form?
+  [x]
+  (or (number? x)
+      (symbol? x)
+      (sequential? x)))
+
 (defn parse
-  ([env form]
-   (cond
-     (number? form) (constant form)
-     (symbol? form) (variable form env)
-     (sequential? form) (let [op (parse env (first form))
-                              args (next form)
-                              result (cond
-                                       (function? op)
-                                       (funcall op (map #(parse env %) args))
-                                       
-                                       (instance? clojure.lang.MultiFn op)
-                                       (apply op (map #(parse env %) args))
-                                       
-                                       (clojure.core/fn? op)
-                                       (apply op env args)
-                                       
-                                       :else
-                                       (throw (ex-info "cannot parse list form" {:form form})))]
-                          (if (node? result)
-                            result
-                            (parse env result)))
-     :else (throw (ex-info "cannot parse form" {:form form}))))
-  ([form]
-   (parse {} form)))
+  [&env &form]
+  (letfn [(die []
+            (throw (ex-info "cannot parse form" {:form &form})))]
+    (cond
+      (number? &form)
+      (constant &form)
+
+      (symbol? &form)
+      (variable &form &env)
+
+      (sequential? &form)
+      (let [op (parse &env (first &form))
+            args (next &form)
+            result (cond
+                     (fnode? op)
+                     (funcall op (map #(parse &env %) args))
+
+                     (instance? clojure.lang.MultiFn op)
+                     (apply op (map #(parse &env %) args))
+
+                     (oben-macro? op)
+                     (apply op &form &env args)
+
+                     (clojure.core/fn? op)
+                     (apply op args)
+
+                     :else (die))]
+        (cond
+          (node? result) result
+          (form? result) (recur &env result)
+          :else (die)))
+      :else (die))))

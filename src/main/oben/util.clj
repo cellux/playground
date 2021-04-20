@@ -6,6 +6,10 @@
   [x]
   (with-meta x nil))
 
+(defn oben-fn?
+  [x]
+  (and (fn? x) (= :oben/FN (:kind (meta x)))))
+
 (defn resolve
   ([sym env]
    (or (get env sym)
@@ -14,8 +18,9 @@
                                       sym-without-ns))
                         (clj/resolve sym))]
          (let [value (var-get v)]
-           (or (and (fn? value) (:oben/FNODE (meta value)))
-               value)))
+           (if (oben-fn? value)
+             (:fnode (meta value))
+             value)))
        (throw (ex-info "cannot resolve symbol" {:sym sym}))))
   ([sym]
    (resolve sym {})))

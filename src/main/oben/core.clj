@@ -16,52 +16,82 @@
 (def f32 (t/FP 32))
 (def f64 (t/FP 64))
 
-(defn fn
-  [env params & body]
+(oben/defmacro fn
+  [params & body]
   (let [return-type (u/resolve-type-from-meta params)
         param-types (mapv u/resolve-type-from-meta params)
         param-names (mapv u/drop-meta params)
         params (mapv ast/function-parameter param-names param-types)
-        env (into env (map vector param-names params))
-        body-nodes (map #(ast/parse env %) body)]
-    (t/with-type (t/Fn return-type param-types)
+        &env (into &env (map vector param-names params))
+        &env (assoc &env :return-type return-type)
+        body (let [last-item (last body)]
+               (if (and (sequential? last-item)
+                        (= 'return (first last-item)))
+                 body
+                 (concat (butlast body) [(list 'return last-item)])))
+        body-nodes (map #(ast/parse &env %) body)]
+    (ast/make-node (t/Fn return-type param-types)
       (clj/fn [ctx]
-        (let [return-type (t/compile return-type)
+        (let [fname (ctx/node-name ctx)
+              return-type (t/compile return-type)
               ctx (reduce ctx/compile-node ctx params)
-              f (ir/function (ctx/node-name ctx)
+              f (ir/function fname
                              return-type
                              (map #(ctx/compiled ctx %) params))]
-          (letfn [(compile-body-nodes [ctx]
-                    (reduce ctx/compile-node ctx body-nodes))
-                  (add-ret-if-needed [ctx]
-                    (if-not (ir/terminator? (last (:bb ctx)))
-                      (let [instr (ir/ret (:ir ctx))]
-                        (-> ctx
-                            (ctx/compile-instruction instr)
-                            (assoc :ir instr)))
-                      ctx))
-                  (add-function-to-module [ctx]
+          (letfn [(add-function-to-module [ctx]
                     (update ctx :m ir/add-function (:f ctx)))
-                  (set-ir [ctx]
-                    (assoc ctx :ir (:f ctx)))]
+                  (store-ir [ctx]
+                    (ctx/store-ir ctx (:f ctx)))]
             (-> ctx
                 (assoc :f f)
-                compile-body-nodes
-                add-ret-if-needed
-                (ctx/flush-bb)
+                (ctx/compile-nodes body-nodes)
                 add-function-to-module
-                set-ir)))))))
+                store-ir)))))))
+
+(oben/defmacro return
+  ([form]
+   (let [node (t/cast (:return-type &env) (ast/parse &env form))]
+     (ast/make-node (t/Return)
+       (clj/fn [ctx]
+         (when (seq (:bb ctx))
+           (assert (not (ir/terminator? (last (:bb ctx))))))
+         (let [ctx (ctx/compile-node ctx node)
+               instr (ir/ret (ctx/compiled ctx node))]
+           (ctx/compile-instruction ctx instr))))))
+  ([]
+   (if (= ::t/None (:return-type &env))
+     (ast/make-node (t/Return)
+       (clj/fn [ctx]
+         (when (seq (:bb ctx))
+           (assert (not (ir/terminator? (last (:bb ctx))))))
+         (ctx/compile-instruction ctx (ir/ret))))
+     (throw (ex-info "returning void when scope expects non-void type"
+                     {:return-type (:return-type &env)})))))
+
+(defn zext
+  [node size]
+  (let [result-type (t/resize (t/type-of node) size)]
+    (ast/make-node result-type
+      (clj/fn [ctx]
+        (let [ctx (ctx/compile-node ctx node)
+              instr (ir/zext (ctx/compiled ctx node)
+                             (t/compile result-type)
+                             {})]
+          (ctx/compile-instruction ctx instr))))))
 
 (oben/defmulti +)
 
 (defmethod + [::t/Int ::t/Int]
   [x y]
-  (t/with-type i32
-    (clj/fn [ctx]
-      (let [ctx (ctx/compile-nodes ctx x y)
-            instr (ir/add (ctx/compiled ctx x)
-                          (ctx/compiled ctx y)
-                          {})]
-        (-> ctx
-            (ctx/compile-instruction instr)
-            (assoc :ir instr))))))
+  (let [[s1 s2] (map (comp :size t/type-of) [x y])
+        result-size (max s1 s2)
+        result-type (t/Int result-size)
+        x (if (< s1 result-size) (zext x result-size) x)
+        y (if (< s2 result-size) (zext y result-size) y)]
+    (ast/make-node result-type
+      (clj/fn [ctx]
+        (let [ctx (ctx/compile-nodes ctx [x y])
+              instr (ir/add (ctx/compiled ctx x)
+                            (ctx/compiled ctx y)
+                            {})]
+          (ctx/compile-instruction ctx instr))))))

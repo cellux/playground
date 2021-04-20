@@ -1,6 +1,5 @@
 (ns oben.types
-  (:refer-clojure :exclude [compile])
-  (:require [clojure.core :as clj])
+  (:refer-clojure :exclude [compile cast])
   (:require [midje.sweet :as m]))
 
 (defmacro define-type
@@ -8,11 +7,10 @@
   `(def ~name
      (memoize
       (fn [~@args]
-        (-> {:kind :oben/TYPE
-             :uses #{}}
-            (merge (do ~@body))
-            (assoc :class ~(keyword (str (ns-name *ns*))
-                                    (str name))))))))
+        (merge (do ~@body)
+               {:kind :oben/TYPE}
+               {:class ~(keyword (str (ns-name *ns*))
+                                 (str (clojure.core/name name)))})))))
 
 (defn type?
   [t]
@@ -26,22 +24,35 @@
   [c x]
   (= (typeclass-of x) c))
 
-(defmacro with-type
-  [t x]
-  `(with-meta ~x {:type ~t}))
+(defmulti compile (fn [t] (:class t)))
+(defmulti resize (fn [t size] (:class t)))
+(defmulti cast* (fn [t x] [(:class t) (typeclass-of x)]))
 
-(clj/defmulti compile :class)
+(defn cast
+  [t x]
+  (if (= (:class t) (typeclass-of x))
+    x
+    (cast* t x)))
+
+(define-type None [])
+
+;; used as the type of return forms
+(define-type Return [])
 
 (define-type Int
   [size]
   {:size size})
 
 (m/facts
- (m/fact (Int 32) => {:kind :oben/TYPE :class ::Int :size 32 :uses #{}}))
+ (m/fact (Int 32) => {:kind :oben/TYPE :class ::Int :size 32}))
 
 (defmethod compile ::Int
   [t]
   [:integer (:size t)])
+
+(defmethod resize ::Int
+  [t newsize]
+  (Int newsize))
 
 (define-type FP
   [size]
@@ -52,6 +63,10 @@
   (case (:size t)
     32 :float
     64 :double))
+
+(defmethod resize ::FP
+  [t newsize]
+  (FP newsize))
 
 (define-type Fn
   [return-type param-types]
