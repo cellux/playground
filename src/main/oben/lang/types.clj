@@ -1,4 +1,4 @@
-(ns oben.types
+(ns oben.lang.types
   (:refer-clojure :exclude [compile cast])
   (:require [midje.sweet :as m]))
 

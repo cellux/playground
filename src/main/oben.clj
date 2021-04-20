@@ -1,9 +1,9 @@
 (ns oben
   (:refer-clojure :exclude [fn defn defmulti defmacro])
   (:require [clojure.core :as clj])
-  (:require [oben.context :as ctx])
-  (:require [oben.types :as t])
-  (:require [oben.ast :as ast]))
+  (:require [oben.lang.context :as ctx])
+  (:require [oben.lang.types :as t])
+  (:require [oben.lang.ast :as ast]))
 
 (def
   ^{:dynamic true}
@@ -55,4 +55,4 @@
   [name]
   `(clj/defmulti ~name t/params->typeclasses))
 
-(require '(oben core))
+(require 'oben.lang.core)

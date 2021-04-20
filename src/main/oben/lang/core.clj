@@ -1,10 +1,10 @@
-(ns oben.core
+(ns oben.lang.core
   (:refer-clojure :exclude [fn +])
   (:require [clojure.core :as clj])
-  (:require [oben.types :as t])
-  (:require [oben.ast :as ast])
-  (:require [oben.util :as u])
-  (:require [oben.context :as ctx])
+  (:require [oben.lang.types :as t])
+  (:require [oben.lang.ast :as ast])
+  (:require [oben.lang.util :as u])
+  (:require [oben.lang.context :as ctx])
   (:require [omkamra.llvm.ir :as ir]))
 
 (def i1 (t/Int 1))

@@ -1,7 +1,6 @@
-(ns oben.context
-  (:refer-clojure :exclude [pop drop])
+(ns oben.lang.context
   (:require [clojure.core :as clj])
-  (:require [oben.types :as t])
+  (:require [oben.lang.types :as t])
   (:require [omkamra.llvm.ir :as ir])
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.buffer :as llvm-buffer])
@@ -36,7 +35,7 @@
     :compiled {}
     :ir nil})
   ([]
-   (oben.context/new default-ftab-size)))
+   (oben.lang.context/new default-ftab-size)))
 
 (defn next-epoch
   [ctx]

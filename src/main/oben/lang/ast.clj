@@ -1,7 +1,7 @@
-(ns oben.ast
-  (:require [oben.types :as t])
-  (:require [oben.util :as u])
-  (:require [oben.context :as ctx])
+(ns oben.lang.ast
+  (:require [oben.lang.types :as t])
+  (:require [oben.lang.util :as u])
+  (:require [oben.lang.context :as ctx])
   (:require [midje.sweet :as m])
   (:require [omkamra.llvm.ir :as ir]))
 

@@ -1,6 +1,6 @@
 (ns oben-test
   (:require [oben])
-  (:require [oben.context :as ctx])
+  (:require [oben.lang.context :as ctx])
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m]))
 
