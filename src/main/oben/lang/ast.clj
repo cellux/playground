@@ -80,7 +80,14 @@
                (throw (ex-info "cannot create constant" {:value x})))]
     (make-node type
       (fn [ctx]
-        (ctx/store-ir ctx (ir/const (t/compile type) x))))))
+        (ctx/store-ir ctx (ir/const (t/compile type) x)))
+      {:constant-value x})))
+
+(defn constant-value
+  [x]
+  (if (node? x)
+    (:constant-value (meta x))
+    x))
 
 (defn fnode?
   [x]
@@ -110,22 +117,22 @@
   [x]
   (and (fn? x) (= :oben/MACRO (:kind (meta x)))))
 
-(defn form?
-  [x]
-  (or (number? x)
-      (symbol? x)
-      (sequential? x)))
-
 (defn parse
   [&env &form]
   (letfn [(die []
             (throw (ex-info "cannot parse form" {:form &form})))]
     (cond
-      (number? &form)
-      (constant &form)
+      (node? &form)
+      &form
+
+      (t/type? &form)
+      &form
 
       (symbol? &form)
       (u/resolve &form &env)
+
+      (number? &form)
+      (constant &form)
 
       (sequential? &form)
       (let [op (parse &env (first &form))
@@ -142,8 +149,5 @@
                      (apply op (map #(parse &env %) args))
 
                      :else (die))]
-        (cond
-          (node? result) result
-          (form? result) (recur &env result)
-          :else (die)))
+        (recur &env result))
       :else (die))))

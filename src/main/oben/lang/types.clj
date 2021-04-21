@@ -14,7 +14,8 @@
 
 (defn type?
   [t]
-  (and (map? t) (= (:kind t) :oben/TYPE)))
+  (and (map? t)
+       (= (:kind t) :oben/TYPE)))
 
 (def type-of (comp :type meta))
 (def typeclass-of (comp :class :type meta))
@@ -26,15 +27,19 @@
 
 (defmulti compile (fn [t] (:class t)))
 (defmulti resize (fn [t size] (:class t)))
-(defmulti cast* (fn [t x] [(:class t) (typeclass-of x)]))
+(defmulti cast* (fn [t node] [(:class t) (typeclass-of node)]))
 
 (defn cast
-  [t x]
-  (if (= (:class t) (typeclass-of x))
-    x
-    (cast* t x)))
+  [t node]
+  (if (= t (type-of node))
+    node
+    (cast* t node)))
 
 (define-type None [])
+
+(defmethod compile ::None
+  [t]
+  :void)
 
 ;; used as the type of return forms
 (define-type Return [])
@@ -53,6 +58,17 @@
 (defmethod resize ::Int
   [t newsize]
   (Int newsize))
+
+(defmethod cast* [::Int ::Int]
+  [t node]
+  (let [t-size (:size t)
+        node-size (:size (type-of node))]
+    (cond (= t-size node-size)
+          node
+          (> t-size node-size)
+          `(zext ~node ~t-size)
+          :else
+          (throw (ex-info "rejected implicit narrowing conversion")))))
 
 (define-type FP
   [size]

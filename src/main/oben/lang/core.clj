@@ -1,5 +1,5 @@
 (ns oben.lang.core
-  (:refer-clojure :exclude [fn +])
+  (:refer-clojure :exclude [fn + cast])
   (:require [clojure.core :as clj])
   (:require [oben.lang.types :as t])
   (:require [oben.lang.ast :as ast])
@@ -16,6 +16,8 @@
 (def f32 (t/FP 32))
 (def f64 (t/FP 64))
 
+(def void (t/None))
+
 (oben/defmacro fn
   [params & body]
   (let [return-type (u/resolve-type-from-meta params)
@@ -24,11 +26,13 @@
         params (mapv ast/function-parameter param-names param-types)
         &env (into &env (map vector param-names params))
         &env (assoc &env :return-type return-type)
-        body (let [last-item (last body)]
-               (if (and (sequential? last-item)
-                        (= 'return (first last-item)))
-                 body
-                 (concat (butlast body) [(list 'return last-item)])))
+        body (if (= return-type void)
+               body
+               (let [last-item (last body)]
+                 (if (and (sequential? last-item)
+                          (= 'return (first last-item)))
+                   body
+                   (concat (butlast body) [(list 'return last-item)]))))
         body-nodes (map #(ast/parse &env %) body)]
     (ast/make-node (t/Fn return-type param-types)
       (clj/fn [ctx]
@@ -48,9 +52,11 @@
                 add-function-to-module
                 store-ir)))))))
 
+(def cast t/cast)
+
 (oben/defmacro return
   ([form]
-   (let [node (t/cast (:return-type &env) (ast/parse &env form))]
+   (let [node (ast/parse &env `(cast ~(:return-type &env) ~form))]
      (ast/make-node (t/Return)
        (clj/fn [ctx]
          (when (seq (:bb ctx))
@@ -70,7 +76,8 @@
 
 (defn zext
   [node size]
-  (let [result-type (t/resize (t/type-of node) size)]
+  (let [result-type (t/resize (t/type-of node)
+                              (ast/constant-value size))]
     (ast/make-node result-type
       (clj/fn [ctx]
         (let [ctx (ctx/compile-node ctx node)
