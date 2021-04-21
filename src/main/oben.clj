@@ -3,7 +3,9 @@
   (:require [clojure.core :as clj])
   (:require [oben.lang.context :as ctx])
   (:require [oben.lang.types :as t])
-  (:require [oben.lang.ast :as ast]))
+  (:require [oben.lang.ast :as ast])
+  (:require [omkamra.llvm.context :as llvm-context])
+  (:require [omkamra.llvm.engine :as llvm-engine]))
 
 (def
   ^{:dynamic true}
@@ -18,6 +20,20 @@
 (clj/defmacro with-context
   [ctx & body]
   `(binding [*ctx* ~ctx]
+     (let [had-llvm-context# (ctx/get-llvm-context *ctx*)
+           had-llvm-ee# (ctx/get-llvm-execution-engine *ctx*)
+           result# (do ~@body)]
+       (when-not had-llvm-ee#
+         (when-let [llvm-ee# (ctx/get-llvm-execution-engine *ctx*)]
+           (llvm-engine/dispose llvm-ee#)))
+       (when-not had-llvm-context#
+         (when-let [llvm-context# (ctx/get-llvm-context *ctx*)]
+           (llvm-context/dispose llvm-context#)))
+       result#)))
+
+(clj/defmacro with-temp-context
+  [& body]
+  `(with-context (ctx/new)
      ~@body))
 
 (clj/defn make-fn

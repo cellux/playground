@@ -61,14 +61,6 @@
   [ctx ee]
   (assoc-in ctx [:llvm :ee] ee))
 
-(defn dispose
-  [ctx]
-  (when-let [ee (get-llvm-execution-engine ctx)]
-    (llvm-engine/dispose ee))
-  (when-let [llvm-context (get-llvm-context ctx)]
-    (llvm-context/dispose llvm-context))
-  (dissoc ctx :llvm))
-
 (defn flush-bb
   [ctx]
   (assert (:f ctx) "no compiled function")
