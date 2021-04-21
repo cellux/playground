@@ -56,8 +56,8 @@
          (when (seq (:bb ctx))
            (assert (not (ir/terminator? (last (:bb ctx))))))
          (let [ctx (ctx/compile-node ctx node)
-               instr (ir/ret (ctx/compiled ctx node))]
-           (ctx/compile-instruction ctx instr))))))
+               ins (ir/ret (ctx/compiled ctx node))]
+           (ctx/compile-instruction ctx ins))))))
   ([]
    (if (= ::t/None (:return-type &env))
      (ast/make-node (t/Return)
@@ -74,10 +74,10 @@
     (ast/make-node result-type
       (clj/fn [ctx]
         (let [ctx (ctx/compile-node ctx node)
-              instr (ir/zext (ctx/compiled ctx node)
-                             (t/compile result-type)
-                             {})]
-          (ctx/compile-instruction ctx instr))))))
+              ins (ir/zext (ctx/compiled ctx node)
+                           (t/compile result-type)
+                           {})]
+          (ctx/compile-instruction ctx ins))))))
 
 (oben/defmulti +)
 
@@ -91,7 +91,7 @@
     (ast/make-node result-type
       (clj/fn [ctx]
         (let [ctx (ctx/compile-nodes ctx [x y])
-              instr (ir/add (ctx/compiled ctx x)
-                            (ctx/compiled ctx y)
-                            {})]
-          (ctx/compile-instruction ctx instr))))))
+              ins (ir/add (ctx/compiled ctx x)
+                          (ctx/compiled ctx y)
+                          {})]
+          (ctx/compile-instruction ctx ins))))))

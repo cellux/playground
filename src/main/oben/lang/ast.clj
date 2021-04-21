@@ -101,9 +101,9 @@
                 (reduce ctx/compile-node ctx args))
               (compile-call [ctx]
                 (let [ctx (ctx/compile-node ctx op)
-                      call-instr (ir/call (ctx/compiled ctx op)
-                                          (map #(ctx/compiled ctx %) args))]
-                  (ctx/compile-instruction ctx call-instr)))]
+                      ins (ir/call (ctx/compiled ctx op)
+                                   (map #(ctx/compiled ctx %) args))]
+                  (ctx/compile-instruction ctx ins)))]
         (-> ctx compile-args compile-call)))))
 
 (defn oben-macro?

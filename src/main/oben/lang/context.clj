@@ -87,19 +87,19 @@
   (assoc ctx :ir ir))
 
 (defn compile-instruction
-  [ctx instruction]
+  [ctx ins]
   (assert (:f ctx) "no compiled function")
   (letfn [(add-instruction [ctx]
-            (update ctx :bb ir/add-i instruction))
+            (update ctx :bb ir/add-i ins))
           (flush-if-terminator [ctx]
-            (if (ir/terminator? instruction)
+            (if (ir/terminator? ins)
               (flush-bb ctx)
               ctx))]
     (-> ctx 
         ensure-bb
         add-instruction
         flush-if-terminator
-        (store-ir instruction))))
+        (store-ir ins))))
 
 (defn compiled
   [ctx node]
