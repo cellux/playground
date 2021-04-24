@@ -32,7 +32,7 @@
     (m/fact (f 1 2) => 12)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i32 x ^i32 y]
+  (let [f (oben/fn ^f32 [^i32 x ^i32 y]
             (let [g (fn ^i32 [^i16 x ^i8 y] (+ x y))]
-              (g (trunc x 16) (trunc y 8))))]
-    (m/fact (f 6 3) => 9)))
+              (g (cast! i16 x) (cast! i8 y))))]
+    (m/fact (f 6 3) => 9.0)))

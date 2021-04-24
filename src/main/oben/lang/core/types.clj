@@ -7,6 +7,12 @@
 (def %i32 (t/Int 32))
 (def %i64 (t/Int 64))
 
+(def %s1 (t/SInt 1))
+(def %s8 (t/SInt 8))
+(def %s16 (t/SInt 16))
+(def %s32 (t/SInt 32))
+(def %s64 (t/SInt 64))
+
 (def %f32 (t/FP 32))
 (def %f64 (t/FP 64))
 

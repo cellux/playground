@@ -73,7 +73,9 @@
   [x]
   (let [type (cond
                (integer? x)
-               (t/Int (integer-size x))
+               (if (neg? x)
+                 (t/SInt (integer-size x))
+                 (t/Int (integer-size x)))
                (float? x)
                (t/FP (float-size x))
                :else

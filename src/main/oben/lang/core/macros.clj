@@ -54,7 +54,7 @@
 (oben/defmacro %return
   ([form]
    (let [node (ast/parse &env `(cast ~(:return-type &env) ~form))]
-     (ast/make-node (t/Return)
+     (ast/make-node %void
        (fn [ctx]
          (when (seq (:bb ctx))
            (assert (not (ir/terminator? (last (:bb ctx))))))
@@ -63,7 +63,7 @@
            (ctx/compile-instruction ctx ins))))))
   ([]
    (if (= %void (:return-type &env))
-     (ast/make-node (t/Return)
+     (ast/make-node %void
        (fn [ctx]
          (when (seq (:bb ctx))
            (assert (not (ir/terminator? (last (:bb ctx))))))

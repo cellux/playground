@@ -20,22 +20,4 @@
    (%nop)))
 
 (def %cast t/cast)
-
-(defmacro define-conversion-op
-  [op]
-  `(defn ~(symbol (str "%" op))
-     [node# size#]
-     (let [node-type# (t/type-of node#)
-           result-size# (ast/constant-value size#)
-           result-type# (t/resize node-type# result-size#)]
-       (ast/make-node result-type#
-         (fn [ctx#]
-           (let [ctx# (ctx/compile-node ctx# node#)
-                 ins# (~(symbol "omkamra.llvm.ir" (str op))
-                       (ctx/compiled ctx# node#)
-                       (t/compile result-type#)
-                       {})]
-             (ctx/compile-instruction ctx# ins#)))))))
-
-(define-conversion-op zext)
-(define-conversion-op trunc)
+(def %cast! t/cast!)

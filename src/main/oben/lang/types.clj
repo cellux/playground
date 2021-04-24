@@ -26,22 +26,25 @@
 
 (defmulti compile (fn [t] (:class t)))
 (defmulti resize (fn [t size] (:class t)))
-(defmulti cast* (fn [t node] [(:class t) (typeclass-of node)]))
+(defmulti cast* (fn [t node force?] [(:class t) (typeclass-of node)]))
 
 (defn cast
   [t node]
   (if (= t (type-of node))
     node
-    (cast* t node)))
+    (cast* t node false)))
+
+(defn cast!
+  [t node]
+  (if (= t (type-of node))
+    node
+    (cast* t node true)))
 
 (define-type None [])
 
 (defmethod compile ::None
   [t]
   :void)
-
-;; used as the type of return forms
-(define-type Return [])
 
 (define-type Int
   [size]
@@ -58,17 +61,17 @@
   [t newsize]
   (Int newsize))
 
-(defmethod cast* [::Int ::Int]
-  [t node]
-  (let [t-size (:size t)
-        node-size (:size (type-of node))]
-    (cond (= t-size node-size)
-          node
-          (> t-size node-size)
-          `(zext ~node ~t-size)
-          :else
-          (throw (ex-info "rejected implicit narrowing conversion of type Int"
-                          {:from node-size :to t-size})))))
+(define-type SInt
+  [size]
+  {:size size})
+
+(defmethod compile ::SInt
+  [t]
+  [:integer (:size t)])
+
+(defmethod resize ::SInt
+  [t newsize]
+  (SInt newsize))
 
 (define-type FP
   [size]
