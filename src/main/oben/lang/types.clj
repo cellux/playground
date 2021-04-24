@@ -85,3 +85,41 @@
   [:fn
    (compile return-type)
    (mapv compile param-types)])
+
+(defmulti get-uber-type (fn [t1 t2] [(:class t1) (:class t2)]))
+
+(defmethod get-uber-type [::Int ::Int]
+  [t1 t2]
+  (Int (max (:size t1) (:size t2))))
+
+(defmethod get-uber-type [::Int ::SInt]
+  [t1 t2]
+  (SInt (max (:size t1) (:size t2))))
+
+(defmethod get-uber-type [::SInt ::Int]
+  [t1 t2]
+  (SInt (max (:size t1) (:size t2))))
+
+(defmethod get-uber-type [::Int ::FP]
+  [t1 t2]
+  (FP (max (:size t1) (:size t2))))
+
+(defmethod get-uber-type [::FP ::Int]
+  [t1 t2]
+  (FP (max (:size t1) (:size t2))))
+
+(defmethod get-uber-type [::SInt ::SInt]
+  [t1 t2]
+  (SInt (max (:size t1) (:size t2))))
+
+(defmethod get-uber-type [::SInt ::FP]
+  [t1 t2]
+  (FP (max (:size t1) (:size t2))))
+
+(defmethod get-uber-type [::FP ::SInt]
+  [t1 t2]
+  (FP (max (:size t1) (:size t2))))
+
+(defmethod get-uber-type [::FP ::FP]
+  [t1 t2]
+  (FP (max (:size t1) (:size t2))))

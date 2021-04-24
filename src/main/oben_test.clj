@@ -44,3 +44,60 @@
             (let [g (fn ^i32 [^i16 x ^i8 y] (+ x y))]
               (g (i16 x) (i8 y))))]
     (m/fact (f 6 3) => 9.0)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^i32 [^i32 x ^i32 y]
+            (+ x y))]
+    (m/fact (f 6 3) => 9))
+  (let [f (oben/fn ^s32 [^i32 x ^s32 y]
+            (+ x y))]
+    (m/fact (f 6 -3) => 3))
+  (let [f (oben/fn ^s32 [^s32 x ^i32 y]
+            (+ x y))]
+    (m/fact (f -3 6) => 3))
+  (let [f (oben/fn ^s32 [^s32 x ^s32 y]
+            (+ x y))]
+    (m/fact (f -3 -6) => -9)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^f32 [^f32 x ^f32 y]
+            (+ x y))]
+    (oben/dump-ir f)
+    (m/fact (f 6.5 3.25) => 9.75))
+  (let [f (oben/fn ^f32 [^f32 x ^i32 y]
+            (+ x y))]
+    (m/fact (f 6.5 3) => 9.5))
+  (let [f (oben/fn ^f32 [^i32 x ^f32 y]
+            (+ x y))]
+    (m/fact (f 3 6.5) => 9.5))
+  (let [f (oben/fn ^f32 [^i32 x ^i32 y]
+            (+ x y))]
+    (m/fact (f 3 6) => 9.0)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^f32 [^f32 x ^f32 y]
+            (+ x y))]
+    (m/fact (f 6.5 -1.25) => 5.25))
+  (let [f (oben/fn ^f32 [^f32 x ^s32 y]
+            (+ x y))]
+    (m/fact (f 6.5 -3) => 3.5))
+  (let [f (oben/fn ^f32 [^s32 x ^f32 y]
+            (+ x y))]
+    (m/fact (f -3 6.5) => 3.5))
+  (let [f (oben/fn ^f32 [^s32 x ^s32 y]
+            (+ x y))]
+    (m/fact (f -3 -6) => -9.0)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^f32 [^f32 x ^f32 y]
+            (+ x y))]
+    (m/fact (f 6.5 -1.25) => 5.25))
+  (let [f (oben/fn ^f32 [^f32 x ^f32 y]
+            (- x y))]
+    (m/fact (f 6.5 -1.25) => 7.75))
+  (let [f (oben/fn ^f32 [^f32 x ^f32 y]
+            (* x y))]
+    (m/fact (f 6.5 -1.25) => -8.125))
+  (let [f (oben/fn ^f32 [^f32 x ^f32 y]
+            (/ x y))]
+    (m/fact (f 6.5 -3.25) => -2.0)))
