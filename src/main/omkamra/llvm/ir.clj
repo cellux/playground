@@ -1414,10 +1414,10 @@
   (case (:kind obj)
     :function-parameter (not (:name obj))
     :basic-block (not (:name obj))
-    :instruction (not (clj/or (:name obj)
-                              (ops-with-no-name (:op obj))
-                              (clj/and (= (:op obj) :call)
-                                       (not= (:type obj) :void))))))
+    :instruction (if (= (:op obj) :call)
+                   (not= (:type obj) :void)
+                   (not (clj/or (:name obj)
+                                (ops-with-no-name (:op obj)))))))
 
 (defn render-function
   [{:keys [name linkage dso-local visibility dll-storage-class
@@ -1600,7 +1600,7 @@ entry:
   store i32 %argc, i32* %1, align 4
   store i8** %argv, i8*** %2, align 8
   %3 = getelementptr inbounds [15 x i8], [15 x i8]* @.str, i32 0, i32 0
-  call i32 (i8*, ...) @printf(i8* %3)
+  %4 = call i32 (i8*, ...) @printf(i8* %3)
   ret i32 0
 }
 

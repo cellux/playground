@@ -19,7 +19,6 @@
 
 (def type-of (comp :type meta))
 (def typeclass-of (comp :class :type meta))
-(def params->typeclasses (comp (partial mapv typeclass-of) vector))
 
 (defn has-typeclass?
   [c x]
@@ -68,7 +67,8 @@
           (> t-size node-size)
           `(zext ~node ~t-size)
           :else
-          (throw (ex-info "rejected implicit narrowing conversion")))))
+          (throw (ex-info "rejected implicit narrowing conversion of type Int"
+                          {:from node-size :to t-size})))))
 
 (define-type FP
   [size]

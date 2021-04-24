@@ -4,6 +4,7 @@
   (:require [oben.lang.context :as ctx])
   (:require [oben.lang.types :as t])
   (:require [oben.lang.ast :as ast])
+  (:require [omkamra.llvm.ir :as ir])
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.engine :as llvm-engine]))
 
@@ -67,8 +68,20 @@
      (alter-var-root m# vary-meta assoc :kind :oben/MACRO)
      m#))
 
+(def params->typeclasses (comp (partial mapv t/typeclass-of) vector))
+
 (clj/defmacro defmulti
   [name]
-  `(clj/defmulti ~name t/params->typeclasses))
+  `(clj/defmulti ~name params->typeclasses))
+
+(clj/defn dump-ir
+  [f]
+  (assert (= (:kind (meta f)) :oben/FN))
+  (let [fnode (:fnode (meta f))
+        ctx (-> *ctx*
+                (ctx/next-epoch)
+                (ctx/forget-node fnode)
+                (ctx/compile-node fnode))]
+    (println (ir/render-module (:m ctx)))))
 
 (require 'oben.lang.core)

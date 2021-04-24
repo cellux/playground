@@ -102,16 +102,18 @@
 (defn funcall
   [op args]
   (assert (fnode? op))
-  (make-node (:return-type (t/type-of op))
-    (fn [ctx]
-      (letfn [(compile-args [ctx]
-                (reduce ctx/compile-node ctx args))
-              (compile-call [ctx]
-                (let [ctx (ctx/compile-node ctx op)
-                      ins (ir/call (ctx/compiled ctx op)
-                                   (map #(ctx/compiled ctx %) args))]
-                  (ctx/compile-instruction ctx ins)))]
-        (-> ctx compile-args compile-call)))))
+  (let [{:keys [return-type param-types]} (t/type-of op)
+        args (mapv #(t/cast %1 %2) param-types args)]
+    (make-node return-type
+      (fn [ctx]
+        (letfn [(compile-args [ctx]
+                  (reduce ctx/compile-node ctx args))
+                (compile-call [ctx]
+                  (let [ctx (ctx/compile-node ctx op)
+                        ins (ir/call (ctx/compiled ctx op)
+                                     (map #(ctx/compiled ctx %) args))]
+                    (ctx/compile-instruction ctx ins)))]
+          (-> ctx compile-args compile-call))))))
 
 (defn oben-macro?
   [x]
@@ -140,6 +142,10 @@
             result (cond
                      (fnode? op)
                      (funcall op (map #(parse &env %) args))
+
+                     (t/type? op)
+                     (let [arg (parse &env (first args))]
+                       (t/cast op arg))
 
                      (oben-macro? op)
                      (apply op &form &env args)
