@@ -19,5 +19,14 @@
   ([]
    (%nop)))
 
-(def %cast t/cast)
-(def %cast! t/cast!)
+(defn %cast
+  [target-type node]
+  (if (= target-type (t/type-of node))
+    node
+    (t/cast target-type node false)))
+
+(defn %cast!
+  [target-type node]
+  (if (= target-type (t/type-of node))
+    node
+    (t/cast target-type node true)))

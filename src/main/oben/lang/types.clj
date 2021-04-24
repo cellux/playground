@@ -26,19 +26,7 @@
 
 (defmulti compile (fn [t] (:class t)))
 (defmulti resize (fn [t size] (:class t)))
-(defmulti cast* (fn [t node force?] [(:class t) (typeclass-of node)]))
-
-(defn cast
-  [t node]
-  (if (= t (type-of node))
-    node
-    (cast* t node false)))
-
-(defn cast!
-  [t node]
-  (if (= t (type-of node))
-    node
-    (cast* t node true)))
+(defmulti cast (fn [t node force?] [(:class t) (typeclass-of node)]))
 
 (define-type None [])
 

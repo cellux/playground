@@ -5,7 +5,7 @@
   (:require [oben.lang.llvm :as llvm])
   (:require [omkamra.llvm.ir :as ir]))
 
-(defmethod t/cast* [::t/Int ::t/Int]
+(defmethod t/cast [::t/Int ::t/Int]
   [t node force?]
   (let [t-size (:size t)
         node-size (:size (t/type-of node))]
@@ -19,7 +19,7 @@
           (throw (ex-info "rejected narrowing Int->Int conversion"
                           {:from node-size :to t-size})))))
 
-(defmethod t/cast* [::t/SInt ::t/SInt]
+(defmethod t/cast [::t/SInt ::t/SInt]
   [t node force?]
   (let [t-size (:size t)
         node-size (:size (t/type-of node))]
@@ -33,7 +33,7 @@
           (throw (ex-info "rejected narrowing SInt->SInt conversion"
                           {:from node-size :to t-size})))))
 
-(defmethod t/cast* [::t/FP ::t/FP]
+(defmethod t/cast [::t/FP ::t/FP]
   [t node force?]
   (let [t-size (:size t)
         node-size (:size (t/type-of node))]
@@ -47,19 +47,19 @@
           (throw (ex-info "rejected narrowing FP->FP conversion"
                           {:from node-size :to t-size})))))
 
-(defmethod t/cast* [::t/FP ::t/Int]
+(defmethod t/cast [::t/FP ::t/Int]
   [t node force?]
   (let [t-size (:size t)
         node-size (:size (t/type-of node))]
     (llvm/uitofp node t-size)))
 
-(defmethod t/cast* [::t/FP ::t/SInt]
+(defmethod t/cast [::t/FP ::t/SInt]
   [t node force?]
   (let [t-size (:size t)
         node-size (:size (t/type-of node))]
     (llvm/sitofp node t-size)))
 
-(defmethod t/cast* [::t/Int ::t/FP]
+(defmethod t/cast [::t/Int ::t/FP]
   [t node force?]
   (let [t-size (:size t)
         node-size (:size (t/type-of node))]
@@ -68,7 +68,7 @@
           :else
           (throw (ex-info "rejected narrowing FP->Int conversion")))))
 
-(defmethod t/cast* [::t/SInt ::t/FP]
+(defmethod t/cast [::t/SInt ::t/FP]
   [t node force?]
   (let [t-size (:size t)
         node-size (:size (t/type-of node))]

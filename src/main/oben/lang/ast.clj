@@ -105,7 +105,7 @@
   [op args]
   (assert (fnode? op))
   (let [{:keys [return-type param-types]} (t/type-of op)
-        args (mapv #(t/cast %1 %2) param-types args)]
+        args (mapv #(t/cast %1 %2 false) param-types args)]
     (make-node return-type
       (fn [ctx]
         (letfn [(compile-args [ctx]
@@ -147,7 +147,7 @@
 
                      (t/type? op)
                      (let [arg (parse &env (first args))]
-                       (t/cast op arg))
+                       (t/cast op arg true))
 
                      (oben-macro? op)
                      (apply op &form &env args)
