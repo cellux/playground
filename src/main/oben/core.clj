@@ -42,3 +42,7 @@
 (def * oben.core.functions/%mul)
 (def / oben.core.functions/%div)
 (def % oben.core.functions/%rem)
+
+(def and oben.core.functions/%and)
+(def or oben.core.functions/%or)
+(def xor oben.core.functions/%xor)

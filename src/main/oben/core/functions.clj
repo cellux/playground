@@ -62,6 +62,15 @@
 (define-make-binary-op-compiler-method :rem ::t/SInt ir/srem)
 (define-make-binary-op-compiler-method :rem ::t/FP ir/frem)
 
+(define-make-binary-op-compiler-method :and ::t/Int ir/and)
+(define-make-binary-op-compiler-method :and ::t/SInt ir/and)
+
+(define-make-binary-op-compiler-method :or ::t/Int ir/or)
+(define-make-binary-op-compiler-method :or ::t/SInt ir/or)
+
+(define-make-binary-op-compiler-method :xor ::t/Int ir/xor)
+(define-make-binary-op-compiler-method :xor ::t/SInt ir/xor)
+
 (defmacro define-binary-op
   [op make-unary-form]
   (let [fname (symbol (str "%" op))
@@ -87,3 +96,6 @@
 (define-binary-op mul identity)
 (define-binary-op div identity)
 (define-binary-op rem identity)
+(define-binary-op and identity)
+(define-binary-op or identity)
+(define-binary-op xor identity)
