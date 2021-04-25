@@ -58,7 +58,11 @@
 (define-make-binary-op-compiler-method :div ::t/SInt ir/sdiv)
 (define-make-binary-op-compiler-method :div ::t/FP ir/fdiv)
 
-(defmacro define-binary-operator
+(define-make-binary-op-compiler-method :rem ::t/Int ir/urem)
+(define-make-binary-op-compiler-method :rem ::t/SInt ir/srem)
+(define-make-binary-op-compiler-method :rem ::t/FP ir/frem)
+
+(defmacro define-binary-op
   [op make-unary-form]
   (let [fname (symbol (str "%" op))
         op-keyword (keyword op)]
@@ -67,7 +71,7 @@
         ~((eval make-unary-form) 'x))
        ([~'x ~'y]
         (let [result-type# (t/get-uber-type (t/type-of ~'x)
-                                                    (t/type-of ~'y))
+                                            (t/type-of ~'y))
               ~'x (t/cast result-type# ~'x false)
               ~'y (t/cast result-type# ~'y false)]
           (ast/make-node result-type#
@@ -78,7 +82,8 @@
        ([~'x ~'y ~'z & ~'rest]
         (apply ~fname (~fname ~'x ~'y) ~'z ~'rest)))))
 
-(define-binary-operator add identity)
-(define-binary-operator sub (fn [sym] `(list '- 0 ~sym)))
-(define-binary-operator mul identity)
-(define-binary-operator div identity)
+(define-binary-op add identity)
+(define-binary-op sub (fn [sym] `(list '- 0 ~sym)))
+(define-binary-op mul identity)
+(define-binary-op div identity)
+(define-binary-op rem identity)

@@ -41,3 +41,4 @@
 (def - oben.core.functions/%sub)
 (def * oben.core.functions/%mul)
 (def / oben.core.functions/%div)
+(def % oben.core.functions/%rem)
