@@ -99,3 +99,63 @@
 (define-binary-op and identity)
 (define-binary-op or identity)
 (define-binary-op xor identity)
+
+(defmacro define-make-compare-op-compiler-method
+  [op tc make-ir pred]
+  `(defmethod if/make-compare-op-compiler [~op ~tc]
+     [~'_ ~'lhs ~'rhs]
+     (fn [~'ctx]
+       (let [~'ins (~make-ir ~pred
+                    (ctx/compiled ~'ctx ~'lhs)
+                    (ctx/compiled ~'ctx ~'rhs)
+                    {})]
+         (ctx/compile-instruction ~'ctx ~'ins)))))
+
+(define-make-compare-op-compiler-method := ::t/Int ir/icmp :eq)
+(define-make-compare-op-compiler-method :!= ::t/Int ir/icmp :ne)
+(define-make-compare-op-compiler-method :< ::t/Int ir/icmp :ult)
+(define-make-compare-op-compiler-method :<= ::t/Int ir/icmp :ule)
+(define-make-compare-op-compiler-method :>= ::t/Int ir/icmp :uge)
+(define-make-compare-op-compiler-method :> ::t/Int ir/icmp :ugt)
+
+(define-make-compare-op-compiler-method := ::t/SInt ir/icmp :eq)
+(define-make-compare-op-compiler-method :!= ::t/SInt ir/icmp :ne)
+(define-make-compare-op-compiler-method :< ::t/SInt ir/icmp :slt)
+(define-make-compare-op-compiler-method :<= ::t/SInt ir/icmp :sle)
+(define-make-compare-op-compiler-method :>= ::t/SInt ir/icmp :sge)
+(define-make-compare-op-compiler-method :> ::t/SInt ir/icmp :sgt)
+
+(define-make-compare-op-compiler-method := ::t/FP ir/fcmp :oeq)
+(define-make-compare-op-compiler-method :!= ::t/FP ir/fcmp :one)
+(define-make-compare-op-compiler-method :< ::t/FP ir/fcmp :olt)
+(define-make-compare-op-compiler-method :<= ::t/FP ir/fcmp :ole)
+(define-make-compare-op-compiler-method :>= ::t/FP ir/fcmp :oge)
+(define-make-compare-op-compiler-method :> ::t/FP ir/fcmp :ogt)
+
+(defmacro define-compare-op
+  [op]
+  (let [fname (symbol (str "%" op))
+        op-keyword (keyword op)]
+    `(defn ~fname
+       ([~'x ~'y]
+        (let [uber-type# (t/get-uber-type (t/type-of ~'x)
+                                          (t/type-of ~'y))
+              ~'x (t/cast uber-type# ~'x false)
+              ~'y (t/cast uber-type# ~'y false)]
+          (ast/make-node t/%i1
+            (fn [ctx#]
+              (let [ctx# (ctx/compile-nodes ctx# [~'x ~'y])
+                    compile# (if/make-compare-op-compiler ~op-keyword ~'x ~'y)]
+                (compile# ctx#))))))
+       ([~'x ~'y ~'z & ~'rest]
+        (apply %and (map #(~fname %1 %2)
+                         (partition
+                          2 1
+                          (list* ~'x ~'y ~'z ~'rest))))))))
+
+(define-compare-op =)
+(define-compare-op !=)
+(define-compare-op <)
+(define-compare-op <=)
+(define-compare-op >=)
+(define-compare-op >)

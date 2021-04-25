@@ -1,5 +1,9 @@
 (ns oben.core
-  (:refer-clojure :exclude [let fn do cast + - * /])
+  (:refer-clojure
+   :exclude [let fn do cast
+             + - * / %
+             and or xor
+             = != < <= >= >])
   (:require [oben.core.types :as types])
   (:require [oben.core.macros :as macros])
   (:require [oben.core.functions :as functions])
@@ -46,3 +50,10 @@
 (def and oben.core.functions/%and)
 (def or oben.core.functions/%or)
 (def xor oben.core.functions/%xor)
+
+(def = oben.core.functions/%=)
+(def != oben.core.functions/%!=)
+(def < oben.core.functions/%<)
+(def <= oben.core.functions/%<=)
+(def >= oben.core.functions/%>=)
+(def > oben.core.functions/%>)

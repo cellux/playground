@@ -181,6 +181,7 @@
     :double Type/DOUBLE
     :integer (let [[_ size] ir-type]
                (case size
+                 1 Type/UINT8
                  8 Type/UINT8
                  16 Type/UINT16
                  32 Type/UINT32
@@ -204,6 +205,7 @@
           (case (ir/extract-type-tag type)
             :integer (let [[_ size] type]
                        (case size
+                         1 (.putByte hib (int arg))
                          8 (.putByte hib (int arg))
                          16 (.putShort hib (int arg))
                          32 (.putInt hib (int arg))
@@ -215,6 +217,9 @@
           :ptr (.invokeAddress invoker cc address hib)
           :integer (let [[_ size] result-type]
                      (case size
+                       1 (.invokeInt invoker cc address hib)
+                       8 (.invokeInt invoker cc address hib)
+                       16 (.invokeInt invoker cc address hib)
                        32 (.invokeInt invoker cc address hib)
                        64 (.invokeLong invoker cc address hib)))
           :float (.invokeFloat invoker cc address hib)
