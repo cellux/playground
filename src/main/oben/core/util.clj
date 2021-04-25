@@ -1,4 +1,4 @@
-(ns oben.lang.util
+(ns oben.core.util
   (:refer-clojure :exclude [resolve])
   (:require [clojure.core :as clj]))
 
@@ -14,7 +14,7 @@
   ([sym env]
    (or (get env sym)
        (when-let [v (or (let [sym-without-ns (symbol (name sym))]
-                          (ns-resolve (the-ns 'oben.lang.core)
+                          (ns-resolve (the-ns 'oben.core)
                                       sym-without-ns))
                         (clj/resolve sym))]
          (let [value (var-get v)]

@@ -1,8 +1,8 @@
 (ns oben-test
   (:require [oben])
-  (:require [oben.lang.context :as ctx])
-  (:require [oben.lang.ast :as ast])
-  (:require [oben.lang.types :as t])
+  (:require [oben.core.context :as ctx])
+  (:require [oben.core.ast :as ast])
+  (:require [oben.core.types :as t])
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m]))
 
@@ -62,7 +62,6 @@
 (oben/with-temp-context
   (let [f (oben/fn ^f32 [^f32 x ^f32 y]
             (+ x y))]
-    (oben/dump-ir f)
     (m/fact (f 6.5 3.25) => 9.75))
   (let [f (oben/fn ^f32 [^f32 x ^i32 y]
             (+ x y))]

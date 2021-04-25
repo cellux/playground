@@ -1,9 +1,9 @@
-(ns oben.lang.ast
-  (:require [oben.lang.types :as t])
-  (:require [oben.lang.util :as u])
-  (:require [oben.lang.context :as ctx])
-  (:require [midje.sweet :as m])
-  (:require [omkamra.llvm.ir :as ir]))
+(ns oben.core.ast
+  (:require [oben.core.types :as t])
+  (:require [oben.core.util :as u])
+  (:require [oben.core.context :as ctx])
+  (:require [omkamra.llvm.ir :as ir])
+  (:require [midje.sweet :as m]))
 
 (defn integer-size
   [n]

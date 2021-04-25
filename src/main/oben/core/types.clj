@@ -1,5 +1,6 @@
-(ns oben.lang.types
+(ns oben.core.types
   (:refer-clojure :exclude [compile cast])
+  (:require [clojure.core :as clj])
   (:require [midje.sweet :as m]))
 
 (defmacro define-type
@@ -10,7 +11,7 @@
         (merge (do ~@body)
                {:kind :oben/TYPE}
                {:class ~(keyword (str (ns-name *ns*))
-                                 (str (clojure.core/name name)))})))))
+                                 (str (clj/name name)))})))))
 
 (defn type?
   [t]
@@ -28,11 +29,17 @@
 (defmulti resize (fn [t size] (:class t)))
 (defmulti cast (fn [t node force?] [(:class t) (typeclass-of node)]))
 
+;; None (void)
+
 (define-type None [])
 
 (defmethod compile ::None
   [t]
   :void)
+
+(def %void (None))
+
+;; Int
 
 (define-type Int
   [size]
@@ -49,6 +56,14 @@
   [t newsize]
   (Int newsize))
 
+(def %i1 (Int 1))
+(def %i8 (Int 8))
+(def %i16 (Int 16))
+(def %i32 (Int 32))
+(def %i64 (Int 64))
+
+;; SInt
+
 (define-type SInt
   [size]
   {:size size})
@@ -60,6 +75,14 @@
 (defmethod resize ::SInt
   [t newsize]
   (SInt newsize))
+
+(def %s1 (SInt 1))
+(def %s8 (SInt 8))
+(def %s16 (SInt 16))
+(def %s32 (SInt 32))
+(def %s64 (SInt 64))
+
+;; FP
 
 (define-type FP
   [size]
@@ -75,6 +98,11 @@
   [t newsize]
   (FP newsize))
 
+(def %f32 (FP 32))
+(def %f64 (FP 64))
+
+;; Fn
+
 (define-type Fn
   [return-type param-types]
   {:return-type return-type
@@ -85,6 +113,8 @@
   [:fn
    (compile return-type)
    (mapv compile param-types)])
+
+;; get-uber-type
 
 (defmulti get-uber-type (fn [t1 t2] [(:class t1) (:class t2)]))
 

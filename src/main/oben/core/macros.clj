@@ -1,9 +1,8 @@
-(ns oben.lang.core.macros
-  (:require [oben.lang.core.types :refer [%void]])
-  (:require [oben.lang.types :as t])
-  (:require [oben.lang.ast :as ast])
-  (:require [oben.lang.util :as u])
-  (:require [oben.lang.context :as ctx])
+(ns oben.core.macros
+  (:require [oben.core.types :as t])
+  (:require [oben.core.ast :as ast])
+  (:require [oben.core.util :as u])
+  (:require [oben.core.context :as ctx])
   (:require [omkamra.llvm.ir :as ir]))
 
 (oben/defmacro %let
@@ -22,7 +21,7 @@
         params (mapv ast/function-parameter param-names param-types)
         &env (into &env (map vector param-names params))
         &env (assoc &env :return-type return-type)
-        body (if (= return-type %void)
+        body (if (= return-type t/%void)
                body
                (let [last-item (last body)]
                  (if (and (sequential? last-item)
@@ -54,7 +53,7 @@
 (oben/defmacro %return
   ([form]
    (let [node (ast/parse &env `(cast ~(:return-type &env) ~form))]
-     (ast/make-node %void
+     (ast/make-node t/%void
        (fn [ctx]
          (when (seq (:bb ctx))
            (assert (not (ir/terminator? (last (:bb ctx))))))
@@ -62,8 +61,8 @@
                ins (ir/ret (ctx/compiled ctx node))]
            (ctx/compile-instruction ctx ins))))))
   ([]
-   (if (= %void (:return-type &env))
-     (ast/make-node %void
+   (if (= t/%void (:return-type &env))
+     (ast/make-node t/%void
        (fn [ctx]
          (when (seq (:bb ctx))
            (assert (not (ir/terminator? (last (:bb ctx))))))

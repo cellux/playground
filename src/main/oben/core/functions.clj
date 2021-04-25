@@ -1,14 +1,13 @@
-(ns oben.lang.core.functions
-  (:require [oben.lang.core.types :refer [%void]])
-  (:require [oben.lang.ast :as ast])
-  (:require [oben.lang.types :as t])
-  (:require [oben.lang.context :as ctx])
-  (:require [oben.lang.interfaces :as interfaces])
+(ns oben.core.functions
+  (:require [oben.core.ast :as ast])
+  (:require [oben.core.types :as t])
+  (:require [oben.core.context :as ctx])
+  (:require [oben.core.interfaces :as if])
   (:require [omkamra.llvm.ir :as ir]))
 
 (defn %nop
   [& args]
-  (ast/make-node %void identity))
+  (ast/make-node t/%void identity))
 
 (defn %do
   ([head & body]
@@ -34,7 +33,7 @@
 
 (defmacro define-make-binary-op-compiler-method
   [op tc make-ir]
-  `(defmethod interfaces/make-binary-op-compiler [~op ~tc]
+  `(defmethod if/make-binary-op-compiler [~op ~tc]
      [~'_ ~'lhs ~'rhs]
      (fn [~'ctx]
        (let [~'ins (~make-ir
@@ -76,7 +75,7 @@
           (ast/make-node result-type#
             (fn [ctx#]
               (let [ctx# (ctx/compile-nodes ctx# [~'x ~'y])
-                    compile# (interfaces/make-binary-op-compiler ~op-keyword ~'x ~'y)]
+                    compile# (if/make-binary-op-compiler ~op-keyword ~'x ~'y)]
                 (compile# ctx#))))))
        ([~'x ~'y ~'z & ~'rest]
         (apply ~fname (~fname ~'x ~'y) ~'z ~'rest)))))

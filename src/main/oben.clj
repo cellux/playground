@@ -1,9 +1,9 @@
 (ns oben
   (:refer-clojure :exclude [fn defn defmulti defmacro])
   (:require [clojure.core :as clj])
-  (:require [oben.lang.context :as ctx])
-  (:require [oben.lang.types :as t])
-  (:require [oben.lang.ast :as ast])
+  (:require [oben.core.context :as ctx])
+  (:require [oben.core.types :as t])
+  (:require [oben.core.ast :as ast])
   (:require [omkamra.llvm.ir :as ir])
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.engine :as llvm-engine]))
@@ -84,4 +84,4 @@
                 (ctx/compile-node fnode))]
     (println (ir/render-module (:m ctx)))))
 
-(require 'oben.lang.core)
+(require 'oben.core)

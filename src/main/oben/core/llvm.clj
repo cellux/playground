@@ -1,7 +1,7 @@
-(ns oben.lang.llvm
-  (:require [oben.lang.types :as t])
-  (:require [oben.lang.ast :as ast])
-  (:require [oben.lang.context :as ctx])
+(ns oben.core.llvm
+  (:require [oben.core.types :as t])
+  (:require [oben.core.ast :as ast])
+  (:require [oben.core.context :as ctx])
   (:require [omkamra.llvm.ir :as ir]))
 
 (defmacro define-resize-op

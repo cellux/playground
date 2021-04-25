@@ -1,6 +1,6 @@
-(ns oben.lang.context
+(ns oben.core.context
   (:require [clojure.core :as clj])
-  (:require [oben.lang.types :as t])
+  (:require [oben.core.types :as t])
   (:require [omkamra.llvm.ir :as ir])
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.buffer :as llvm-buffer])
@@ -35,14 +35,15 @@
     :compiled {}
     :ir nil})
   ([]
-   (oben.lang.context/new default-ftab-size)))
+   (oben.core.context/new default-ftab-size)))
 
 (defn next-epoch
   [ctx]
   (-> ctx
       (assoc :m (ir/module)
              :f nil
-             :bb nil)
+             :bb nil
+             :node-id 0)
       (update :epoch inc)))
 
 (defn get-llvm-context
@@ -101,8 +102,9 @@
   [node]
   (case (t/typeclass-of node)
     ::t/Fn "fn"
-    ::t/Int "i"
-    ::t/FP "f"
+    ::t/Int (str "i" (:size (t/type-of node)))
+    ::t/SInt (str "s" (:size (t/type-of node)))
+    ::t/FP (str "f" (:size (t/type-of node)))
     "node"))
 
 (defn store-node-name

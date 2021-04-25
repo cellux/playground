@@ -1,8 +1,8 @@
-(ns oben.lang.core.methods
-  (:require [oben.lang.types :as t])
-  (:require [oben.lang.ast :as ast])
-  (:require [oben.lang.context :as ctx])
-  (:require [oben.lang.llvm :as llvm])
+(ns oben.core.methods
+  (:require [oben.core.types :as t])
+  (:require [oben.core.ast :as ast])
+  (:require [oben.core.context :as ctx])
+  (:require [oben.core.llvm :as llvm])
   (:require [omkamra.llvm.ir :as ir]))
 
 (defmethod t/cast [::t/Int ::t/Int]
