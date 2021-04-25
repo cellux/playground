@@ -59,14 +59,12 @@
 (define-make-binary-op-compiler-method :div ::t/FP ir/fdiv)
 
 (defmacro define-binary-operator
-  [op]
+  [op make-unary-form]
   (let [fname (symbol (str "%" op))
         op-keyword (keyword op)]
     `(defn ~fname
-       ([]
-        (%nop))
        ([~'x]
-        ~'x)
+        ~((eval make-unary-form) 'x))
        ([~'x ~'y]
         (let [result-type# (t/get-uber-type (t/type-of ~'x)
                                                     (t/type-of ~'y))
@@ -80,7 +78,7 @@
        ([~'x ~'y ~'z & ~'rest]
         (apply ~fname (~fname ~'x ~'y) ~'z ~'rest)))))
 
-(define-binary-operator add)
-(define-binary-operator sub)
-(define-binary-operator mul)
-(define-binary-operator div)
+(define-binary-operator add identity)
+(define-binary-operator sub (fn [sym] `(list '- 0 ~sym)))
+(define-binary-operator mul identity)
+(define-binary-operator div identity)

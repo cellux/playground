@@ -100,3 +100,15 @@
   (let [f (oben/fn ^f32 [^f32 x ^f32 y]
             (/ x y))]
     (m/fact (f 6.5 -3.25) => -2.0)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^s32 [^i32 x]
+            (- x))]
+    (m/fact (f 5) => -5))
+  (let [f (oben/fn ^s32 [^s32 x]
+            (- x))]
+    (m/fact (f -5) => 5))
+  (let [f (oben/fn ^f32 [^f32 x]
+            (- x))]
+    (m/fact (f 5.25) => -5.25)
+    (m/fact (f -5.25) => 5.25)))
