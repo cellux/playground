@@ -14,7 +14,7 @@
    (if (seq body)
      (ast/make-node (t/type-of (last body))
        (fn [ctx]
-         (ctx/compile-nodes ctx (cons head body))))
+         (reduce ctx/compile-node ctx (cons head body))))
      head))
   ([]
    (%nop)))
@@ -85,7 +85,8 @@
               ~'y (t/cast result-type# ~'y false)]
           (ast/make-node result-type#
             (fn [ctx#]
-              (let [ctx# (ctx/compile-nodes ctx# [~'x ~'y])
+              (let [ctx# (ctx/compile-node ctx# ~'x)
+                    ctx# (ctx/compile-node ctx# ~'y)
                     compile# (if/make-binary-op-compiler ~op-keyword ~'x ~'y)]
                 (compile# ctx#))))))
        ([~'x ~'y ~'z & ~'rest]
@@ -144,7 +145,8 @@
               ~'y (t/cast uber-type# ~'y false)]
           (ast/make-node t/%i1
             (fn [ctx#]
-              (let [ctx# (ctx/compile-nodes ctx# [~'x ~'y])
+              (let [ctx# (ctx/compile-node ctx# ~'x)
+                    ctx# (ctx/compile-node ctx# ~'y)
                     compile# (if/make-compare-op-compiler ~op-keyword ~'x ~'y)]
                 (compile# ctx#))))))
        ([~'x ~'y ~'z & ~'rest]

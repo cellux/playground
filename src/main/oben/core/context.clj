@@ -140,10 +140,6 @@
           node
           store-compiled))))
 
-(defn compile-nodes
-  [ctx nodes]
-  (reduce compile-node ctx nodes))
-
 (defn forget-node
   [ctx node]
   (dissoc ctx :compiled node))

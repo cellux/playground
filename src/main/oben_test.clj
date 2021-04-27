@@ -6,6 +6,45 @@
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m]))
 
+(defn gen-fname
+  [name return-type lhs-type rhs-type]
+  (symbol (str
+           name
+           \:
+           (first (str lhs-type))
+           (first (str rhs-type))
+           "->"
+           (first (str return-type)))))
+
+(defmacro gen-param-list
+  [return-type lhs-type rhs-type]
+  `(with-meta [(with-meta (symbol "x") {:tag ~lhs-type})
+               (with-meta (symbol "y") {:tag ~rhs-type})]
+     {:tag ~return-type}))
+
+(defmacro with-operator-functions
+  [ops opnames types & body]
+  (let [combos (for [[op name] (map vector ops opnames)
+                     return-type types
+                     lhs-type types
+                     rhs-type types]
+                 [op name return-type lhs-type rhs-type])]
+    `(let ~(into [] (mapcat
+                     (fn [[op name return-type lhs-type rhs-type]]
+                       [(gen-fname name return-type lhs-type rhs-type)
+                        `(oben/fn
+                           ~(gen-param-list return-type lhs-type rhs-type)
+                           (~op ~'x ~'y))])
+                     combos))
+       ~@body)))
+
+#_(oben/with-temp-context
+    (with-operator-functions
+      [+ - * /]
+      [add sub mul div]
+      [i32 s32 f32]
+      (m/fact (add:ii->i 1 2) => 3)))
+
 (oben/with-temp-context
   (let [f (oben/fn ^i32 [^i32 x ^i32 y] (+ x y))]
     (m/fact (f 1 2) => 3)
