@@ -23,12 +23,12 @@
         &env (assoc &env :return-type return-type)
         body (if (= return-type t/%void)
                body
-               (let [last-item (last body)]
-                 (if (and (sequential? last-item)
-                          (= 'return (first last-item)))
+               (let [last-expr (last body)]
+                 (if (and (sequential? last-expr)
+                          (= 'return (first last-expr)))
                    body
-                   (concat (butlast body) [(list 'return last-item)]))))
-        body-nodes (map #(ast/parse &env %) body)]
+                   (concat (butlast body) [(list 'return last-expr)]))))
+        body-node (ast/parse &env `(do ~@body))]
     (ast/make-node (t/Fn return-type param-types)
       (fn [ctx]
         (let [saved ctx
@@ -45,7 +45,7 @@
             (-> ctx
                 (assoc :f f)
                 (dissoc :bb)
-                (ctx/compile-nodes body-nodes)
+                (ctx/compile-node body-node)
                 add-function-to-module
                 store-ir
                 (merge (select-keys saved [:f :bb])))))))))
