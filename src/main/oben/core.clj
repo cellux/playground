@@ -2,7 +2,7 @@
   (:refer-clojure
    :exclude [let fn do cast
              + - * / %
-             and or xor
+             bit-and bit-or bit-xor
              = != < <= >= >])
   (:require [oben.core.types :as types])
   (:require [oben.core.nodes :as nodes])
@@ -48,9 +48,9 @@
 (def / oben.core.nodes/%div)
 (def % oben.core.nodes/%rem)
 
-(def and oben.core.nodes/%and)
-(def or oben.core.nodes/%or)
-(def xor oben.core.nodes/%xor)
+(def bit-and oben.core.nodes/%bit-and)
+(def bit-or oben.core.nodes/%bit-or)
+(def bit-xor oben.core.nodes/%bit-xor)
 
 (def = oben.core.nodes/%=)
 (def != oben.core.nodes/%!=)

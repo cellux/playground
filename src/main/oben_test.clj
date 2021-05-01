@@ -169,25 +169,25 @@
 
 (oben/with-temp-context
   (let [f (oben/fn ^i32 [^i32 x ^i32 y]
-            (and x y))]
+            (bit-and x y))]
     (m/fact (f 0x1234 0xff) => 0x34)
     (m/fact (f 0x1234 0xff00) => 0x1200))
   (let [f (oben/fn ^s32 [^s32 x ^s32 y]
-            (and x y))]
+            (bit-and x y))]
     (m/fact (f -2 0xff) => 0xfe)))
 
 (oben/with-temp-context
   (let [f (oben/fn ^i32 [^i32 x ^i32 y]
-            (or x y))]
+            (bit-or x y))]
     (m/fact (f 0x1234 0xff) => 0x12ff)
     (m/fact (f 0x1234 0xff00) => 0xff34))
   (let [f (oben/fn ^s32 [^s32 x ^s32 y]
-            (or x y))]
+            (bit-or x y))]
     (m/fact (f -2 0xff) => -1)))
 
 (oben/with-temp-context
   (let [f (oben/fn ^i32 [^i32 x ^i32 y]
-            (xor x y))]
+            (bit-xor x y))]
     (m/fact (f 0x1234 0xff) => (+ 0x1200 (- 0xff 0x34)))
     (m/fact (f 0x1234 0xff00) => (+ 0x34 (- 0xff00 0x1200)))))
 

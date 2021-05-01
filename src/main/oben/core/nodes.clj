@@ -216,14 +216,14 @@
 (define-make-binary-op-compiler-method :rem ::t/SInt ir/srem)
 (define-make-binary-op-compiler-method :rem ::t/FP ir/frem)
 
-(define-make-binary-op-compiler-method :and ::t/Int ir/and)
-(define-make-binary-op-compiler-method :and ::t/SInt ir/and)
+(define-make-binary-op-compiler-method :bit-and ::t/Int ir/and)
+(define-make-binary-op-compiler-method :bit-and ::t/SInt ir/and)
 
-(define-make-binary-op-compiler-method :or ::t/Int ir/or)
-(define-make-binary-op-compiler-method :or ::t/SInt ir/or)
+(define-make-binary-op-compiler-method :bit-or ::t/Int ir/or)
+(define-make-binary-op-compiler-method :bit-or ::t/SInt ir/or)
 
-(define-make-binary-op-compiler-method :xor ::t/Int ir/xor)
-(define-make-binary-op-compiler-method :xor ::t/SInt ir/xor)
+(define-make-binary-op-compiler-method :bit-xor ::t/Int ir/xor)
+(define-make-binary-op-compiler-method :bit-xor ::t/SInt ir/xor)
 
 (defmacro define-binary-op
   [op make-unary-form]
@@ -251,9 +251,10 @@
 (define-binary-op mul identity)
 (define-binary-op div identity)
 (define-binary-op rem identity)
-(define-binary-op and identity)
-(define-binary-op or identity)
-(define-binary-op xor identity)
+
+(define-binary-op bit-and identity)
+(define-binary-op bit-or identity)
+(define-binary-op bit-xor identity)
 
 (defmacro define-make-compare-op-compiler-method
   [op tc make-ir pred]
@@ -304,10 +305,10 @@
                     compile# (if/make-compare-op-compiler ~op-keyword ~'x ~'y)]
                 (compile# ctx#))))))
        ([~'x ~'y ~'z & ~'rest]
-        (apply %and (map #(~fname %1 %2)
-                         (partition
-                          2 1
-                          (list* ~'x ~'y ~'z ~'rest))))))))
+        (apply %bit-and (map #(~fname %1 %2)
+                             (partition
+                              2 1
+                              (list* ~'x ~'y ~'z ~'rest))))))))
 
 (define-compare-op =)
 (define-compare-op !=)
