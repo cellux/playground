@@ -5,13 +5,15 @@
 
 (defmacro define-type
   [name args & body]
-  `(def ~name
-     (memoize
-      (fn [~@args]
-        (merge (do ~@body)
-               {:kind :oben/TYPE}
-               {:class ~(keyword (str (ns-name *ns*))
-                                 (str (clj/name name)))})))))
+  (let [class-id (keyword (str (ns-name *ns*))
+                          (str (clj/name name)))]
+    `(do (def ~name
+           (memoize
+            (fn [~@args]
+              (merge (do ~@body)
+                     {:kind :oben/TYPE}
+                     {:class ~class-id}))))
+         (derive ~class-id ::Any))))
 
 (defn type?
   [t]
@@ -114,6 +116,14 @@
    (compile return-type)
    (mapv compile param-types)])
 
+(define-type Ptr
+  [element-type]
+  {:element-type element-type})
+
+(defmethod compile ::Ptr
+  [{:keys [element-type]}]
+  [:ptr (compile element-type)])
+
 ;; get-uber-type
 
 (defmulti get-uber-type (fn [t1 t2] [(:class t1) (:class t2)]))
@@ -153,3 +163,13 @@
 (defmethod get-uber-type [::FP ::FP]
   [t1 t2]
   (FP (max (:size t1) (:size t2))))
+
+(defmethod get-uber-type [::Ptr ::Any]
+  [t1 t2]
+  (let [elt (:element-type t1)]
+    (get-uber-type elt t2)))
+
+(defmethod get-uber-type [::Any ::Ptr]
+  [t1 t2]
+  (let [elt (:element-type t2)]
+    (get-uber-type t1 elt)))

@@ -701,10 +701,10 @@
 (defmethod render-instruction :alloca
   [{:keys [object-type address-space array-size align] :as i}]
   (let [name (find-name-of i)]
-    (format "%s = alloca %s, align %d"
+    (format "%s = alloca %s%s"
             (render-name name)
             (render-type object-type)
-            align)))
+            (if align (format ", align %d" align) ""))))
 
 (m/facts
  (m/fact
@@ -744,16 +744,16 @@
          :op :load
          :object-type (:object-type target)
          :ptr target
-         :type (:type target)))
+         :type (:object-type target)))
 
 (defmethod render-instruction :load
   [{:keys [object-type ptr align] :as i}]
   (let [name (find-name-of i)]
-    (format "%s = load %s, %s, align %d"
+    (format "%s = load %s, %s%s"
             (render-name name)
             (render-type object-type)
             (render-typed-value ptr)
-            align)))
+            (if align (format ", align %d" align) ""))))
 
 (m/facts
  (m/fact
@@ -781,10 +781,10 @@
 
 (defmethod render-instruction :store
   [{:keys [value ptr align]}]
-  (format "store %s, %s, align %d"
+  (format "store %s, %s%s"
           (render-typed-value value)
           (render-typed-value ptr)
-          align))
+          (if align (format ", align %d" align) "")))
 
 (m/facts
  (m/fact

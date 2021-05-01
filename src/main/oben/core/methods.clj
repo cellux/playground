@@ -114,3 +114,14 @@
   (let [t-size (:size t)
         node-size (:size (t/type-of node))]
     (llvm/sitofp node t-size)))
+
+(defmethod t/cast [::t/Any ::t/Ptr]
+  [t ptr-node force?]
+  (let [elt (:element-type (t/type-of ptr-node))]
+    (t/cast (t/get-uber-type t elt)
+            (ast/make-node elt
+              (fn [ctx]
+                (let [ctx (ctx/compile-node ctx ptr-node)]
+                  (ctx/compile-instruction
+                   ctx (ir/load (ctx/compiled ctx ptr-node) {})))))
+            force?)))

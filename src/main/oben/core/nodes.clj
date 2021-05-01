@@ -6,6 +6,22 @@
   (:require [oben.core.util :as u])
   (:require [omkamra.llvm.ir :as ir]))
 
+(defn %nop
+  [& args]
+  (ast/make-node t/%void identity))
+
+(defn %cast
+  [target-type node]
+  (if (= target-type (t/type-of node))
+    node
+    (t/cast target-type node false)))
+
+(defn %cast!
+  [target-type node]
+  (if (= target-type (t/type-of node))
+    node
+    (t/cast target-type node true)))
+
 (defn make-label
   [name]
   (ast/make-node t/%void
@@ -17,6 +33,31 @@
             (ctx/append-bb label-block)
             (ctx/save-ir label-block))))
     {:name name}))
+
+(defn var-form?
+  [x]
+  (and (sequential? x)
+       (= 'var (first x))))
+
+(defn make-var
+  [name]
+  (let [var-type (u/resolve-type-from-meta name)]
+    (ast/make-node (t/Ptr var-type)
+      (fn [ctx]
+        (let [ins (ir/alloca (t/compile var-type) {})]
+          (letfn [(compile-alloca [ctx]
+                    (ctx/compile-instruction ctx ins))]
+            (compile-alloca ctx))))
+      {:name name})))
+
+(defn extract-initializers
+  [var-forms]
+  (reduce (fn [result [_ name & init]]
+            (if init
+              (conj result (list* 'set! name init))
+              result))
+          []
+          var-forms))
 
 (oben/defmacro %do
   ([head & body]
@@ -33,6 +74,16 @@
                                    (get label-nodes expr)
                                    expr))
            body (map keyword->label-node body)
+           var-forms (filter var-form? body)
+           var-names (map second var-forms)
+           _ (when (not= var-names (distinct var-names))
+               (throw (ex-info "var names not unique within do block"
+                               {:var-names var-names})))
+           var-nodes (zipmap var-names (map make-var var-names))
+           env (merge env var-nodes)
+           init-nodes (map #(ast/parse env %)
+                           (extract-initializers var-forms))
+           body (filter (complement var-form?) body)
            body (map #(ast/parse env %) body)]
        (ast/make-node (t/type-of (last body))
          (fn [ctx]
@@ -40,16 +91,44 @@
                      [ctx]
                      (reduce ctx/add-label-block
                              ctx (vals label-nodes)))
+                   (compile-var-nodes
+                     [ctx]
+                     (reduce ctx/compile-node
+                             ctx (vals var-nodes)))
+                   (compile-init-nodes
+                     [ctx]
+                     (reduce ctx/compile-node
+                             ctx init-nodes))
                    (compile-body
                      [ctx]
                      (reduce ctx/compile-node
                              ctx body))]
              (-> ctx
                  add-label-blocks
+                 compile-var-nodes
+                 compile-init-nodes
                  compile-body)))))
      (ast/parse &env head)))
   ([]
    '(nop)))
+
+(defn %set!
+  [target-node value-node]
+  (assert (= (t/typeclass-of target-node) ::t/Ptr))
+  (let [elt (:element-type (t/type-of target-node))
+        value-node (%cast elt value-node)]
+    (ast/make-node t/%void
+      (fn [ctx]
+        (letfn [(compile-store
+                  [ctx]
+                  (ctx/compile-instruction
+                   ctx (ir/store (ctx/compiled ctx value-node)
+                                 (ctx/compiled ctx target-node)
+                                 {})))]
+          (-> ctx
+              (ctx/compile-node value-node)
+              (ctx/compile-node target-node)
+              compile-store))))))
 
 (oben/defmacro %goto
   [label-name]
@@ -124,31 +203,15 @@
      (throw (ex-info "returning void when scope expects non-void type"
                      {:oben/return-type (:oben/return-type &env)})))))
 
-(defn %nop
-  [& args]
-  (ast/make-node t/%void identity))
-
-(defn %cast
-  [target-type node]
-  (if (= target-type (t/type-of node))
-    node
-    (t/cast target-type node false)))
-
-(defn %cast!
-  [target-type node]
-  (if (= target-type (t/type-of node))
-    node
-    (t/cast target-type node true)))
-
 (defn %if
   [cond-node then-node else-node]
   (let [result-type (t/get-uber-type (t/type-of then-node)
                                      (t/type-of else-node))
-        cond-node (t/cast t/%i1 cond-node true)
+        cond-node (%cast! t/%i1 cond-node)
         then-label (make-label :then)
-        then-node (t/cast result-type then-node false)
+        then-node (%cast result-type then-node)
         else-label (make-label :else)
-        else-node (t/cast result-type else-node false)
+        else-node (%cast result-type else-node)
         end-label (make-label :end)]
     (ast/make-node result-type
       (fn [ctx]
@@ -187,7 +250,7 @@
 
 (defn %when
   [cond-node then-node]
-  (let [cond-node (t/cast t/%i1 cond-node true)
+  (let [cond-node (%cast! t/%i1 cond-node)
         then-label (make-label :then)
         end-label (make-label :end)]
     (ast/make-node t/%void
@@ -261,8 +324,8 @@
        ([~'x ~'y]
         (let [result-type# (t/get-uber-type (t/type-of ~'x)
                                             (t/type-of ~'y))
-              ~'x (t/cast result-type# ~'x false)
-              ~'y (t/cast result-type# ~'y false)]
+              ~'x (%cast result-type# ~'x)
+              ~'y (%cast result-type# ~'y)]
           (ast/make-node result-type#
             (fn [ctx#]
               (let [ctx# (ctx/compile-node ctx# ~'x)
@@ -322,8 +385,8 @@
        ([~'x ~'y]
         (let [uber-type# (t/get-uber-type (t/type-of ~'x)
                                           (t/type-of ~'y))
-              ~'x (t/cast uber-type# ~'x false)
-              ~'y (t/cast uber-type# ~'y false)]
+              ~'x (%cast uber-type# ~'x)
+              ~'y (%cast uber-type# ~'y)]
           (ast/make-node t/%i1
             (fn [ctx#]
               (let [ctx# (ctx/compile-node ctx# ~'x)
