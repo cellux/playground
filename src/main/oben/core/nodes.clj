@@ -185,6 +185,32 @@
               (ctx/compile-node end-label)
               (add-phi)))))))
 
+(defn %when
+  [cond-node then-node]
+  (let [cond-node (t/cast t/%i1 cond-node true)
+        then-label (make-label :then)
+        end-label (make-label :end)]
+    (ast/make-node t/%void
+      (fn [ctx]
+        (letfn [(add-br
+                  ([ctx cond-node then-label else-label]
+                   (ctx/compile-instruction
+                    ctx (ir/br (ctx/compiled ctx cond-node)
+                               (ctx/get-label-block ctx then-label)
+                               (ctx/get-label-block ctx else-label))))
+                  ([ctx dest-label]
+                   (ctx/compile-instruction
+                    ctx (ir/br (ctx/get-label-block ctx dest-label)))))]
+          (-> ctx
+              (ctx/compile-node cond-node)
+              (ctx/add-label-block then-label)
+              (ctx/add-label-block end-label)
+              (add-br cond-node then-label end-label)
+              (ctx/compile-node then-label)
+              (ctx/compile-node then-node)
+              (add-br end-label)
+              (ctx/compile-node end-label)))))))
+
 (defmacro define-make-binary-op-compiler-method
   [op tc make-ir]
   `(defmethod if/make-binary-op-compiler [~op ~tc]
