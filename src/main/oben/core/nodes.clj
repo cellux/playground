@@ -73,8 +73,8 @@
         param-types (mapv u/resolve-type-from-meta params)
         param-names (mapv u/drop-meta params)
         params (mapv ast/function-parameter param-names param-types)
-        &env (into &env (map vector param-names params))
-        &env (assoc &env :return-type return-type)
+        fenv (into {:oben/return-type return-type}
+                   (map vector param-names params))
         body (if (= return-type t/%void)
                body
                (let [last-expr (last body)]
@@ -82,7 +82,7 @@
                           (= 'return (first last-expr)))
                    body
                    (concat (butlast body) [(list 'return last-expr)]))))
-        body-node (ast/parse &env `(do ~@body))]
+        body-node (ast/parse fenv `(do ~@body))]
     (ast/make-node (t/Fn return-type param-types)
       (fn [ctx]
         (let [saved ctx
@@ -106,7 +106,7 @@
 
 (oben/defmacro %return
   ([form]
-   (let [node (ast/parse &env `(cast ~(:return-type &env) ~form))]
+   (let [node (ast/parse &env `(cast ~(:oben/return-type &env) ~form))]
      (ast/make-node t/%void
        (fn [ctx]
          (when (seq (:bb ctx))
@@ -115,14 +115,14 @@
                ins (ir/ret (ctx/compiled ctx node))]
            (ctx/compile-instruction ctx ins))))))
   ([]
-   (if (= t/%void (:return-type &env))
+   (if (= t/%void (:oben/return-type &env))
      (ast/make-node t/%void
        (fn [ctx]
          (when (seq (:bb ctx))
            (assert (not (ir/terminator? (last (:bb ctx))))))
          (ctx/compile-instruction ctx (ir/ret))))
      (throw (ex-info "returning void when scope expects non-void type"
-                     {:return-type (:return-type &env)})))))
+                     {:oben/return-type (:oben/return-type &env)})))))
 
 (defn %nop
   [& args]
