@@ -4,7 +4,8 @@
   (:require [oben.core.ast :as ast])
   (:require [oben.core.types :as t])
   (:require [omkamra.llvm.ir :as ir])
-  (:require [midje.sweet :as m]))
+  (:require [midje.sweet :as m])
+  (:use [midje.repl]))
 
 (defn gen-fname
   [name return-type lhs-type rhs-type]
@@ -297,3 +298,26 @@
     (m/fact (f 3.25 3.25) => 0)
     (m/fact (f 3.2 3.3) => 0)
     (m/fact (f 3.3 3.2) => 1)))
+
+(oben/with-temp-context
+  (let [compare-s8 (oben/fn ^s8 [^i32 x ^i32 y]
+                     (if (> x y) 1 -1))
+        compare-s16 (oben/fn ^s16 [^i32 x ^i32 y]
+                      (if (> x y) 1 -1))
+        compare-s32 (oben/fn ^s32 [^i32 x ^i32 y]
+                      (if (> x y) 1 -1))]
+    (m/fact (compare-s8 3 5) => -1)
+    (m/fact (compare-s8 5 3) => 1)
+    (m/fact (compare-s16 3 5) => -1)
+    (m/fact (compare-s16 5 3) => 1)
+    (m/fact (compare-s32 3 5) => -1)
+    (m/fact (compare-s32 5 3) => 1)))
+
+(oben/with-temp-context
+  (let [compare (oben/fn ^s8 [^i32 x ^i32 y]
+                  (if (> x y) 1
+                      (if (< x y) -1
+                          0)))]
+    (m/fact (compare 3 5) => -1)
+    (m/fact (compare 5 3) => 1)
+    (m/fact (compare 3 3) => 0)))

@@ -82,7 +82,7 @@
                (throw (ex-info "cannot create constant" {:value x})))]
     (make-node type
       (fn [ctx]
-        (ctx/store-ir ctx (ir/const (t/compile type) x)))
+        (ctx/save-ir ctx (ir/const (t/compile type) x)))
       {:constant-value x})))
 
 (defn constant-value
@@ -99,7 +99,7 @@
   [name type]
   (make-node type
     (fn [ctx]
-      (ctx/store-ir ctx (ir/param (keyword name) (t/compile type))))))
+      (ctx/save-ir ctx (ir/param (keyword name) (t/compile type))))))
 
 (defn funcall
   [op args]

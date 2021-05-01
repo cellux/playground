@@ -28,11 +28,14 @@
     :m (ir/module)
     :f nil
     :bb nil
+    :label-blocks {}
+    :node-blocks {}
     :ftab (allocate-ftab ftabsize)
     :fid 0
     :mode :dev
     :types #{}
     :compiled {}
+    :compiled-node nil
     :ir nil})
   ([]
    (oben.core.context/new default-ftab-size)))
@@ -43,7 +46,11 @@
       (assoc :m (ir/module)
              :f nil
              :bb nil
-             :node-id 0)
+             :node-id 0
+             :compiled-node nil
+             :label-blocks {}
+             :node-blocks {}
+             :ir nil)
       (update :epoch inc)))
 
 (defn get-llvm-context
@@ -62,6 +69,46 @@
   [ctx ee]
   (assoc-in ctx [:llvm :ee] ee))
 
+(defn node-name-prefix
+  [node]
+  (or (some-> (meta node)
+              :name
+              name)
+      (case (t/typeclass-of node)
+        ::t/Fn "fn"
+        ::t/Int (str "i" (:size (t/type-of node)))
+        ::t/SInt (str "s" (:size (t/type-of node)))
+        ::t/FP (str "f" (:size (t/type-of node)))
+        "node")))
+
+(defn assign-node-name
+  [ctx node]
+  (let [name (symbol (str (node-name-prefix node)
+                          "."
+                          (:epoch ctx)
+                          "."
+                          (:node-id ctx)))]
+    (-> ctx
+        (update :node-id inc)
+        (assoc :node-name name))))
+
+(def get-node-name :node-name)
+
+(defn add-label-block
+  [ctx label-node]
+  (letfn [(create-label-block
+            [ctx label-node]
+            (update ctx :label-blocks
+                    assoc label-node
+                    (ir/basic-block (keyword (:node-name ctx)))))]
+    (-> ctx
+        (assign-node-name label-node)
+        (create-label-block label-node))))
+
+(defn get-label-block
+  [ctx label-node]
+  (get (:label-blocks ctx) label-node))
+
 (defn flush-bb
   [ctx]
   (assert (:f ctx) "no compiled function")
@@ -75,7 +122,7 @@
   [ctx]
   (update ctx :bb #(or % (ir/basic-block))))
 
-(defn store-ir
+(defn save-ir
   [ctx ir]
   (assoc ctx :ir ir))
 
@@ -84,6 +131,9 @@
   (assert (:f ctx) "no compiled function")
   (letfn [(add-instruction [ctx]
             (update ctx :bb ir/add-i ins))
+          (save-node-block [ctx]
+            (update ctx :node-blocks
+                    assoc (:compiled-node ctx) (:bb ctx)))
           (flush-if-terminator [ctx]
             (if (ir/terminator? ins)
               (flush-bb ctx)
@@ -91,35 +141,24 @@
     (-> ctx 
         ensure-bb
         add-instruction
+        save-node-block
         flush-if-terminator
-        (store-ir ins))))
+        (save-ir ins))))
 
 (defn compiled
   [ctx node]
   (get (:compiled ctx) node))
 
-(defn node-name-prefix
-  [node]
-  (case (t/typeclass-of node)
-    ::t/Fn "fn"
-    ::t/Int (str "i" (:size (t/type-of node)))
-    ::t/SInt (str "s" (:size (t/type-of node)))
-    ::t/FP (str "f" (:size (t/type-of node)))
-    "node"))
-
-(defn store-node-name
+(defn get-node-block
   [ctx node]
-  (let [name (symbol (str (or (:name (meta node))
-                              (node-name-prefix node))
-                          "."
-                          (:epoch ctx)
-                          "."
-                          (:node-id ctx)))]
-    (-> ctx
-        (update :node-id inc)
-        (assoc :node-name name))))
+  (get (:node-blocks ctx) node))
 
-(def node-name :node-name)
+(defn append-bb
+  [ctx bb]
+  (let [ctx (if (:bb ctx)
+              (compile-instruction ctx (ir/br bb))
+              ctx)]
+    (assoc ctx :bb bb)))
 
 (defn compile-node
   [ctx node]
@@ -133,16 +172,21 @@
           ctx
           (update ctx :m ir/add-global (dissoc ir :initializer))))
       ctx)
-    (letfn [(store-compiled [ctx]
+    (letfn [(save-compiled-ir [ctx]
               (update ctx :compiled assoc node (:ir ctx)))]
-      (-> ctx
-          (store-node-name node)
-          node
-          store-compiled))))
+      (let [saved ctx]
+        (-> ctx
+            (assign-node-name node)
+            (assoc :compiled-node node)
+            node
+            save-compiled-ir
+            (merge (select-keys saved [:compiled-node])))))))
 
 (defn forget-node
   [ctx node]
-  (dissoc ctx :compiled node))
+  (-> ctx
+      (update :compiled dissoc node)
+      (update :node-blocks dissoc node)))
 
 (defn assemble-module
   [ctx]
@@ -213,10 +257,10 @@
           :ptr (.invokeAddress invoker cc address hib)
           :integer (let [[_ size] result-type]
                      (case size
-                       1 (.invokeInt invoker cc address hib)
-                       8 (.invokeInt invoker cc address hib)
-                       16 (.invokeInt invoker cc address hib)
-                       32 (.invokeInt invoker cc address hib)
-                       64 (.invokeLong invoker cc address hib)))
+                       1 (unchecked-byte (.invokeInt invoker cc address hib))
+                       8 (unchecked-byte (.invokeInt invoker cc address hib))
+                       16 (unchecked-short (.invokeInt invoker cc address hib))
+                       32 (unchecked-int (.invokeInt invoker cc address hib))
+                       64 (unchecked-long (.invokeLong invoker cc address hib))))
           :float (.invokeFloat invoker cc address hib)
           :double (.invokeDouble invoker cc address hib))))))
