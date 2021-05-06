@@ -35,13 +35,20 @@
 (def nop oben.core.nodes/%nop)
 (def cast oben.core.nodes/%cast)
 (def cast! oben.core.nodes/%cast!)
+(def set! oben.core.nodes/%set!)
+(def var oben.core.nodes/%var)
 
 (def do oben.core.nodes/%do)
-(def set! oben.core.nodes/%set!)
-(def goto oben.core.nodes/%goto)
+
+(def tagbody oben.core.nodes/%tagbody)
+(def go oben.core.nodes/%go)
+
+(def block oben.core.nodes/%block)
+(def return-from oben.core.nodes/%return-from)
+(def return oben.core.nodes/%return)
+
 (def let oben.core.nodes/%let)
 (def fn oben.core.nodes/%fn)
-(def return oben.core.nodes/%return)
 
 (def if oben.core.nodes/%if)
 (def when oben.core.nodes/%when)

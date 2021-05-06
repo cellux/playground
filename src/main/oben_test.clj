@@ -324,25 +324,35 @@
 
 (oben/with-temp-context
   (let [return-local-var (oben/fn ^i32 []
-                           (var ^i8 i (+ 5 3))
-                           (return i))]
+                           (let [v (var i8 (+ 5 3))]
+                             v))]
+    (m/fact (return-local-var) => 8)))
+
+(oben/with-temp-context
+  (let [set-local-var (oben/fn ^i32 []
+                        (let [v (var i8)]
+                          (set! v 5)
+                          v))]
+    (m/fact (set-local-var) => 5)))
+
+(oben/with-temp-context
+  (let [return-local-var (oben/fn ^i32 []
+                           (let [v (var i8)]
+                             (set! v (+ 5 3))
+                             (return v)
+                             2))]
     (m/fact (return-local-var) => 8)))
 
 (oben/with-temp-context
   (let [return-local-var (oben/fn ^i32 []
-                           (var ^i8 i)
-                           (set! i (+ 5 3))
-                           (return i))]
-    (m/fact (return-local-var) => 8)))
-
-(oben/with-temp-context
-  (let [return-local-var (oben/fn ^i32 []
-                           (var ^i8 i)
-                           (set! i (+ 5 3))
-                           (when (> i 7)
-                             (set! i (+ i 2)))
-                           (return i))]
-    (m/fact (return-local-var) => 10)))
+                           (let [v (var i8)]
+                             (set! v (+ 5 3))
+                             (when (> v 7)
+                               (set! v (+ v 2))
+                               (set! v (+ v 2)))
+                             (return v)
+                             2))]
+    (m/fact (return-local-var) => 12)))
 
 (m/fact
  (t/get-uber-type (t/Ptr (t/Int 32))
@@ -350,11 +360,12 @@
 
 (oben/with-temp-context
   (let [count-to (oben/fn ^i32 [^i32 limit]
-                   (var ^i32 i 0)
-                   :loop
-                   (when (>= i limit)
-                     (return i))
-                   (set! i (+ i 1))
-                   (goto :loop)
-                   (return 0))]
+                   (let [i (var i32 0)]
+                     (tagbody
+                      :loop
+                      (when (>= i limit)
+                        (return i))
+                      (set! i (+ i 1))
+                      (go :loop))
+                     7))]
     (m/fact (count-to 420) => 420)))

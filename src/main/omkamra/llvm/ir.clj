@@ -1181,6 +1181,18 @@
       (doseq [i instructions]
         (printf "  %s\n" (render-instruction i))))))
 
+(defn render-basic-blocks
+  [blocks]
+  (with-out-str
+    (doseq [[block next-block] (partition 2 1 blocks)]
+      (print (render-basic-block block))
+      (let [last-instruction (last (:instructions block))]
+        (when (clj/or (not last-instruction)
+                      (not (terminator? last-instruction)))
+          (printf "  %s\n" (render-instruction (br next-block))))))
+    (when-let [last-block (last blocks)]
+      (print (render-basic-block last-block)))))
+
 (m/facts
  (m/fact
   (render-basic-block
@@ -1190,7 +1202,26 @@
   => "entry:
   %retval = alloca i32, align 4
   ret i32 0
-"))
+")
+ (let [bbs (vector (-> (basic-block :begin)
+                       (add-i (add {:type i32 :name 1}
+                                   (const i32 5)
+                                   {:name :foo})))
+                   (basic-block :middle)
+                   (-> (basic-block :end)
+                       (add-i (sub {:type i32 :name :foo}
+                                   (const i32 3)
+                                   {:name :bar}))))]
+   (m/fact
+    (render-basic-blocks bbs)
+    => "begin:
+  %foo = add i32 %1, 5
+  br label %middle
+middle:
+  br label %end
+end:
+  %bar = sub i32 %foo, 3
+")))
 
 (def known-linkages
   {:external "external"
@@ -1478,8 +1509,7 @@
           (printf " align %d" align))
         (when definition?
           (print " {\n")
-          (doseq [block blocks]
-            (print (render-basic-block block)))
+          (print (render-basic-blocks blocks))
           (print "}\n"))))))
 
 (m/facts

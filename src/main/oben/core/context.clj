@@ -19,6 +19,12 @@
    (doto (ByteBuffer/allocateDirect size)
      (.order (ByteOrder/nativeOrder)))))
 
+(def blockbin-ids [:entry :init :main :exit])
+
+(defn new-blockbins
+  []
+  (reduce #(assoc %1 %2 []) {} blockbin-ids))
+
 (defn new
   ([ftabsize]
    {:llvm {:context nil
@@ -27,7 +33,8 @@
     :node-id 0
     :m (ir/module)
     :f nil
-    :bb nil
+    :blockbins (new-blockbins)
+    :blockbin-id :main
     :label-blocks {}
     :node-blocks {}
     :ftab (allocate-ftab ftabsize)
@@ -45,7 +52,8 @@
   (-> ctx
       (assoc :m (ir/module)
              :f nil
-             :bb nil
+             :blockbins (new-blockbins)
+             :blockbin-id :main
              :node-id 0
              :compiled-node nil
              :label-blocks {}
@@ -83,24 +91,27 @@
 
 (defn assign-node-name
   [ctx node]
-  (let [name (symbol (str (node-name-prefix node)
-                          "."
-                          (:epoch ctx)
-                          "."
-                          (:node-id ctx)))]
+  (let [node-name (symbol (str (node-name-prefix node)
+                               "."
+                               (:epoch ctx)
+                               "."
+                               (:node-id ctx)))]
     (-> ctx
         (update :node-id inc)
-        (assoc :node-name name))))
+        (assoc :node-name node-name))))
 
-(def get-node-name :node-name)
+(defn get-assigned-name
+  [ctx]
+  (:node-name ctx))
 
 (defn add-label-block
   [ctx label-node]
   (letfn [(create-label-block
             [ctx label-node]
-            (update ctx :label-blocks
-                    assoc label-node
-                    (ir/basic-block (keyword (:node-name ctx)))))]
+            (let [block-name (keyword (get-assigned-name ctx))]
+              (update ctx :label-blocks
+                      assoc label-node
+                      (ir/basic-block block-name))))]
     (-> ctx
         (assign-node-name label-node)
         (create-label-block label-node))))
@@ -109,41 +120,44 @@
   [ctx label-node]
   (get (:label-blocks ctx) label-node))
 
-(defn flush-bb
-  [ctx]
-  (assert (:f ctx) "no compiled function")
-  (if (:bb ctx)
-    (-> ctx
-        (update :f ir/add-bb (:bb ctx))
-        (dissoc :bb))
-    ctx))
-
-(defn ensure-bb
-  [ctx]
-  (update ctx :bb #(or % (ir/basic-block))))
-
 (defn save-ir
   [ctx ir]
   (assoc ctx :ir ir))
 
+(defn ensure-bb
+  ([ctx blockbin-id]
+   (let [blockbin-list (get (:blockbins ctx) blockbin-id)]
+     (if (seq blockbin-list)
+       ctx
+       (update-in ctx [:blockbins blockbin-id]
+                  conj (ir/basic-block)))))
+  ([ctx]
+   (ensure-bb ctx (:blockbin-id ctx))))
+
 (defn compile-instruction
-  [ctx ins]
-  (assert (:f ctx) "no compiled function")
-  (letfn [(add-instruction [ctx]
-            (update ctx :bb ir/add-i ins))
-          (save-node-block [ctx]
-            (update ctx :node-blocks
-                    assoc (:compiled-node ctx) (:bb ctx)))
-          (flush-if-terminator [ctx]
-            (if (ir/terminator? ins)
-              (flush-bb ctx)
-              ctx))]
-    (-> ctx 
-        ensure-bb
-        add-instruction
-        save-node-block
-        flush-if-terminator
-        (save-ir ins))))
+  ([ctx ins blockbin-id]
+   (letfn [(add-instruction [ctx]
+             (let [blockbin-list (get (:blockbins ctx) blockbin-id)
+                   last-index (dec (count blockbin-list))]
+               (update-in ctx [:blockbins blockbin-id last-index]
+                          ir/add-i ins)))
+           (save-node-block [ctx]
+             (let [blockbin-list (get (:blockbins ctx) blockbin-id)]
+               (update ctx :node-blocks
+                       assoc (:compiled-node ctx)
+                       (last blockbin-list))))
+           (flush-if-terminator [ctx]
+             (if (ir/terminator? ins)
+               (update-in ctx [:blockbins blockbin-id]
+                          conj (ir/basic-block))
+               ctx))]
+     (-> (ensure-bb ctx blockbin-id)
+         add-instruction
+         save-node-block
+         flush-if-terminator
+         (save-ir ins))))
+  ([ctx ins]
+   (compile-instruction ctx ins (:blockbin-id ctx))))
 
 (defn compiled
   [ctx node]
@@ -154,11 +168,18 @@
   (get (:node-blocks ctx) node))
 
 (defn append-bb
-  [ctx bb]
-  (let [ctx (if (:bb ctx)
-              (compile-instruction ctx (ir/br bb))
-              ctx)]
-    (assoc ctx :bb bb)))
+  ([ctx bb blockbin-id]
+   (-> ctx
+       (ensure-bb blockbin-id)
+       (update-in [:blockbins blockbin-id] conj bb)))
+  ([ctx bb]
+   (append-bb ctx bb (:blockbin-id ctx))))
+
+(defn with-blockbin
+  [ctx blockbin-id f]
+  (let [saved ctx
+        ctx (assoc ctx :blockbin-id blockbin-id)]
+    (merge (f ctx) (select-keys saved [:blockbin-id]))))
 
 (defn compile-node
   [ctx node]
@@ -182,6 +203,17 @@
             save-compiled-ir
             (merge (select-keys saved [:compiled-node])))))))
 
+(defn collect-blocks
+  [ctx]
+  (letfn [(collect? [block]
+            (or (:name block)
+                (seq (:instructions block))))]
+    (reduce (fn [ctx bb]
+              (update ctx :f ir/add-bb bb))
+            ctx
+            (->> (mapcat (:blockbins ctx) blockbin-ids)
+                 (filter collect?)))))
+
 (defn forget-node
   [ctx node]
   (-> ctx
@@ -203,9 +235,7 @@
         (llvm-engine/add-module existing-ee mod))
       (-> ctx
           (set-llvm-context llvm-context)
-          (set-llvm-execution-engine ee)
-          (dissoc :f :bb)
-          (assoc :m (ir/module))))
+          (set-llvm-execution-engine ee)))
     ctx))
 
 (defn get-function-address

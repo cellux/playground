@@ -74,14 +74,25 @@
   [name]
   `(clj/defmulti ~name params->typeclasses))
 
-(clj/defn dump-ir
+(clj/defn get-ctx
   [f]
   (assert (= (:kind (meta f)) :oben/FN))
-  (let [fnode (:fnode (meta f))
-        ctx (-> *ctx*
-                (ctx/next-epoch)
-                (ctx/forget-node fnode)
-                (ctx/compile-node fnode))]
-    (println (ir/render-module (:m ctx)))))
+  (let [fnode (:fnode (meta f))]
+    (-> *ctx*
+        (ctx/next-epoch)
+        (ctx/forget-node fnode)
+        (ctx/compile-node fnode))))
+
+(clj/defn get-m
+  [f]
+  (:m (get-ctx f)))
+
+(clj/defn get-ir
+  [f]
+  (ir/render-module (get-m f)))
+
+(clj/defn dump-ir
+  [f]
+  (println (get-ir f)))
 
 (require 'oben.core)
