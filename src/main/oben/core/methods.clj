@@ -118,7 +118,7 @@
 (defmethod t/cast [::t/Any ::t/Ptr]
   [t ptr-node force?]
   (let [elt (:element-type (t/type-of ptr-node))]
-    (t/cast (t/get-uber-type t elt)
+    (t/cast (t/uber-type-of t elt)
             (ast/make-node elt
               (fn [ctx]
                 (let [ctx (ctx/compile-node ctx ptr-node)]

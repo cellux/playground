@@ -171,11 +171,10 @@
                     (ctx/compile-node ctx return-label))
                   (load-return-value [ctx]
                     (if return-var
-                      (let [load (ir/load
-                                  (ctx/compiled ctx return-var)
-                                  {})]
-                        (-> ctx
-                            (ctx/compile-instruction load)))
+                      (ctx/compile-instruction
+                       ctx (ir/load
+                            (ctx/compiled ctx return-var)
+                            {}))
                       ctx))]
             (-> ctx
                 compile-return-var
@@ -270,8 +269,8 @@
 
 (defn %if
   [cond-node then-node else-node]
-  (let [result-type (t/get-uber-type (t/type-of then-node)
-                                     (t/type-of else-node))
+  (let [result-type (t/uber-type-of (t/type-of then-node)
+                                    (t/type-of else-node))
         cond-node (%cast! t/%i1 cond-node)
         then-label (make-label :then)
         then-node (%cast result-type then-node)
@@ -389,8 +388,8 @@
        ([~'x]
         ~((eval make-unary-form) 'x))
        ([~'x ~'y]
-        (let [result-type# (t/get-uber-type (t/type-of ~'x)
-                                            (t/type-of ~'y))
+        (let [result-type# (t/uber-type-of (t/type-of ~'x)
+                                           (t/type-of ~'y))
               ~'x (%cast result-type# ~'x)
               ~'y (%cast result-type# ~'y)]
           (ast/make-node result-type#
@@ -450,8 +449,8 @@
         op-keyword (keyword op)]
     `(defn ~fname
        ([~'x ~'y]
-        (let [uber-type# (t/get-uber-type (t/type-of ~'x)
-                                          (t/type-of ~'y))
+        (let [uber-type# (t/uber-type-of (t/type-of ~'x)
+                                         (t/type-of ~'y))
               ~'x (%cast uber-type# ~'x)
               ~'y (%cast uber-type# ~'y)]
           (ast/make-node t/%i1

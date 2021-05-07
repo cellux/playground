@@ -355,8 +355,8 @@
     (m/fact (return-local-var) => 12)))
 
 (m/fact
- (t/get-uber-type (t/Ptr (t/Int 32))
-                  (t/Int 8)) => (t/Int 32))
+ (t/uber-type-of (t/Ptr (t/Int 32))
+                 (t/Int 8)) => (t/Int 32))
 
 (oben/with-temp-context
   (let [count-to (oben/fn ^i32 [^i32 limit]

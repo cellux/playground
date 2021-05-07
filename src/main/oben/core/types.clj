@@ -173,3 +173,11 @@
   [t1 t2]
   (let [elt (:element-type t2)]
     (get-uber-type t1 elt)))
+
+;; uber-type-of
+
+(defmacro uber-type-of
+  ([t1 t2]
+   `(get-uber-type ~t1 ~t2))
+  ([t1 t2 t3 & ts]
+   `(uber-type-of (get-uber-type ~t1 ~t2) ~t3 ~@ts)))
