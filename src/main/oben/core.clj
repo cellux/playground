@@ -33,6 +33,7 @@
 (def void oben.core.types/%void)
 
 (def nop oben.core.nodes/%nop)
+(def deref oben.core.nodes/%deref)
 (def cast oben.core.nodes/%cast)
 (def cast! oben.core.nodes/%cast!)
 (def set! oben.core.nodes/%set!)

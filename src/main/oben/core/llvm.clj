@@ -18,7 +18,9 @@
                        (ctx/compiled ctx# ~'node)
                        (t/compile result-type#)
                        {})]
-             (ctx/compile-instruction ctx# ins#)))))))
+             (ctx/compile-instruction ctx# ins#)))
+         {:class ~(keyword (str (ns-name *ns*)) (str op))
+          :children #{~'node}}))))
 
 (define-resize-op trunc)
 (define-resize-op zext)
@@ -40,7 +42,9 @@
                        (ctx/compiled ctx# ~'node)
                        (t/compile result-type#)
                        {})]
-             (ctx/compile-instruction ctx# ins#)))))))
+             (ctx/compile-instruction ctx# ins#)))
+         {:class ~(keyword (str (ns-name *ns*)) (str op))
+          :children #{~'node}}))))
 
 (define-conversion-op fptoui t/Int)
 (define-conversion-op fptosi t/SInt)

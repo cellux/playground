@@ -117,11 +117,6 @@
 
 (defmethod t/cast [::t/Any ::t/Ptr]
   [t ptr-node force?]
-  (let [elt (:element-type (t/type-of ptr-node))]
-    (t/cast (t/uber-type-of t elt)
-            (ast/make-node elt
-              (fn [ctx]
-                (let [ctx (ctx/compile-node ctx ptr-node)]
-                  (ctx/compile-instruction
-                   ctx (ir/load (ctx/compiled ctx ptr-node) {})))))
-            force?)))
+  (let [node (nodes/%deref ptr-node)
+        node-type (t/type-of node)]
+    (t/cast (t/ubertype-of t node-type) node force?)))

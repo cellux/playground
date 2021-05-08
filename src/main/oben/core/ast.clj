@@ -60,14 +60,20 @@
   [type compile & opts]
   (apply vary-meta compile
          merge
-         {:kind :oben/NODE}
-         {:type type}
+         {:kind :oben/NODE
+          :class nil
+          :type type
+          :children #{}}
          opts))
 
 (defn node?
   [x]
   (and (fn? x) 
        (= :oben/NODE (:kind (meta x)))))
+
+(defn nodeclass-of
+  [node]
+  (:class (meta node)))
 
 (defn constant
   [x]
@@ -82,12 +88,18 @@
                (throw (ex-info "cannot create constant" {:value x})))]
     (make-node type
       (fn [ctx]
-        (ctx/save-ir ctx (ir/const (t/compile type) x)))
-      {:constant-value x})))
+        (let [const (ir/const (t/compile type) x)]
+          (ctx/save-ir ctx const)))
+      {:class :oben/constant
+       :constant-value x})))
+
+(defn constant?
+  [x]
+  (= (nodeclass-of x) :oben/constant))
 
 (defn constant-value
   [x]
-  (if (node? x)
+  (if (constant? x)
     (:constant-value (meta x))
     x))
 
@@ -99,7 +111,8 @@
   [name type]
   (make-node type
     (fn [ctx]
-      (ctx/save-ir ctx (ir/param (keyword name) (t/compile type))))))
+      (ctx/save-ir ctx (ir/param (keyword name) (t/compile type))))
+    {:class :oben/function-parameter}))
 
 (defn funcall
   [op args]
@@ -115,7 +128,9 @@
                         ins (ir/call (ctx/compiled ctx op)
                                      (map #(ctx/compiled ctx %) args))]
                     (ctx/compile-instruction ctx ins)))]
-          (-> ctx compile-args compile-call))))))
+          (-> ctx compile-args compile-call)))
+      {:class :oben/funcall
+       :children #{op args}})))
 
 (defn oben-macro?
   [x]

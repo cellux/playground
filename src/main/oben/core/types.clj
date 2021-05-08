@@ -31,15 +31,28 @@
 (defmulti resize (fn [t size] (:class t)))
 (defmulti cast (fn [t node force?] [(:class t) (typeclass-of node)]))
 
-;; None (void)
+;; Void
 
-(define-type None [])
+(define-type _Void_ [])
 
-(defmethod compile ::None
+(defmethod compile ::_Void_
   [t]
   :void)
 
-(def %void (None))
+(def %void (_Void_))
+
+;; Unseen
+
+(define-type Unseen [])
+
+(defmethod compile ::Unseen
+  [t]
+  :void)
+
+(def %unseen (Unseen))
+
+(def intangible? #{%void %unseen})
+(def tangible? (complement intangible?))
 
 ;; Int
 
@@ -116,6 +129,8 @@
    (compile return-type)
    (mapv compile param-types)])
 
+;; Ptr
+
 (define-type Ptr
   [element-type]
   {:element-type element-type})
@@ -124,60 +139,74 @@
   [{:keys [element-type]}]
   [:ptr (compile element-type)])
 
-;; get-uber-type
+(defn type*of
+  [node]
+  (let [t (type-of node)]
+    (if (= (:class t) ::Ptr)
+      (let [elt (:element-type t)]
+        (if (= (:class elt) ::Ptr)
+          t elt))
+      t)))
 
-(defmulti get-uber-type (fn [t1 t2] [(:class t1) (:class t2)]))
+;; get-ubertype
 
-(defmethod get-uber-type [::Int ::Int]
+(defmulti get-ubertype (fn [t1 t2] [(:class t1) (:class t2)]))
+
+(defmethod get-ubertype [::Int ::Int]
   [t1 t2]
   (Int (max (:size t1) (:size t2))))
 
-(defmethod get-uber-type [::Int ::SInt]
+(defmethod get-ubertype [::Int ::SInt]
   [t1 t2]
   (SInt (max (:size t1) (:size t2))))
 
-(defmethod get-uber-type [::SInt ::Int]
+(defmethod get-ubertype [::SInt ::Int]
   [t1 t2]
   (SInt (max (:size t1) (:size t2))))
 
-(defmethod get-uber-type [::Int ::FP]
+(defmethod get-ubertype [::Int ::FP]
   [t1 t2]
   (FP (max (:size t1) (:size t2))))
 
-(defmethod get-uber-type [::FP ::Int]
+(defmethod get-ubertype [::FP ::Int]
   [t1 t2]
   (FP (max (:size t1) (:size t2))))
 
-(defmethod get-uber-type [::SInt ::SInt]
+(defmethod get-ubertype [::SInt ::SInt]
   [t1 t2]
   (SInt (max (:size t1) (:size t2))))
 
-(defmethod get-uber-type [::SInt ::FP]
+(defmethod get-ubertype [::SInt ::FP]
   [t1 t2]
   (FP (max (:size t1) (:size t2))))
 
-(defmethod get-uber-type [::FP ::SInt]
+(defmethod get-ubertype [::FP ::SInt]
   [t1 t2]
   (FP (max (:size t1) (:size t2))))
 
-(defmethod get-uber-type [::FP ::FP]
+(defmethod get-ubertype [::FP ::FP]
   [t1 t2]
   (FP (max (:size t1) (:size t2))))
 
-(defmethod get-uber-type [::Ptr ::Any]
+(defmethod get-ubertype [::Ptr ::Any]
   [t1 t2]
   (let [elt (:element-type t1)]
-    (get-uber-type elt t2)))
+    (get-ubertype elt t2)))
 
-(defmethod get-uber-type [::Any ::Ptr]
+(defmethod get-ubertype [::Any ::Ptr]
   [t1 t2]
   (let [elt (:element-type t2)]
-    (get-uber-type t1 elt)))
+    (get-ubertype t1 elt)))
 
-;; uber-type-of
+;; ubertype-of
 
-(defmacro uber-type-of
+(defn ubertype-of
+  ([t]
+   t)
   ([t1 t2]
-   `(get-uber-type ~t1 ~t2))
+   (cond (= t1 t2) t1
+         (= t1 %unseen) t2
+         (= t2 %unseen) t1
+         :else (get-ubertype t1 t2)))
   ([t1 t2 t3 & ts]
-   `(uber-type-of (get-uber-type ~t1 ~t2) ~t3 ~@ts)))
+   (apply ubertype-of (get-ubertype t1 t2) t3 ts)))
