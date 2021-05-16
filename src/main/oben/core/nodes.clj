@@ -373,53 +373,6 @@
                                      :node-blocks]))))))
       {:class :oben/fn})))
 
-(defn %if
-  [cond-node then-node else-node]
-  (let [result-type (t/ubertype-of (t/type-of then-node)
-                                   (t/type-of else-node))
-        cond-node (%cast! t/%i1 cond-node)
-        then-label (make-label :then)
-        then-node (%cast result-type then-node)
-        else-label (make-label :else)
-        else-node (%cast result-type else-node)
-        end-label (make-label :end)]
-    (ast/make-node result-type
-      (fn [ctx]
-        (letfn [(add-br
-                  ([ctx cond-node then-label else-label]
-                   (ctx/compile-instruction
-                    ctx (ir/br (ctx/compiled ctx cond-node)
-                               (ctx/get-label-block ctx then-label)
-                               (ctx/get-label-block ctx else-label))))
-                  ([ctx dest-label]
-                   (ctx/compile-instruction
-                    ctx (ir/br (ctx/get-label-block ctx dest-label)))))
-                (add-phi
-                  [ctx]
-                  (ctx/compile-instruction
-                   ctx (ir/phi {(or (ctx/get-node-block ctx then-node)
-                                    (ctx/get-label-block ctx then-label))
-                                (ctx/compiled ctx then-node)
-                                (or (ctx/get-node-block ctx else-node)
-                                    (ctx/get-label-block ctx else-label))
-                                (ctx/compiled ctx else-node)}
-                               {})))]
-          (-> ctx
-              (ctx/compile-node cond-node)
-              (ctx/add-label-block then-label)
-              (ctx/add-label-block else-label)
-              (ctx/add-label-block end-label)
-              (add-br cond-node then-label else-label)
-              (ctx/compile-node then-label)
-              (ctx/compile-node then-node)
-              (add-br end-label)
-              (ctx/compile-node else-label)
-              (ctx/compile-node else-node)
-              (ctx/compile-node end-label)
-              (add-phi))))
-      {:class :oben/if
-       :children #{cond-node then-node else-node}})))
-
 (defn %when
   [cond-node & then-nodes]
   (let [cond-node (%cast! t/%i1 cond-node)
@@ -449,6 +402,14 @@
               (ctx/compile-node end-label))))
       {:class :oben/when
        :children (set (cons cond-node then-nodes))})))
+
+(defn %if
+  [cond-node then-node else-node]
+  `(block
+    :if
+    (when ~cond-node
+      (return-from :if ~then-node))
+    (return-from :if ~else-node)))
 
 (defmacro define-make-binary-op-compiler-method
   [op tc make-ir]
