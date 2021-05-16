@@ -83,40 +83,38 @@
   [& args]
   (symbol (apply str (map name args))))
 
-(defn make-var
-  ([type]
-   (ast/make-node (t/Ptr type)
-     (fn [ctx]
-       (let [ins (ir/alloca
-                  (t/compile type)
-                  {:name (keyword (ctx/get-assigned-name ctx))})
-             compile-var (fn [ctx]
-                           (ctx/compile-instruction ctx ins))]
-         (-> ctx
-             (ctx/with-blockbin :entry compile-var))))
-     {:class :oben/var}))
+(defn %var
   ([type init-node]
-   (let [var-node (make-var type)
-         init-node (%set! var-node init-node)]
+   (let [init-node (when init-node (%cast type init-node))]
      (ast/make-node (t/Ptr type)
        (fn [ctx]
-         (letfn [(compile-var-and-init [ctx]
-                   (ctx/compile-node ctx var-node)
-                   (ctx/compile-node ctx init-node))
-                 (save-ir [ctx]
-                   (ctx/save-ir ctx (ctx/compiled ctx var-node)))]
+         (let [ins (ir/alloca
+                    (t/compile type)
+                    {:name (keyword (ctx/get-assigned-name ctx))})
+               compile-var (fn [ctx]
+                             (ctx/compile-instruction ctx ins))
+               compile-store (fn [ctx]
+                               (ctx/compile-instruction
+                                ctx (ir/store
+                                     (ctx/compiled ctx init-node)
+                                     ins
+                                     {})))
+               compile-init (fn [ctx]
+                              (if init-node
+                                (-> ctx
+                                    (ctx/compile-node init-node)
+                                    compile-store)
+                                ctx))
+               save-ir (fn [ctx]
+                         (ctx/save-ir ctx ins))]
            (-> ctx
-               (ctx/with-blockbin :entry compile-var-and-init)
+               (ctx/with-blockbin :entry compile-var)
+               (ctx/with-blockbin :init compile-init)
                save-ir)))
        {:class :oben/var
-        :children #{init-node}}))))
-
-(oben/defmacro %var
-  ([type & rest]
-   (let [type (u/resolve type &env)]
-     (if-let [init-form (first rest)]
-       (make-var type (ast/parse init-form &env))
-       (make-var type)))))
+        :children (when init-node #{init-node})})))
+  ([type]
+   (%var type nil)))
 
 (defn- drop-all-after-first-return
   [nodes]
