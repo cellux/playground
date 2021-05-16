@@ -37,7 +37,7 @@
       force?
       (llvm/trunc node t-size)
       :else
-      (throw (ex-info "rejected narrowing Int->SInt conversion"
+      (throw (ex-info "rejected narrowing SInt->Int conversion"
                       {:from node-size :to t-size})))))
 
 (defmethod t/cast [::t/Int ::t/FP]

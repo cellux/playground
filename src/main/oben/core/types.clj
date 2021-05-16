@@ -21,25 +21,36 @@
        (= (:kind t) :oben/TYPE)))
 
 (def type-of (comp :type meta))
-(def typeclass-of (comp :class :type meta))
+(def typeclass-of (comp :class type-of))
 
 (defn has-typeclass?
   [c x]
   (= (typeclass-of x) c))
 
-(defmulti compile (fn [t] (:class t)))
-(defmulti resize (fn [t size] (:class t)))
-(defmulti cast (fn [t node force?] [(:class t) (typeclass-of node)]))
+(defmulti compile
+  "Compiles an Oben type into the corresponding LLVM type."
+  (fn [t] (:class t)))
+
+(defmulti resize
+  "Returns a type with the typeclass of `t` but with size `size`."
+  (fn [t size] (:class t)))
+
+(defmulti cast
+  "Returns an AST node which casts `node` to type `t`.
+  If the cast cannot be accomplished without information loss, cast
+  throws an error unless `force?` is true."
+  (fn [t node force?] [(:class t) (typeclass-of node)]))
 
 ;; Void
 
-(define-type _Void_ [])
+;; % prefix prevents clash with java.lang.Void
+(define-type %Void [])
 
-(defmethod compile ::_Void_
+(defmethod compile ::%Void
   [t]
   :void)
 
-(def %void (_Void_))
+(def %void (%Void))
 
 ;; Unseen
 
@@ -135,28 +146,40 @@
   [element-type]
   {:element-type element-type})
 
+(defn pointer-type?
+  [t]
+  (= ::Ptr (:class t)))
+
 (defmethod compile ::Ptr
   [{:keys [element-type]}]
   [:ptr (compile element-type)])
 
 (defn type*of
+  "If `node` is a pointer to a non-pointer type `t`, returns `t`.
+  Otherwise returns the type of `node`."
   [node]
   (let [t (type-of node)]
-    (if (= (:class t) ::Ptr)
+    (if (pointer-type? t)
       (let [elt (:element-type t)]
-        (if (= (:class elt) ::Ptr)
+        (if (pointer-type? elt)
           t elt))
       t)))
 
 ;; get-ubertype
 
-(defmulti get-ubertype (fn [t1 t2] [(:class t1) (:class t2)]))
+(defmulti get-ubertype
+  "Returns the closest type to which both `t1` and `t2` can be cast to."
+  (fn [t1 t2] [(:class t1) (:class t2)]))
+
+(defmethod get-ubertype :default
+  [t1 t2]
+  nil)
 
 (defmethod get-ubertype [::Int ::Int]
   [t1 t2]
   (Int (max (:size t1) (:size t2))))
 
-(defmethod get-ubertype [::Int ::SInt]
+(defmethod get-ubertype [::SInt ::SInt]
   [t1 t2]
   (SInt (max (:size t1) (:size t2))))
 
@@ -164,19 +187,7 @@
   [t1 t2]
   (SInt (max (:size t1) (:size t2))))
 
-(defmethod get-ubertype [::Int ::FP]
-  [t1 t2]
-  (FP (max (:size t1) (:size t2))))
-
-(defmethod get-ubertype [::FP ::Int]
-  [t1 t2]
-  (FP (max (:size t1) (:size t2))))
-
-(defmethod get-ubertype [::SInt ::SInt]
-  [t1 t2]
-  (SInt (max (:size t1) (:size t2))))
-
-(defmethod get-ubertype [::SInt ::FP]
+(defmethod get-ubertype [::FP ::FP]
   [t1 t2]
   (FP (max (:size t1) (:size t2))))
 
@@ -184,21 +195,9 @@
   [t1 t2]
   (FP (max (:size t1) (:size t2))))
 
-(defmethod get-ubertype [::FP ::FP]
+(defmethod get-ubertype [::FP ::Int]
   [t1 t2]
   (FP (max (:size t1) (:size t2))))
-
-(defmethod get-ubertype [::Ptr ::Any]
-  [t1 t2]
-  (let [elt (:element-type t1)]
-    (get-ubertype elt t2)))
-
-(defmethod get-ubertype [::Any ::Ptr]
-  [t1 t2]
-  (let [elt (:element-type t2)]
-    (get-ubertype t1 elt)))
-
-;; ubertype-of
 
 (defn ubertype-of
   ([t]
@@ -207,6 +206,37 @@
    (cond (= t1 t2) t1
          (= t1 %unseen) t2
          (= t2 %unseen) t1
-         :else (get-ubertype t1 t2)))
+         :else (or (get-ubertype t1 t2)
+                   (get-ubertype t2 t1)
+                   (throw (ex-info "Cannot find übertype"
+                                   {:t1 t1 :t2 t2})))))
   ([t1 t2 t3 & ts]
-   (apply ubertype-of (get-ubertype t1 t2) t3 ts)))
+   (apply ubertype-of (ubertype-of t1 t2) t3 ts)))
+
+(m/facts
+ (m/fact (ubertype-of (Int 8) (Int 32)) => (Int 32))
+ (m/fact (ubertype-of (SInt 8) (Int 32)) => (SInt 32))
+ (m/fact (ubertype-of (Int 8) (FP 64)) => (FP 64)))
+
+(defmethod get-ubertype [::Ptr ::Ptr]
+  [t1 t2]
+  nil)
+
+(defmethod get-ubertype [::Any ::Ptr]
+  [t1 t2]
+  (let [elt (:element-type t2)]
+    (if (pointer-type? elt)
+      nil
+      (ubertype-of t1 elt))))
+
+(prefer-method get-ubertype
+               [::Ptr ::Ptr]
+               [::Any ::Ptr])
+
+(m/facts
+ (m/fact (ubertype-of (Ptr %i8) (Ptr %i32)) => (m/throws "Cannot find übertype"))
+ (m/fact (ubertype-of %i8 (Ptr %i32)) => %i32)
+ (m/fact (get-ubertype %i8 (Ptr (Ptr %i32))) => nil)
+ (m/fact (ubertype-of %i8 (Ptr (Ptr %i32))) => (m/throws "Cannot find übertype"))
+ (m/fact (get-ubertype (Ptr (Ptr %i32)) %i8) => nil)
+ (m/fact (ubertype-of (Ptr (Ptr %i32)) %i8) => (m/throws "Cannot find übertype")))

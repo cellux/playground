@@ -57,8 +57,8 @@
 
 (defn make-node
   {:style/indent 1}
-  [type compile & opts]
-  (apply vary-meta compile
+  [type compile-fn & opts]
+  (apply vary-meta compile-fn
          merge
          {:kind :oben/NODE
           :class nil
@@ -91,21 +91,23 @@
         (let [const (ir/const (t/compile type) x)]
           (ctx/save-ir ctx const)))
       {:class :oben/constant
-       :constant-value x})))
+       :value x})))
 
 (defn constant?
   [x]
-  (= (nodeclass-of x) :oben/constant))
+  (and (node? x)
+       (= (nodeclass-of x) :oben/constant)))
 
 (defn constant-value
   [x]
   (if (constant? x)
-    (:constant-value (meta x))
+    (:value (meta x))
     x))
 
 (defn fnode?
   [x]
-  (and (node? x) (t/has-typeclass? ::t/Fn x)))
+  (and (node? x)
+       (= (nodeclass-of x) :oben/fn)))
 
 (defn function-parameter
   [name type]
@@ -130,16 +132,17 @@
                     (ctx/compile-instruction ctx ins)))]
           (-> ctx compile-args compile-call)))
       {:class :oben/funcall
-       :children #{op args}})))
+       :children (set (cons op args))})))
 
 (defn oben-macro?
   [x]
-  (and (fn? x) (= :oben/MACRO (:kind (meta x)))))
+  (and (fn? x)
+       (= :oben/MACRO (:kind (meta x)))))
 
 (defn parse
-  [&env &form]
+  [&form &env]
   (letfn [(die []
-            (throw (ex-info "cannot parse form" {:form &form})))]
+            (throw (ex-info "cannot parse form" {:form &form :env &env})))]
     (cond
       (node? &form)
       &form
@@ -154,14 +157,14 @@
       (constant &form)
 
       (sequential? &form)
-      (let [op (parse &env (first &form))
+      (let [op (parse (first &form) &env)
             args (next &form)
             result (cond
                      (fnode? op)
-                     (funcall op (map #(parse &env %) args))
+                     (funcall op (map #(parse % &env) args))
 
                      (t/type? op)
-                     (let [arg (parse &env (first args))]
+                     (let [arg (parse (first args) &env)]
                        (t/cast op arg true))
 
                      (oben-macro? op)
@@ -169,8 +172,10 @@
 
                      (or (fn? op)
                          (instance? clojure.lang.MultiFn op))
-                     (apply op (map #(parse &env %) args))
+                     (apply op (map #(parse % &env) args))
 
                      :else (die))]
-        (recur &env result))
-      :else (die))))
+        (recur result &env))
+
+      :else
+      (die))))

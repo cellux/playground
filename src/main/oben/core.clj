@@ -1,6 +1,6 @@
 (ns oben.core
   (:refer-clojure
-   :exclude [do set! let fn
+   :exclude [deref do set! let fn
              cast if when
              + - * / %
              bit-and bit-or bit-xor
