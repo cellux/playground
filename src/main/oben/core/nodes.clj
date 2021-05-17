@@ -497,6 +497,14 @@
 (define-binary-op bit-or identity)
 (define-binary-op bit-xor identity)
 
+(defn %and
+  ([lhs rhs]
+   `(bit-and (i1 ~lhs) (i1 ~rhs))))
+
+(defn %or
+  ([lhs rhs]
+   `(bit-or (i1 ~lhs) (i1 ~rhs))))
+
 (defmacro define-make-compare-op-compiler-method
   [op tc make-ir pred]
   `(defmethod if/make-compare-op-compiler [~op ~tc]

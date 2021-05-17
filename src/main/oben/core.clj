@@ -4,6 +4,7 @@
              cast when if not while
              + - * / %
              bit-and bit-or bit-xor
+             and or
              = != < <= >= >])
   (:require [oben.core.types :as types])
   (:require [oben.core.nodes :as nodes])
@@ -65,6 +66,9 @@
 (def bit-and oben.core.nodes/%bit-and)
 (def bit-or oben.core.nodes/%bit-or)
 (def bit-xor oben.core.nodes/%bit-xor)
+
+(def and oben.core.nodes/%and)
+(def or oben.core.nodes/%or)
 
 (def = oben.core.nodes/%=)
 (def != oben.core.nodes/%!=)

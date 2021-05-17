@@ -460,3 +460,41 @@
                     hi
                     x)))]
     (m/fact (clamp 4 7 10) => 7)))
+
+(oben/with-temp-context
+  (let [div-six (oben/fn ^i1 [^i32 x]
+                         (if (and (= (% x 2) 0)
+                                  (= (% x 3) 0))
+                           1 0))]
+    (m/fact (div-six 0) => 1)
+    (m/fact (div-six 1) => 0)
+    (m/fact (div-six 2) => 0)
+    (m/fact (div-six 3) => 0)
+    (m/fact (div-six 4) => 0)
+    (m/fact (div-six 5) => 0)
+    (m/fact (div-six 6) => 1)
+    (m/fact (div-six 7) => 0)
+    (m/fact (div-six 8) => 0)
+    (m/fact (div-six 9) => 0)
+    (m/fact (div-six 10) => 0)
+    (m/fact (div-six 11) => 0)
+    (m/fact (div-six 12) => 1)))
+
+(oben/with-temp-context
+  (let [div-2or3 (oben/fn ^i1 [^i32 x]
+                  (if (or (= (% x 2) 0)
+                          (= (% x 3) 0))
+                    1 0))]
+    (m/fact (div-2or3 0) => 1)
+    (m/fact (div-2or3 1) => 0)
+    (m/fact (div-2or3 2) => 1)
+    (m/fact (div-2or3 3) => 1)
+    (m/fact (div-2or3 4) => 1)
+    (m/fact (div-2or3 5) => 0)
+    (m/fact (div-2or3 6) => 1)
+    (m/fact (div-2or3 7) => 0)
+    (m/fact (div-2or3 8) => 1)
+    (m/fact (div-2or3 9) => 1)
+    (m/fact (div-2or3 10) => 1)
+    (m/fact (div-2or3 11) => 0)
+    (m/fact (div-2or3 12) => 1)))
