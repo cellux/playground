@@ -1,7 +1,7 @@
 (ns oben.core
   (:refer-clojure
    :exclude [deref do set! let fn
-             cast if when
+             cast when if not while
              + - * / %
              bit-and bit-or bit-xor
              = != < <= >= >])
@@ -51,8 +51,10 @@
 (def let oben.core.nodes/%let)
 (def fn oben.core.nodes/%fn)
 
-(def if oben.core.nodes/%if)
 (def when oben.core.nodes/%when)
+(def if oben.core.nodes/%if)
+(def not oben.core.nodes/%not)
+(def while oben.core.nodes/%while)
 
 (def + oben.core.nodes/%add)
 (def - oben.core.nodes/%sub)

@@ -430,3 +430,19 @@
                       (go :loop))
                      7))]
     (m/fact (count-to 420) => 420)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^i8 [^i32 x]
+            (if (not (< x 5))
+              8 3))]
+    (m/fact (f 4) => 3)
+    (m/fact (f 5) => 8)
+    (m/fact (f 6) => 8)))
+
+(oben/with-temp-context
+  (let [count-to (oben/fn ^i32 [^i32 limit]
+                   (let [i (var i32 0)]
+                     (while (< i limit)
+                       (set! i (+ i 1)))
+                     i))]
+    (m/fact (count-to 420) => 420)))

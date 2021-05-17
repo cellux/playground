@@ -248,12 +248,6 @@
   [node]
   (into [] (mapcat node-and-descendants (node-children node))))
 
-(defn collect-meta-fields
-  [node node-class field-name]
-  (->> (node-descendants node)
-       (filter #(= (ast/nodeclass-of %) node-class))
-       (map (comp field-name meta))))
-
 (oben/defmacro %block
   [name & body]
   (let [block-id (gensym name)
@@ -262,20 +256,20 @@
                     assoc name {:block-id block-id
                                 :return-label return-label})
         body-node (ast/parse (list* 'do body) env)
-        return-type (->> (collect-meta-fields
-                          body-node
-                          :oben/return-from
-                          :return-type)
+        find-return-nodes (fn [node]
+                            (->> (node-descendants node)
+                                 (filter #(and (= (ast/nodeclass-of %) :oben/return-from)
+                                               (= (:block-id (meta %)) block-id)))))
+        return-type (->> (find-return-nodes body-node)
+                         (map (comp :return-type meta))
                          (apply t/ubertype-of (t/type-of body-node)))
         env (assoc-in env [:oben/blocks name :return-type] return-type)
         body-node (ast/parse (list* 'do body) env)
         body-node (if (t/tangible? (t/type-of body-node))
                     (%cast return-type body-node)
                     body-node)
-        return-values (->> (collect-meta-fields
-                            body-node
-                            :oben/return-from
-                            :return-value)
+        return-values (->> (find-return-nodes body-node)
+                           (map (comp :return-value meta))
                            (into [body-node])
                            (filter (comp t/tangible? t/type-of)))]
     (ast/make-node return-type
@@ -410,6 +404,30 @@
     (when ~cond-node
       (return-from :if ~then-node))
     (return-from :if ~else-node)))
+
+(defn %not
+  [node]
+  (let [bool-node (%cast! t/%i1 node)]
+    (ast/make-node t/%i1
+      (fn [ctx]
+        (let [ctx (ctx/compile-node ctx bool-node)]
+          (ctx/compile-instruction
+           ctx (ir/xor (ctx/compiled ctx bool-node)
+                       (ir/const [:integer 1] 1)
+                       {}))))
+      {:class :oben/not
+       :children #{bool-node}})))
+
+(defn %while
+  [cond-node & then-nodes]
+  `(tagbody
+    :while
+    (when (not ~cond-node)
+      (go :end))
+    (do
+      ~@then-nodes
+      (go :while))
+    :end))
 
 (defmacro define-make-binary-op-compiler-method
   [op tc make-ir]

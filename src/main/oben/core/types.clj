@@ -43,14 +43,14 @@
 
 ;; Void
 
-;; % prefix prevents clash with java.lang.Void
-(define-type %Void [])
+;; we call this VoidType to prevent clash with java.lang.Void
+(define-type VoidType [])
 
-(defmethod compile ::%Void
+(defmethod compile ::VoidType
   [t]
   :void)
 
-(def %void (%Void))
+(def %void (VoidType))
 
 ;; Unseen
 
