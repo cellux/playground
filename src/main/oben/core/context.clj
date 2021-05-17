@@ -186,15 +186,21 @@
 (defn compile-node
   [ctx node]
   (if-let [ir (get (:compiled ctx) node)]
-    (if (and (:global? (meta node)) (:name ir))
-      (case (t/typeclass-of node)
-        ::t/Fn (if (contains? (:functions (:m ctx)) (:name ir))
-                 ctx
-                 (update ctx :m ir/add-function (dissoc ir :blocks)))
-        (if (contains? (:globals (:m ctx)) (:name ir))
-          ctx
-          (update ctx :m ir/add-global (dissoc ir :initializer))))
-      ctx)
+    (letfn [(declare-previously-compiled-globals [ctx]
+              (if (and (:global? (meta node)) (:name ir))
+                (case (t/typeclass-of node)
+                  ::t/Fn (if (contains? (:functions (:m ctx)) (:name ir))
+                           ctx
+                           (update ctx :m ir/add-function (dissoc ir :blocks)))
+                  (if (contains? (:globals (:m ctx)) (:name ir))
+                    ctx
+                    (update ctx :m ir/add-global (dissoc ir :initializer))))
+                ctx))
+            (save-ir [ctx]
+              (assoc ctx :ir ir))]
+      (-> ctx
+          declare-previously-compiled-globals
+          save-ir))
     (letfn [(save-node-ir [ctx]
               (update ctx :compiled
                       assoc node (:ir ctx)))]

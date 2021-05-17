@@ -129,24 +129,10 @@
 (defn %do
   ([head & tail]
    (if (seq tail)
-     (let [body (drop-all-after-first-return (cons head tail))
-           first-nodes (butlast body)
-           do-label (make-label :do)
-           last-node (last body)]
-       (ast/make-node (t/type-of last-node)
+     (let [body (drop-all-after-first-return (cons head tail))]
+       (ast/make-node (t/type-of (last body))
          (fn [ctx]
-           (letfn [(compile-first-nodes [ctx]
-                     (reduce ctx/compile-node ctx first-nodes))
-                   (compile-last-node [ctx]
-                     (ctx/compile-node ctx last-node))
-                   (save-ir [ctx]
-                     (ctx/save-ir ctx (ctx/compiled ctx last-node)))]
-             (-> ctx
-                 (ctx/add-label-block do-label)
-                 compile-first-nodes
-                 (ctx/compile-node do-label)
-                 compile-last-node
-                 save-ir)))
+           (reduce ctx/compile-node ctx body))
          {:class :oben/do
           :children (set body)}))
      head))
