@@ -44,7 +44,7 @@
   [name]
   (ast/make-node t/%void
     (fn [ctx]
-      (let [self (ctx/get-compiled-node ctx)
+      (let [self (:compiled-node ctx)
             label-block (ctx/get-label-block ctx self)]
         (-> ctx
             (ctx/append-bb label-block)
@@ -205,16 +205,21 @@
        (fn [ctx]
          (letfn [(compile-node [ctx]
                    (ctx/compile-node ctx value-node))
+                 (register-return-value [ctx]
+                   (ctx/register-return-value
+                    ctx block-id
+                    (ctx/current-bb ctx)
+                    (ctx/compiled ctx value-node)))
                  (compile-br [ctx]
                    (ctx/compile-instruction
                     ctx (ir/br (ctx/get-label-block ctx return-label))))]
            (-> ctx
                compile-node
+               register-return-value
                compile-br)))
        {:class :oben/return-from
         :block-id block-id
         :return-type (t/type-of value-node)
-        :return-value value-node
         :children #{value-node}})))
   ([block-name]
    (assert (map? (get-in &env [:oben/blocks block-name])))
@@ -265,42 +270,35 @@
                          (apply t/ubertype-of (t/type-of body-node)))
         env (assoc-in env [:oben/blocks name :return-type] return-type)
         body-node (ast/parse (list* 'do body) env)
-        body-node (if (t/tangible? (t/type-of body-node))
+        tangible-body? (t/tangible? (t/type-of body-node))
+        body-node (if tangible-body?
                     (%cast return-type body-node)
-                    body-node)
-        return-values (->> (find-return-nodes body-node)
-                           (map (comp :return-value meta))
-                           (into [body-node])
-                           (filter (comp t/tangible? t/type-of)))]
+                    body-node)]
     (ast/make-node return-type
       (fn [ctx]
         (let [return-type (t/compile return-type)]
           (letfn [(compile-body [ctx]
                     (ctx/compile-node ctx body-node))
+                  (register-body-value [ctx]
+                    (if tangible-body?
+                      (ctx/register-return-value ctx block-id
+                                                 (ctx/current-bb ctx)
+                                                 (ctx/compiled ctx body-node))
+                      ctx))
                   (compile-return-label [ctx]
                     (ctx/compile-node ctx return-label))
-                  (compile-return-values [ctx]
-                    (reduce ctx/compile-node ctx return-values))
-                  (compile-phi [ctx]
-                    (ctx/compile-instruction
-                     (ctx/flush-bb ctx)
-                     (ir/phi (into
-                              {}
-                              (map (fn [node]
-                                     (vector
-                                      (ctx/get-node-block ctx node)
-                                      (ctx/compiled ctx node)))
-                                   return-values))
-                             {})))
+                  (compile-phi [ctx return-values]
+                    (ctx/compile-instruction ctx (ir/phi return-values {})))
                   (compile-result [ctx]
-                    (if (= (count return-values) 1)
-                      (ctx/save-ir ctx (ctx/compiled ctx (first return-values)))
-                      (compile-phi ctx)))]
+                    (let [return-values (ctx/get-return-values ctx block-id)]
+                      (if (= (count return-values) 1)
+                        (ctx/save-ir ctx (val (first return-values)))
+                        (compile-phi ctx return-values))))]
             (-> ctx
                 (ctx/add-label-block return-label)
                 compile-body
+                register-body-value
                 compile-return-label
-                compile-return-values
                 compile-result))))
       {:class :oben/block
        :children #{body-node}})))
@@ -352,7 +350,7 @@
                     (ctx/save-ir ctx (:f ctx)))]
             (-> ctx
                 (assoc :f f)
-                (assoc :blockbins (ctx/new-blockbins))
+                (assoc :fdata ctx/init-fdata)
                 (ctx/compile-node body-node)
                 compile-return
                 ctx/collect-blocks
@@ -360,11 +358,8 @@
                 save-ir
                 (merge (select-keys saved
                                     [:f
-                                     :blockbins
-                                     :blockbin-id
-                                     :label-blocks
-                                     :compiled
-                                     :node-blocks]))))))
+                                     :fdata
+                                     :compiled]))))))
       {:class :oben/fn})))
 
 (defn %when

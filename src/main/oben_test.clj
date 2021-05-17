@@ -345,6 +345,11 @@
     (m/fact (f) => 1)))
 
 (oben/with-temp-context
+  (let [f (oben/fn ^i32 [^i32 x]
+            x)]
+    (m/fact (f 5) => 5)))
+
+(oben/with-temp-context
   (let [f (oben/fn ^i32 []
             (let [v 5]
               3))]
@@ -446,3 +451,12 @@
                        (set! i (+ i 1)))
                      i))]
     (m/fact (count-to 420) => 420)))
+
+(oben/with-temp-context
+  (let [clamp (oben/fn ^i32 [^i32 x ^i32 lo ^i32 hi]
+                (if (< x lo)
+                  lo
+                  (if (> x hi)
+                    hi
+                    x)))]
+    (m/fact (clamp 4 7 10) => 7)))
