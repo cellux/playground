@@ -56,6 +56,7 @@
 
 (def when oben.core.nodes/%when)
 (def if oben.core.nodes/%if)
+(def cond oben.core.nodes/%cond)
 (def not oben.core.nodes/%not)
 (def while oben.core.nodes/%while)
 

@@ -529,3 +529,15 @@
   (let [f (oben/fn ^s8 [^s8 x ^i8 y]
             (bit-shift-right x y))]
     (m/fact (f 0xff 4) => -1)))
+
+(oben/with-temp-context
+  (let [clamp (oben/fn ^i32 [^i32 x ^i32 lo ^i32 hi]
+                (cond (< x lo) lo
+                      (> x hi) hi
+                      x))]
+    (m/fact (clamp 6 7 10) => 7)
+    (m/fact (clamp 7 7 10) => 7)
+    (m/fact (clamp 8 7 10) => 8)
+    (m/fact (clamp 9 7 10) => 9)
+    (m/fact (clamp 10 7 10) => 10)
+    (m/fact (clamp 11 7 10) => 10)))

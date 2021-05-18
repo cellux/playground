@@ -386,6 +386,15 @@
       (return-from :if ~then-node))
     (return-from :if ~else-node)))
 
+(defn %cond
+  [& clauses]
+  (let [[cond-node then-node & rest] clauses]
+    (cond (seq rest) (%if cond-node
+                          then-node
+                          (apply %cond rest))
+          then-node (throw (ex-info "cond without default branch"))
+          :else cond-node)))
+
 (defn %not
   [node]
   (let [bool-node (%cast! t/%i1 node)]
