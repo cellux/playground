@@ -5,6 +5,7 @@
              + - * / %
              bit-and bit-or bit-xor
              bit-not bit-and-not
+             bit-shift-left bit-shift-right
              and or
              = != < <= >= >])
   (:require [oben.core.types :as types])
@@ -70,6 +71,9 @@
 
 (def bit-not oben.core.nodes/%bit-not)
 (def bit-and-not oben.core.nodes/%bit-and-not)
+
+(def bit-shift-left oben.core.nodes/%bit-shift-left)
+(def bit-shift-right oben.core.nodes/%bit-shift-right)
 
 (def and oben.core.nodes/%and)
 (def or oben.core.nodes/%or)

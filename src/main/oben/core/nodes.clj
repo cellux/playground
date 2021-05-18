@@ -450,6 +450,12 @@
 (define-make-binary-op-compiler-method :bit-xor ::t/Int ir/xor)
 (define-make-binary-op-compiler-method :bit-xor ::t/SInt ir/xor)
 
+(define-make-binary-op-compiler-method :bit-shift-left ::t/Int ir/shl)
+(define-make-binary-op-compiler-method :bit-shift-left ::t/SInt ir/shl)
+
+(define-make-binary-op-compiler-method :bit-shift-right ::t/Int ir/lshr)
+(define-make-binary-op-compiler-method :bit-shift-right ::t/SInt ir/ashr)
+
 (defmacro define-binary-op
   [op make-unary-form]
   (let [fname (symbol (str "%" op))
@@ -482,6 +488,9 @@
 (define-binary-op bit-and identity)
 (define-binary-op bit-or identity)
 (define-binary-op bit-xor identity)
+
+(define-binary-op bit-shift-left identity)
+(define-binary-op bit-shift-right identity)
 
 (defn %bit-not
   [x]

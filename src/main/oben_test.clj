@@ -514,3 +514,18 @@
             (bit-and-not x y))]
     (m/fact (f 0xff 0x40) => 0xbf)
     (m/fact (f 0xff 0x55) => 0xaa)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^i32 [^i32 x ^i32 y]
+            (bit-shift-left x y))]
+    (m/fact (f 0xff 4) => 0xff0)
+    (m/fact (f 0xff 1) => 0x1fe)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^i32 [^i32 x ^i32 y]
+            (bit-shift-right x y))]
+    (m/fact (f 0xff 4) => 0x0f)
+    (m/fact (f 0xff 1) => 0x7f))
+  (let [f (oben/fn ^s8 [^s8 x ^i8 y]
+            (bit-shift-right x y))]
+    (m/fact (f 0xff 4) => -1)))
