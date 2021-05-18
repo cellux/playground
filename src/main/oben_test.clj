@@ -498,3 +498,13 @@
     (m/fact (div-2or3 10) => 1)
     (m/fact (div-2or3 11) => 0)
     (m/fact (div-2or3 12) => 1)))
+
+(oben/with-temp-context
+  (let [neg (oben/fn ^i32 [^i32 x]
+              (bit-not x))]
+    (m/fact (neg 0) => -1)
+    (m/fact (neg -1) => 0)
+    (m/fact (neg -2) => 1)
+    (m/fact (neg -128) => 127)
+    (m/fact (neg -32768) => 32767)
+    (m/fact (neg -2147483648) => 2147483647)))

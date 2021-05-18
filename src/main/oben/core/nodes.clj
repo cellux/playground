@@ -483,6 +483,11 @@
 (define-binary-op bit-or identity)
 (define-binary-op bit-xor identity)
 
+(defn %bit-not
+  [x]
+  (let [size (:size (t/type-of x))]
+    (%bit-xor x (%cast (t/SInt size) (ast/constant -1)))))
+
 (defn %and
   ([lhs rhs]
    `(bit-and (i1 ~lhs) (i1 ~rhs))))
