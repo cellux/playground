@@ -488,6 +488,10 @@
   (let [size (:size (t/type-of x))]
     (%bit-xor x (%cast (t/SInt size) (ast/constant -1)))))
 
+(defn %bit-and-not
+  [lhs rhs]
+  (%bit-and lhs (%bit-not rhs)))
+
 (defn %and
   ([lhs rhs]
    `(bit-and (i1 ~lhs) (i1 ~rhs))))

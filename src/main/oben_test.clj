@@ -508,3 +508,9 @@
     (m/fact (neg -128) => 127)
     (m/fact (neg -32768) => 32767)
     (m/fact (neg -2147483648) => 2147483647)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^i32 [^i32 x ^i32 y]
+            (bit-and-not x y))]
+    (m/fact (f 0xff 0x40) => 0xbf)
+    (m/fact (f 0xff 0x55) => 0xaa)))
