@@ -395,6 +395,23 @@
           then-node (throw (ex-info "cond without default branch"))
           :else cond-node)))
 
+(oben/defmacro %condp
+  [pred expr & clauses]
+  (letfn [(process [clauses]
+            (loop [clauses clauses
+                   result []]
+              (if (seq clauses)
+                (let [[test-expr value & rest] clauses]
+                  (if value
+                    (recur rest (conj result (list pred test-expr expr) value))
+                    (recur rest (conj result test-expr))))
+                result)))]
+    (cons 'cond (process clauses))))
+
+(defn %case
+  [expr & clauses]
+  `(condp = ~expr ~@clauses))
+
 (defn %not
   [node]
   (let [bool-node (%cast! t/%i1 node)]

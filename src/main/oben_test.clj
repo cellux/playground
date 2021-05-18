@@ -541,3 +541,27 @@
     (m/fact (clamp 9 7 10) => 9)
     (m/fact (clamp 10 7 10) => 10)
     (m/fact (clamp 11 7 10) => 10)))
+
+(oben/with-temp-context
+  (let [select (oben/fn ^s32 [^i32 x]
+                 (condp = x
+                   1 -2
+                   2 -4
+                   3 -6
+                   10))]
+    (m/fact (select 1) => -2)
+    (m/fact (select 2) => -4)
+    (m/fact (select 3) => -6)
+    (m/fact (select 4) => 10)))
+
+(oben/with-temp-context
+  (let [select (oben/fn ^s32 [^i32 x]
+                 (case x
+                   1 -2
+                   2 -4
+                   3 -6
+                   10))]
+    (m/fact (select 1) => -2)
+    (m/fact (select 2) => -4)
+    (m/fact (select 3) => -6)
+    (m/fact (select 4) => 10)))
