@@ -3,7 +3,7 @@
   (:require [clojure.core :as clj])
   (:require [midje.sweet :as m]))
 
-(defmacro define-type
+(defmacro define-typeclass
   [name args & body]
   (let [class-id (keyword (str (ns-name *ns*))
                           (str (clj/name name)))]
@@ -44,7 +44,7 @@
 ;; Void
 
 ;; we call this VoidType to prevent clash with java.lang.Void
-(define-type VoidType [])
+(define-typeclass VoidType [])
 
 (defmethod compile ::VoidType
   [t]
@@ -54,7 +54,7 @@
 
 ;; Unseen
 
-(define-type Unseen [])
+(define-typeclass Unseen [])
 
 (defmethod compile ::Unseen
   [t]
@@ -67,7 +67,7 @@
 
 ;; Int
 
-(define-type Int
+(define-typeclass Int
   [size]
   {:size size})
 
@@ -90,7 +90,7 @@
 
 ;; SInt
 
-(define-type SInt
+(define-typeclass SInt
   [size]
   {:size size})
 
@@ -110,7 +110,7 @@
 
 ;; FP
 
-(define-type FP
+(define-typeclass FP
   [size]
   {:size size})
 
@@ -129,7 +129,7 @@
 
 ;; Fn
 
-(define-type Fn
+(define-typeclass Fn
   [return-type param-types]
   {:return-type return-type
    :param-types param-types})
@@ -142,7 +142,7 @@
 
 ;; Ptr
 
-(define-type Ptr
+(define-typeclass Ptr
   [element-type]
   {:element-type element-type})
 
