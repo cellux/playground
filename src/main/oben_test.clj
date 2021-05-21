@@ -3,6 +3,7 @@
   (:require [oben.core.context :as ctx])
   (:require [oben.core.ast :as ast])
   (:require [oben.core.types :as t])
+  (:require [oben.core.types :as t*])
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m])
   (:use [midje.repl]))
@@ -46,10 +47,22 @@
       [i32 s32 f32]
       (m/fact (add:ii->i 1 2) => 3)))
 
+(m/facts
+ "type constructors memoize the types they return"
+ (m/fact (identical? (t/Int 32) (t/Int 32)))
+ (m/fact (identical? (t/Int 32) t/%i32)))
+
 (oben/with-temp-context
   (let [f (oben/fn ^i32 []
             (+ 5 2))]
     (m/fact (f) => 7)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^{:tag (t*/Int 32)} []
+            (+ 5 2))]
+    (m/fact
+     "values can be tagged with types constructed on the spot"
+     (f) => 7)))
 
 (oben/with-temp-context
   (let [f (oben/fn ^i32 [^i32 x ^i32 y] (+ x y))]
@@ -83,19 +96,21 @@
               (+ 3 9)))]
     (m/fact (f 1 2) => 12)))
 
-;; forced casts
 (oben/with-temp-context
   (let [f (oben/fn ^f32 [^i32 x ^i32 y]
             (let [g (fn ^i32 [^i16 x ^i8 y] (+ x y))]
               (g (cast! i16 x) (cast! i8 y))))]
-    (m/fact (f 6 3) => 9.0)))
+    (m/fact
+     "forced casts"
+     (f 6 3) => 9.0)))
 
-;; types in operator position can be also used for forced casts
 (oben/with-temp-context
   (let [f (oben/fn ^f32 [^i32 x ^i32 y]
             (let [g (fn ^i32 [^i16 x ^i8 y] (+ x y))]
               (g (i16 x) (i8 y))))]
-    (m/fact (f 6 3) => 9.0)))
+    (m/fact
+     "types in operator position can be also used for forced casts"
+     (f 6 3) => 9.0)))
 
 (oben/with-temp-context
   (let [f (oben/fn ^i32 [^i32 x ^i32 y]

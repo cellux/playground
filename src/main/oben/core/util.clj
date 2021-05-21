@@ -36,7 +36,9 @@
   [x]
   (if-let [m (meta x)]
     (if-let [tag (:tag m)]
-      (resolve tag)
+      (if (symbol? tag)
+        (resolve tag)
+        (eval tag))
       (throw (ex-info "no tag field in metadata of value"
                       {:value x :meta m})))
     (throw (ex-info "no metadata on value"
