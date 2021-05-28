@@ -12,12 +12,17 @@
 
 (defn- find-oben-var
   [sym]
-  (let [sym-without-ns (symbol (name sym))]
-    (ns-resolve (the-ns 'oben.core) sym-without-ns)))
+  (let [sym-without-ns (symbol (name sym))
+        v (ns-resolve (the-ns 'oben.core) sym-without-ns)]
+    (if (= (:ns (meta v)) (the-ns 'oben.core))
+      v nil)))
 
 (defn- find-clojure-var
   [sym]
-  (clj/resolve sym))
+  (let [v (clj/resolve sym)]
+    (if (= (:ns (meta v)) (the-ns 'clojure.core))
+      (throw (ex-info "oben symbol resolves to a var in clojure.core" {:sym sym}))
+      v)))
 
 (defn resolve
   ([sym env]
