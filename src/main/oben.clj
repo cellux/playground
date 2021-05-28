@@ -53,13 +53,47 @@
           result))
       {:kind :oben/FN :fnode fnode})))
 
+(clj/defn items->obj-with-meta
+  [items obj? all?]
+  (loop [result []
+         items items
+         m nil]
+    (if-let [head (first items)]
+      (cond (obj? head)
+            (let [obj (if m
+                        (vary-meta head merge m)
+                        head)]
+              (if all?
+                (recur (conj result obj) (next items) nil)
+                (vector obj (next items))))
+
+            (list? head)
+            (recur result (next items) (assoc m :tag head))
+
+            (map? head)
+            (recur result (next items) (merge m head)))
+      result)))
+
+(clj/defn unpack-fn-params
+  [params]
+  (with-meta
+    (items->obj-with-meta params symbol? true)
+    (meta params)))
+
+(clj/defn unpack-fn-decl
+  [decl]
+  (let [[params body] (items->obj-with-meta decl vector? false)]
+    (vector (unpack-fn-params params) body)))
+
 (clj/defmacro fn
-  [params & body]
-  `(make-fn nil '~params '~body))
+  [& decl]
+  (let [[params body] (unpack-fn-decl decl)]
+    `(make-fn nil '~params '~body)))
 
 (clj/defmacro defn
-  [name params & body]
-  `(def ~name (make-fn '~name '~params '~body)))
+  [name & decl]
+  (let [[params body] (unpack-fn-decl decl)]
+    `(def ~name (make-fn '~name '~params '~body))))
 
 (clj/defmacro defmacro
   [& args]

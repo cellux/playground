@@ -58,14 +58,28 @@
     (m/fact (f) => 7)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^{:tag (t*/Int 32)} []
+  (let [f (oben/fn {:tag (t*/Int 32)} []
             (+ 5 2))]
     (m/fact
-     "values can be tagged with types constructed on the spot"
+     "a map before the param vector is evaluated and used as params metadata"
+     (f) => 7)))
+
+(oben/with-temp-context
+  (let [f (oben/fn (t*/Int 32) []
+            (+ 5 2))]
+    (m/fact
+     "a list before the param vector is evaluated and used as the :tag field of params metadata"
      (f) => 7)))
 
 (oben/with-temp-context
   (let [f (oben/fn ^i32 [^i32 x ^i32 y] (+ x y))]
+    (m/fact (f 1 2) => 3)
+    (m/fact (f 5 3) => 8)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^i32 [{:tag t/%i32} x
+                         (t/Int 32) y]
+            (+ x y))]
     (m/fact (f 1 2) => 3)
     (m/fact (f 5 3) => 8)))
 
