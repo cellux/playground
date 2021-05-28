@@ -1,7 +1,8 @@
 (ns oben.core
   (:refer-clojure
    :exclude [deref do set! let fn
-             cast when if not while
+             cast when if cond condp case
+             not while
              + - * / %
              bit-and bit-or bit-xor
              bit-not bit-and-not
