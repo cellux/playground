@@ -1,6 +1,9 @@
 (ns oben.core.nodes
   (:require [oben.core.ast :as ast])
   (:require [oben.core.types :as t])
+  (:require [oben.core.types.numbers :as numbers])
+  (:require [oben.core.types.ptr :as ptr])
+  (:require [oben.core.types.fn :as fn])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.interfaces :as if])
   (:require [oben.core.util :as u])
@@ -11,22 +14,6 @@
   (ast/make-node t/%void
     identity
     {:class :oben/nop}))
-
-(defn %deref
-  [ptr-node]
-  (let [elt (:element-type (t/type-of ptr-node))]
-    (ast/make-node elt
-      (fn [ctx]
-        (letfn [(compile-pointer [ctx]
-                  (ctx/compile-node ctx ptr-node))
-                (load-pointee [ctx]
-                  (ctx/compile-instruction
-                   ctx (ir/load (ctx/compiled ctx ptr-node) {})))]
-          (-> ctx
-              compile-pointer
-              load-pointee)))
-      {:class :oben/deref
-       :children #{ptr-node}})))
 
 (defn %cast
   [target-type node]
@@ -54,7 +41,7 @@
 
 (defn %set!
   [target-node value-node]
-  (assert (= (t/typeclass-of target-node) ::t/Ptr))
+  (assert (isa? (t/tid-of target-node) ::ptr/Ptr))
   (let [elt (:element-type (t/type-of target-node))
         value-node (%cast elt value-node)]
     (ast/make-node elt
@@ -86,7 +73,7 @@
 (defn %var
   ([type init-node]
    (let [init-node (when init-node (%cast type init-node))]
-     (ast/make-node (t/Ptr type)
+     (ast/make-node (ptr/Ptr type)
        (fn [ctx]
          (let [ins (ir/alloca
                     (t/compile type)
@@ -316,7 +303,7 @@
         env (into {} (map vector param-names params))
         body-node (ast/parse (list* 'block :oben/default-block body) env)
         body-node (%cast return-type body-node)]
-    (ast/make-node (t/Fn return-type param-types)
+    (ast/make-node (fn/Fn return-type param-types)
       (fn [ctx]
         (let [saved ctx
               fname (ctx/get-assigned-name ctx)
@@ -350,7 +337,7 @@
 
 (defn %when
   [cond-node & then-nodes]
-  (let [cond-node (%cast! t/%i1 cond-node)
+  (let [cond-node (%cast! numbers/%i1 cond-node)
         then-label (make-label :then)
         end-label (make-label :end)]
     (ast/make-node t/%void
@@ -414,8 +401,8 @@
 
 (defn %not
   [node]
-  (let [bool-node (%cast! t/%i1 node)]
-    (ast/make-node t/%i1
+  (let [bool-node (%cast! numbers/%i1 node)]
+    (ast/make-node numbers/%i1
       (fn [ctx]
         (let [ctx (ctx/compile-node ctx bool-node)]
           (ctx/compile-instruction
@@ -447,40 +434,40 @@
                     {})]
          (ctx/compile-instruction ~'ctx ~'ins)))))
 
-(define-make-binary-op-compiler-method :add ::t/Int ir/add)
-(define-make-binary-op-compiler-method :add ::t/SInt ir/add)
-(define-make-binary-op-compiler-method :add ::t/FP ir/fadd)
+(define-make-binary-op-compiler-method :add ::numbers/Int ir/add)
+(define-make-binary-op-compiler-method :add ::numbers/SInt ir/add)
+(define-make-binary-op-compiler-method :add ::numbers/FP ir/fadd)
 
-(define-make-binary-op-compiler-method :sub ::t/Int ir/sub)
-(define-make-binary-op-compiler-method :sub ::t/SInt ir/sub)
-(define-make-binary-op-compiler-method :sub ::t/FP ir/fsub)
+(define-make-binary-op-compiler-method :sub ::numbers/Int ir/sub)
+(define-make-binary-op-compiler-method :sub ::numbers/SInt ir/sub)
+(define-make-binary-op-compiler-method :sub ::numbers/FP ir/fsub)
 
-(define-make-binary-op-compiler-method :mul ::t/Int ir/mul)
-(define-make-binary-op-compiler-method :mul ::t/SInt ir/mul)
-(define-make-binary-op-compiler-method :mul ::t/FP ir/fmul)
+(define-make-binary-op-compiler-method :mul ::numbers/Int ir/mul)
+(define-make-binary-op-compiler-method :mul ::numbers/SInt ir/mul)
+(define-make-binary-op-compiler-method :mul ::numbers/FP ir/fmul)
 
-(define-make-binary-op-compiler-method :div ::t/Int ir/udiv)
-(define-make-binary-op-compiler-method :div ::t/SInt ir/sdiv)
-(define-make-binary-op-compiler-method :div ::t/FP ir/fdiv)
+(define-make-binary-op-compiler-method :div ::numbers/Int ir/udiv)
+(define-make-binary-op-compiler-method :div ::numbers/SInt ir/sdiv)
+(define-make-binary-op-compiler-method :div ::numbers/FP ir/fdiv)
 
-(define-make-binary-op-compiler-method :rem ::t/Int ir/urem)
-(define-make-binary-op-compiler-method :rem ::t/SInt ir/srem)
-(define-make-binary-op-compiler-method :rem ::t/FP ir/frem)
+(define-make-binary-op-compiler-method :rem ::numbers/Int ir/urem)
+(define-make-binary-op-compiler-method :rem ::numbers/SInt ir/srem)
+(define-make-binary-op-compiler-method :rem ::numbers/FP ir/frem)
 
-(define-make-binary-op-compiler-method :bit-and ::t/Int ir/and)
-(define-make-binary-op-compiler-method :bit-and ::t/SInt ir/and)
+(define-make-binary-op-compiler-method :bit-and ::numbers/Int ir/and)
+(define-make-binary-op-compiler-method :bit-and ::numbers/SInt ir/and)
 
-(define-make-binary-op-compiler-method :bit-or ::t/Int ir/or)
-(define-make-binary-op-compiler-method :bit-or ::t/SInt ir/or)
+(define-make-binary-op-compiler-method :bit-or ::numbers/Int ir/or)
+(define-make-binary-op-compiler-method :bit-or ::numbers/SInt ir/or)
 
-(define-make-binary-op-compiler-method :bit-xor ::t/Int ir/xor)
-(define-make-binary-op-compiler-method :bit-xor ::t/SInt ir/xor)
+(define-make-binary-op-compiler-method :bit-xor ::numbers/Int ir/xor)
+(define-make-binary-op-compiler-method :bit-xor ::numbers/SInt ir/xor)
 
-(define-make-binary-op-compiler-method :bit-shift-left ::t/Int ir/shl)
-(define-make-binary-op-compiler-method :bit-shift-left ::t/SInt ir/shl)
+(define-make-binary-op-compiler-method :bit-shift-left ::numbers/Int ir/shl)
+(define-make-binary-op-compiler-method :bit-shift-left ::numbers/SInt ir/shl)
 
-(define-make-binary-op-compiler-method :bit-shift-right ::t/Int ir/lshr)
-(define-make-binary-op-compiler-method :bit-shift-right ::t/SInt ir/ashr)
+(define-make-binary-op-compiler-method :bit-shift-right ::numbers/Int ir/lshr)
+(define-make-binary-op-compiler-method :bit-shift-right ::numbers/SInt ir/ashr)
 
 (defmacro define-binary-op
   [op make-unary-form]
@@ -490,8 +477,8 @@
        ([~'x]
         ~((eval make-unary-form) 'x))
        ([~'x ~'y]
-        (let [result-type# (t/ubertype-of (t/type*of ~'x)
-                                          (t/type*of ~'y))
+        (let [result-type# (t/ubertype-of (ptr/type*of ~'x)
+                                          (ptr/type*of ~'y))
               ~'x (%cast result-type# ~'x)
               ~'y (%cast result-type# ~'y)]
           (ast/make-node result-type#
@@ -521,7 +508,7 @@
 (defn %bit-not
   [x]
   (let [size (:size (t/type-of x))]
-    (%bit-xor x (%cast (t/SInt size) (ast/constant -1)))))
+    (%bit-xor x (%cast (numbers/SInt size) (ast/constant -1)))))
 
 (defn %bit-and-not
   [lhs rhs]
@@ -546,26 +533,26 @@
                     {})]
          (ctx/compile-instruction ~'ctx ~'ins)))))
 
-(define-make-compare-op-compiler-method := ::t/Int ir/icmp :eq)
-(define-make-compare-op-compiler-method :!= ::t/Int ir/icmp :ne)
-(define-make-compare-op-compiler-method :< ::t/Int ir/icmp :ult)
-(define-make-compare-op-compiler-method :<= ::t/Int ir/icmp :ule)
-(define-make-compare-op-compiler-method :>= ::t/Int ir/icmp :uge)
-(define-make-compare-op-compiler-method :> ::t/Int ir/icmp :ugt)
+(define-make-compare-op-compiler-method := ::numbers/Int ir/icmp :eq)
+(define-make-compare-op-compiler-method :!= ::numbers/Int ir/icmp :ne)
+(define-make-compare-op-compiler-method :< ::numbers/Int ir/icmp :ult)
+(define-make-compare-op-compiler-method :<= ::numbers/Int ir/icmp :ule)
+(define-make-compare-op-compiler-method :>= ::numbers/Int ir/icmp :uge)
+(define-make-compare-op-compiler-method :> ::numbers/Int ir/icmp :ugt)
 
-(define-make-compare-op-compiler-method := ::t/SInt ir/icmp :eq)
-(define-make-compare-op-compiler-method :!= ::t/SInt ir/icmp :ne)
-(define-make-compare-op-compiler-method :< ::t/SInt ir/icmp :slt)
-(define-make-compare-op-compiler-method :<= ::t/SInt ir/icmp :sle)
-(define-make-compare-op-compiler-method :>= ::t/SInt ir/icmp :sge)
-(define-make-compare-op-compiler-method :> ::t/SInt ir/icmp :sgt)
+(define-make-compare-op-compiler-method := ::numbers/SInt ir/icmp :eq)
+(define-make-compare-op-compiler-method :!= ::numbers/SInt ir/icmp :ne)
+(define-make-compare-op-compiler-method :< ::numbers/SInt ir/icmp :slt)
+(define-make-compare-op-compiler-method :<= ::numbers/SInt ir/icmp :sle)
+(define-make-compare-op-compiler-method :>= ::numbers/SInt ir/icmp :sge)
+(define-make-compare-op-compiler-method :> ::numbers/SInt ir/icmp :sgt)
 
-(define-make-compare-op-compiler-method := ::t/FP ir/fcmp :oeq)
-(define-make-compare-op-compiler-method :!= ::t/FP ir/fcmp :one)
-(define-make-compare-op-compiler-method :< ::t/FP ir/fcmp :olt)
-(define-make-compare-op-compiler-method :<= ::t/FP ir/fcmp :ole)
-(define-make-compare-op-compiler-method :>= ::t/FP ir/fcmp :oge)
-(define-make-compare-op-compiler-method :> ::t/FP ir/fcmp :ogt)
+(define-make-compare-op-compiler-method := ::numbers/FP ir/fcmp :oeq)
+(define-make-compare-op-compiler-method :!= ::numbers/FP ir/fcmp :one)
+(define-make-compare-op-compiler-method :< ::numbers/FP ir/fcmp :olt)
+(define-make-compare-op-compiler-method :<= ::numbers/FP ir/fcmp :ole)
+(define-make-compare-op-compiler-method :>= ::numbers/FP ir/fcmp :oge)
+(define-make-compare-op-compiler-method :> ::numbers/FP ir/fcmp :ogt)
 
 (defmacro define-compare-op
   [op]
@@ -577,7 +564,7 @@
                                        (t/type-of ~'y))
               ~'x (%cast ubertype# ~'x)
               ~'y (%cast ubertype# ~'y)]
-          (ast/make-node t/%i1
+          (ast/make-node numbers/%i1
             (fn [ctx#]
               (let [ctx# (ctx/compile-node ctx# ~'x)
                     ctx# (ctx/compile-node ctx# ~'y)

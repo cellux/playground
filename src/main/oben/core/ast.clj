@@ -5,56 +5,6 @@
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m]))
 
-(defn integer-size
-  [n]
-  (cond
-    (<= -128 n 255) 8
-    (<= -32768 n 65535) 16
-    (<= -2147483648 n 4294967295) 32
-    (<= -9223372036854775808 n 18446744073709551613) 64
-    :else (throw (ex-info "integer constant too big"
-                          {:value n}))))
-
-(m/tabular
- (m/facts
-  (m/fact (integer-size ?n) => ?size))
- ?n ?size
- 0 8
- 1 8 -1 8
- 127 8 -127 8
- 128 8 -128 8
- 129 8 -129 16
- 255 8 -255 16
- 256 16 -256 16
- 32767 16 -32767 16
- 32768 16 -32768 16
- 32769 16 -32769 32
- 65535 16 -65535 32
- 65536 32 -65536 32
- 2147483647 32 -2147483647 32
- 2147483648 32 -2147483648 32
- 2147483649 32 -2147483649 64
- 4294967295 32 -4294967295 64
- 4294967296 64 -4294967296 64
- 9223372036854775807 64 -9223372036854775807 64
- 9223372036854775808 64 -9223372036854775808 64
- 9223372036854775809 64 -9223372036854775809 (m/throws clojure.lang.ExceptionInfo "integer constant too big"))
-
-(defn float-size
-  [x]
-  (cond
-    (= (.floatValue x) x) 32
-    (= (.doubleValue x) x) 64
-    :else (throw (ex-info "float constant too big"
-                          {:value x}))))
-
-(m/facts
- (m/fact (float-size 0.0) => 32)
- (m/fact (float-size 1.0) => 32)
- (m/fact (float-size -1.0) => 32)
- (m/fact (float-size Float/MAX_VALUE) => 32)
- (m/fact (float-size Double/MAX_VALUE) => 64))
-
 (defn make-node
   {:style/indent 1}
   [type compile-fn & opts]
@@ -75,17 +25,11 @@
   [node]
   (:class (meta node)))
 
+(defmulti determine-constant-type class)
+
 (defn constant
   [x]
-  (let [type (cond
-               (integer? x)
-               (if (neg? x)
-                 (t/SInt (integer-size x))
-                 (t/Int (integer-size x)))
-               (float? x)
-               (t/FP (float-size x))
-               :else
-               (throw (ex-info "cannot create constant" {:value x})))]
+  (let [type (determine-constant-type x)]
     (make-node type
       (fn [ctx]
         (let [const (ir/const (t/compile type) x)]

@@ -12,7 +12,7 @@
   ^{:dynamic true}
   *ctx* (ctx/new))
 
-(clj/defn alter-*ctx*!
+(clj/defn set-*ctx*!
   [new-ctx]
   (if (thread-bound? #'*ctx*)
     (set! *ctx* new-ctx)
@@ -49,7 +49,7 @@
               ctx (ctx/assemble-module ctx)
               invoker (ctx/invoker ctx f)
               result (apply invoker args)]
-          (alter-*ctx*! ctx)
+          (set-*ctx*! ctx)
           result))
       {:kind :oben/FN :fnode fnode})))
 
@@ -74,26 +74,39 @@
             (recur result (next items) (merge m head)))
       result)))
 
-(clj/defn unpack-fn-params
-  [params]
-  (with-meta
-    (items->obj-with-meta params symbol? true)
-    (meta params)))
+(clj/defn quote-tag-if-unbound-symbol
+  [m env]
+  (if (and (symbol? (:tag m))
+           (not (contains? env (:tag m))))
+    (update m :tag #(list 'quote %))
+    m))
 
-(clj/defn unpack-fn-decl
-  [decl]
+(clj/defn build-param-form
+  [sym env]
+  `(with-meta '~sym ~(quote-tag-if-unbound-symbol (meta sym) env)))
+
+(clj/defn build-param-forms
+  [params env]
+  (map #(build-param-form % env) (items->obj-with-meta params symbol? true)))
+
+(clj/defn build-make-fn-args
+  [decl env]
   (let [[params body] (items->obj-with-meta decl vector? false)]
-    (vector (unpack-fn-params params) body)))
+    (vector
+     `(with-meta
+        (vector ~@(build-param-forms params env))
+        ~(quote-tag-if-unbound-symbol (meta params) env))
+     `(quote ~body))))
 
 (clj/defmacro fn
   [& decl]
-  (let [[params body] (unpack-fn-decl decl)]
-    `(make-fn nil '~params '~body)))
+  (let [[params body] (build-make-fn-args decl &env)]
+    `(make-fn nil ~params ~body)))
 
 (clj/defmacro defn
   [name & decl]
-  (let [[params body] (unpack-fn-decl decl)]
-    `(def ~name (make-fn '~name '~params '~body))))
+  (let [[params body] (build-make-fn-args decl &env)]
+    `(def ~name (make-fn '~name ~params ~body))))
 
 (clj/defmacro defmacro
   [& args]
@@ -102,31 +115,10 @@
      (alter-var-root m# vary-meta assoc :kind :oben/MACRO)
      m#))
 
-(def params->typeclasses (comp (partial mapv t/typeclass-of) vector))
+(def params->tids (comp (partial mapv t/tid-of-node) vector))
 
 (clj/defmacro defmulti
   [name]
-  `(clj/defmulti ~name params->typeclasses))
-
-(clj/defn get-ctx
-  [f]
-  (assert (= (:kind (meta f)) :oben/FN))
-  (let [fnode (:fnode (meta f))]
-    (-> *ctx*
-        (ctx/next-epoch)
-        (ctx/forget-node fnode)
-        (ctx/compile-node fnode))))
-
-(clj/defn get-m
-  [f]
-  (:m (get-ctx f)))
-
-(clj/defn get-ir
-  [f]
-  (ir/render-module (get-m f)))
-
-(clj/defn dump-ir
-  [f]
-  (println (get-ir f)))
+  `(clj/defmulti ~name params->tids))
 
 (require 'oben.core)

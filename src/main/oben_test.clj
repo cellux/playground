@@ -3,10 +3,33 @@
   (:require [oben.core.context :as ctx])
   (:require [oben.core.ast :as ast])
   (:require [oben.core.types :as t])
-  (:require [oben.core.types :as t*])
+  (:require [oben.core.types.numbers :as numbers])
+  (:require [oben.core.types.numbers :as numbers*])
+  (:require [oben.core.types.ptr :as ptr])
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m])
   (:use [midje.repl]))
+
+(defn get-ctx
+  [f]
+  (assert (= (:kind (meta f)) :oben/FN))
+  (let [fnode (:fnode (meta f))]
+    (-> oben/*ctx*
+        (ctx/next-epoch)
+        (ctx/forget-node fnode)
+        (ctx/compile-node fnode))))
+
+(defn get-m
+  [f]
+  (:m (get-ctx f)))
+
+(defn get-ir
+  [f]
+  (ir/render-module (get-m f)))
+
+(defn dump-ir
+  [f]
+  (println (get-ir f)))
 
 (defn gen-fname
   [name return-type lhs-type rhs-type]
@@ -49,8 +72,8 @@
 
 (m/facts
  "type constructors memoize the types they return"
- (m/fact (identical? (t/Int 32) (t/Int 32)))
- (m/fact (identical? (t/Int 32) t/%i32)))
+ (m/fact (identical? (numbers/Int 32) (numbers/Int 32)))
+ (m/fact (identical? (numbers/Int 32) numbers/%i32)))
 
 (oben/with-temp-context
   (let [f (oben/fn ^i32 []
@@ -58,14 +81,14 @@
     (m/fact (f) => 7)))
 
 (oben/with-temp-context
-  (let [f (oben/fn {:tag (t*/Int 32)} []
+  (let [f (oben/fn {:tag (numbers*/Int 32)} []
             (+ 5 2))]
     (m/fact
      "a map before the param vector is evaluated and used as params metadata"
      (f) => 7)))
 
 (oben/with-temp-context
-  (let [f (oben/fn (t*/Int 32) []
+  (let [f (oben/fn (numbers*/Int 32) []
             (+ 5 2))]
     (m/fact
      "a list before the param vector is evaluated and used as the :tag field of params metadata"
@@ -77,8 +100,8 @@
     (m/fact (f 5 3) => 8)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [{:tag t/%i32} x
-                         (t/Int 32) y]
+  (let [f (oben/fn ^i32 [{:tag numbers/%i32} x
+                         (numbers/Int 32) y]
             (+ x y))]
     (m/fact (f 1 2) => 3)
     (m/fact (f 5 3) => 8)))
@@ -450,8 +473,8 @@
     (m/fact (f) => 12)))
 
 (m/fact
- (t/ubertype-of (t/Ptr (t/Int 32))
-                 (t/Int 8)) => (t/Int 32))
+ (t/ubertype-of (ptr/Ptr (numbers/Int 32))
+                 (numbers/Int 8)) => (numbers/Int 32))
 
 (oben/with-temp-context
   (let [count-to (oben/fn ^i32 [^i32 limit]
@@ -594,3 +617,13 @@
     (m/fact (select 2) => -4)
     (m/fact (select 3) => -6)
     (m/fact (select 4) => 10)))
+
+#_(oben/with-temp-context
+  (let [atype (t/Array numbers/%i32 10)
+        a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
+        f (oben/fn ^i32 [^atype a
+                         ^i32 index]
+            (get a index))]
+    (dump-ir f)
+    ;; (m/fact (f a 3) => 6)
+    ))

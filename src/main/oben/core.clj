@@ -8,16 +8,21 @@
              bit-not bit-and-not
              bit-shift-left bit-shift-right
              and or
-             = != < <= >= >])
+             = != < <= >= >
+             get put])
   (:require [oben.core.types :as types])
+  (:require [oben.core.types.numbers])
+  (:require [oben.core.types.ptr])
   (:require [oben.core.nodes :as nodes])
-  (:require [oben.core.methods]))
+  (:require [oben.core.protocols.Container]))
 
-(def i1 oben.core.types/%i1)
-(def i8 oben.core.types/%i8)
-(def i16 oben.core.types/%i16)
-(def i32 oben.core.types/%i32)
-(def i64 oben.core.types/%i64)
+(def void oben.core.types/%void)
+
+(def i1 oben.core.types.numbers/%i1)
+(def i8 oben.core.types.numbers/%i8)
+(def i16 oben.core.types.numbers/%i16)
+(def i32 oben.core.types.numbers/%i32)
+(def i64 oben.core.types.numbers/%i64)
 
 (def u1 i1)
 (def u8 i8)
@@ -25,19 +30,18 @@
 (def u32 i32)
 (def u64 i64)
 
-(def s1 oben.core.types/%s1)
-(def s8 oben.core.types/%s8)
-(def s16 oben.core.types/%s16)
-(def s32 oben.core.types/%s32)
-(def s64 oben.core.types/%s64)
+(def s1 oben.core.types.numbers/%s1)
+(def s8 oben.core.types.numbers/%s8)
+(def s16 oben.core.types.numbers/%s16)
+(def s32 oben.core.types.numbers/%s32)
+(def s64 oben.core.types.numbers/%s64)
 
-(def f32 oben.core.types/%f32)
-(def f64 oben.core.types/%f64)
+(def f32 oben.core.types.numbers/%f32)
+(def f64 oben.core.types.numbers/%f64)
 
-(def void oben.core.types/%void)
+(def deref oben.core.types.ptr/%deref)
 
 (def nop oben.core.nodes/%nop)
-(def deref oben.core.nodes/%deref)
 (def cast oben.core.nodes/%cast)
 (def cast! oben.core.nodes/%cast!)
 (def set! oben.core.nodes/%set!)
@@ -88,3 +92,6 @@
 (def <= oben.core.nodes/%<=)
 (def >= oben.core.nodes/%>=)
 (def > oben.core.nodes/%>)
+
+(def get oben.core.protocols.Container/get)
+(def put oben.core.protocols.Container/put)
