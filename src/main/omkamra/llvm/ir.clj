@@ -298,11 +298,11 @@
 
 (defmethod render-complex-type :struct
   [t]
-  (format-struct-type "{ %s }" t))
+  (format-struct-type "{%s}" t))
 
 (defmethod render-complex-type :packed-struct
   [t]
-  (format-struct-type "<{ %s }>" t))
+  (format-struct-type "<{%s}>" t))
 
 (defmethod render-complex-type :opaque-struct
   [t]
@@ -368,6 +368,11 @@
     (vector? value)
     (format "[ %s ]" (str/join ", " (map render-typed-value value)))))
 
+(defmethod render-literal :struct
+  [type value]
+  (let [[_ element-types] type]
+    (format "{ %s }" (str/join ", " (map render-typed-value value)))))
+
 (def
   ^{:private true
     :dynamic true
@@ -399,18 +404,42 @@
       (render-name name)
       (render-literal type value))))
 
-(defn const
+(defmulti const
+  (fn [type value]
+    (extract-type-tag type)))
+
+(defmethod const :default
   [type value]
   {:kind :const
    :type type
    :value value})
 
+(defmethod const :array
+  [type value]
+  (let [[_ elt size] type]
+    {:kind :const
+     :type type
+     :value (cond
+              (clj/and (= elt i8) (string? value)) value
+              (vector? value) (mapv #(const elt %) value)
+              :else (throw (ex-info "invalid array constant" {:type type :value value})))}))
+
+(defmethod const :struct
+  [type value]
+  (let [[_ element-types] type]
+    {:kind :const
+     :type type
+     :value (mapv const element-types value)}))
+
 (m/facts
  (m/fact
   (render-typed-value (const i64 1234)) => "i64 1234")
  (m/fact
-  (render-typed-value (const [:array i16 3] (mapv #(const i16 %) [5 8 -3])))
+  (render-typed-value (const [:array i16 3] [5 8 -3]))
   => "[3 x i16] [ i16 5, i16 8, i16 -3 ]")
+ (m/fact
+  (render-typed-value (const [:struct [i32 [:ptr i32] [:array i8 2]]] [5 nil [3 4]]))
+  => "{i32, i32*, [2 x i8]} { i32 5, i32* null, [2 x i8] [ i8 3, i8 4 ] }")
  (m/fact
   (render-value (const i64 1234)) => "1234"))
 
@@ -425,7 +454,10 @@
  (m/fact (render-literal :double -5.25) => "-5.25")
  (m/fact (render-literal [:ptr i8] nil) => "null")
  (m/fact (render-literal [:array i8] "Hello, world\n\0") => "c\"Hello, world\\0A\\00\"")
- (m/fact (render-literal [:array i16] (mapv #(const i16 %) [5 8 -3])) => "[ i16 5, i16 8, i16 -3 ]"))
+ (m/fact (render-literal [:array i16] (mapv #(const i16 %) [5 8 -3])) => "[ i16 5, i16 8, i16 -3 ]")
+ (m/fact (render-literal [:struct [i32 [:ptr i32] [:array i8 2]]]
+                         [(const i32 5) (const [:ptr i32] nil) (const [:array i8 2] [3 4])])
+         => "{ i32 5, i32* null, [2 x i8] [ i8 3, i8 4 ] }"))
 
 (def void {:type :void :value :void})
 
@@ -1186,14 +1218,14 @@
 (m/facts
  (m/fact
   (render-instruction
-   (extractvalue (const [:array i32 4] (mapv #(const i32 %) [10 9 8 7]))
+   (extractvalue (const [:array i32 4] [10 9 8 7])
                  [(const i32 2)]
                  {:name :a_elt}))
   => "%a_elt = extractvalue [4 x i32] [ i32 10, i32 9, i32 8, i32 7 ], 2")
  (m/fact
   "literal indices are automatically wrapped as (const i32 x)"
   (render-instruction
-   (extractvalue (const [:array i32 4] (mapv #(const i32 %) [10 9 8 7]))
+   (extractvalue (const [:array i32 4] [10 9 8 7])
                  [2]
                  {:name :a_elt}))
   => "%a_elt = extractvalue [4 x i32] [ i32 10, i32 9, i32 8, i32 7 ], 2"))
@@ -1224,7 +1256,7 @@
 (m/facts
  (m/fact
   (render-instruction
-   (insertvalue (const [:array i32 4] (mapv #(const i32 %) [10 9 8 7]))
+   (insertvalue (const [:array i32 4] [10 9 8 7])
                 {:type i32 :name :x}
                 [(const i32 2)]
                 {:name :updated_array}))

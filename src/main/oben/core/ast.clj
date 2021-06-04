@@ -28,14 +28,16 @@
 (defmulti determine-constant-type class)
 
 (defn constant
-  [x]
-  (let [type (determine-constant-type x)]
-    (make-node type
-      (fn [ctx]
-        (let [const (ir/const (t/compile type) x)]
-          (ctx/save-ir ctx const)))
-      {:class :oben/constant
-       :value x})))
+  ([type x]
+   (make-node type
+     (fn [ctx]
+       (let [const (ir/const (t/compile type) x)]
+         (ctx/save-ir ctx const)))
+     {:class :oben/constant
+      :value x}))
+  ([x]
+   (let [type (determine-constant-type x)]
+     (constant type x))))
 
 (defn constant?
   [x]

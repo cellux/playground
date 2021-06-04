@@ -643,12 +643,36 @@
      "vars with initializer only"
      (f 7) => 15.75)))
 
+(oben/with-temp-context
+  (let [f (oben/fn ^i32 []
+            (let [a (array i32 [9 8 7 6 5 4 3 2 1 0])]
+              (get a 3)))]
+    (m/fact
+     "array literals support get with a constant index"
+     (f) => 6)))
+
+;; (oben/with-temp-context
+;;   (let [f (oben/fn ^i32 [i32 index]
+;;             (let [a (var (array i32 [9 8 7 6 5 4 3 2 1 0]))]
+;;               (get-in a [0 index])))]
+;;     (m/fact
+;;      "array variables are pointers to the array (not to its first element)"
+;;      (f a 3) => 6)))
+
+;; (oben/with-temp-context
+;;   (let [f (oben/fn ^i32 [i32 index]
+;;             (let [a (var i32 (array i32 [9 8 7 6 5 4 3 2 1 0]))]
+;;               (get a index)))]
+;;     (m/fact
+;;      "array variable automatically casted to a pointer to its first element"
+;;      (f a 3) => 6)))
+
 #_(oben/with-temp-context
-  (let [atype (t/Array numbers/%i32 10)
-        a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
-        f (oben/fn ^i32 [^atype a
-                         ^i32 index]
-            (get a index))]
-    (dump-ir f)
-    ;; (m/fact (f a 3) => 6)
-    ))
+    (let [atype (t/Array numbers/%i32 10)
+          a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
+          f (oben/fn ^i32 [^i32* a
+                           ^i32 index]
+              (get a index))]
+      (dump-ir f)
+      ;; (m/fact (f a 3) => 6)
+      ))

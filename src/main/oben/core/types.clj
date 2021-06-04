@@ -92,6 +92,8 @@
   [t]
   (isa? (tid-of-type t) ::Value))
 
+(derive ::Aggregate ::Value)
+
 ;; get-ubertype
 
 (defmulti get-ubertype

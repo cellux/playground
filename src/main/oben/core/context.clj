@@ -9,7 +9,7 @@
   (:require [omkamra.llvm.engine :as llvm-engine])
   (:import (java.nio ByteBuffer ByteOrder))
   (:import (com.kenai.jffi Type CallContext CallingConvention
-                           Invoker HeapInvocationBuffer))
+                           Invoker HeapInvocationBuffer ArrayFlags))
   (:require [midje.sweet :as m]))
 
 (def default-ftab-size 65536)
@@ -282,7 +282,8 @@
                  16 Type/UINT16
                  32 Type/UINT32
                  64 Type/UINT64))
-    :ptr Type/POINTER))
+    :ptr Type/POINTER
+    :array Type/POINTER))
 
 (defn invoker
   [ctx f]
@@ -308,7 +309,19 @@
                          64 (.putLong hib (long arg))))
             :float (.putFloat hib (float arg))
             :double (.putDouble hib (double arg))
-            :ptr (.putAddress hib (long arg))))
+            :ptr (.putAddress hib (long arg))
+            :array (let [[_ elt size] type
+                         flags ArrayFlags/PINNED]
+                     (case (ir/extract-type-tag elt)
+                       :integer (let [[_ size] type]
+                                  (case size
+                                    1 (.putArray hib (bytes arg) 0 (count arg) flags)
+                                    8 (.putArray hib (bytes arg) 0 (count arg) flags)
+                                    16 (.putArray hib (shorts arg) 0 (count arg) flags)
+                                    32 (.putArray hib (ints arg) 0 (count arg) flags)
+                                    64 (.putArray hib (longs arg) 0 (count arg) flags)))
+                       :float (.putArray hib (floats arg) 0 (count arg) flags)
+                       :double (.putArray hib (doubles arg) 0 (count arg) flags)))))
         (case (ir/extract-type-tag result-type)
           :ptr (.invokeAddress invoker cc address hib)
           :integer (let [[_ size] result-type]

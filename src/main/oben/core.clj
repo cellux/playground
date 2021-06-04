@@ -12,6 +12,7 @@
              get put])
   (:require [oben.core.types :as types])
   (:require [oben.core.types.numbers])
+  (:require [oben.core.types.array])
   (:require [oben.core.types.ptr])
   (:require [oben.core.nodes :as nodes])
   (:require [oben.core.protocols.Container]))
@@ -38,6 +39,8 @@
 
 (def f32 oben.core.types.numbers/%f32)
 (def f64 oben.core.types.numbers/%f64)
+
+(def array oben.core.types.array/%array)
 
 (def deref oben.core.types.ptr/%deref)
 
