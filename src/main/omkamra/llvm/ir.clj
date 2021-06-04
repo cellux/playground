@@ -368,18 +368,6 @@
     (vector? value)
     (format "[ %s ]" (str/join ", " (map render-typed-value value)))))
 
-(m/facts
- (m/fact (render-literal :void :void) => "void")
- (m/fact (render-literal i32 1234) => "1234")
- (m/fact (render-literal i1 true) => "true")
- (m/fact (render-literal i1 false) => "false")
- (m/fact (render-literal i1 0) => "0")
- (m/fact (render-literal i1 1) => "1")
- (m/fact (render-literal :float 5.25) => "5.25")
- (m/fact (render-literal :double -5.25) => "-5.25")
- (m/fact (render-literal [:ptr i8] nil) => "null")
- (m/fact (render-literal [:array i8] "Hello, world\n\0") => "c\"Hello, world\\0A\\00\""))
-
 (def
   ^{:private true
     :dynamic true
@@ -421,7 +409,23 @@
  (m/fact
   (render-typed-value (const i64 1234)) => "i64 1234")
  (m/fact
+  (render-typed-value (const [:array i16 3] (mapv #(const i16 %) [5 8 -3])))
+  => "[3 x i16] [ i16 5, i16 8, i16 -3 ]")
+ (m/fact
   (render-value (const i64 1234)) => "1234"))
+
+(m/facts
+ (m/fact (render-literal :void :void) => "void")
+ (m/fact (render-literal i32 1234) => "1234")
+ (m/fact (render-literal i1 true) => "true")
+ (m/fact (render-literal i1 false) => "false")
+ (m/fact (render-literal i1 0) => "0")
+ (m/fact (render-literal i1 1) => "1")
+ (m/fact (render-literal :float 5.25) => "5.25")
+ (m/fact (render-literal :double -5.25) => "-5.25")
+ (m/fact (render-literal [:ptr i8] nil) => "null")
+ (m/fact (render-literal [:array i8] "Hello, world\n\0") => "c\"Hello, world\\0A\\00\"")
+ (m/fact (render-literal [:array i16] (mapv #(const i16 %) [5 8 -3])) => "[ i16 5, i16 8, i16 -3 ]"))
 
 (def void {:type :void :value :void})
 
@@ -1157,6 +1161,74 @@
                     {:inbounds true
                      :name :arrayidx})))
   => "%arrayidx = getelementptr inbounds [4 x [3 x i32]], [4 x [3 x i32]]* %matrix, i64 0, i64 %idxprom"))
+
+(defn extractvalue
+  [val indices opts]
+  (let [val-type (:type val)]
+    (assert (vector? val-type))
+    (assert (#{:struct :array} (first val-type)))
+    (let [indices (map sanitize-gep-index indices)]
+      (assoc opts
+             :kind :instruction
+             :op :extractvalue
+             :val val
+             :indices indices
+             :type (infer-element-type val-type indices)))))
+
+(defmethod render-instruction :extractvalue
+  [{:keys [val indices] :as i}]
+  (let [name (find-name-of i)]
+    (format "%s = extractvalue %s, %s"
+            (render-name name)
+            (render-typed-value val)
+            (str/join ", " (map render-value indices)))))
+
+(m/facts
+ (m/fact
+  (render-instruction
+   (extractvalue (const [:array i32 4] (mapv #(const i32 %) [10 9 8 7]))
+                 [(const i32 2)]
+                 {:name :a_elt}))
+  => "%a_elt = extractvalue [4 x i32] [ i32 10, i32 9, i32 8, i32 7 ], 2")
+ (m/fact
+  "literal indices are automatically wrapped as (const i32 x)"
+  (render-instruction
+   (extractvalue (const [:array i32 4] (mapv #(const i32 %) [10 9 8 7]))
+                 [2]
+                 {:name :a_elt}))
+  => "%a_elt = extractvalue [4 x i32] [ i32 10, i32 9, i32 8, i32 7 ], 2"))
+
+(defn insertvalue
+  [val elt indices opts]
+  (let [val-type (:type val)]
+    (assert (vector? val-type))
+    (assert (#{:struct :array} (first val-type)))
+    (let [indices (map sanitize-gep-index indices)]
+      (assoc opts
+             :kind :instruction
+             :op :insertvalue
+             :val val
+             :elt elt
+             :indices indices
+             :type val-type))))
+
+(defmethod render-instruction :insertvalue
+  [{:keys [val elt indices] :as i}]
+  (let [name (find-name-of i)]
+    (format "%s = insertvalue %s, %s, %s"
+            (render-name name)
+            (render-typed-value val)
+            (render-typed-value elt)
+            (str/join ", " (map render-value indices)))))
+
+(m/facts
+ (m/fact
+  (render-instruction
+   (insertvalue (const [:array i32 4] (mapv #(const i32 %) [10 9 8 7]))
+                {:type i32 :name :x}
+                [(const i32 2)]
+                {:name :updated_array}))
+  => "%updated_array = insertvalue [4 x i32] [ i32 10, i32 9, i32 8, i32 7 ], i32 %x, 2"))
 
 (def
   ^{:private true}
