@@ -157,7 +157,7 @@
       (> t-size node-size)
       (zext node t-size)
       (= t-size 1)
-      (ast/parse `(> ~node 0) {})
+      (ast/parse `(> ~node 0))
       force?
       (trunc node t-size)
       :else
@@ -174,7 +174,7 @@
       (> t-size node-size)
       (zext node t-size)
       (= t-size 1)
-      (ast/parse `(!= ~node 0) {})
+      (ast/parse `(!= ~node 0))
       force?
       (trunc node t-size)
       :else
@@ -189,7 +189,7 @@
       (or (>= t-size node-size) force?)
       (fptoui node t-size)
       (= t-size 1)
-      (ast/parse `(!= ~node 0.0) {})
+      (ast/parse `(!= ~node 0.0))
       :else
       (throw (ex-info "rejected narrowing FP->Int conversion")))))
 

@@ -39,7 +39,7 @@
 
 (clj/defn make-fn
   [name params body]
-  (let [fnode (-> (ast/parse (list* 'fn params body) {})
+  (let [fnode (-> (ast/parse `(fn ~params ~@body))
                   (vary-meta assoc :name name))]
     (with-meta
       (clj/fn [& args]

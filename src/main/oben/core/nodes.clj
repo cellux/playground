@@ -176,7 +176,7 @@
    (let [{:keys [block-id return-label return-type]}
          (get-in &env [:oben/blocks block-name])
          value-node (if return-type
-                      (ast/parse (list 'cast return-type form) &env)
+                      (ast/parse `(cast ~return-type ~form) &env)
                       (ast/parse form &env))]
      (ast/make-node t/%unseen
        (fn [ctx]
@@ -237,7 +237,7 @@
         env (update &env :oben/blocks
                     assoc name {:block-id block-id
                                 :return-label return-label})
-        body-node (ast/parse (list* 'do body) env)
+        body-node (ast/parse `(do ~@body) env)
         find-return-nodes (fn [node]
                             (->> (node-descendants node)
                                  (filter #(and (= (ast/nodeclass-of %) :oben/return-from)
@@ -246,7 +246,7 @@
                          (map (comp :return-type meta))
                          (apply t/ubertype-of (t/type-of body-node)))
         env (assoc-in env [:oben/blocks name :return-type] return-type)
-        body-node (ast/parse (list* 'do body) env)
+        body-node (ast/parse `(do ~@body) env)
         tangible-body? (t/tangible? (t/type-of body-node))
         body-node (if tangible-body?
                     (%cast return-type body-node)
@@ -305,7 +305,7 @@
         params (mapv ast/function-parameter param-names param-types)
         void? (= return-type t/%void)
         env (into {} (map vector param-names params))
-        body-node (ast/parse (list* 'block :oben/default-block body) env)
+        body-node (ast/parse `(block :oben/default-block ~@body) env)
         body-node (%cast return-type body-node)]
     (ast/make-node (fn/Fn return-type param-types)
       (fn [ctx]

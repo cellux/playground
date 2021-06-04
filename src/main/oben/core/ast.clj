@@ -86,42 +86,44 @@
        (= :oben/MACRO (:kind (meta x)))))
 
 (defn parse
-  [&form &env]
-  (letfn [(die []
-            (throw (ex-info "cannot parse form" {:form &form :env &env})))]
-    (cond
-      (node? &form)
-      &form
+  ([form env]
+   (letfn [(die []
+             (throw (ex-info "cannot parse form" {:form form :env env})))]
+     (cond
+       (node? form)
+       form
 
-      (t/type? &form)
-      &form
+       (t/type? form)
+       form
 
-      (symbol? &form)
-      (u/resolve &form &env)
+       (symbol? form)
+       (u/resolve form env)
 
-      (number? &form)
-      (constant &form)
+       (number? form)
+       (constant form)
 
-      (sequential? &form)
-      (let [op (parse (first &form) &env)
-            args (next &form)
-            result (cond
-                     (fnode? op)
-                     (funcall op (map #(parse % &env) args))
+       (sequential? form)
+       (let [op (parse (first form) env)
+             args (next form)
+             result (cond
+                      (fnode? op)
+                      (funcall op (map #(parse % env) args))
 
-                     (t/type? op)
-                     (let [arg (parse (first args) &env)]
-                       (t/cast op arg true))
+                      (t/type? op)
+                      (let [arg (parse (first args) env)]
+                        (t/cast op arg true))
 
-                     (oben-macro? op)
-                     (apply op &form &env args)
+                      (oben-macro? op)
+                      (apply op form env args)
 
-                     (or (fn? op)
-                         (instance? clojure.lang.MultiFn op))
-                     (apply op (map #(parse % &env) args))
+                      (or (fn? op)
+                          (instance? clojure.lang.MultiFn op))
+                      (apply op (map #(parse % env) args))
 
-                     :else (die))]
-        (recur result &env))
+                      :else (die))]
+         (recur result env))
 
-      :else
-      (die))))
+       :else
+       (die))))
+  ([form]
+   (parse form {})))
