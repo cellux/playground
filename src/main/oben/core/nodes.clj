@@ -101,7 +101,11 @@
        {:class :oben/var
         :children (when init-node #{init-node})})))
   ([type]
-   (%var type nil)))
+   (cond (t/type? type) (%var type nil)
+         (ast/node? type) (let [init-node type
+                                type (t/type-of init-node)]
+                            (%var type init-node))
+         :else (throw (ex-info "invalid var form")))))
 
 (defn- drop-all-after-first-return
   [nodes]

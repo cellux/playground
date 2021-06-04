@@ -344,6 +344,14 @@
     (str value)
     (format "%d" value)))
 
+(defmethod render-literal :float
+  [_ value]
+  (Float/toString value))
+
+(defmethod render-literal :double
+  [_ value]
+  (Double/toString value))
+
 (defmethod render-literal :ptr
   [_ value]
   (if (nil? value) "null"
@@ -367,6 +375,8 @@
  (m/fact (render-literal i1 false) => "false")
  (m/fact (render-literal i1 0) => "0")
  (m/fact (render-literal i1 1) => "1")
+ (m/fact (render-literal :float 5.25) => "5.25")
+ (m/fact (render-literal :double -5.25) => "-5.25")
  (m/fact (render-literal [:ptr i8] nil) => "null")
  (m/fact (render-literal [:array i8] "Hello, world\n\0") => "c\"Hello, world\\0A\\00\""))
 

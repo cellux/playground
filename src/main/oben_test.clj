@@ -618,6 +618,31 @@
     (m/fact (select 3) => -6)
     (m/fact (select 4) => 10)))
 
+(oben/with-temp-context
+  (let [f (oben/fn ^i32 [^i32 increment]
+            (let [v (var i32 (+ 5 3))]
+              (+ v increment)))]
+    (m/fact
+     "vars with type and initializer"
+     (f 7) => 15)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^i32 [^i32 increment]
+            (let [v (var i32)]
+              (set! v (+ 5 3))
+              (+ v increment)))]
+    (m/fact
+     "vars with type only"
+     (f 7) => 15)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^f32 [^i32 increment]
+            (let [v (var (+ 5.0 3.75))]
+              (+ v increment)))]
+    (m/fact
+     "vars with initializer only"
+     (f 7) => 15.75)))
+
 #_(oben/with-temp-context
   (let [atype (t/Array numbers/%i32 10)
         a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
