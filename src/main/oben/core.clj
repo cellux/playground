@@ -14,22 +14,20 @@
   (:require [oben.core.types.numbers])
   (:require [oben.core.types.array])
   (:require [oben.core.types.ptr])
+  (:require [oben.core.types.var])
   (:require [oben.core.nodes :as nodes])
+  (:require [oben.core.protocols.Eq])
+  (:require [oben.core.protocols.Ord])
+  (:require [oben.core.protocols.Algebra])
   (:require [oben.core.protocols.Container]))
 
 (def void oben.core.types/%void)
 
-(def i1 oben.core.types.numbers/%i1)
-(def i8 oben.core.types.numbers/%i8)
-(def i16 oben.core.types.numbers/%i16)
-(def i32 oben.core.types.numbers/%i32)
-(def i64 oben.core.types.numbers/%i64)
-
-(def u1 i1)
-(def u8 i8)
-(def u16 i16)
-(def u32 i32)
-(def u64 i64)
+(def u1 oben.core.types.numbers/%u1)
+(def u8 oben.core.types.numbers/%u8)
+(def u16 oben.core.types.numbers/%u16)
+(def u32 oben.core.types.numbers/%u32)
+(def u64 oben.core.types.numbers/%u64)
 
 (def s1 oben.core.types.numbers/%s1)
 (def s8 oben.core.types.numbers/%s8)
@@ -41,14 +39,13 @@
 (def f64 oben.core.types.numbers/%f64)
 
 (def array oben.core.types.array/%array)
-
 (def deref oben.core.types.ptr/%deref)
+(def var oben.core.types.var/%var)
 
 (def nop oben.core.nodes/%nop)
 (def cast oben.core.nodes/%cast)
 (def cast! oben.core.nodes/%cast!)
 (def set! oben.core.nodes/%set!)
-(def var oben.core.nodes/%var)
 
 (def do oben.core.nodes/%do)
 
@@ -68,33 +65,33 @@
 (def condp oben.core.nodes/%condp)
 (def case oben.core.nodes/%case)
 (def not oben.core.nodes/%not)
-(def while oben.core.nodes/%while)
-
-(def + oben.core.nodes/%add)
-(def - oben.core.nodes/%sub)
-(def * oben.core.nodes/%mul)
-(def / oben.core.nodes/%div)
-(def % oben.core.nodes/%rem)
-
-(def bit-and oben.core.nodes/%bit-and)
-(def bit-or oben.core.nodes/%bit-or)
-(def bit-xor oben.core.nodes/%bit-xor)
-
-(def bit-not oben.core.nodes/%bit-not)
-(def bit-and-not oben.core.nodes/%bit-and-not)
-
-(def bit-shift-left oben.core.nodes/%bit-shift-left)
-(def bit-shift-right oben.core.nodes/%bit-shift-right)
-
 (def and oben.core.nodes/%and)
 (def or oben.core.nodes/%or)
+(def while oben.core.nodes/%while)
 
-(def = oben.core.nodes/%=)
-(def != oben.core.nodes/%!=)
-(def < oben.core.nodes/%<)
-(def <= oben.core.nodes/%<=)
-(def >= oben.core.nodes/%>=)
-(def > oben.core.nodes/%>)
+(def = oben.core.protocols.Eq/=)
+(def != oben.core.protocols.Eq/!=)
+
+(def < oben.core.protocols.Ord/<)
+(def <= oben.core.protocols.Ord/<=)
+(def >= oben.core.protocols.Ord/>=)
+(def > oben.core.protocols.Ord/>)
+
+(def + oben.core.protocols.Algebra/+)
+(def - oben.core.protocols.Algebra/-)
+(def * oben.core.protocols.Algebra/*)
+(def / oben.core.protocols.Algebra//)
+(def % oben.core.protocols.Algebra/%)
+
+(def bit-and oben.core.protocols.Bitwise/bit-and)
+(def bit-or oben.core.protocols.Bitwise/bit-or)
+(def bit-xor oben.core.protocols.Bitwise/bit-xor)
+
+(def bit-shift-left oben.core.protocols.Bitwise/bit-shift-left)
+(def bit-shift-right oben.core.protocols.Bitwise/bit-shift-right)
+
+(def bit-not oben.core.protocols.Bitwise/bit-not)
+(def bit-and-not oben.core.protocols.Bitwise/bit-and-not)
 
 (def get oben.core.protocols.Container/get)
 (def put oben.core.protocols.Container/put)

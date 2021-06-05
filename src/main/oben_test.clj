@@ -67,65 +67,65 @@
     (with-operator-functions
       [+ - * /]
       [add sub mul div]
-      [i32 s32 f32]
+      [u32 s32 f32]
       (m/fact (add:ii->i 1 2) => 3)))
 
 (m/facts
  "type constructors memoize the types they return"
- (m/fact (identical? (numbers/Int 32) (numbers/Int 32)))
- (m/fact (identical? (numbers/Int 32) numbers/%i32)))
+ (m/fact (identical? (numbers/UInt 32) (numbers/UInt 32)))
+ (m/fact (identical? (numbers/UInt 32) numbers/%u32)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 []
+  (let [f (oben/fn ^u32 []
             (+ 5 2))]
     (m/fact (f) => 7)))
 
 (oben/with-temp-context
-  (let [f (oben/fn {:tag (numbers*/Int 32)} []
+  (let [f (oben/fn {:tag (numbers*/UInt 32)} []
             (+ 5 2))]
     (m/fact
      "a map before the param vector is evaluated and used as params metadata"
      (f) => 7)))
 
 (oben/with-temp-context
-  (let [f (oben/fn (numbers*/Int 32) []
+  (let [f (oben/fn (numbers*/UInt 32) []
             (+ 5 2))]
     (m/fact
      "a list before the param vector is evaluated and used as the :tag field of params metadata"
      (f) => 7)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i32 x ^i32 y] (+ x y))]
+  (let [f (oben/fn ^u32 [^u32 x ^u32 y] (+ x y))]
     (m/fact (f 1 2) => 3)
     (m/fact (f 5 3) => 8)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [{:tag numbers/%i32} x
-                         (numbers/Int 32) y]
+  (let [f (oben/fn ^u32 [{:tag numbers/%u32} x
+                         (numbers/UInt 32) y]
             (+ x y))]
     (m/fact (f 1 2) => 3)
     (m/fact (f 5 3) => 8)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (+ x y)
             (+ 5 2))]
     (m/fact (f 1 2) => 7)
     (m/fact (f 5 3) => 7)))
 
 (oben/defn add
-  ^i32 [^i32 x ^i32 y]
+  ^u32 [^u32 x ^u32 y]
   (+ x y))
 
 (m/facts
  (m/fact (add (add 1 2) (add 7 -2)) => 8))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i16 x ^i8 y] (+ x y))]
+  (let [f (oben/fn ^u32 [^u16 x ^u8 y] (+ x y))]
     (m/fact (f 1 2) => 3)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (do)
             (do (+ x y))
             (do
@@ -134,29 +134,29 @@
     (m/fact (f 1 2) => 12)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^f32 [^i32 x ^i32 y]
-            (let [g (fn ^i32 [^i16 x ^i8 y] (+ x y))]
-              (g (cast! i16 x) (cast! i8 y))))]
+  (let [f (oben/fn ^f32 [^u32 x ^u32 y]
+            (let [g (fn ^u32 [^u16 x ^u8 y] (+ x y))]
+              (g (cast! u16 x) (cast! u8 y))))]
     (m/fact
      "forced casts"
      (f 6 3) => 9.0)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^f32 [^i32 x ^i32 y]
-            (let [g (fn ^i32 [^i16 x ^i8 y] (+ x y))]
-              (g (i16 x) (i8 y))))]
+  (let [f (oben/fn ^f32 [^u32 x ^u32 y]
+            (let [g (fn ^u32 [^u16 x ^u8 y] (+ x y))]
+              (g (u16 x) (u8 y))))]
     (m/fact
      "types in operator position can be also used for forced casts"
      (f 6 3) => 9.0)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (+ x y))]
     (m/fact (f 6 3) => 9))
-  (let [f (oben/fn ^s32 [^i32 x ^s32 y]
+  (let [f (oben/fn ^s32 [^u32 x ^s32 y]
             (+ x y))]
     (m/fact (f 6 -3) => 3))
-  (let [f (oben/fn ^s32 [^s32 x ^i32 y]
+  (let [f (oben/fn ^s32 [^s32 x ^u32 y]
             (+ x y))]
     (m/fact (f -3 6) => 3))
   (let [f (oben/fn ^s32 [^s32 x ^s32 y]
@@ -167,13 +167,13 @@
   (let [f (oben/fn ^f32 [^f32 x ^f32 y]
             (+ x y))]
     (m/fact (f 6.5 3.25) => 9.75))
-  (let [f (oben/fn ^f32 [^f32 x ^i32 y]
+  (let [f (oben/fn ^f32 [^f32 x ^u32 y]
             (+ x y))]
     (m/fact (f 6.5 3) => 9.5))
-  (let [f (oben/fn ^f32 [^i32 x ^f32 y]
+  (let [f (oben/fn ^f32 [^u32 x ^f32 y]
             (+ x y))]
     (m/fact (f 3 6.5) => 9.5))
-  (let [f (oben/fn ^f32 [^i32 x ^i32 y]
+  (let [f (oben/fn ^f32 [^u32 x ^u32 y]
             (+ x y))]
     (m/fact (f 3 6) => 9.0)))
 
@@ -206,7 +206,7 @@
     (m/fact (f 6.5 -3.25) => -2.0)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^s32 [^i32 x]
+  (let [f (oben/fn ^s32 [^u32 x]
             (- x))]
     (m/fact (f 5) => -5))
   (let [f (oben/fn ^s32 [^s32 x]
@@ -218,7 +218,7 @@
     (m/fact (f -5.25) => 5.25)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (% x y))]
     (m/fact (f 67 7) => 4))
   (let [f (oben/fn ^s32 [^s32 x ^s32 y]
@@ -232,7 +232,7 @@
     (m/fact (f 7.25 3.5) => 0.25)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (bit-and x y))]
     (m/fact (f 0x1234 0xff) => 0x34)
     (m/fact (f 0x1234 0xff00) => 0x1200))
@@ -241,7 +241,7 @@
     (m/fact (f -2 0xff) => 0xfe)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (bit-or x y))]
     (m/fact (f 0x1234 0xff) => 0x12ff)
     (m/fact (f 0x1234 0xff00) => 0xff34))
@@ -250,51 +250,51 @@
     (m/fact (f -2 0xff) => -1)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (bit-xor x y))]
     (m/fact (f 0x1234 0xff) => (+ 0x1200 (- 0xff 0x34)))
     (m/fact (f 0x1234 0xff00) => (+ 0x34 (- 0xff00 0x1200)))))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i1 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u1 [^u32 x ^u32 y]
             (= x y))]
     (m/fact (f 3 5) => 0)
     (m/fact (f 3 3) => 1))
-  (let [f (oben/fn ^i1 [^s32 x ^s32 y]
+  (let [f (oben/fn ^u1 [^s32 x ^s32 y]
             (= x y))]
     (m/fact (f -3 -5) => 0)
     (m/fact (f -3 -3) => 1))
-  (let [f (oben/fn ^i1 [^f32 x ^f32 y]
+  (let [f (oben/fn ^u1 [^f32 x ^f32 y]
             (= x y))]
     (m/fact (f 3 5) => 0)
     (m/fact (f 3 3) => 1)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i1 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u1 [^u32 x ^u32 y]
             (!= x y))]
     (m/fact (f 3 5) => 1)
     (m/fact (f 3 3) => 0))
-  (let [f (oben/fn ^i1 [^s32 x ^s32 y]
+  (let [f (oben/fn ^u1 [^s32 x ^s32 y]
             (!= x y))]
     (m/fact (f -3 -5) => 1)
     (m/fact (f -3 -3) => 0))
-  (let [f (oben/fn ^i1 [^f32 x ^f32 y]
+  (let [f (oben/fn ^u1 [^f32 x ^f32 y]
             (!= x y))]
     (m/fact (f 3 5) => 1)
     (m/fact (f 3 3) => 0)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i1 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u1 [^u32 x ^u32 y]
             (< x y))]
     (m/fact (f 3 5) => 1)
     (m/fact (f 5 3) => 0)
     (m/fact (f 3 3) => 0))
-  (let [f (oben/fn ^i1 [^s32 x ^s32 y]
+  (let [f (oben/fn ^u1 [^s32 x ^s32 y]
             (< x y))]
     (m/fact (f -3 5) => 1)
     (m/fact (f 5 -3) => 0)
     (m/fact (f -3 -3) => 0))
-  (let [f (oben/fn ^i1 [^f32 x ^f32 y]
+  (let [f (oben/fn ^u1 [^f32 x ^f32 y]
             (< x y))]
     (m/fact (f 3 5) => 1)
     (m/fact (f 5 3) => 0)
@@ -304,17 +304,17 @@
     (m/fact (f 3.3 3.2) => 0)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i1 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u1 [^u32 x ^u32 y]
             (<= x y))]
     (m/fact (f 3 5) => 1)
     (m/fact (f 5 3) => 0)
     (m/fact (f 3 3) => 1))
-  (let [f (oben/fn ^i1 [^s32 x ^s32 y]
+  (let [f (oben/fn ^u1 [^s32 x ^s32 y]
             (<= x y))]
     (m/fact (f -3 5) => 1)
     (m/fact (f 5 -3) => 0)
     (m/fact (f -3 -3) => 1))
-  (let [f (oben/fn ^i1 [^f32 x ^f32 y]
+  (let [f (oben/fn ^u1 [^f32 x ^f32 y]
             (<= x y))]
     (m/fact (f 3 5) => 1)
     (m/fact (f 5 3) => 0)
@@ -324,17 +324,17 @@
     (m/fact (f 3.3 3.2) => 0)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i1 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u1 [^u32 x ^u32 y]
             (>= x y))]
     (m/fact (f 3 5) => 0)
     (m/fact (f 5 3) => 1)
     (m/fact (f 3 3) => 1))
-  (let [f (oben/fn ^i1 [^s32 x ^s32 y]
+  (let [f (oben/fn ^u1 [^s32 x ^s32 y]
             (>= x y))]
     (m/fact (f -3 5) => 0)
     (m/fact (f 5 -3) => 1)
     (m/fact (f -3 -3) => 1))
-  (let [f (oben/fn ^i1 [^f32 x ^f32 y]
+  (let [f (oben/fn ^u1 [^f32 x ^f32 y]
             (>= x y))]
     (m/fact (f 3 5) => 0)
     (m/fact (f 5 3) => 1)
@@ -344,17 +344,17 @@
     (m/fact (f 3.3 3.2) => 1)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i1 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u1 [^u32 x ^u32 y]
             (> x y))]
     (m/fact (f 3 5) => 0)
     (m/fact (f 5 3) => 1)
     (m/fact (f 3 3) => 0))
-  (let [f (oben/fn ^i1 [^s32 x ^s32 y]
+  (let [f (oben/fn ^u1 [^s32 x ^s32 y]
             (> x y))]
     (m/fact (f -3 5) => 0)
     (m/fact (f 5 -3) => 1)
     (m/fact (f -3 -3) => 0))
-  (let [f (oben/fn ^i1 [^f32 x ^f32 y]
+  (let [f (oben/fn ^u1 [^f32 x ^f32 y]
             (> x y))]
     (m/fact (f 3 5) => 0)
     (m/fact (f 5 3) => 1)
@@ -364,11 +364,11 @@
     (m/fact (f 3.3 3.2) => 1)))
 
 (oben/with-temp-context
-  (let [compare-s8 (oben/fn ^s8 [^i32 x ^i32 y]
+  (let [compare-s8 (oben/fn ^s8 [^u32 x ^u32 y]
                      (if (> x y) 1 -1))
-        compare-s16 (oben/fn ^s16 [^i32 x ^i32 y]
+        compare-s16 (oben/fn ^s16 [^u32 x ^u32 y]
                       (if (> x y) 1 -1))
-        compare-s32 (oben/fn ^s32 [^i32 x ^i32 y]
+        compare-s32 (oben/fn ^s32 [^u32 x ^u32 y]
                       (if (> x y) 1 -1))]
     (m/fact (compare-s8 3 5) => -1)
     (m/fact (compare-s8 5 3) => 1)
@@ -378,7 +378,7 @@
     (m/fact (compare-s32 5 3) => 1)))
 
 (oben/with-temp-context
-  (let [compare (oben/fn ^s8 [^i32 x ^i32 y]
+  (let [compare (oben/fn ^s8 [^u32 x ^u32 y]
                   (if (> x y) 1
                       (if (< x y) -1
                           0)))]
@@ -387,109 +387,105 @@
     (m/fact (compare 3 3) => 0)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 []
+  (let [f (oben/fn ^u32 []
             1)]
     (m/fact (f) => 1)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i8 []
+  (let [f (oben/fn ^u8 []
             1)]
     (m/fact (f) => 1)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i32 x]
+  (let [f (oben/fn ^u32 [^u32 x]
             x)]
     (m/fact (f 5) => 5)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 []
+  (let [f (oben/fn ^u32 []
             (let [v 5]
               3))]
     (m/fact (f) => 3)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 []
+  (let [f (oben/fn ^u32 []
             (let [v 5]
               v))]
     (m/fact (f) => 5)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 []
-            (let [v (var i8 (+ 5 3))]
-              v))]
+  (let [f (oben/fn ^u32 []
+            (let [v (var u8 (+ 5 3))]
+              @v))]
     (m/fact (f) => 8)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 []
-            (let [v (var i8)]
+  (let [f (oben/fn ^u32 []
+            (let [v (var u8)]
               (set! v 5)))]
     (m/fact (f) => 5)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 []
-            (let [v (var i8)]
+  (let [f (oben/fn ^u32 []
+            (let [v (var u8)]
               (set! v 5)
               (set! v 3)))]
     (m/fact (f) => 3)))
 
 (oben/with-temp-context
   (let [f (oben/fn ^s32 []
-            (let [v (var i8)]
+            (let [v (var u8)]
               (set! v 5)
-              (set! v (- v))))]
+              (set! v (- @v))))]
     (m/fact (f) => -5)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 []
-            (let [v (var i8)]
+  (let [f (oben/fn ^u32 []
+            (let [v (var u8)]
               (set! v (+ 5 3))
-              (return v)))]
+              (return @v)))]
     (m/fact (f) => 8)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 []
-            (let [v (var i8)]
+  (let [f (oben/fn ^u32 []
+            (let [v (var u8)]
               (set! v (+ 5 3))
-              (return (* v v))))]
+              (return (* @v @v))))]
     (m/fact (f) => 64)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 []
-            (let [v (var i8)]
+  (let [f (oben/fn ^u32 []
+            (let [v (var u8)]
               (set! v (+ 5 3))
-              (return v)
+              (return @v)
               2))]
     (m/fact (f) => 8)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 []
-            (let [v (var i8)]
+  (let [f (oben/fn ^u32 []
+            (let [v (var u8)]
               (set! v (+ 5 3))
-              (when (> v 7)
-                (set! v (+ v 2))
-                (set! v (+ v 2)))
-              (return v)
+              (when (> @v 7)
+                (set! v (+ @v 2))
+                (set! v (+ @v 2)))
+              (return @v)
               2))]
     (m/fact (f) => 12)))
 
-(m/fact
- (t/ubertype-of (ptr/Ptr (numbers/Int 32))
-                 (numbers/Int 8)) => (numbers/Int 32))
-
 (oben/with-temp-context
-  (let [count-to (oben/fn ^i32 [^i32 limit]
-                   (let [i (var i32 0)]
+  (let [count-to (oben/fn ^u32 [^u32 limit]
+                   (let [i (var u32 0)]
                      (tagbody
                       :loop
-                      (when (>= i limit)
-                        (return i))
-                      (set! i (+ i 1))
+                      (when (>= @i limit)
+                        (return @i))
+                      (set! i (+ @i 1))
                       (go :loop))
                      7))]
     (m/fact (count-to 420) => 420)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i8 [^i32 x]
+  (let [f (oben/fn ^u8 [^u32 x]
             (if (not (< x 5))
               8 3))]
     (m/fact (f 4) => 3)
@@ -497,15 +493,15 @@
     (m/fact (f 6) => 8)))
 
 (oben/with-temp-context
-  (let [count-to (oben/fn ^i32 [^i32 limit]
-                   (let [i (var i32 0)]
-                     (while (< i limit)
-                       (set! i (+ i 1)))
-                     i))]
+  (let [count-to (oben/fn ^u32 [^u32 limit]
+                   (let [i (var u32 0)]
+                     (while (< @i limit)
+                       (set! i (+ @i 1)))
+                     @i))]
     (m/fact (count-to 420) => 420)))
 
 (oben/with-temp-context
-  (let [clamp (oben/fn ^i32 [^i32 x ^i32 lo ^i32 hi]
+  (let [clamp (oben/fn ^u32 [^u32 x ^u32 lo ^u32 hi]
                 (if (< x lo)
                   lo
                   (if (> x hi)
@@ -514,7 +510,7 @@
     (m/fact (clamp 4 7 10) => 7)))
 
 (oben/with-temp-context
-  (let [div-six (oben/fn ^i1 [^i32 x]
+  (let [div-six (oben/fn ^u1 [^u32 x]
                          (if (and (= (% x 2) 0)
                                   (= (% x 3) 0))
                            1 0))]
@@ -533,7 +529,7 @@
     (m/fact (div-six 12) => 1)))
 
 (oben/with-temp-context
-  (let [div-2or3 (oben/fn ^i1 [^i32 x]
+  (let [div-2or3 (oben/fn ^u1 [^u32 x]
                   (if (or (= (% x 2) 0)
                           (= (% x 3) 0))
                     1 0))]
@@ -552,7 +548,7 @@
     (m/fact (div-2or3 12) => 1)))
 
 (oben/with-temp-context
-  (let [neg (oben/fn ^i32 [^i32 x]
+  (let [neg (oben/fn ^u32 [^u32 x]
               (bit-not x))]
     (m/fact (neg 0) => -1)
     (m/fact (neg -1) => 0)
@@ -562,28 +558,28 @@
     (m/fact (neg -2147483648) => 2147483647)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (bit-and-not x y))]
     (m/fact (f 0xff 0x40) => 0xbf)
     (m/fact (f 0xff 0x55) => 0xaa)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (bit-shift-left x y))]
     (m/fact (f 0xff 4) => 0xff0)
     (m/fact (f 0xff 1) => 0x1fe)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i32 x ^i32 y]
+  (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (bit-shift-right x y))]
     (m/fact (f 0xff 4) => 0x0f)
     (m/fact (f 0xff 1) => 0x7f))
-  (let [f (oben/fn ^s8 [^s8 x ^i8 y]
+  (let [f (oben/fn ^s8 [^s8 x ^u8 y]
             (bit-shift-right x y))]
     (m/fact (f 0xff 4) => -1)))
 
 (oben/with-temp-context
-  (let [clamp (oben/fn ^i32 [^i32 x ^i32 lo ^i32 hi]
+  (let [clamp (oben/fn ^u32 [^u32 x ^u32 lo ^u32 hi]
                 (cond (< x lo) lo
                       (> x hi) hi
                       x))]
@@ -595,7 +591,7 @@
     (m/fact (clamp 11 7 10) => 10)))
 
 (oben/with-temp-context
-  (let [select (oben/fn ^s32 [^i32 x]
+  (let [select (oben/fn ^s32 [^u32 x]
                  (condp = x
                    1 -2
                    2 -4
@@ -607,7 +603,7 @@
     (m/fact (select 4) => 10)))
 
 (oben/with-temp-context
-  (let [select (oben/fn ^s32 [^i32 x]
+  (let [select (oben/fn ^s32 [^u32 x]
                  (case x
                    1 -2
                    2 -4
@@ -619,59 +615,67 @@
     (m/fact (select 4) => 10)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i32 increment]
-            (let [v (var i32 (+ 5 3))]
-              (+ v increment)))]
+  (let [f (oben/fn ^u32 [^u32 increment]
+            (let [v (var u32 (+ 5 3))]
+              (+ @v increment)))]
     (m/fact
      "vars with type and initializer"
      (f 7) => 15)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 [^i32 increment]
-            (let [v (var i32)]
+  (let [f (oben/fn ^u32 [^u32 increment]
+            (let [v (var u32)]
               (set! v (+ 5 3))
-              (+ v increment)))]
+              (+ @v increment)))]
     (m/fact
      "vars with type only"
      (f 7) => 15)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^f32 [^i32 increment]
+  (let [f (oben/fn ^f32 [^u32 increment]
             (let [v (var (+ 5.0 3.75))]
-              (+ v increment)))]
+              (+ @v increment)))]
     (m/fact
      "vars with initializer only"
      (f 7) => 15.75)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^i32 []
-            (let [a (array i32 [9 8 7 6 5 4 3 2 1 0])]
+  (let [f (oben/fn ^f32 []
+            (let [v1 (var 5.0)
+                  v2 (var 3.75)]
+              (+ @v1 @v2)))]
+    (m/fact
+     (f) => 8.75)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^u32 []
+            (let [a (array u32 [9 8 7 6 5 4 3 2 1 0])]
               (get a 3)))]
     (m/fact
      "array literals support get with a constant index"
      (f) => 6)))
 
 ;; (oben/with-temp-context
-;;   (let [f (oben/fn ^i32 [i32 index]
-;;             (let [a (var (array i32 [9 8 7 6 5 4 3 2 1 0]))]
+;;   (let [f (oben/fn ^u32 [u32 index]
+;;             (let [a (var (array u32 [9 8 7 6 5 4 3 2 1 0]))]
 ;;               (get-in a [0 index])))]
 ;;     (m/fact
 ;;      "array variables are pointers to the array (not to its first element)"
 ;;      (f a 3) => 6)))
 
 ;; (oben/with-temp-context
-;;   (let [f (oben/fn ^i32 [i32 index]
-;;             (let [a (var i32 (array i32 [9 8 7 6 5 4 3 2 1 0]))]
+;;   (let [f (oben/fn ^u32 [u32 index]
+;;             (let [a (var u32 (array u32 [9 8 7 6 5 4 3 2 1 0]))]
 ;;               (get a index)))]
 ;;     (m/fact
 ;;      "array variable automatically casted to a pointer to its first element"
 ;;      (f a 3) => 6)))
 
 #_(oben/with-temp-context
-    (let [atype (t/Array numbers/%i32 10)
+    (let [atype (t/Array numbers/%u32 10)
           a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
-          f (oben/fn ^i32 [^i32* a
-                           ^i32 index]
+          f (oben/fn ^u32 [^u32* a
+                           ^u32 index]
               (get a index))]
       (dump-ir f)
       ;; (m/fact (f a 3) => 6)

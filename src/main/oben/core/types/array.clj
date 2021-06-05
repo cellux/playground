@@ -16,7 +16,7 @@
   [{:keys [element-type size]}]
   [:array (t/compile element-type) size])
 
-(defmethod Container/get [::Array ::numbers/Int]
+(defmethod Container/get [::Array ::numbers/UInt]
   [self index]
   (assert (ast/constant? index))
   (let [atype (t/type-of self)

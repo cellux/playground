@@ -2,35 +2,41 @@
   (:require [oben.core.types :as t])
   (:require [oben.core.ast :as ast])
   (:require [oben.core.context :as ctx])
+  (:require [oben.core.protocols.Eq :as Eq])
+  (:require [oben.core.protocols.Ord :as Ord])
+  (:require [oben.core.protocols.Algebra :as Algebra])
+  (:require [oben.core.protocols.Bitwise :as Bitwise])
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m]))
 
 (derive ::Number ::t/Value)
 
-(t/define-typeclass Int [::Number]
+(derive ::Int ::Number)
+
+(t/define-typeclass UInt [::Int]
   [size]
   {:size size})
 
 (m/facts
- (m/fact (Int 32) => {:kind :oben/TYPE :class ::Int :size 32}))
+ (m/fact (UInt 32) => {:kind :oben/TYPE :class ::UInt :size 32}))
 
-(defmethod t/compile ::Int
+(defmethod t/compile ::UInt
   [t]
   [:integer (:size t)])
 
-(defmethod t/resize ::Int
+(defmethod t/resize ::UInt
   [t newsize]
-  (Int newsize))
+  (UInt newsize))
 
-(t/define-type %i1 (Int 1))
-(t/define-type %i8 (Int 8))
-(t/define-type %i16 (Int 16))
-(t/define-type %i32 (Int 32))
-(t/define-type %i64 (Int 64))
+(t/define-type %u1 (UInt 1))
+(t/define-type %u8 (UInt 8))
+(t/define-type %u16 (UInt 16))
+(t/define-type %u32 (UInt 32))
+(t/define-type %u64 (UInt 64))
 
 ;; SInt
 
-(t/define-typeclass SInt [::Number]
+(t/define-typeclass SInt [::Int]
   [size]
   {:size size})
 
@@ -67,15 +73,15 @@
 (t/define-type %f32 (FP 32))
 (t/define-type %f64 (FP 64))
 
-(defmethod t/get-ubertype [::Int ::Int]
+(defmethod t/get-ubertype [::UInt ::UInt]
   [t1 t2]
-  (Int (max (:size t1) (:size t2))))
+  (UInt (max (:size t1) (:size t2))))
 
 (defmethod t/get-ubertype [::SInt ::SInt]
   [t1 t2]
   (SInt (max (:size t1) (:size t2))))
 
-(defmethod t/get-ubertype [::SInt ::Int]
+(defmethod t/get-ubertype [::SInt ::UInt]
   [t1 t2]
   (SInt (max (:size t1) (:size t2))))
 
@@ -87,14 +93,14 @@
   [t1 t2]
   (FP (max (:size t1) (:size t2))))
 
-(defmethod t/get-ubertype [::FP ::Int]
+(defmethod t/get-ubertype [::FP ::UInt]
   [t1 t2]
   (FP (max (:size t1) (:size t2))))
 
 (m/facts
- (m/fact (t/ubertype-of (Int 8) (Int 32)) => (Int 32))
- (m/fact (t/ubertype-of (SInt 8) (Int 32)) => (SInt 32))
- (m/fact (t/ubertype-of (Int 8) (FP 64)) => (FP 64)))
+ (m/fact (t/ubertype-of (UInt 8) (UInt 32)) => (UInt 32))
+ (m/fact (t/ubertype-of (SInt 8) (UInt 32)) => (SInt 32))
+ (m/fact (t/ubertype-of (UInt 8) (FP 64)) => (FP 64)))
 
 (defmacro define-resize-op
   [op]
@@ -138,7 +144,7 @@
          {:class ~(keyword (str (ns-name *ns*)) (str op))
           :children #{~'node}}))))
 
-(define-conversion-op fptoui Int)
+(define-conversion-op fptoui UInt)
 (define-conversion-op fptosi SInt)
 (define-conversion-op uitofp FP)
 (define-conversion-op sitofp FP)
@@ -147,7 +153,7 @@
 ;; (define-conversion-op inttoptr)
 ;; (define-conversion-op bitcast)
 
-(defmethod t/cast [::Int ::Int]
+(defmethod t/cast [::UInt ::UInt]
   [t node force?]
   (let [t-size (:size t)
         node-size (:size (t/type-of node))]
@@ -161,10 +167,10 @@
       force?
       (trunc node t-size)
       :else
-      (throw (ex-info "rejected narrowing Int->Int conversion"
+      (throw (ex-info "rejected narrowing UInt->UInt conversion"
                       {:from node-size :to t-size})))))
 
-(defmethod t/cast [::Int ::SInt]
+(defmethod t/cast [::UInt ::SInt]
   [t node force?]
   (let [t-size (:size t)
         node-size (:size (t/type-of node))]
@@ -178,10 +184,10 @@
       force?
       (trunc node t-size)
       :else
-      (throw (ex-info "rejected narrowing SInt->Int conversion"
+      (throw (ex-info "rejected narrowing SInt->UInt conversion"
                       {:from node-size :to t-size})))))
 
-(defmethod t/cast [::Int ::FP]
+(defmethod t/cast [::UInt ::FP]
   [t node force?]
   (let [t-size (:size t)
         node-size (:size (t/type-of node))]
@@ -191,7 +197,7 @@
       (= t-size 1)
       (ast/parse `(!= ~node 0.0))
       :else
-      (throw (ex-info "rejected narrowing FP->Int conversion")))))
+      (throw (ex-info "rejected narrowing FP->UInt conversion")))))
 
 (defmethod t/cast [::SInt ::SInt]
   [t node force?]
@@ -207,7 +213,7 @@
           (throw (ex-info "rejected narrowing SInt->SInt conversion"
                           {:from node-size :to t-size})))))
 
-(defmethod t/cast [::SInt ::Int]
+(defmethod t/cast [::SInt ::UInt]
   [t node force?]
   (let [t-size (:size t)
         node-size (:size (t/type-of node))]
@@ -218,7 +224,7 @@
           force?
           (trunc node t-size)
           :else
-          (throw (ex-info "rejected narrowing SInt->Int conversion"
+          (throw (ex-info "rejected narrowing SInt->UInt conversion"
                           {:from node-size :to t-size})))))
 
 (defmethod t/cast [::SInt ::FP]
@@ -244,7 +250,7 @@
           (throw (ex-info "rejected narrowing FP->FP conversion"
                           {:from node-size :to t-size})))))
 
-(defmethod t/cast [::FP ::Int]
+(defmethod t/cast [::FP ::UInt]
   [t node force?]
   (let [t-size (:size t)
         node-size (:size (t/type-of node))]
@@ -310,7 +316,7 @@
   [x]
   (if (neg? x)
     (SInt (integer-size x))
-    (Int (integer-size x))))
+    (UInt (integer-size x))))
 
 (defmethod ast/determine-constant-type java.lang.Byte
   [x]
@@ -339,3 +345,114 @@
 (defmethod ast/determine-constant-type java.lang.Double
   [x]
   (determine-constant-type-for-float x))
+
+(defmacro define-binary-op
+  [op-multifn arg-typeclass make-ir]
+  `(letfn [(doit# [~'lhs ~'rhs]
+             (let [result-type# (t/ubertype-of (t/type-of ~'lhs)
+                                               (t/type-of ~'rhs))
+                   ~'lhs (ast/parse (list 'cast result-type# ~'lhs))
+                   ~'rhs (ast/parse (list 'cast result-type# ~'rhs))]
+               (if (isa? (t/tid-of-type result-type#) ~arg-typeclass)
+                 (ast/make-node result-type#
+                   (fn [~'ctx]
+                     (let [compile-op# (fn [~'ctx]
+                                         (let [~'ins (~make-ir
+                                                      (ctx/compiled ~'ctx ~'lhs)
+                                                      (ctx/compiled ~'ctx ~'rhs)
+                                                      {})]
+                                           (ctx/compile-instruction ~'ctx ~'ins)))]
+                       (-> ~'ctx
+                           (ctx/compile-node ~'lhs)
+                           (ctx/compile-node ~'rhs)
+                           compile-op#)))
+                   {:class :oben/binop
+                    :children (set [~'lhs ~'rhs])})
+                 (~op-multifn ~'lhs ~'rhs))))]
+     (defmethod ~op-multifn [~arg-typeclass ::Number]
+       [~'lhs ~'rhs]
+       (doit# ~'lhs ~'rhs))))
+
+(define-binary-op Algebra/+ ::Int ir/add)
+(define-binary-op Algebra/+ ::FP ir/fadd)
+
+(define-binary-op Algebra/- ::Int ir/sub)
+(define-binary-op Algebra/- ::FP ir/fsub)
+
+(define-binary-op Algebra/* ::Int ir/mul)
+(define-binary-op Algebra/* ::FP ir/fmul)
+
+(define-binary-op Algebra// ::UInt ir/udiv)
+(define-binary-op Algebra// ::SInt ir/sdiv)
+(define-binary-op Algebra// ::FP ir/fdiv)
+
+(define-binary-op Algebra/% ::UInt ir/urem)
+(define-binary-op Algebra/% ::SInt ir/srem)
+(define-binary-op Algebra/% ::FP ir/frem)
+
+(define-binary-op Bitwise/bit-and ::Int ir/and)
+(define-binary-op Bitwise/bit-or ::Int ir/or)
+(define-binary-op Bitwise/bit-xor ::Int ir/xor)
+
+(define-binary-op Bitwise/bit-shift-left ::Int ir/shl)
+
+(define-binary-op Bitwise/bit-shift-right ::UInt ir/lshr)
+(define-binary-op Bitwise/bit-shift-right ::SInt ir/ashr)
+
+(defmethod Algebra/- [::Number]
+  [x]
+  `(- 0 ~x))
+
+(defmethod Bitwise/bit-not [::Int]
+  [x]
+  (let [size (:size (t/type-of x))]
+    (ast/parse `(bit-xor ~x (cast ~(SInt size) ~(ast/constant -1))))))
+
+(defmacro define-compare-op
+  [op-multifn arg-typeclass make-ir pred]
+  `(letfn [(doit# [~'lhs ~'rhs]
+             (let [ubertype# (t/ubertype-of (t/type-of ~'lhs)
+                                            (t/type-of ~'rhs))
+                   ~'lhs (ast/parse (list 'cast ubertype# ~'lhs))
+                   ~'rhs (ast/parse (list 'cast ubertype# ~'rhs))]
+               (if (isa? (t/tid-of-type ubertype#) ~arg-typeclass)
+                 (ast/make-node %u1
+                   (fn [~'ctx]
+                     (let [compile-op# (fn [~'ctx]
+                                         (let [~'ins (~make-ir ~pred
+                                                      (ctx/compiled ~'ctx ~'lhs)
+                                                      (ctx/compiled ~'ctx ~'rhs)
+                                                      {})]
+                                           (ctx/compile-instruction ~'ctx ~'ins)))]
+                       (-> ~'ctx
+                           (ctx/compile-node ~'lhs)
+                           (ctx/compile-node ~'rhs)
+                           compile-op#)))
+                   {:class :oben/binop
+                    :children (set [~'lhs ~'rhs])})
+                 (~op-multifn ~'lhs ~'rhs))))]
+     (defmethod ~op-multifn [~arg-typeclass ::Number]
+       [~'lhs ~'rhs]
+       (doit# ~'lhs ~'rhs))))
+
+(define-compare-op Eq/= ::Int ir/icmp :eq)
+(define-compare-op Eq/= ::FP ir/fcmp :oeq)
+
+(define-compare-op Eq/!= ::Int ir/icmp :ne)
+(define-compare-op Eq/!= ::FP ir/fcmp :one)
+
+(define-compare-op Ord/< ::UInt ir/icmp :ult)
+(define-compare-op Ord/< ::SInt ir/icmp :slt)
+(define-compare-op Ord/< ::FP ir/fcmp :olt)
+
+(define-compare-op Ord/<= ::UInt ir/icmp :ule)
+(define-compare-op Ord/<= ::SInt ir/icmp :sle)
+(define-compare-op Ord/<= ::FP ir/fcmp :ole)
+
+(define-compare-op Ord/>= ::UInt ir/icmp :uge)
+(define-compare-op Ord/>= ::SInt ir/icmp :sge)
+(define-compare-op Ord/>= ::FP ir/fcmp :oge)
+
+(define-compare-op Ord/> ::UInt ir/icmp :ugt)
+(define-compare-op Ord/> ::SInt ir/icmp :sgt)
+(define-compare-op Ord/> ::FP ir/fcmp :ogt)

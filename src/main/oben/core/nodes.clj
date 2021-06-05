@@ -5,7 +5,6 @@
   (:require [oben.core.types.ptr :as ptr])
   (:require [oben.core.types.fn :as fn])
   (:require [oben.core.context :as ctx])
-  (:require [oben.core.interfaces :as if])
   (:require [oben.core.util :as u])
   (:require [omkamra.llvm.ir :as ir]))
 
@@ -61,51 +60,6 @@
               save-ir)))
       {:class :oben/set!
        :children #{value-node}})))
-
-(defn as-keyword
-  [& args]
-  (keyword (apply str (map name args))))
-
-(defn as-symbol
-  [& args]
-  (symbol (apply str (map name args))))
-
-(defn %var
-  ([type init-node]
-   (let [init-node (when init-node (%cast type init-node))]
-     (ast/make-node (ptr/Ptr type)
-       (fn [ctx]
-         (let [ins (ir/alloca
-                    (t/compile type)
-                    {:name (keyword (ctx/get-assigned-name ctx))})
-               compile-var (fn [ctx]
-                             (ctx/compile-instruction ctx ins))
-               compile-store (fn [ctx]
-                               (ctx/compile-instruction
-                                ctx (ir/store
-                                     (ctx/compiled ctx init-node)
-                                     ins
-                                     {})))
-               compile-init (fn [ctx]
-                              (if init-node
-                                (-> ctx
-                                    (ctx/compile-node init-node)
-                                    compile-store)
-                                ctx))
-               save-ir (fn [ctx]
-                         (ctx/save-ir ctx ins))]
-           (-> ctx
-               (ctx/with-blockbin :entry compile-var)
-               (ctx/with-blockbin :init compile-init)
-               save-ir)))
-       {:class :oben/var
-        :children (when init-node #{init-node})})))
-  ([type]
-   (cond (t/type? type) (%var type nil)
-         (ast/node? type) (let [init-node type
-                                type (t/type-of init-node)]
-                            (%var type init-node))
-         :else (throw (ex-info "invalid var form")))))
 
 (defn- drop-all-after-first-return
   [nodes]
@@ -230,6 +184,10 @@
   [node]
   (into [] (mapcat node-and-descendants (node-children node))))
 
+(defn as-keyword
+  [& args]
+  (keyword (apply str (map name args))))
+
 (oben/defmacro %block
   [name & body]
   (let [block-id (gensym name)
@@ -341,7 +299,7 @@
 
 (defn %when
   [cond-node & then-nodes]
-  (let [cond-node (%cast! numbers/%i1 cond-node)
+  (let [cond-node (%cast! numbers/%u1 cond-node)
         then-label (make-label :then)
         end-label (make-label :end)]
     (ast/make-node t/%void
@@ -405,8 +363,8 @@
 
 (defn %not
   [node]
-  (let [bool-node (%cast! numbers/%i1 node)]
-    (ast/make-node numbers/%i1
+  (let [bool-node (%cast! numbers/%u1 node)]
+    (ast/make-node numbers/%u1
       (fn [ctx]
         (let [ctx (ctx/compile-node ctx bool-node)]
           (ctx/compile-instruction
@@ -415,6 +373,14 @@
                        {}))))
       {:class :oben/not
        :children #{bool-node}})))
+
+(defn %and
+  ([lhs rhs]
+   `(bit-and (u1 ~lhs) (u1 ~rhs))))
+
+(defn %or
+  ([lhs rhs]
+   `(bit-or (u1 ~lhs) (u1 ~rhs))))
 
 (defn %while
   [cond-node & then-nodes]
@@ -426,165 +392,3 @@
       ~@then-nodes
       (go :while))
     :end))
-
-(defmacro define-make-binary-op-compiler-method
-  [op tc make-ir]
-  `(defmethod if/make-binary-op-compiler [~op ~tc]
-     [~'_ ~'lhs ~'rhs]
-     (fn [~'ctx]
-       (let [~'ins (~make-ir
-                    (ctx/compiled ~'ctx ~'lhs)
-                    (ctx/compiled ~'ctx ~'rhs)
-                    {})]
-         (ctx/compile-instruction ~'ctx ~'ins)))))
-
-(define-make-binary-op-compiler-method :add ::numbers/Int ir/add)
-(define-make-binary-op-compiler-method :add ::numbers/SInt ir/add)
-(define-make-binary-op-compiler-method :add ::numbers/FP ir/fadd)
-
-(define-make-binary-op-compiler-method :sub ::numbers/Int ir/sub)
-(define-make-binary-op-compiler-method :sub ::numbers/SInt ir/sub)
-(define-make-binary-op-compiler-method :sub ::numbers/FP ir/fsub)
-
-(define-make-binary-op-compiler-method :mul ::numbers/Int ir/mul)
-(define-make-binary-op-compiler-method :mul ::numbers/SInt ir/mul)
-(define-make-binary-op-compiler-method :mul ::numbers/FP ir/fmul)
-
-(define-make-binary-op-compiler-method :div ::numbers/Int ir/udiv)
-(define-make-binary-op-compiler-method :div ::numbers/SInt ir/sdiv)
-(define-make-binary-op-compiler-method :div ::numbers/FP ir/fdiv)
-
-(define-make-binary-op-compiler-method :rem ::numbers/Int ir/urem)
-(define-make-binary-op-compiler-method :rem ::numbers/SInt ir/srem)
-(define-make-binary-op-compiler-method :rem ::numbers/FP ir/frem)
-
-(define-make-binary-op-compiler-method :bit-and ::numbers/Int ir/and)
-(define-make-binary-op-compiler-method :bit-and ::numbers/SInt ir/and)
-
-(define-make-binary-op-compiler-method :bit-or ::numbers/Int ir/or)
-(define-make-binary-op-compiler-method :bit-or ::numbers/SInt ir/or)
-
-(define-make-binary-op-compiler-method :bit-xor ::numbers/Int ir/xor)
-(define-make-binary-op-compiler-method :bit-xor ::numbers/SInt ir/xor)
-
-(define-make-binary-op-compiler-method :bit-shift-left ::numbers/Int ir/shl)
-(define-make-binary-op-compiler-method :bit-shift-left ::numbers/SInt ir/shl)
-
-(define-make-binary-op-compiler-method :bit-shift-right ::numbers/Int ir/lshr)
-(define-make-binary-op-compiler-method :bit-shift-right ::numbers/SInt ir/ashr)
-
-(defmacro define-binary-op
-  [op make-unary-form]
-  (let [fname (symbol (str "%" op))
-        op-keyword (keyword op)]
-    `(defn ~fname
-       ([~'x]
-        ~((eval make-unary-form) 'x))
-       ([~'x ~'y]
-        (let [result-type# (t/ubertype-of (ptr/type*of ~'x)
-                                          (ptr/type*of ~'y))
-              ~'x (%cast result-type# ~'x)
-              ~'y (%cast result-type# ~'y)]
-          (ast/make-node result-type#
-            (fn [ctx#]
-              (let [ctx# (ctx/compile-node ctx# ~'x)
-                    ctx# (ctx/compile-node ctx# ~'y)
-                    compile# (if/make-binary-op-compiler ~op-keyword ~'x ~'y)]
-                (compile# ctx#)))
-            {:class ~(keyword "oben" (str op))
-             :children (set [~'x ~'y])})))
-       ([~'x ~'y ~'z & ~'rest]
-        (apply ~fname (~fname ~'x ~'y) ~'z ~'rest)))))
-
-(define-binary-op add identity)
-(define-binary-op sub (fn [sym] `(list '- 0 ~sym)))
-(define-binary-op mul identity)
-(define-binary-op div identity)
-(define-binary-op rem identity)
-
-(define-binary-op bit-and identity)
-(define-binary-op bit-or identity)
-(define-binary-op bit-xor identity)
-
-(define-binary-op bit-shift-left identity)
-(define-binary-op bit-shift-right identity)
-
-(defn %bit-not
-  [x]
-  (let [size (:size (t/type-of x))]
-    (%bit-xor x (%cast (numbers/SInt size) (ast/constant -1)))))
-
-(defn %bit-and-not
-  [lhs rhs]
-  (%bit-and lhs (%bit-not rhs)))
-
-(defn %and
-  ([lhs rhs]
-   `(bit-and (i1 ~lhs) (i1 ~rhs))))
-
-(defn %or
-  ([lhs rhs]
-   `(bit-or (i1 ~lhs) (i1 ~rhs))))
-
-(defmacro define-make-compare-op-compiler-method
-  [op tc make-ir pred]
-  `(defmethod if/make-compare-op-compiler [~op ~tc]
-     [~'_ ~'lhs ~'rhs]
-     (fn [~'ctx]
-       (let [~'ins (~make-ir ~pred
-                    (ctx/compiled ~'ctx ~'lhs)
-                    (ctx/compiled ~'ctx ~'rhs)
-                    {})]
-         (ctx/compile-instruction ~'ctx ~'ins)))))
-
-(define-make-compare-op-compiler-method := ::numbers/Int ir/icmp :eq)
-(define-make-compare-op-compiler-method :!= ::numbers/Int ir/icmp :ne)
-(define-make-compare-op-compiler-method :< ::numbers/Int ir/icmp :ult)
-(define-make-compare-op-compiler-method :<= ::numbers/Int ir/icmp :ule)
-(define-make-compare-op-compiler-method :>= ::numbers/Int ir/icmp :uge)
-(define-make-compare-op-compiler-method :> ::numbers/Int ir/icmp :ugt)
-
-(define-make-compare-op-compiler-method := ::numbers/SInt ir/icmp :eq)
-(define-make-compare-op-compiler-method :!= ::numbers/SInt ir/icmp :ne)
-(define-make-compare-op-compiler-method :< ::numbers/SInt ir/icmp :slt)
-(define-make-compare-op-compiler-method :<= ::numbers/SInt ir/icmp :sle)
-(define-make-compare-op-compiler-method :>= ::numbers/SInt ir/icmp :sge)
-(define-make-compare-op-compiler-method :> ::numbers/SInt ir/icmp :sgt)
-
-(define-make-compare-op-compiler-method := ::numbers/FP ir/fcmp :oeq)
-(define-make-compare-op-compiler-method :!= ::numbers/FP ir/fcmp :one)
-(define-make-compare-op-compiler-method :< ::numbers/FP ir/fcmp :olt)
-(define-make-compare-op-compiler-method :<= ::numbers/FP ir/fcmp :ole)
-(define-make-compare-op-compiler-method :>= ::numbers/FP ir/fcmp :oge)
-(define-make-compare-op-compiler-method :> ::numbers/FP ir/fcmp :ogt)
-
-(defmacro define-compare-op
-  [op]
-  (let [fname (symbol (str "%" op))
-        op-keyword (keyword op)]
-    `(defn ~fname
-       ([~'x ~'y]
-        (let [ubertype# (t/ubertype-of (t/type-of ~'x)
-                                       (t/type-of ~'y))
-              ~'x (%cast ubertype# ~'x)
-              ~'y (%cast ubertype# ~'y)]
-          (ast/make-node numbers/%i1
-            (fn [ctx#]
-              (let [ctx# (ctx/compile-node ctx# ~'x)
-                    ctx# (ctx/compile-node ctx# ~'y)
-                    compile# (if/make-compare-op-compiler ~op-keyword ~'x ~'y)]
-                (compile# ctx#)))
-            {:class ~(keyword "oben" (str op))
-             :children (set [~'x ~'y])})))
-       ([~'x ~'y ~'z & ~'rest]
-        (apply %bit-and (map #(~fname %1 %2)
-                             (partition
-                              2 1
-                              (list* ~'x ~'y ~'z ~'rest))))))))
-
-(define-compare-op =)
-(define-compare-op !=)
-(define-compare-op <)
-(define-compare-op <=)
-(define-compare-op >=)
-(define-compare-op >)
