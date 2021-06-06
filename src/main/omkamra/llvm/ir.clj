@@ -1155,7 +1155,12 @@
                       [{:type i32 :value 0}
                        {:type i32 :name :index}
                        {:type i32 :value 1}])
-  => i8))
+  => i8)
+ (m/fact
+  (infer-element-type [:ptr [:array [:integer 32] 10]]
+                      [{:kind :const :type i8 :value 0}
+                       {:kind :function-parameter :name :index :type i32}])
+  => i32))
 
 (defn getelementptr
   [target indices opts]
@@ -1163,14 +1168,16 @@
     (assert (vector? target-type))
     (assert (= :ptr (first target-type)))
     (let [[_ base-type] target-type
-          indices (map sanitize-gep-index indices)]
+          indices (map sanitize-gep-index indices)
+          object-type (infer-element-type target-type indices)]
       (assoc opts
              :kind :instruction
              :op :getelementptr
              :base-type base-type
              :ptr target
              :indices indices
-             :type [:ptr (infer-element-type (:type target) indices)]))))
+             :object-type object-type
+             :type [:ptr object-type]))))
 
 (defmethod render-instruction :getelementptr
   [{:keys [base-type ptr indices inbounds] :as i}]

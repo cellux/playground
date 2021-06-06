@@ -9,11 +9,11 @@
              bit-shift-left bit-shift-right
              and or
              = != < <= >= >
-             get put])
+             get-in get put])
   (:require [oben.core.types :as types])
-  (:require [oben.core.types.numbers])
-  (:require [oben.core.types.array])
-  (:require [oben.core.types.ptr])
+  (:require [oben.core.types.Number])
+  (:require [oben.core.types.Array])
+  (:require [oben.core.types.Ptr])
   (:require [oben.core.nodes :as nodes])
   (:require [oben.core.protocols.Eq])
   (:require [oben.core.protocols.Ord])
@@ -22,23 +22,23 @@
 
 (def void oben.core.types/%void)
 
-(def u1 oben.core.types.numbers/%u1)
-(def u8 oben.core.types.numbers/%u8)
-(def u16 oben.core.types.numbers/%u16)
-(def u32 oben.core.types.numbers/%u32)
-(def u64 oben.core.types.numbers/%u64)
+(def u1 oben.core.types.Number/%u1)
+(def u8 oben.core.types.Number/%u8)
+(def u16 oben.core.types.Number/%u16)
+(def u32 oben.core.types.Number/%u32)
+(def u64 oben.core.types.Number/%u64)
 
-(def s1 oben.core.types.numbers/%s1)
-(def s8 oben.core.types.numbers/%s8)
-(def s16 oben.core.types.numbers/%s16)
-(def s32 oben.core.types.numbers/%s32)
-(def s64 oben.core.types.numbers/%s64)
+(def s1 oben.core.types.Number/%s1)
+(def s8 oben.core.types.Number/%s8)
+(def s16 oben.core.types.Number/%s16)
+(def s32 oben.core.types.Number/%s32)
+(def s64 oben.core.types.Number/%s64)
 
-(def f32 oben.core.types.numbers/%f32)
-(def f64 oben.core.types.numbers/%f64)
+(def f32 oben.core.types.Number/%f32)
+(def f64 oben.core.types.Number/%f64)
 
-(def array oben.core.types.array/%array)
-(def deref oben.core.types.ptr/%deref)
+(def array oben.core.types.Array/%array)
+(def deref oben.core.types.Ptr/%deref)
 
 (def nop oben.core.nodes/%nop)
 
@@ -73,6 +73,8 @@
 
 (def while oben.core.nodes/%while)
 
+(def gep oben.core.nodes/%gep)
+
 (def = oben.core.protocols.Eq/=)
 (def != oben.core.protocols.Eq/!=)
 
@@ -97,5 +99,6 @@
 (def bit-not oben.core.protocols.Bitwise/bit-not)
 (def bit-and-not oben.core.protocols.Bitwise/bit-and-not)
 
+(def get-in oben.core.protocols.Container/get-in)
 (def get oben.core.protocols.Container/get)
 (def put oben.core.protocols.Container/put)

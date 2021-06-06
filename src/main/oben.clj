@@ -115,7 +115,7 @@
      (alter-var-root m# vary-meta assoc :kind :oben/MACRO)
      m#))
 
-(def params->tids (comp (partial mapv t/tid-of-node) vector))
+(def params->tids (comp (partial mapv t/tid-of) vector))
 
 (clj/defmacro defmulti
   [name]

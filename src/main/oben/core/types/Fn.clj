@@ -1,4 +1,4 @@
-(ns oben.core.types.fn
+(ns oben.core.types.Fn
   (:require [oben.core.types :as t])
   (:require [midje.sweet :as m]))
 

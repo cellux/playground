@@ -1,4 +1,4 @@
-(ns oben.core.types.numbers
+(ns oben.core.types.Number
   (:require [oben.core.types :as t])
   (:require [oben.core.ast :as ast])
   (:require [oben.core.context :as ctx])

@@ -1,9 +1,10 @@
 (ns oben.core.nodes
   (:require [oben.core.ast :as ast])
   (:require [oben.core.types :as t])
-  (:require [oben.core.types.numbers :as numbers])
-  (:require [oben.core.types.ptr :as ptr])
-  (:require [oben.core.types.fn :as fn])
+  (:require [oben.core.types.Number :as Number])
+  (:require [oben.core.types.Ptr :as Ptr])
+  (:require [oben.core.types.Fn :as Fn])
+  (:require [oben.core.types.Aggregate :as Aggregate])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.util :as u])
   (:require [omkamra.llvm.ir :as ir]))
@@ -41,7 +42,7 @@
 (defn %var
   ([type init-node]
    (let [init-node (when init-node (ast/parse `(cast ~type ~init-node)))]
-     (ast/make-node (ptr/Ptr type)
+     (ast/make-node (Ptr/Ptr type)
        (fn [ctx]
          (let [ins (ir/alloca
                     (t/compile type)
@@ -77,10 +78,10 @@
 
 (defn %set!
   [target-node value-node]
-  (assert (isa? (t/tid-of target-node) ::ptr/Ptr))
-  (let [elt (:element-type (t/type-of target-node))
-        value-node (%cast elt value-node)]
-    (ast/make-node elt
+  (assert (isa? (t/tid-of target-node) ::Ptr/Ptr))
+  (let [object-type (:object-type (t/type-of target-node))
+        value-node (%cast object-type value-node)]
+    (ast/make-node object-type
       (fn [ctx]
         (letfn [(compile-store [ctx]
                   (ctx/compile-instruction
@@ -302,7 +303,7 @@
         env (into {} (map vector param-names params))
         body-node (ast/parse `(block :oben/default-block ~@body) env)
         body-node (%cast return-type body-node)]
-    (ast/make-node (fn/Fn return-type param-types)
+    (ast/make-node (Fn/Fn return-type param-types)
       (fn [ctx]
         (let [saved ctx
               fname (ctx/get-assigned-name ctx)
@@ -336,7 +337,7 @@
 
 (defn %when
   [cond-node & then-nodes]
-  (let [cond-node (%cast! numbers/%u1 cond-node)
+  (let [cond-node (%cast! Number/%u1 cond-node)
         then-label (make-label :then)
         end-label (make-label :end)]
     (ast/make-node t/%void
@@ -400,8 +401,8 @@
 
 (defn %not
   [node]
-  (let [bool-node (%cast! numbers/%u1 node)]
-    (ast/make-node numbers/%u1
+  (let [bool-node (%cast! Number/%u1 node)]
+    (ast/make-node Number/%u1
       (fn [ctx]
         (let [ctx (ctx/compile-node ctx bool-node)]
           (ctx/compile-instruction
@@ -429,3 +430,39 @@
       ~@then-nodes
       (go :while))
     :end))
+
+(defn determine-gep-leaf-type+indices
+  ([t keys indices]
+   (if-let [k (first keys)]
+     (let [element-index (Aggregate/get-element-index t k)
+           element-type (Aggregate/get-element-type t k)]
+       (recur element-type (next keys) (conj indices element-index)))
+     [t indices]))
+  ([t keys]
+   (determine-gep-leaf-type+indices t keys [])))
+
+(defn %gep
+  [ptr keys]
+  (assert (Ptr/pointer-node? ptr))
+  (assert (isa? (t/tid-of (first keys)) ::Number/Int))
+  (let [object-type (:object-type (t/type-of ptr))]
+    (assert (isa? (t/tid-of-type object-type) :oben.core.types/Aggregate))
+    (let [[leaf-type indices] (determine-gep-leaf-type+indices object-type (next keys))
+          indices (cons (first keys) indices)]
+      (ast/make-node (Ptr/Ptr leaf-type)
+        (fn [ctx]
+          (letfn [(compile-ptr [ctx]
+                    (ctx/compile-node ctx ptr))
+                  (compile-indices [ctx]
+                    (reduce ctx/compile-node ctx indices))
+                  (compile-gep [ctx]
+                    (let [ins (ir/getelementptr (ctx/compiled ctx ptr)
+                                                (map #(ctx/compiled ctx %) indices)
+                                                {})]
+                      (ctx/compile-instruction ctx ins)))]
+            (-> ctx
+                compile-ptr
+                compile-indices
+                compile-gep)))
+        {:class :oben/gep
+         :children (set (cons ptr keys))}))))

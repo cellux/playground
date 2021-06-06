@@ -47,11 +47,38 @@
 
 (def tid-of-type (comp :tid meta))
 
+(defn node?
+  [x]
+  (and (fn? x)
+       (= :oben/NODE (:kind (meta x)))))
+
 (def type-of-node (comp :type meta))
 (def type-of type-of-node)
 
 (def tid-of-node (comp :tid meta type-of))
-(def tid-of tid-of-node)
+
+(derive ::HostKeyword ::HostValue)
+(derive ::HostVector ::HostValue)
+(derive ::HostMap ::HostValue)
+
+(defn host-value?
+  [x]
+  (or (keyword? x)
+      (vector? x)
+      (map? x)))
+
+(defn tid-of-host-value
+  [x]
+  (cond (keyword? x) ::HostKeyword
+        (vector? x) ::HostVector
+        (map? x) ::HostMap
+        :else (throw (ex-info "no tid for host value" {:host-value x}))))
+
+(defn tid-of
+  [x]
+  (cond (node? x) (tid-of-node x)
+        (host-value? x) (tid-of-host-value x)
+        :else (throw (ex-info "no tid for value" {:value x}))))
 
 (defmulti compile
   "Compiles an Oben type into the corresponding LLVM type."
@@ -91,8 +118,6 @@
 (defn tangible?
   [t]
   (isa? (tid-of-type t) ::Value))
-
-(derive ::Aggregate ::Value)
 
 ;; get-ubertype
 

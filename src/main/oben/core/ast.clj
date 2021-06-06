@@ -18,7 +18,7 @@
 
 (defn node?
   [x]
-  (and (fn? x) 
+  (and (fn? x)
        (= :oben/NODE (:kind (meta x)))))
 
 (defn nodeclass-of
@@ -85,45 +85,64 @@
   (and (fn? x)
        (= :oben/MACRO (:kind (meta x)))))
 
+(defn multifn?
+  [x]
+  (instance? clojure.lang.MultiFn x))
+
 (defn parse
   ([form env]
    (letfn [(die []
              (throw (ex-info "cannot parse form" {:form form :env env})))]
-     (cond
-       (node? form)
-       form
+     (try
+       (cond
+         (node? form)
+         form
 
-       (t/type? form)
-       form
+         (t/type? form)
+         form
 
-       (symbol? form)
-       (u/resolve form env)
+         (symbol? form)
+         (u/resolve form env)
 
-       (number? form)
-       (constant form)
+         (number? form)
+         (constant form)
 
-       (sequential? form)
-       (let [op (parse (first form) env)
-             args (next form)
-             result (cond
-                      (fnode? op)
-                      (funcall op (map #(parse % env) args))
+         (keyword? form)
+         form
 
-                      (t/type? op)
-                      (let [arg (parse (first args) env)]
-                        (t/cast op arg true))
+         (vector? form)
+         (mapv #(parse % env) form)
 
-                      (oben-macro? op)
-                      (apply op form env args)
+         (map? form)
+         (reduce-kv (fn [result k v]
+                      (assoc result
+                             (parse k env)
+                             (parse v env)))
+                    {} form)
 
-                      (or (fn? op)
-                          (instance? clojure.lang.MultiFn op))
-                      (apply op (map #(parse % env) args))
+         (sequential? form)
+         (let [op (parse (first form) env)
+               args (next form)
+               result (cond
+                        (fnode? op)
+                        (funcall op (map #(parse % env) args))
 
-                      :else (die))]
-         (recur result env))
+                        (t/type? op)
+                        (let [arg (parse (first args) env)]
+                          (t/cast op arg true))
 
-       :else
-       (die))))
+                        (oben-macro? op)
+                        (apply op form env args)
+
+                        (or (fn? op) (multifn? op))
+                        (apply op (map #(parse % env) args))
+
+                        :else (die))]
+           (parse result env))
+
+         :else (die))
+       (catch clojure.lang.ExceptionInfo e
+         (throw (ex-info (.getMessage e)
+                         (update (ex-data e) :forms concat (list form))))))))
   ([form]
    (parse form {})))

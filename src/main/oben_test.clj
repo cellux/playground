@@ -3,9 +3,7 @@
   (:require [oben.core.context :as ctx])
   (:require [oben.core.ast :as ast])
   (:require [oben.core.types :as t])
-  (:require [oben.core.types.numbers :as numbers])
-  (:require [oben.core.types.numbers :as numbers*])
-  (:require [oben.core.types.ptr :as ptr])
+  (:require [oben.core.types.Number :as Number])
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m])
   (:use [midje.repl]))
@@ -72,8 +70,8 @@
 
 (m/facts
  "type constructors memoize the types they return"
- (m/fact (identical? (numbers/UInt 32) (numbers/UInt 32)))
- (m/fact (identical? (numbers/UInt 32) numbers/%u32)))
+ (m/fact (identical? (Number/UInt 32) (Number/UInt 32)))
+ (m/fact (identical? (Number/UInt 32) Number/%u32)))
 
 (oben/with-temp-context
   (let [f (oben/fn ^u32 []
@@ -81,14 +79,14 @@
     (m/fact (f) => 7)))
 
 (oben/with-temp-context
-  (let [f (oben/fn {:tag (numbers*/UInt 32)} []
+  (let [f (oben/fn {:tag (Number/UInt 32)} []
             (+ 5 2))]
     (m/fact
      "a map before the param vector is evaluated and used as params metadata"
      (f) => 7)))
 
 (oben/with-temp-context
-  (let [f (oben/fn (numbers*/UInt 32) []
+  (let [f (oben/fn (Number/UInt 32) []
             (+ 5 2))]
     (m/fact
      "a list before the param vector is evaluated and used as the :tag field of params metadata"
@@ -100,8 +98,8 @@
     (m/fact (f 5 3) => 8)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^u32 [{:tag numbers/%u32} x
-                         (numbers/UInt 32) y]
+  (let [f (oben/fn ^u32 [{:tag Number/%u32} x
+                         (Number/UInt 32) y]
             (+ x y))]
     (m/fact (f 1 2) => 3)
     (m/fact (f 5 3) => 8)))
@@ -652,16 +650,16 @@
             (let [a (array u32 [9 8 7 6 5 4 3 2 1 0])]
               (get a 3)))]
     (m/fact
-     "array literals support get with a constant index"
+     "array literal supports get with constant index"
      (f) => 6)))
 
-;; (oben/with-temp-context
-;;   (let [f (oben/fn ^u32 [u32 index]
-;;             (let [a (var (array u32 [9 8 7 6 5 4 3 2 1 0]))]
-;;               (get a index)))]
-;;     (m/fact
-;;      "pointer to aggregate supports get with variable index"
-;;      (f a 3) => 6)))
+(oben/with-temp-context
+  (let [f (oben/fn ^u32 [^u32 index]
+            (let [a (var (array u32 [9 8 7 6 5 4 3 2 1 0]))]
+              (get a (+ index 1))))]
+    (m/fact
+     "pointer to aggregate supports get with variable index"
+     (f 3) => 5)))
 
 ;; (oben/with-temp-context
 ;;   (let [f (oben/fn ^u32 [u32 index]
@@ -672,7 +670,7 @@
 ;;      (f a 3) => 6)))
 
 #_(oben/with-temp-context
-    (let [atype (t/Array numbers/%u32 10)
+    (let [atype (t/Array Number/%u32 10)
           a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
           f (oben/fn ^u32 [^u32* a
                            ^u32 index]
