@@ -658,9 +658,9 @@
 ;; (oben/with-temp-context
 ;;   (let [f (oben/fn ^u32 [u32 index]
 ;;             (let [a (var (array u32 [9 8 7 6 5 4 3 2 1 0]))]
-;;               (get-in a [0 index])))]
+;;               (get a index)))]
 ;;     (m/fact
-;;      "array variables are pointers to the array (not to its first element)"
+;;      "pointer to aggregate supports get with variable index"
 ;;      (f a 3) => 6)))
 
 ;; (oben/with-temp-context

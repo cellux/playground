@@ -14,7 +14,6 @@
   (:require [oben.core.types.numbers])
   (:require [oben.core.types.array])
   (:require [oben.core.types.ptr])
-  (:require [oben.core.types.var])
   (:require [oben.core.nodes :as nodes])
   (:require [oben.core.protocols.Eq])
   (:require [oben.core.protocols.Ord])
@@ -40,11 +39,13 @@
 
 (def array oben.core.types.array/%array)
 (def deref oben.core.types.ptr/%deref)
-(def var oben.core.types.var/%var)
 
 (def nop oben.core.nodes/%nop)
+
 (def cast oben.core.nodes/%cast)
 (def cast! oben.core.nodes/%cast!)
+
+(def var oben.core.nodes/%var)
 (def set! oben.core.nodes/%set!)
 
 (def do oben.core.nodes/%do)
@@ -61,12 +62,15 @@
 
 (def when oben.core.nodes/%when)
 (def if oben.core.nodes/%if)
+
 (def cond oben.core.nodes/%cond)
 (def condp oben.core.nodes/%condp)
 (def case oben.core.nodes/%case)
+
 (def not oben.core.nodes/%not)
 (def and oben.core.nodes/%and)
 (def or oben.core.nodes/%or)
+
 (def while oben.core.nodes/%while)
 
 (def = oben.core.protocols.Eq/=)
