@@ -309,19 +309,26 @@
                          64 (.putLong hib (long arg))))
             :float (.putFloat hib (float arg))
             :double (.putDouble hib (double arg))
-            :ptr (.putAddress hib (long arg))
-            :array (let [[_ elt size] type
-                         flags ArrayFlags/PINNED]
-                     (case (ir/extract-type-tag elt)
-                       :integer (let [[_ size] type]
-                                  (case size
-                                    1 (.putArray hib (bytes arg) 0 (count arg) flags)
-                                    8 (.putArray hib (bytes arg) 0 (count arg) flags)
-                                    16 (.putArray hib (shorts arg) 0 (count arg) flags)
-                                    32 (.putArray hib (ints arg) 0 (count arg) flags)
-                                    64 (.putArray hib (longs arg) 0 (count arg) flags)))
-                       :float (.putArray hib (floats arg) 0 (count arg) flags)
-                       :double (.putArray hib (doubles arg) 0 (count arg) flags)))))
+            :ptr (letfn [(put-arg-as-array
+                           [object-type]
+                           (let [[_ elt] type]
+                             (assert (= elt object-type) "array element type does not match ptr type")
+                             (.putArray hib arg 0 (count arg) ArrayFlags/PINNED)))]
+                   (cond (integer? arg)
+                         (.putAddress hib (long arg))
+                         (instance? (Class/forName "[B") arg)
+                         (put-arg-as-array [:integer 8])
+                         (instance? (Class/forName "[S") arg)
+                         (put-arg-as-array [:integer 16])
+                         (instance? (Class/forName "[I") arg)
+                         (put-arg-as-array [:integer 32])
+                         (instance? (Class/forName "[J") arg)
+                         (put-arg-as-array [:integer 64])
+                         (instance? (Class/forName "[F") arg)
+                         (put-arg-as-array [:float 32])
+                         (instance? (Class/forName "[D") arg)
+                         (put-arg-as-array [:float 64])
+                         :else (throw (ex-info "cannot convert vector arg into array pointer" {:vector arg :type type}))))))
         (case (ir/extract-type-tag result-type)
           :ptr (.invokeAddress invoker cc address hib)
           :integer (let [[_ size] result-type]

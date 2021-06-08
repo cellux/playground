@@ -446,7 +446,7 @@
   (assert (Ptr/pointer-node? ptr))
   (assert (isa? (t/tid-of (first keys)) ::Number/Int))
   (let [object-type (:object-type (t/type-of ptr))]
-    (assert (isa? (t/tid-of-type object-type) :oben.core.types/Aggregate))
+    ;; (assert (isa? (t/tid-of-type object-type) :oben.core.types/Aggregate))
     (let [[leaf-type indices] (determine-gep-leaf-type+indices object-type (next keys))
           indices (cons (first keys) indices)]
       (ast/make-node (Ptr/Ptr leaf-type)

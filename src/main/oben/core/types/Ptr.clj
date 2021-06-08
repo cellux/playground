@@ -3,6 +3,8 @@
   (:require [oben.core.ast :as ast])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.protocols.Container :as Container])
+  (:require [oben.core.protocols.Algebra :as Algebra])
+  (:require [oben.core.types.Number :as Number])
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m]))
 
@@ -49,3 +51,7 @@
 (defmethod Container/get [::Ptr ::t/Value]
   [ptr key]
   (Container/get-in ptr [key]))
+
+(defmethod Algebra/+ [::Ptr ::Number/Int]
+  [ptr offset]
+  `(gep ~ptr [~offset]))
