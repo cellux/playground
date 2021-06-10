@@ -55,3 +55,7 @@
 (defmethod Algebra/+ [::Ptr ::Number/Int]
   [ptr offset]
   `(gep ~ptr [~offset]))
+
+(defmethod Algebra/- [::Ptr ::Number/Int]
+  [ptr offset]
+  `(gep ~ptr [(- ~offset)]))
