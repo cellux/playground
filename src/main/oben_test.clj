@@ -723,6 +723,7 @@
                          ^u32 value]
             (set! (+ a index) value))]
     (m/fact
+     (aset a 3 6)
      (nth a 3) => 6
      (f a 3 21)
      (nth a 3) => 21)))
