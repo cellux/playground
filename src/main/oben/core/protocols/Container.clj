@@ -4,4 +4,6 @@
 
 (oben/defmulti get-in)
 (oben/defmulti get)
+
+(oben/defmulti put-in)
 (oben/defmulti put)

@@ -52,6 +52,18 @@
   [ptr key]
   (Container/get-in ptr [key]))
 
+(defmethod Container/put-in [::Ptr ::t/HostVector ::t/Value]
+  [ptr ks val]
+  (let [object-type (:object-type (t/type-of ptr))
+        tid (t/tid-of-type object-type)]
+    (cond (isa? tid :oben.core.types/Aggregate)
+          `(set! (gep ~ptr [0 ~@ks]) ~val)
+          :else `(put-in (deref ~ptr) ~ks ~val))))
+
+(defmethod Container/put [::Ptr ::t/Value ::t/Value]
+  [ptr key val]
+  (Container/put-in ptr [key] val))
+
 (defmethod Algebra/+ [::Ptr ::Number/Int]
   [ptr offset]
   `(gep ~ptr [~offset]))

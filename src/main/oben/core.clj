@@ -101,4 +101,6 @@
 
 (def get-in oben.core.protocols.Container/get-in)
 (def get oben.core.protocols.Container/get)
+
+(def put-in oben.core.protocols.Container/put-in)
 (def put oben.core.protocols.Container/put)
