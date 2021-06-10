@@ -9,7 +9,8 @@
              bit-shift-left bit-shift-right
              and or
              = != < <= >= >
-             get-in get put])
+             get-in get
+             assoc-in assoc])
   (:require [oben.core.types :as types])
   (:require [oben.core.types.Number])
   (:require [oben.core.types.Array])
@@ -101,6 +102,9 @@
 
 (def get-in oben.core.protocols.Container/get-in)
 (def get oben.core.protocols.Container/get)
+
+(def assoc-in oben.core.protocols.Container/assoc-in)
+(def assoc oben.core.protocols.Container/assoc)
 
 (def put-in oben.core.protocols.Container/put-in)
 (def put oben.core.protocols.Container/put)

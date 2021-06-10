@@ -17,22 +17,69 @@
   [{:keys [element-type size]}]
   [:array (t/compile element-type) size])
 
-(defmethod Container/get [::Array ::Number/UInt]
-  [self index]
-  (assert (ast/constant? index))
+(defn find-element-type
+  [type indices]
+  (if (seq indices)
+    (find-element-type (:element-type type) (next indices))
+    type))
+
+(defn array-index?
+  [node]
+  (and (ast/constant? node)
+       (isa? ::Number/UInt (t/tid-of node))))
+
+(defmethod Container/get-in [::Array ::t/HostVector]
+  [self indices]
+  (assert (every? array-index? indices))
   (let [atype (t/type-of self)
-        elt (:element-type atype)]
-    (ast/make-node elt
+        return-type (find-element-type atype indices)]
+    (ast/make-node return-type
       (fn [ctx]
-        (letfn [(compile-extractvalue [ctx]
+        (letfn [(compile-indices [ctx]
+                  (reduce ctx/compile-node ctx indices))
+                (compile-extractvalue [ctx]
                   (ctx/compile-instruction
-                   ctx (ir/extractvalue (ctx/compiled ctx self)
-                                        [(ctx/compiled ctx index)]
-                                        {})))]
+                   ctx (ir/extractvalue
+                        (ctx/compiled ctx self)
+                        (mapv #(ctx/compiled ctx %) indices)
+                        {})))]
           (-> ctx
               (ctx/compile-node self)
-              (ctx/compile-node index)
+              compile-indices
               compile-extractvalue))))))
+
+(defmethod Container/get [::Array ::Number/UInt]
+  [self index]
+  (Container/get-in self [index]))
+
+(defmethod Container/assoc-in [::Array ::t/HostVector ::t/Value]
+  [self indices value]
+  (assert (every? array-index? indices))
+  (let [atype (t/type-of self)
+        value-type (find-element-type atype indices)
+        return-type atype]
+    (ast/make-node return-type
+      (fn [ctx]
+        (letfn [(compile-indices [ctx]
+                  (reduce ctx/compile-node ctx indices))
+                (compile-value [ctx]
+                  (ctx/compile-node ctx value))
+                (compile-insertvalue [ctx]
+                  (ctx/compile-instruction
+                   ctx (ir/insertvalue
+                        (ctx/compiled ctx self)
+                        (ctx/compiled ctx value)
+                        (mapv #(ctx/compiled ctx %) indices)
+                        {})))]
+          (-> ctx
+              (ctx/compile-node self)
+              compile-value
+              compile-indices
+              compile-insertvalue))))))
+
+(defmethod Container/assoc [::Array ::Number/UInt ::t/Value]
+  [self index value]
+  (Container/assoc-in self [index] value))
 
 (defmethod Aggregate/get-element-type ::Array
   [t key]
