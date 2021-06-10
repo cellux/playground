@@ -92,7 +92,9 @@
 (defn parse
   ([form env]
    (letfn [(die []
-             (throw (ex-info "cannot parse form" {:form form :env env})))]
+             (throw (ex-info "cannot parse form" {:form form :env env})))
+           (annotate [form]
+             (remove nil? (list (meta form) form)))]
      (try
        (cond
          (node? form)
@@ -143,6 +145,9 @@
          :else (die))
        (catch clojure.lang.ExceptionInfo e
          (throw (ex-info (.getMessage e)
-                         (update (ex-data e) :forms concat (list form))))))))
+                         (update (ex-data e) :forms concat (annotate form)))))
+       (catch Exception e
+         (throw (ex-info (.getMessage e)
+                         {:forms (annotate form)}))))))
   ([form]
    (parse form {})))
