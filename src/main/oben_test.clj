@@ -714,3 +714,15 @@
             @a)]
     (m/fact
      (f a) => 9)))
+
+(oben/with-temp-context
+  (let [atype (Array/Array Number/%u32 10)
+        a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
+        f (oben/fn ^u32 [(* u32) a
+                         ^u32 index
+                         ^u32 value]
+            (set! (+ a index) value))]
+    (m/fact
+     (nth a 3) => 6
+     (f a 3 21)
+     (nth a 3) => 21)))
