@@ -785,12 +785,13 @@
 
 (defn load
   [target opts]
-  (assoc opts
-         :kind :instruction
-         :op :load
-         :object-type (:object-type target)
-         :ptr target
-         :type (:object-type target)))
+  (let [[_ object-type] (:type target)]
+    (assoc opts
+           :kind :instruction
+           :op :load
+           :object-type object-type
+           :ptr target
+           :type object-type)))
 
 (defmethod render-instruction :load
   [{:keys [object-type ptr align] :as i}]

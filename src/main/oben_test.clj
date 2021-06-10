@@ -706,3 +706,11 @@
     (m/fact
      "(* type) is a shortcut for (Ptr/Ptr type)"
      (f a 3) => 6)))
+
+(oben/with-temp-context
+  (let [atype (Array/Array Number/%u32 10)
+        a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
+        f (oben/fn ^u32 [(* u32) a]
+            @a)]
+    (m/fact
+     (f a) => 9)))
