@@ -3,6 +3,7 @@
   (:require [clojure.core :as clj])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.types :as t])
+  (:require [oben.core.util :as u])
   (:require [oben.core.ast :as ast])
   (:require [omkamra.llvm.ir :as ir])
   (:require [omkamra.llvm.context :as llvm-context])
@@ -53,49 +54,13 @@
           result))
       {:kind :oben/FN :fnode fnode})))
 
-(clj/defn items->obj-with-meta
-  [items obj? all?]
-  (loop [result []
-         items items
-         m nil]
-    (if-let [head (first items)]
-      (cond (obj? head)
-            (let [obj (if m
-                        (vary-meta head merge m)
-                        head)]
-              (if all?
-                (recur (conj result obj) (next items) nil)
-                (vector obj (next items))))
-
-            (list? head)
-            (recur result (next items) (assoc m :tag head))
-
-            (map? head)
-            (recur result (next items) (merge m head)))
-      result)))
-
-(clj/defn quote-tag-if-unbound-symbol
-  [m env]
-  (if (and (symbol? (:tag m))
-           (not (contains? env (:tag m))))
-    (update m :tag #(list 'quote %))
-    m))
-
-(clj/defn build-param-form
-  [sym env]
-  `(with-meta '~sym ~(quote-tag-if-unbound-symbol (meta sym) env)))
-
-(clj/defn build-param-forms
-  [params env]
-  (map #(build-param-form % env) (items->obj-with-meta params symbol? true)))
-
 (clj/defn build-make-fn-args
   [decl env]
-  (let [[params body] (items->obj-with-meta decl vector? false)]
+  (let [[params body] (u/sanitize-typed-forms decl env vector? false false)]
     (vector
      `(with-meta
-        (vector ~@(build-param-forms params env))
-        ~(quote-tag-if-unbound-symbol (meta params) env))
+        (vector ~@(u/sanitize-typed-forms params env symbol? true true))
+        ~(meta params))
      `(quote ~body))))
 
 (clj/defmacro fn

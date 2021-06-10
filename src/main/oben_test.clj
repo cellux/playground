@@ -78,33 +78,59 @@
 (oben/with-temp-context
   (let [f (oben/fn ^u32 []
             (+ 5 2))]
-    (m/fact (f) => 7)))
+    (m/fact
+     "a type tag on the param vector defines the return type of the function"
+     (f) => 7)))
 
 (oben/with-temp-context
-  (let [f (oben/fn {:tag (Number/UInt 32)} []
-            (+ 5 2))]
+  (let [f (oben/fn ^u32 [^u32 x ^u32 y] (+ x y))]
     (m/fact
-     "a map before the param vector is evaluated and used as params metadata"
-     (f) => 7)))
+     "type tags on params define their types"
+     (f 1 2) => 3)
+    (m/fact (f 5 3) => 8)))
 
 (oben/with-temp-context
   (let [f (oben/fn (Number/UInt 32) []
             (+ 5 2))]
     (m/fact
-     "a list before the param vector is evaluated and used as the :tag field of params metadata"
+     "a list before the param vector is evaluated and moved to the type tag"
      (f) => 7)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^u32 [^u32 x ^u32 y] (+ x y))]
-    (m/fact (f 1 2) => 3)
-    (m/fact (f 5 3) => 8)))
+  (let [f (oben/fn ^u32 [u32 x u32 y] (+ x y))]
+    (m/fact
+     "a symbol before a param is used as a type designator"
+     (f 5 3) => 8)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^u32 [{:tag Number/%u32} x
-                         (Number/UInt 32) y]
-            (+ x y))]
-    (m/fact (f 1 2) => 3)
-    (m/fact (f 5 3) => 8)))
+  (let [f (oben/fn ^u32 [u32 a
+                         ^u32 b
+                         (Number/UInt 32) c
+                         Number/%u32 d]
+            (+ a b c d))]
+    (m/fact
+     "type designators"
+     (f 5 3 1 6) => 15)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^u32 [^u8 x]
+            (bit-not x))]
+    (m/fact (f 0) => 255))
+  (let [f (oben/fn ^u32 [^u16 x]
+            (bit-not x))]
+    (m/fact (f 0) => 65535))
+  (let [u8 'u16
+        return-size 32
+        f (oben/fn (Number/UInt return-size) [^u8 x]
+            (bit-not x))]
+    (m/fact
+     "symbols inside type designators can be resolved via bindings in the local environment"
+     (f 0) => 65535))
+  (let [f (oben/fn ^u32 [u8 ^u16 x]
+            (bit-not x))]
+    (m/fact
+     "type designators override existing type tag within metadata"
+     (f 0) => 255)))
 
 (oben/with-temp-context
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
@@ -670,3 +696,13 @@
                          ^u32 index]
             @(+ a index))]
     (m/fact (f a 3) => 6)))
+
+(oben/with-temp-context
+  (let [atype (Array/Array Number/%u32 10)
+        a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
+        f (oben/fn ^u32 [(* u32) a
+                         ^u32 index]
+            @(+ a index))]
+    (m/fact
+     "(* type) is a shortcut for (Ptr/Ptr type)"
+     (f a 3) => 6)))
