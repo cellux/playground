@@ -89,10 +89,10 @@
   (fn [t size] (tid-of-type t)))
 
 (defmulti cast
-  "Returns an AST node which casts `node` to type `t`.
-  If the cast cannot be accomplished without information loss, cast
-  throws an error unless `force?` is true."
-  (fn [t node force?] [(tid-of-type t) (tid-of-node node)]))
+  "Returns an AST node which casts `x` to type `t`.
+  If the cast cannot be accomplished without information loss, throws
+  an error unless `force?` is true."
+  (fn [t x force?] [(tid-of-type t) (tid-of x)]))
 
 ;; we call this %Void to prevent a clash with java.lang.Void
 (define-typeclass %Void [::Any]
