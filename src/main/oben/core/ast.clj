@@ -146,7 +146,7 @@
        (catch clojure.lang.ExceptionInfo e
          (throw (ex-info (.getMessage e)
                          (update (ex-data e) :forms concat (annotate form)))))
-       (catch Exception e
+       (catch Throwable e
          (throw (ex-info (.getMessage e)
                          {:forms (annotate form)}))))))
   ([form]
