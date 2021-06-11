@@ -206,9 +206,9 @@
 
 (oben/defmacro %return
   ([form]
-   (list 'return-from :oben/default-block form))
+   (list 'return-from :oben/fn-block form))
   ([]
-   (list 'return-from :oben/default-block)))
+   (list 'return-from :oben/fn-block)))
 
 (defn node-children
   [node]
@@ -301,7 +301,7 @@
         params (mapv ast/function-parameter param-names param-types)
         void? (= return-type t/%void)
         env (into {} (map vector param-names params))
-        body-node (ast/parse `(block :oben/default-block ~@body) env)
+        body-node (ast/parse `(block :oben/fn-block ~@body) env)
         body-node (%cast return-type body-node)]
     (ast/make-node (Fn/Fn return-type param-types)
       (fn [ctx]
