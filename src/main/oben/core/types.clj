@@ -57,22 +57,30 @@
 
 (def tid-of-node (comp :tid meta type-of))
 
+(derive ::HostNumber ::HostValue)
+(derive ::HostInteger ::HostNumber)
+(derive ::HostFloat ::HostNumber)
+
 (derive ::HostKeyword ::HostValue)
 (derive ::HostVector ::HostValue)
 (derive ::HostMap ::HostValue)
 
 (defn host-value?
   [x]
-  (or (keyword? x)
+  (or (number? x)
+      (keyword? x)
       (vector? x)
       (map? x)))
 
 (defn tid-of-host-value
   [x]
-  (cond (keyword? x) ::HostKeyword
-        (vector? x) ::HostVector
-        (map? x) ::HostMap
-        :else (throw (ex-info "no tid for host value" {:host-value x}))))
+  (cond
+    (float? x) ::HostFloat
+    (integer? x) ::HostInteger
+    (keyword? x) ::HostKeyword
+    (vector? x) ::HostVector
+    (map? x) ::HostMap
+    :else (throw (ex-info "no tid for host value" {:host-value x}))))
 
 (defn tid-of
   [x]

@@ -346,6 +346,20 @@
   [x]
   (determine-constant-type-for-float x))
 
+(defmethod ast/parse-host-value-as-type [::Int ::t/HostInteger]
+  [t n]
+  (if (> (integer-size n) (:size t))
+    (throw (ex-info (str "integer constant does not fit into type")
+                    {:type t :value n}))
+    (ast/constant t n)))
+
+(defmethod ast/parse-host-value-as-type [::FP ::t/HostFloat]
+  [t n]
+  (if (> (float-size n) (:size t))
+    (throw (ex-info (str "floating point constant does not fit into type")
+                    {:type t :value n}))
+    (ast/constant t n)))
+
 (defmacro define-binary-op
   [op-multifn arg-typeclass make-ir]
   `(letfn [(doit# [~'lhs ~'rhs]

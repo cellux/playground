@@ -689,6 +689,21 @@
      "pointer to aggregate supports get with variable index"
      (f 3) => 5)))
 
+(def u32array-3 (Array/Array Number/%u32 5))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^u32 [^u32 index]
+            (let [a (var (u32array-3 [9 8 7 6 5]))]
+              (get a (+ index (u8 3)))))]
+    (m/fact
+     "types can be used as value constructors"
+     (f 1) => 5))
+  (m/fact
+   (oben/fn ^u32 [^u32 index]
+     (let [a (var (u32array-3 [9 8 7 6 5]))]
+       (get a (+ index (u1 3)))))
+   => (throws clojure.lang.ExceptionInfo "integer constant does not fit into type")))
+
 (oben/with-temp-context
   (let [atype (Array/Array Number/%u32 10)
         a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])

@@ -17,6 +17,12 @@
   [{:keys [element-type size]}]
   [:array (t/compile element-type) size])
 
+(defmethod ast/parse-host-value-as-type [::Array ::t/HostVector]
+  [t elems]
+  (assert (= (count elems) (:size t)))
+  (assert (every? #(ast/parse-host-value-as-type (:element-type t) %) elems))
+  (ast/constant t elems))
+
 (defn find-element-type
   [type indices]
   (if (seq indices)
@@ -94,4 +100,4 @@
   (let [size (count initializer)
         elt (ast/parse element-type &env)
         array-type (Array elt size)]
-    (ast/constant array-type initializer)))
+    (ast/parse-host-value-as-type array-type initializer)))

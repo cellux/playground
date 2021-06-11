@@ -25,6 +25,10 @@
   [node]
   (:class (meta node)))
 
+(defmulti parse-host-value-as-type
+  (fn [t x]
+    [(t/tid-of-type t) (t/tid-of x)]))
+
 (defmulti determine-constant-type class)
 
 (defn constant
@@ -130,8 +134,10 @@
                         (funcall op (map #(parse % env) args))
 
                         (t/type? op)
-                        (let [arg (parse (first args) env)]
-                          (t/cast op arg true))
+                        (let [arg (first args)]
+                          (if (t/host-value? arg)
+                            (parse-host-value-as-type op arg)
+                            (t/cast op (parse arg env) true)))
 
                         (oben-macro? op)
                         (apply op form env args)
