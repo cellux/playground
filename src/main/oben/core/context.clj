@@ -310,9 +310,19 @@
             :float (.putFloat hib (float arg))
             :double (.putDouble hib (double arg))
             :ptr (letfn [(put-arg-as-array
-                           [object-type]
-                           (let [[_ elt] type]
-                             (assert (= elt object-type) "array element type does not match ptr type")
+                           [arg-elt]
+                           (let [[_ object-type] type]
+                             (case (ir/extract-type-tag object-type)
+                               :array (let [[_ elt size] object-type]
+                                        (when (not= elt arg-elt)
+                                          (throw (ex-info "array element type mismatch"
+                                                          {:actual arg-elt :desired elt})))
+                                        (when (not= size (count arg))
+                                          (throw (ex-info "array size mismatch"
+                                                          {:actual (count arg) :desired size}))))
+                               (when (not= arg-elt object-type)
+                                 (throw (ex-info "array element type mismatch"
+                                                 {:actual arg-elt :desired object-type}))))
                              (.putArray hib arg 0 (count arg) ArrayFlags/PINNED)))]
                    (cond (integer? arg)
                          (.putAddress hib (long arg))
@@ -330,6 +340,7 @@
                          (put-arg-as-array [:float 64])
                          :else (throw (ex-info "cannot convert vector arg into array pointer" {:vector arg :type type}))))))
         (case (ir/extract-type-tag result-type)
+          :void (do (.invokeInt invoker cc address hib) nil)
           :ptr (.invokeAddress invoker cc address hib)
           :integer (let [[_ size] result-type]
                      (case size

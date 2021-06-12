@@ -168,14 +168,6 @@
      (f 6 3) => 9.0)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^f32 [^u32 x ^u32 y]
-            (let [g (fn ^u32 [^u16 x ^u8 y] (+ x y))]
-              (g (u16 x) (u8 y))))]
-    (m/fact
-     "types in operator position can be also used for forced casts"
-     (f 6 3) => 9.0)))
-
-(oben/with-temp-context
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (+ x y))]
     (m/fact (f 6 3) => 9))
@@ -282,45 +274,45 @@
     (m/fact (f 0x1234 0xff00) => (+ 0x34 (- 0xff00 0x1200)))))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^u1 [^u32 x ^u32 y]
+  (let [f (oben/fn ^bool [^u32 x ^u32 y]
             (= x y))]
     (m/fact (f 3 5) => 0)
     (m/fact (f 3 3) => 1))
-  (let [f (oben/fn ^u1 [^s32 x ^s32 y]
+  (let [f (oben/fn ^bool [^s32 x ^s32 y]
             (= x y))]
     (m/fact (f -3 -5) => 0)
     (m/fact (f -3 -3) => 1))
-  (let [f (oben/fn ^u1 [^f32 x ^f32 y]
+  (let [f (oben/fn ^bool [^f32 x ^f32 y]
             (= x y))]
     (m/fact (f 3 5) => 0)
     (m/fact (f 3 3) => 1)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^u1 [^u32 x ^u32 y]
+  (let [f (oben/fn ^bool [^u32 x ^u32 y]
             (!= x y))]
     (m/fact (f 3 5) => 1)
     (m/fact (f 3 3) => 0))
-  (let [f (oben/fn ^u1 [^s32 x ^s32 y]
+  (let [f (oben/fn ^bool [^s32 x ^s32 y]
             (!= x y))]
     (m/fact (f -3 -5) => 1)
     (m/fact (f -3 -3) => 0))
-  (let [f (oben/fn ^u1 [^f32 x ^f32 y]
+  (let [f (oben/fn ^bool [^f32 x ^f32 y]
             (!= x y))]
     (m/fact (f 3 5) => 1)
     (m/fact (f 3 3) => 0)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^u1 [^u32 x ^u32 y]
+  (let [f (oben/fn ^bool [^u32 x ^u32 y]
             (< x y))]
     (m/fact (f 3 5) => 1)
     (m/fact (f 5 3) => 0)
     (m/fact (f 3 3) => 0))
-  (let [f (oben/fn ^u1 [^s32 x ^s32 y]
+  (let [f (oben/fn ^bool [^s32 x ^s32 y]
             (< x y))]
     (m/fact (f -3 5) => 1)
     (m/fact (f 5 -3) => 0)
     (m/fact (f -3 -3) => 0))
-  (let [f (oben/fn ^u1 [^f32 x ^f32 y]
+  (let [f (oben/fn ^bool [^f32 x ^f32 y]
             (< x y))]
     (m/fact (f 3 5) => 1)
     (m/fact (f 5 3) => 0)
@@ -330,17 +322,17 @@
     (m/fact (f 3.3 3.2) => 0)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^u1 [^u32 x ^u32 y]
+  (let [f (oben/fn ^bool [^u32 x ^u32 y]
             (<= x y))]
     (m/fact (f 3 5) => 1)
     (m/fact (f 5 3) => 0)
     (m/fact (f 3 3) => 1))
-  (let [f (oben/fn ^u1 [^s32 x ^s32 y]
+  (let [f (oben/fn ^bool [^s32 x ^s32 y]
             (<= x y))]
     (m/fact (f -3 5) => 1)
     (m/fact (f 5 -3) => 0)
     (m/fact (f -3 -3) => 1))
-  (let [f (oben/fn ^u1 [^f32 x ^f32 y]
+  (let [f (oben/fn ^bool [^f32 x ^f32 y]
             (<= x y))]
     (m/fact (f 3 5) => 1)
     (m/fact (f 5 3) => 0)
@@ -350,17 +342,17 @@
     (m/fact (f 3.3 3.2) => 0)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^u1 [^u32 x ^u32 y]
+  (let [f (oben/fn ^bool [^u32 x ^u32 y]
             (>= x y))]
     (m/fact (f 3 5) => 0)
     (m/fact (f 5 3) => 1)
     (m/fact (f 3 3) => 1))
-  (let [f (oben/fn ^u1 [^s32 x ^s32 y]
+  (let [f (oben/fn ^bool [^s32 x ^s32 y]
             (>= x y))]
     (m/fact (f -3 5) => 0)
     (m/fact (f 5 -3) => 1)
     (m/fact (f -3 -3) => 1))
-  (let [f (oben/fn ^u1 [^f32 x ^f32 y]
+  (let [f (oben/fn ^bool [^f32 x ^f32 y]
             (>= x y))]
     (m/fact (f 3 5) => 0)
     (m/fact (f 5 3) => 1)
@@ -370,17 +362,17 @@
     (m/fact (f 3.3 3.2) => 1)))
 
 (oben/with-temp-context
-  (let [f (oben/fn ^u1 [^u32 x ^u32 y]
+  (let [f (oben/fn ^bool [^u32 x ^u32 y]
             (> x y))]
     (m/fact (f 3 5) => 0)
     (m/fact (f 5 3) => 1)
     (m/fact (f 3 3) => 0))
-  (let [f (oben/fn ^u1 [^s32 x ^s32 y]
+  (let [f (oben/fn ^bool [^s32 x ^s32 y]
             (> x y))]
     (m/fact (f -3 5) => 0)
     (m/fact (f 5 -3) => 1)
     (m/fact (f -3 -3) => 0))
-  (let [f (oben/fn ^u1 [^f32 x ^f32 y]
+  (let [f (oben/fn ^bool [^f32 x ^f32 y]
             (> x y))]
     (m/fact (f 3 5) => 0)
     (m/fact (f 5 3) => 1)
@@ -536,10 +528,9 @@
     (m/fact (clamp 4 7 10) => 7)))
 
 (oben/with-temp-context
-  (let [div-six (oben/fn ^u1 [^u32 x]
-                         (if (and (= (% x 2) 0)
-                                  (= (% x 3) 0))
-                           1 0))]
+  (let [div-six (oben/fn ^bool [^u32 x]
+                         (and (= (% x 2) 0)
+                              (= (% x 3) 0)))]
     (m/fact (div-six 0) => 1)
     (m/fact (div-six 1) => 0)
     (m/fact (div-six 2) => 0)
@@ -555,10 +546,9 @@
     (m/fact (div-six 12) => 1)))
 
 (oben/with-temp-context
-  (let [div-2or3 (oben/fn ^u1 [^u32 x]
-                  (if (or (= (% x 2) 0)
-                          (= (% x 3) 0))
-                    1 0))]
+  (let [div-2or3 (oben/fn ^bool [^u32 x]
+                   (or (= (% x 2) 0)
+                       (= (% x 3) 0)))]
     (m/fact (div-2or3 0) => 1)
     (m/fact (div-2or3 1) => 0)
     (m/fact (div-2or3 2) => 1)
@@ -582,6 +572,17 @@
     (m/fact (neg -128) => 127)
     (m/fact (neg -32768) => 32767)
     (m/fact (neg -2147483648) => 2147483647)))
+
+(oben/with-temp-context
+  (let [neg (oben/fn ^u64 [^u64 x]
+              (bit-not x))]
+    (m/fact (neg 0) => -1)
+    (m/fact (neg -1) => 0)
+    (m/fact (neg -2) => 1)
+    (m/fact (neg -128) => 127)
+    (m/fact (neg -32768) => 32767)
+    (m/fact (neg -2147483648) => 2147483647)
+    (m/fact (neg -9223372036854775808) => 9223372036854775807)))
 
 (oben/with-temp-context
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
@@ -698,11 +699,43 @@
     (m/fact
      "types can be used as value constructors"
      (f 1) => 5))
+
   (m/fact
+   "narrowing conversions are rejected by default"
    (oben/fn ^u32 [^u32 index]
      (let [a (var (u32array-3 [9 8 7 6 5]))]
        (get a (+ index (u1 3)))))
-   => (throws clojure.lang.ExceptionInfo "integer constant does not fit into type")))
+   => (throws clojure.lang.ExceptionInfo #"rejected narrowing UInt->UInt conversion"))
+
+  (let [f (oben/fn ^u32 [^u32 index]
+            (let [a (var (u32array-3 [9 8 7 6 5]))]
+              (get a (+ index (cast! u1 3)))))]
+    (m/fact
+     "narrowing conversions can be forced via cast!"
+     (f 1) => 7)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^void [] 5)]
+    (m/fact
+     "void functions return nil"
+     (f) => nil)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^void [(* (Array u64 10)) ret]
+            (put ret 0 (cast u1 0))
+            (put ret 1 (cast u1 1))
+            (put ret 2 (cast u8 0xff))
+            (put ret 3 (cast u16 0xffff))
+            (put ret 4 (cast u32 0xffffffff))
+            (put ret 5 (cast u64 0xffffffffffffffff)))]
+    (let [a (long-array 10 0)]
+      (f a)
+      (m/fact (vec a) => [0 1 0xff 0xffff 0xffffffff -1 0 0 0 0]))))
+
+(m/fact
+ (oben/fn ^void []
+   (cast u1 2))
+ => (throws clojure.lang.ExceptionInfo #"rejected narrowing UInt->UInt conversion"))
 
 (oben/with-temp-context
   (let [atype (Array/Array Number/%u32 10)

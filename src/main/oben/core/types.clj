@@ -57,6 +57,10 @@
 
 (def tid-of-node (comp :tid meta type-of))
 
+(derive ::HostValue ::Any)
+
+(derive ::HostBoolean ::HostValue)
+
 (derive ::HostNumber ::HostValue)
 (derive ::HostInteger ::HostNumber)
 (derive ::HostFloat ::HostNumber)
@@ -67,14 +71,17 @@
 
 (defn host-value?
   [x]
-  (or (number? x)
-      (keyword? x)
-      (vector? x)
-      (map? x)))
+  (or
+   (boolean? x)
+   (number? x)
+   (keyword? x)
+   (vector? x)
+   (map? x)))
 
 (defn tid-of-host-value
   [x]
   (cond
+    (boolean? x) ::HostBoolean
     (float? x) ::HostFloat
     (integer? x) ::HostInteger
     (keyword? x) ::HostKeyword
@@ -91,10 +98,6 @@
 (defmulti compile
   "Compiles an Oben type into the corresponding LLVM type."
   (fn [t] (tid-of-type t)))
-
-(defmulti resize
-  "Returns a type with the typeclass of `t` but with size `size`."
-  (fn [t size] (tid-of-type t)))
 
 (defmulti cast
   "Returns an AST node which casts `x` to type `t`.

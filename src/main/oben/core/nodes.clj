@@ -302,7 +302,9 @@
         void? (= return-type t/%void)
         env (into {} (map vector param-names params))
         body-node (ast/parse `(block :oben/fn-block ~@body) env)
-        body-node (%cast return-type body-node)]
+        body-node (if void?
+                    body-node
+                    (%cast return-type body-node))]
     (ast/make-node (Fn/Fn return-type param-types)
       (fn [ctx]
         (let [saved ctx
@@ -337,7 +339,7 @@
 
 (defn %when
   [cond-node & then-nodes]
-  (let [cond-node (%cast! Number/%u1 cond-node)
+  (let [cond-node (%cast Number/%u1 cond-node)
         then-label (make-label :then)
         end-label (make-label :end)]
     (ast/make-node t/%void
@@ -401,7 +403,7 @@
 
 (defn %not
   [node]
-  (let [bool-node (%cast! Number/%u1 node)]
+  (let [bool-node (%cast Number/%u1 node)]
     (ast/make-node Number/%u1
       (fn [ctx]
         (let [ctx (ctx/compile-node ctx bool-node)]
@@ -431,10 +433,16 @@
       (go :while))
     :end))
 
+(def gep-index-type (Number/UInt ir/platform-address-size))
+
+(defn as-gep-index
+  [index]
+  (t/cast gep-index-type index false))
+
 (defn determine-gep-leaf-type+indices
   ([t keys indices]
    (if-let [k (first keys)]
-     (let [element-index (Aggregate/get-element-index t k)
+     (let [element-index (as-gep-index (Aggregate/get-element-index t k))
            element-type (Aggregate/get-element-type t k)]
        (recur element-type (next keys) (conj indices element-index)))
      [t indices]))
@@ -448,7 +456,7 @@
   (let [object-type (:object-type (t/type-of ptr))]
     ;; (assert (isa? (t/tid-of-type object-type) :oben.core.types/Aggregate))
     (let [[leaf-type indices] (determine-gep-leaf-type+indices object-type (next keys))
-          indices (cons (first keys) indices)]
+          indices (cons (as-gep-index (first keys)) indices)]
       (ast/make-node (Ptr/Ptr leaf-type)
         (fn [ctx]
           (letfn [(compile-ptr [ctx]

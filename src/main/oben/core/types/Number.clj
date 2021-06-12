@@ -9,9 +9,72 @@
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m]))
 
+(defn integer-size
+  [n]
+  (cond
+    (<= 0 n 1) 1
+    (<= -128 n 255) 8
+    (<= -32768 n 65535) 16
+    (<= -2147483648 n 4294967295) 32
+    (<= -9223372036854775808 n 18446744073709551615N) 64
+    :else (throw (ex-info "integer constant too big"
+                          {:value n}))))
+
+(m/tabular
+ (m/facts
+  (m/fact (integer-size ?n) => ?size))
+ ?n ?size
+ 0 1
+ 1 1
+ -1 8
+ 127 8 -127 8
+ 128 8 -128 8
+ 129 8 -129 16
+ 255 8 -255 16
+ 256 16 -256 16
+ 32767 16 -32767 16
+ 32768 16 -32768 16
+ 32769 16 -32769 32
+ 65535 16 -65535 32
+ 65536 32 -65536 32
+ 2147483647 32 -2147483647 32
+ 2147483648 32 -2147483648 32
+ 2147483649 32 -2147483649 64
+ 4294967295 32 -4294967295 64
+ 4294967296 64 -4294967296 64
+ 9223372036854775807 64
+ -9223372036854775807 64
+ 9223372036854775808 64
+ -9223372036854775808 64
+ 9223372036854775809 64
+ -9223372036854775809 (m/throws clojure.lang.ExceptionInfo "integer constant too big")
+ 18446744073709551615N 64
+ 18446744073709551616N (m/throws clojure.lang.ExceptionInfo "integer constant too big"))
+
+(defn float-size
+  [x]
+  (cond
+    (= (.floatValue x) x) 32
+    (= (.doubleValue x) x) 64
+    :else (throw (ex-info "float constant too big"
+                          {:value x}))))
+
+(m/facts
+ (m/fact (float-size 0.0) => 32)
+ (m/fact (float-size 1.0) => 32)
+ (m/fact (float-size -1.0) => 32)
+ (m/fact (float-size Float/MAX_VALUE) => 32)
+ (m/fact (float-size Double/MAX_VALUE) => 64))
+
 (derive ::Number ::t/Value)
 
 (derive ::Int ::Number)
+
+(defmulti resize
+  "Returns a numeric type with the typeclass of `t` but with size `size`."
+  (fn [t size] (t/tid-of-type t)))
+
+;; UInt
 
 (t/define-typeclass UInt [::Int]
   [size]
@@ -24,7 +87,7 @@
   [t]
   [:integer (:size t)])
 
-(defmethod t/resize ::UInt
+(defmethod resize ::UInt
   [t newsize]
   (UInt newsize))
 
@@ -44,7 +107,7 @@
   [t]
   [:integer (:size t)])
 
-(defmethod t/resize ::SInt
+(defmethod resize ::SInt
   [t newsize]
   (SInt newsize))
 
@@ -66,7 +129,7 @@
     32 :float
     64 :double))
 
-(defmethod t/resize ::FP
+(defmethod resize ::FP
   [t newsize]
   (FP newsize))
 
@@ -102,23 +165,39 @@
  (m/fact (t/ubertype-of (SInt 8) (UInt 32)) => (SInt 32))
  (m/fact (t/ubertype-of (UInt 8) (FP 64)) => (FP 64)))
 
+(def resize-constant-fns
+  {'trunc (fn [value size]
+            (bit-and value (- (bit-shift-left 1 size) 1)))
+   'zext (fn [value size] value)
+   'sext (fn [value size] value)
+   'fptrunc (fn [value size]
+              (cond (= size 32) (float value)
+                    :else (throw (ex-info "cannot fptrunc constant" {:value value}))))
+   'fpext (fn [value size] value)})
+
 (defmacro define-resize-op
   [op]
   `(defn ~op
      [~'node ~'size]
      (let [node-type# (t/type-of ~'node)
            result-size# (ast/constant-value ~'size)
-           result-type# (t/resize node-type# result-size#)]
-       (ast/make-node result-type#
-         (fn [ctx#]
-           (let [ctx# (ctx/compile-node ctx# ~'node)
-                 ins# (~(symbol "omkamra.llvm.ir" (str op))
-                       (ctx/compiled ctx# ~'node)
-                       (t/compile result-type#)
-                       {})]
-             (ctx/compile-instruction ctx# ins#)))
-         {:class ~(keyword (str (ns-name *ns*)) (str op))
-          :children #{~'node}}))))
+           result-type# (resize node-type# result-size#)]
+       (if (ast/constant? ~'node)
+         (t/cast result-type#
+                 (~(resize-constant-fns op)
+                  (ast/constant-value ~'node)
+                  result-size#)
+                 true)
+         (ast/make-node result-type#
+           (fn [ctx#]
+             (let [ctx# (ctx/compile-node ctx# ~'node)
+                   ins# (~(symbol "omkamra.llvm.ir" (str op))
+                         (ctx/compiled ctx# ~'node)
+                         (t/compile result-type#)
+                         {})]
+               (ctx/compile-instruction ctx# ins#)))
+           {:class ~(keyword (str (ns-name *ns*)) (str op))
+            :children #{~'node}})))))
 
 (define-resize-op trunc)
 (define-resize-op zext)
@@ -156,15 +235,16 @@
 (defmethod t/cast [::UInt ::UInt]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))]
+        node-size (:size (t/type-of node))
+        real-size (if (ast/constant? node)
+                    (integer-size (ast/constant-value node))
+                    node-size)]
     (cond
       (= t-size node-size)
       node
       (> t-size node-size)
       (zext node t-size)
-      (= t-size 1)
-      (ast/parse `(> ~node 0))
-      force?
+      (or (<= real-size t-size) force?)
       (trunc node t-size)
       :else
       (throw (ex-info "rejected narrowing UInt->UInt conversion"
@@ -173,15 +253,16 @@
 (defmethod t/cast [::UInt ::SInt]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))]
+        node-size (:size (t/type-of node))
+        real-size (if (ast/constant? node)
+                    (integer-size (ast/constant-value node))
+                    node-size)]
     (cond
       (= t-size node-size)
       node
       (> t-size node-size)
       (zext node t-size)
-      (= t-size 1)
-      (ast/parse `(!= ~node 0))
-      force?
+      (or (<= real-size t-size) force?)
       (trunc node t-size)
       :else
       (throw (ex-info "rejected narrowing SInt->UInt conversion"
@@ -190,24 +271,28 @@
 (defmethod t/cast [::UInt ::FP]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))]
+        node-size (:size (t/type-of node))
+        real-size (if (ast/constant? node)
+                    (float-size (ast/constant-value node))
+                    node-size)]
     (cond
-      (or (>= t-size node-size) force?)
+      (or (>= t-size node-size) (<= real-size t-size) force?)
       (fptoui node t-size)
-      (= t-size 1)
-      (ast/parse `(!= ~node 0.0))
       :else
       (throw (ex-info "rejected narrowing FP->UInt conversion")))))
 
 (defmethod t/cast [::SInt ::SInt]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))]
+        node-size (:size (t/type-of node))
+        real-size (if (ast/constant? node)
+                    (integer-size (ast/constant-value node))
+                    node-size)]
     (cond (= t-size node-size)
           node
           (> t-size node-size)
           (sext node t-size)
-          force?
+          (or (<= real-size t-size) force?)
           (trunc node t-size)
           :else
           (throw (ex-info "rejected narrowing SInt->SInt conversion"
@@ -216,12 +301,15 @@
 (defmethod t/cast [::SInt ::UInt]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))]
+        node-size (:size (t/type-of node))
+        real-size (if (ast/constant? node)
+                    (integer-size (ast/constant-value node))
+                    node-size)]
     (cond (= t-size node-size)
           node
           (> t-size node-size)
           (sext node t-size)
-          force?
+          (or (<= real-size t-size) force?)
           (trunc node t-size)
           :else
           (throw (ex-info "rejected narrowing SInt->UInt conversion"
@@ -230,8 +318,11 @@
 (defmethod t/cast [::SInt ::FP]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))]
-    (cond (or (>= t-size node-size) force?)
+        node-size (:size (t/type-of node))
+        real-size (if (ast/constant? node)
+                    (float-size (ast/constant-value node))
+                    node-size)]
+    (cond (or (>= t-size node-size) (<= real-size t-size) force?)
           (fptosi node t-size)
           :else
           (throw (ex-info "rejected narrowing FP->SInt conversion")))))
@@ -239,12 +330,15 @@
 (defmethod t/cast [::FP ::FP]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))]
+        node-size (:size (t/type-of node))
+        real-size (if (ast/constant? node)
+                    (float-size (ast/constant-value node))
+                    node-size)]
     (cond (= t-size node-size)
           node
           (> t-size node-size)
           (fpext node t-size)
-          force?
+          (or (<= real-size t-size) force?)
           (fptrunc node t-size)
           :else
           (throw (ex-info "rejected narrowing FP->FP conversion"
@@ -261,56 +355,6 @@
   (let [t-size (:size t)
         node-size (:size (t/type-of node))]
     (sitofp node t-size)))
-
-(defn integer-size
-  [n]
-  (cond
-    (<= -128 n 255) 8
-    (<= -32768 n 65535) 16
-    (<= -2147483648 n 4294967295) 32
-    (<= -9223372036854775808 n 18446744073709551613) 64
-    :else (throw (ex-info "integer constant too big"
-                          {:value n}))))
-
-(m/tabular
- (m/facts
-  (m/fact (integer-size ?n) => ?size))
- ?n ?size
- 0 8
- 1 8 -1 8
- 127 8 -127 8
- 128 8 -128 8
- 129 8 -129 16
- 255 8 -255 16
- 256 16 -256 16
- 32767 16 -32767 16
- 32768 16 -32768 16
- 32769 16 -32769 32
- 65535 16 -65535 32
- 65536 32 -65536 32
- 2147483647 32 -2147483647 32
- 2147483648 32 -2147483648 32
- 2147483649 32 -2147483649 64
- 4294967295 32 -4294967295 64
- 4294967296 64 -4294967296 64
- 9223372036854775807 64 -9223372036854775807 64
- 9223372036854775808 64 -9223372036854775808 64
- 9223372036854775809 64 -9223372036854775809 (m/throws clojure.lang.ExceptionInfo "integer constant too big"))
-
-(defn float-size
-  [x]
-  (cond
-    (= (.floatValue x) x) 32
-    (= (.doubleValue x) x) 64
-    :else (throw (ex-info "float constant too big"
-                          {:value x}))))
-
-(m/facts
- (m/fact (float-size 0.0) => 32)
- (m/fact (float-size 1.0) => 32)
- (m/fact (float-size -1.0) => 32)
- (m/fact (float-size Float/MAX_VALUE) => 32)
- (m/fact (float-size Double/MAX_VALUE) => 64))
 
 (defn determine-constant-type-for-int
   [x]
@@ -334,6 +378,10 @@
   [x]
   (determine-constant-type-for-int x))
 
+(defmethod ast/determine-constant-type clojure.lang.BigInt
+  [x]
+  (determine-constant-type-for-int x))
+
 (defn determine-constant-type-for-float
   [x]
   (FP (float-size x)))
@@ -346,19 +394,30 @@
   [x]
   (determine-constant-type-for-float x))
 
-(defmethod ast/parse-host-value-as-type [::Int ::t/HostInteger]
-  [t n]
-  (if (> (integer-size n) (:size t))
-    (throw (ex-info (str "integer constant does not fit into type")
-                    {:type t :value n}))
-    (ast/constant t n)))
+(defn make-constant-number-node
+  [type host-value]
+  (ast/make-constant-node type host-value
+    (fn [ctx]
+      (let [const (ir/const (t/compile type) host-value)]
+        (ctx/save-ir ctx const)))))
 
-(defmethod ast/parse-host-value-as-type [::FP ::t/HostFloat]
-  [t n]
-  (if (> (float-size n) (:size t))
-    (throw (ex-info (str "floating point constant does not fit into type")
-                    {:type t :value n}))
-    (ast/constant t n)))
+(defmethod t/cast [::Int ::t/HostInteger]
+  [t n force?]
+  (if (> (integer-size n) (:size t))
+    (if force?
+      ((resize-constant-fns 'trunc) n (:size t))
+      (throw (ex-info (str "integer constant does not fit into type")
+                      {:type t :value n})))
+    (make-constant-number-node t n)))
+
+(defmethod t/cast [::FP ::t/HostFloat]
+  [t x force?]
+  (if (> (float-size x) (:size t))
+    (if force?
+      ((resize-constant-fns 'fptrunc) x (:size t))
+      (throw (ex-info (str "floating point constant does not fit into type")
+                      {:type t :value x})))
+    (make-constant-number-node t x)))
 
 (defmacro define-binary-op
   [op-multifn arg-typeclass make-ir]
@@ -419,8 +478,13 @@
 
 (defmethod Bitwise/bit-not [::Int]
   [x]
-  (let [size (:size (t/type-of x))]
-    (ast/parse `(bit-xor ~x (cast ~(SInt size) ~(ast/constant -1))))))
+  (let [size (:size (t/type-of x))
+        mask (if (< size 64)
+               (- (bit-shift-left 1 size) 1)
+               0xffffffffffffffffN)]
+    (ast/parse `(bit-xor ~x ~mask))))
+
+;; comparisons
 
 (defmacro define-compare-op
   [op-multifn arg-typeclass make-ir pred]

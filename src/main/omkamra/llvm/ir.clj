@@ -370,7 +370,7 @@
   [[_ size] value]
   (if (clj/and (= size 1) (boolean? value))
     (str value)
-    (format "%d" value)))
+    (format "%d" (biginteger value))))
 
 (defmethod render-literal :float
   [_ value]
@@ -432,44 +432,32 @@
       (render-name name)
       (render-literal type value))))
 
-(defmulti const
-  (fn [type value]
-    (extract-type-tag type)))
-
-(defmethod const :default
+(defn const
   [type value]
   {:kind :const
    :type type
    :value value})
 
-(defmethod const :array
-  [type value]
-  (let [[_ elt size] type]
-    {:kind :const
-     :type type
-     :value (cond
-              (clj/and (= elt i8) (string? value)) value
-              (vector? value) (mapv #(const elt %) value)
-              :else (throw (ex-info "invalid array constant" {:type type :value value})))}))
-
-(defmethod const :struct
-  [type value]
-  (let [[_ name element-types] type]
-    {:kind :const
-     :type type
-     :value (mapv const element-types value)}))
-
 (m/facts
  (m/fact
   (render-typed-value (const i64 1234)) => "i64 1234")
  (m/fact
-  (render-typed-value (const [:array i16 3] [5 8 -3]))
+  (render-typed-value (const [:ptr i32] nil)) => "i32* null")
+ (m/fact
+  (render-typed-value (const [:array i16 3]
+                             (mapv #(const i16 %) [5 8 -3])))
   => "[3 x i16] [ i16 5, i16 8, i16 -3 ]")
  (m/fact
-  (render-typed-value (const [:struct nil [i32 [:ptr i32] [:array i8 2]]] [5 nil [3 4]]))
+  (render-typed-value (const [:struct nil [i32 [:ptr i32] [:array i8 2]]]
+                             [(const i32 5)
+                              (const [:ptr i32] nil)
+                              (const [:array i8 2] (mapv #(const i8 %) [3 4]))]))
   => "{i32, i32*, [2 x i8]} { i32 5, i32* null, [2 x i8] [ i8 3, i8 4 ] }")
  (m/fact
-  (render-typed-value (const [:struct :foo [i32 [:ptr i32] [:array i8 2]]] [5 nil [3 4]]))
+  (render-typed-value (const [:struct :foo [i32 [:ptr i32] [:array i8 2]]]
+                             [(const i32 5)
+                              (const [:ptr i32] nil)
+                              (const [:array i8 2] (mapv #(const i8 %) [3 4]))]))
   => "%foo { i32 5, i32* null, [2 x i8] [ i8 3, i8 4 ] }"))
 
 (m/facts
@@ -489,10 +477,14 @@
  (m/fact (render-literal [:array i8] "Hello, world\n\0") => "c\"Hello, world\\0A\\00\"")
  (m/fact (render-literal [:array i16] (mapv #(const i16 %) [5 8 -3])) => "[ i16 5, i16 8, i16 -3 ]")
  (m/fact (render-literal [:struct nil [i32 [:ptr i32] [:array i8 2]]]
-                         [(const i32 5) (const [:ptr i32] nil) (const [:array i8 2] [3 4])])
+                         [(const i32 5)
+                          (const [:ptr i32] nil)
+                          (const [:array i8 2] (mapv #(const i8 %) [3 4]))])
          => "{ i32 5, i32* null, [2 x i8] [ i8 3, i8 4 ] }")
  (m/fact (render-literal [:struct :foo [i32 [:ptr i32] [:array i8 2]]]
-                         [(const i32 5) (const [:ptr i32] nil) (const [:array i8 2] [3 4])])
+                         [(const i32 5)
+                          (const [:ptr i32] nil)
+                          (const [:array i8 2] (mapv #(const i8 %) [3 4]))])
          => "{ i32 5, i32* null, [2 x i8] [ i8 3, i8 4 ] }"))
 
 (def void {:type :void :value :void})
@@ -1262,14 +1254,14 @@
 (m/facts
  (m/fact
   (render-instruction
-   (extractvalue (const [:array i32 4] [10 9 8 7])
+   (extractvalue (const [:array i32 4] (mapv #(const i32 %) [10 9 8 7]))
                  [(const i32 2)]
                  {:name :a_elt}))
   => "%a_elt = extractvalue [4 x i32] [ i32 10, i32 9, i32 8, i32 7 ], 2")
  (m/fact
   "literal indices are automatically wrapped as (const i32 x)"
   (render-instruction
-   (extractvalue (const [:array i32 4] [10 9 8 7])
+   (extractvalue (const [:array i32 4] (mapv #(const i32 %) [10 9 8 7]))
                  [2]
                  {:name :a_elt}))
   => "%a_elt = extractvalue [4 x i32] [ i32 10, i32 9, i32 8, i32 7 ], 2"))
@@ -1300,7 +1292,7 @@
 (m/facts
  (m/fact
   (render-instruction
-   (insertvalue (const [:array i32 4] [10 9 8 7])
+   (insertvalue (const [:array i32 4] (mapv #(const i32 %) [10 9 8 7]))
                 {:type i32 :name :x}
                 [(const i32 2)]
                 {:name :updated_array}))

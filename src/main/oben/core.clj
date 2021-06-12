@@ -15,6 +15,7 @@
   (:require [oben.core.types.Number])
   (:require [oben.core.types.Array])
   (:require [oben.core.types.Ptr])
+  (:require [oben.core.types.Fn])
   (:require [oben.core.nodes :as nodes])
   (:require [oben.core.protocols.Eq])
   (:require [oben.core.protocols.Ord])
@@ -29,6 +30,8 @@
 (def u32 oben.core.types.Number/%u32)
 (def u64 oben.core.types.Number/%u64)
 
+(def bool oben.core.types.Number/%u1)
+
 (def s1 oben.core.types.Number/%s1)
 (def s8 oben.core.types.Number/%s8)
 (def s16 oben.core.types.Number/%s16)
@@ -38,7 +41,9 @@
 (def f32 oben.core.types.Number/%f32)
 (def f64 oben.core.types.Number/%f64)
 
+(def Array oben.core.types.Array/Array)
 (def array oben.core.types.Array/%array)
+
 (def deref oben.core.types.Ptr/%deref)
 
 (def nop oben.core.nodes/%nop)

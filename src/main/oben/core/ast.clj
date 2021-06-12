@@ -25,23 +25,15 @@
   [node]
   (:class (meta node)))
 
-(defmulti parse-host-value-as-type
-  (fn [t x]
-    [(t/tid-of-type t) (t/tid-of x)]))
-
 (defmulti determine-constant-type class)
 
-(defn constant
-  ([type x]
-   (make-node type
-     (fn [ctx]
-       (let [const (ir/const (t/compile type) x)]
-         (ctx/save-ir ctx const)))
-     {:class :oben/constant
-      :value x}))
-  ([x]
-   (let [type (determine-constant-type x)]
-     (constant type x))))
+(defn make-constant-node
+  {:style/indent 1}
+  [type value compile-fn]
+  (make-node type
+    compile-fn
+    {:class :oben/constant
+     :value value}))
 
 (defn constant?
   [x]
@@ -111,7 +103,8 @@
          (u/resolve form env)
 
          (number? form)
-         (constant form)
+         (let [type (determine-constant-type form)]
+           (t/cast type form false))
 
          (keyword? form)
          form
@@ -134,10 +127,7 @@
                         (funcall op (map #(parse % env) args))
 
                         (t/type? op)
-                        (let [arg (first args)]
-                          (if (t/host-value? arg)
-                            (parse-host-value-as-type op arg)
-                            (t/cast op (parse arg env) true)))
+                        (t/cast op (parse (first args) env) false)
 
                         (oben-macro? op)
                         (apply op form env args)

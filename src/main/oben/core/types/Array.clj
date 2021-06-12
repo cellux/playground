@@ -17,11 +17,18 @@
   [{:keys [element-type size]}]
   [:array (t/compile element-type) size])
 
-(defmethod ast/parse-host-value-as-type [::Array ::t/HostVector]
-  [t elems]
+(defmethod t/cast [::Array ::t/HostVector]
+  [t elems force?]
   (assert (= (count elems) (:size t)))
-  (assert (every? #(ast/parse-host-value-as-type (:element-type t) %) elems))
-  (ast/constant t elems))
+  (let [elt (:element-type t)
+        casted-elems (mapv #(t/cast elt % false) elems)]
+    (assert (every? #(= elt %) (map t/type-of-node casted-elems)))
+    (ast/make-constant-node t elems
+      (fn [ctx]
+        (let [ctx (reduce ctx/compile-node ctx casted-elems)
+              const (ir/const (t/compile t)
+                              (mapv #(ctx/compiled ctx %) casted-elems))]
+          (ctx/save-ir ctx const))))))
 
 (defn find-element-type
   [type indices]
@@ -95,9 +102,8 @@
   [t key]
   key)
 
-(oben/defmacro %array
+(defn %array
   [element-type initializer]
   (let [size (count initializer)
-        elt (ast/parse element-type &env)
-        array-type (Array elt size)]
-    (ast/parse-host-value-as-type array-type initializer)))
+        array-type (Array element-type size)]
+    (t/cast array-type initializer false)))
