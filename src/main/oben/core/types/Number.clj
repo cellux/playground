@@ -280,14 +280,16 @@
         node-size (:size (t/type-of node))
         real-size (if (ast/constant? node)
                     (integer-size (ast/constant-value node))
-                    node-size)]
+                    node-size)
+        unsigned-type (UInt node-size)
+        unsigned-node (vary-meta node assoc :type unsigned-type)]
     (cond
       (= t-size node-size)
-      node
+      unsigned-node
       (> t-size node-size)
-      (zext node t-size)
+      (zext unsigned-node t-size)
       (or (<= real-size t-size) force?)
-      (trunc node t-size)
+      (trunc unsigned-node t-size)
       :else
       (throw (ex-info "rejected narrowing SInt->UInt conversion"
                       {:from node-size :to t-size})))))

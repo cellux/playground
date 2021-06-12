@@ -235,7 +235,14 @@
 (m/fact (t/type-of (ast/parse 5)) => Number/%u8)
 (m/fact (t/type-of (ast/parse -5)) => Number/%s8)
 
-(m/fact (t/type-of (ast/parse '(- 5))) => Number/%s8)
+(m/fact (t/type-of (ast/parse '(u8 -5))) => Number/%u8)
+(m/fact
+ "reinterpreting a signed value as unsigned does not change its bit pattern"
+ (ast/constant-value (ast/parse '(u8 -5))) => -5)
+
+(m/fact
+ "negating an UInt turns it into an SInt"
+ (t/type-of (ast/parse '(- 5))) => Number/%s8)
 
 (oben/with-temp-context
   (let [f (oben/fn ^s32 [^u32 x]
