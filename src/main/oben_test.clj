@@ -223,6 +223,20 @@
             (/ x y))]
     (m/fact (f 6.5 -3.25) => -2.0)))
 
+(m/fact (ast/parse 'u8) => Number/%u8)
+(m/fact (ast/parse 's8) => Number/%s8)
+
+(m/fact (t/type-of (ast/parse '(u8 0))) => Number/%u8)
+(m/fact (t/type-of (ast/parse '(s8 0))) => Number/%s8)
+
+(m/fact (t/type-of (ast/parse 0)) => Number/%u1)
+(m/fact (t/type-of (ast/parse 1)) => Number/%u1)
+(m/fact (t/type-of (ast/parse -1)) => Number/%s8)
+(m/fact (t/type-of (ast/parse 5)) => Number/%u8)
+(m/fact (t/type-of (ast/parse -5)) => Number/%s8)
+
+(m/fact (t/type-of (ast/parse '(- 5))) => Number/%s8)
+
 (oben/with-temp-context
   (let [f (oben/fn ^s32 [^u32 x]
             (- x))]

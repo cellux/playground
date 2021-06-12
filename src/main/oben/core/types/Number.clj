@@ -165,6 +165,29 @@
  (m/fact (t/ubertype-of (SInt 8) (UInt 32)) => (SInt 32))
  (m/fact (t/ubertype-of (UInt 8) (FP 64)) => (FP 64)))
 
+;; parsing host numbers
+
+(defn make-constant-number-node
+  [type host-value]
+  (ast/make-constant-node type host-value
+                          (fn [ctx]
+                            (let [const (ir/const (t/compile type) host-value)]
+                              (ctx/save-ir ctx const)))))
+
+(defmethod ast/parse-host-value ::t/HostInteger
+  [n]
+  (let [type (if (neg? n)
+               (SInt (integer-size n))
+               (UInt (integer-size n)))]
+    (make-constant-number-node type n)))
+
+(defmethod ast/parse-host-value ::t/HostFloat
+  [x]
+  (let [type (FP (float-size x))]
+    (make-constant-number-node type x)))
+
+;; resize ops
+
 (def resize-constant-fns
   {'trunc (fn [value size]
             (bit-and value (- (bit-shift-left 1 size) 1)))
@@ -183,11 +206,10 @@
            result-size# (ast/constant-value ~'size)
            result-type# (resize node-type# result-size#)]
        (if (ast/constant? ~'node)
-         (t/cast result-type#
-                 (~(resize-constant-fns op)
-                  (ast/constant-value ~'node)
-                  result-size#)
-                 true)
+         (make-constant-number-node result-type#
+                                    (~(resize-constant-fns op)
+                                     (ast/constant-value ~'node)
+                                     result-size#))
          (ast/make-node result-type#
            (fn [ctx#]
              (let [ctx# (ctx/compile-node ctx# ~'node)
@@ -204,6 +226,8 @@
 (define-resize-op sext)
 (define-resize-op fptrunc)
 (define-resize-op fpext)
+
+;; conversion ops
 
 (defmacro define-conversion-op
   [op result-typeclass]
@@ -304,13 +328,15 @@
         node-size (:size (t/type-of node))
         real-size (if (ast/constant? node)
                     (integer-size (ast/constant-value node))
-                    node-size)]
+                    node-size)
+        signed-type (SInt node-size)
+        signed-node (vary-meta node assoc :type signed-type)]
     (cond (= t-size node-size)
-          node
+          signed-node
           (> t-size node-size)
-          (sext node t-size)
+          (sext signed-node t-size)
           (or (<= real-size t-size) force?)
-          (trunc node t-size)
+          (trunc signed-node t-size)
           :else
           (throw (ex-info "rejected narrowing SInt->UInt conversion"
                           {:from node-size :to t-size})))))
@@ -356,68 +382,7 @@
         node-size (:size (t/type-of node))]
     (sitofp node t-size)))
 
-(defn determine-constant-type-for-int
-  [x]
-  (if (neg? x)
-    (SInt (integer-size x))
-    (UInt (integer-size x))))
-
-(defmethod ast/determine-constant-type java.lang.Byte
-  [x]
-  (determine-constant-type-for-int x))
-
-(defmethod ast/determine-constant-type java.lang.Short
-  [x]
-  (determine-constant-type-for-int x))
-
-(defmethod ast/determine-constant-type java.lang.Integer
-  [x]
-  (determine-constant-type-for-int x))
-
-(defmethod ast/determine-constant-type java.lang.Long
-  [x]
-  (determine-constant-type-for-int x))
-
-(defmethod ast/determine-constant-type clojure.lang.BigInt
-  [x]
-  (determine-constant-type-for-int x))
-
-(defn determine-constant-type-for-float
-  [x]
-  (FP (float-size x)))
-
-(defmethod ast/determine-constant-type java.lang.Float
-  [x]
-  (determine-constant-type-for-float x))
-
-(defmethod ast/determine-constant-type java.lang.Double
-  [x]
-  (determine-constant-type-for-float x))
-
-(defn make-constant-number-node
-  [type host-value]
-  (ast/make-constant-node type host-value
-    (fn [ctx]
-      (let [const (ir/const (t/compile type) host-value)]
-        (ctx/save-ir ctx const)))))
-
-(defmethod t/cast [::Int ::t/HostInteger]
-  [t n force?]
-  (if (> (integer-size n) (:size t))
-    (if force?
-      ((resize-constant-fns 'trunc) n (:size t))
-      (throw (ex-info (str "integer constant does not fit into type")
-                      {:type t :value n})))
-    (make-constant-number-node t n)))
-
-(defmethod t/cast [::FP ::t/HostFloat]
-  [t x force?]
-  (if (> (float-size x) (:size t))
-    (if force?
-      ((resize-constant-fns 'fptrunc) x (:size t))
-      (throw (ex-info (str "floating point constant does not fit into type")
-                      {:type t :value x})))
-    (make-constant-number-node t x)))
+;; algebraic and bitwise ops
 
 (defmacro define-binary-op
   [op-multifn arg-typeclass make-ir]
@@ -474,7 +439,7 @@
 
 (defmethod Algebra/- [::Number]
   [x]
-  `(- 0 ~x))
+  `(- (s8 0) ~x))
 
 (defmethod Bitwise/bit-not [::Int]
   [x]
@@ -484,7 +449,7 @@
                0xffffffffffffffffN)]
     (ast/parse `(bit-xor ~x ~mask))))
 
-;; comparisons
+;; comparison ops
 
 (defmacro define-compare-op
   [op-multifn arg-typeclass make-ir pred]

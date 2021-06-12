@@ -25,7 +25,7 @@
   [node]
   (:class (meta node)))
 
-(defmulti determine-constant-type class)
+(defmulti parse-host-value t/tid-of-host-value)
 
 (defn make-constant-node
   {:style/indent 1}
@@ -103,8 +103,7 @@
          (u/resolve form env)
 
          (number? form)
-         (let [type (determine-constant-type form)]
-           (t/cast type form false))
+         (parse-host-value form)
 
          (keyword? form)
          form
