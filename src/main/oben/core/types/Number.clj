@@ -214,7 +214,7 @@
            (fn [ctx#]
              (let [ctx# (ctx/compile-node ctx# ~'node)
                    ins# (~(symbol "omkamra.llvm.ir" (str op))
-                         (ctx/compiled ctx# ~'node)
+                         (ctx/compiled-node ctx# ~'node)
                          (t/compile result-type#)
                          {})]
                (ctx/compile-instruction ctx# ins#)))
@@ -240,7 +240,7 @@
          (fn [ctx#]
            (let [ctx# (ctx/compile-node ctx# ~'node)
                  ins# (~(symbol "omkamra.llvm.ir" (str op))
-                       (ctx/compiled ctx# ~'node)
+                       (ctx/compiled-node ctx# ~'node)
                        (t/compile result-type#)
                        {})]
              (ctx/compile-instruction ctx# ins#)))
@@ -398,8 +398,8 @@
                    (fn [~'ctx]
                      (let [compile-op# (fn [~'ctx]
                                          (let [~'ins (~make-ir
-                                                      (ctx/compiled ~'ctx ~'lhs)
-                                                      (ctx/compiled ~'ctx ~'rhs)
+                                                      (ctx/compiled-node ~'ctx ~'lhs)
+                                                      (ctx/compiled-node ~'ctx ~'rhs)
                                                       {})]
                                            (ctx/compile-instruction ~'ctx ~'ins)))]
                        (-> ~'ctx
@@ -465,8 +465,8 @@
                    (fn [~'ctx]
                      (let [compile-op# (fn [~'ctx]
                                          (let [~'ins (~make-ir ~pred
-                                                      (ctx/compiled ~'ctx ~'lhs)
-                                                      (ctx/compiled ~'ctx ~'rhs)
+                                                      (ctx/compiled-node ~'ctx ~'lhs)
+                                                      (ctx/compiled-node ~'ctx ~'rhs)
                                                       {})]
                                            (ctx/compile-instruction ~'ctx ~'ins)))]
                        (-> ~'ctx

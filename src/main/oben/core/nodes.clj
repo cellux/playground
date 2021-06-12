@@ -46,13 +46,13 @@
        (fn [ctx]
          (let [ins (ir/alloca
                     (t/compile type)
-                    {:name (keyword (ctx/get-assigned-name ctx))})
+                    {:name (keyword (ctx/get-assigned-node-name ctx))})
                compile-var (fn [ctx]
                              (ctx/compile-instruction ctx ins))
                compile-store (fn [ctx]
                                (ctx/compile-instruction
                                 ctx (ir/store
-                                     (ctx/compiled ctx init-node)
+                                     (ctx/compiled-node ctx init-node)
                                      ins
                                      {})))
                compile-init (fn [ctx]
@@ -86,11 +86,11 @@
         (letfn [(compile-store [ctx]
                   (ctx/compile-instruction
                    ctx
-                   (ir/store (ctx/compiled ctx value-node)
-                             (ctx/compiled ctx target-node)
+                   (ir/store (ctx/compiled-node ctx value-node)
+                             (ctx/compiled-node ctx target-node)
                              {})))
                 (save-ir [ctx]
-                  (ctx/save-ir ctx (ctx/compiled ctx value-node)))]
+                  (ctx/save-ir ctx (ctx/compiled-node ctx value-node)))]
           (-> ctx
               (ctx/compile-node value-node)
               (ctx/compile-node target-node)
@@ -178,7 +178,7 @@
                    (ctx/register-return-value
                     ctx block-id
                     (ctx/current-bb ctx)
-                    (ctx/compiled ctx value-node)))
+                    (ctx/compiled-node ctx value-node)))
                  (compile-br [ctx]
                    (ctx/compile-instruction
                     ctx (ir/br (ctx/get-label-block ctx return-label))))]
@@ -256,7 +256,7 @@
                     (if tangible-body?
                       (ctx/register-return-value ctx block-id
                                                  (ctx/current-bb ctx)
-                                                 (ctx/compiled ctx body-node))
+                                                 (ctx/compiled-node ctx body-node))
                       ctx))
                   (compile-return-label [ctx]
                     (ctx/compile-node ctx return-label))
@@ -308,16 +308,16 @@
     (ast/make-node (Fn/Fn return-type param-types)
       (fn [ctx]
         (let [saved ctx
-              fname (ctx/get-assigned-name ctx)
+              fname (ctx/get-assigned-node-name ctx)
               return-type (t/compile return-type)
               ctx (reduce ctx/compile-node ctx params)
               f (ir/function fname
                              return-type
-                             (map #(ctx/compiled ctx %) params))]
+                             (map #(ctx/compiled-node ctx %) params))]
           (letfn [(compile-return [ctx]
                     (if void?
                       (ctx/compile-instruction ctx (ir/ret))
-                      (let [ret (ir/ret (ctx/compiled ctx body-node))]
+                      (let [ret (ir/ret (ctx/compiled-node ctx body-node))]
                         (ctx/compile-instruction ctx ret))))
                   (add-function-to-module [ctx]
                     (update ctx :m ir/add-function (:f ctx)))
@@ -334,7 +334,7 @@
                 (merge (select-keys saved
                                     [:f
                                      :fdata
-                                     :compiled]))))))
+                                     :compiled-nodes]))))))
       {:class :oben/fn})))
 
 (defn %when
@@ -347,7 +347,7 @@
         (letfn [(add-br
                   ([ctx cond-node then-label else-label]
                    (ctx/compile-instruction
-                    ctx (ir/br (ctx/compiled ctx cond-node)
+                    ctx (ir/br (ctx/compiled-node ctx cond-node)
                                (ctx/get-label-block ctx then-label)
                                (ctx/get-label-block ctx else-label))))
                   ([ctx dest-label]
@@ -408,7 +408,7 @@
       (fn [ctx]
         (let [ctx (ctx/compile-node ctx bool-node)]
           (ctx/compile-instruction
-           ctx (ir/xor (ctx/compiled ctx bool-node)
+           ctx (ir/xor (ctx/compiled-node ctx bool-node)
                        (ir/const [:integer 1] 1)
                        {}))))
       {:class :oben/not
@@ -464,8 +464,8 @@
                   (compile-indices [ctx]
                     (reduce ctx/compile-node ctx indices))
                   (compile-gep [ctx]
-                    (let [ins (ir/getelementptr (ctx/compiled ctx ptr)
-                                                (map #(ctx/compiled ctx %) indices)
+                    (let [ins (ir/getelementptr (ctx/compiled-node ctx ptr)
+                                                (map #(ctx/compiled-node ctx %) indices)
                                                 {})]
                       (ctx/compile-instruction ctx ins)))]
             (-> ctx

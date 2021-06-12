@@ -42,7 +42,8 @@
     :fid 0
     :ir nil
     :compiled-node nil
-    :compiled {}
+    :compiled-nodes {}
+    :compiled-types {}
     :mode :dev})
   ([]
    (oben.core.context/new default-ftab-size)))
@@ -92,7 +93,7 @@
         (update :node-id inc)
         (assoc :node-name node-name))))
 
-(defn get-assigned-name
+(defn get-assigned-node-name
   [ctx]
   (:node-name ctx))
 
@@ -100,7 +101,7 @@
   [ctx label-node]
   (letfn [(create-label-block
             [ctx label-node]
-            (let [block-name (keyword (get-assigned-name ctx))]
+            (let [block-name (keyword (get-assigned-node-name ctx))]
               (update-in ctx [:fdata :label-blocks]
                          assoc label-node
                          (ir/basic-block block-name))))]
@@ -186,7 +187,7 @@
 
 (defn compile-node
   [ctx node]
-  (if-let [ir (get (:compiled ctx) node)]
+  (if-let [ir (get (:compiled-nodes ctx) node)]
     (letfn [(declare-previously-compiled-globals [ctx]
               (if (and (:global? (meta node)) (:name ir))
                 (if (isa? (t/tid-of node) ::Fn/Fn)
@@ -203,7 +204,7 @@
           declare-previously-compiled-globals
           save-ir))
     (letfn [(save-node-ir [ctx]
-              (update ctx :compiled
+              (update ctx :compiled-nodes
                       assoc node (:ir ctx)))]
       (let [saved ctx
             compile-fn node]
@@ -215,9 +216,9 @@
             save-node-ir
             (merge (select-keys saved [:compiled-node])))))))
 
-(defn compiled
+(defn compiled-node
   [ctx node]
-  (get (:compiled ctx) node))
+  (get (:compiled-nodes ctx) node))
 
 (defn with-blockbin
   [ctx blockbin-id f]
@@ -244,7 +245,7 @@
 (defn forget-node
   [ctx node]
   (-> ctx
-      (update :compiled dissoc node)))
+      (update :compiled-nodes dissoc node)))
 
 (defn assemble-module
   [ctx]

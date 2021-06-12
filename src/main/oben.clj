@@ -46,7 +46,7 @@
       (clj/fn [& args]
         (assert (= (count args) (count params)))
         (let [ctx (ctx/compile-node (ctx/next-epoch *ctx*) fnode)
-              f (ctx/compiled ctx fnode)
+              f (ctx/compiled-node ctx fnode)
               ctx (ctx/assemble-module ctx)
               invoker (ctx/invoker ctx f)
               result (apply invoker args)]

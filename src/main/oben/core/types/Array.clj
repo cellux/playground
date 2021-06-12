@@ -27,7 +27,7 @@
       (fn [ctx]
         (let [ctx (reduce ctx/compile-node ctx casted-elems)
               const (ir/const (t/compile t)
-                              (mapv #(ctx/compiled ctx %) casted-elems))]
+                              (mapv #(ctx/compiled-node ctx %) casted-elems))]
           (ctx/save-ir ctx const))))))
 
 (defn find-element-type
@@ -53,8 +53,8 @@
                 (compile-extractvalue [ctx]
                   (ctx/compile-instruction
                    ctx (ir/extractvalue
-                        (ctx/compiled ctx self)
-                        (mapv #(ctx/compiled ctx %) indices)
+                        (ctx/compiled-node ctx self)
+                        (mapv #(ctx/compiled-node ctx %) indices)
                         {})))]
           (-> ctx
               (ctx/compile-node self)
@@ -80,9 +80,9 @@
                 (compile-insertvalue [ctx]
                   (ctx/compile-instruction
                    ctx (ir/insertvalue
-                        (ctx/compiled ctx self)
-                        (ctx/compiled ctx value)
-                        (mapv #(ctx/compiled ctx %) indices)
+                        (ctx/compiled-node ctx self)
+                        (ctx/compiled-node ctx value)
+                        (mapv #(ctx/compiled-node ctx %) indices)
                         {})))]
           (-> ctx
               (ctx/compile-node self)

@@ -69,8 +69,8 @@
                   (reduce ctx/compile-node ctx args))
                 (compile-call [ctx]
                   (let [ctx (ctx/compile-node ctx op)
-                        ins (ir/call (ctx/compiled ctx op)
-                                     (map #(ctx/compiled ctx %) args))]
+                        ins (ir/call (ctx/compiled-node ctx op)
+                                     (map #(ctx/compiled-node ctx %) args))]
                     (ctx/compile-instruction ctx ins)))]
           (-> ctx compile-args compile-call)))
       {:class :oben/funcall

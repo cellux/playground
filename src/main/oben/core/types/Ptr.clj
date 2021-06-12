@@ -33,7 +33,7 @@
                   (ctx/compile-node ctx ptr-node))
                 (load-object [ctx]
                   (ctx/compile-instruction
-                   ctx (ir/load (ctx/compiled ctx ptr-node) {})))]
+                   ctx (ir/load (ctx/compiled-node ctx ptr-node) {})))]
           (-> ctx
               compile-pointer
               load-object)))
