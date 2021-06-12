@@ -11,7 +11,7 @@
              = != < <= >= >
              get-in get
              assoc-in assoc])
-  (:require [oben.core.types :as types])
+  (:require [oben.core.api])
   (:require [oben.core.types.Number])
   (:require [oben.core.types.Array])
   (:require [oben.core.types.Ptr])
@@ -22,7 +22,7 @@
   (:require [oben.core.protocols.Algebra])
   (:require [oben.core.protocols.Container]))
 
-(def void oben.core.types/%void)
+(def void oben.core.api/%void)
 
 (def u1 oben.core.types.Number/%u1)
 (def u8 oben.core.types.Number/%u8)

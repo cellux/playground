@@ -1,5 +1,5 @@
 (ns oben.core.types.Ptr
-  (:require [oben.core.types :as t])
+  (:require [oben.core.api :as o])
   (:require [oben.core.ast :as ast])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.protocols.Container :as Container])
@@ -8,25 +8,25 @@
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m]))
 
-(t/define-typeclass Ptr [::t/Value]
+(o/define-typeclass Ptr [:oben/Value]
   [object-type]
   {:object-type object-type})
 
 (defn pointer-type?
   [t]
-  (isa? (t/tid-of-type t) ::Ptr))
+  (isa? (o/tid-of-type t) ::Ptr))
 
 (defn pointer-node?
   [x]
-  (and (ast/node? x) (pointer-type? (t/type-of x))))
+  (and (o/node? x) (pointer-type? (o/type-of x))))
 
-(defmethod t/compile ::Ptr
+(defmethod o/compile-type ::Ptr
   [{:keys [object-type]}]
-  [:ptr (t/compile object-type)])
+  [:ptr (o/compile-type object-type)])
 
 (defn %deref
   [ptr-node]
-  (let [object-type (:object-type (t/type-of ptr-node))]
+  (let [object-type (:object-type (o/type-of ptr-node))]
     (ast/make-node object-type
       (fn [ctx]
         (letfn [(compile-pointer [ctx]
@@ -40,27 +40,27 @@
       {:class :oben/deref
        :children #{ptr-node}})))
 
-(defmethod Container/get-in [::Ptr ::t/HostVector]
+(defmethod Container/get-in [::Ptr :oben/HostVector]
   [ptr ks]
-  (let [object-type (:object-type (t/type-of ptr))
-        tid (t/tid-of-type object-type)]
-    (cond (isa? tid :oben.core.types/Aggregate)
+  (let [object-type (:object-type (o/type-of ptr))
+        tid (o/tid-of-type object-type)]
+    (cond (isa? tid :oben/Aggregate)
           `(deref (gep ~ptr [0 ~@ks]))
           :else `(get-in (deref ~ptr) ~ks))))
 
-(defmethod Container/get [::Ptr ::t/Value]
+(defmethod Container/get [::Ptr :oben/Value]
   [ptr key]
   (Container/get-in ptr [key]))
 
-(defmethod Container/put-in [::Ptr ::t/HostVector ::t/Value]
+(defmethod Container/put-in [::Ptr :oben/HostVector :oben/Value]
   [ptr ks val]
-  (let [object-type (:object-type (t/type-of ptr))
-        tid (t/tid-of-type object-type)]
-    (cond (isa? tid :oben.core.types/Aggregate)
+  (let [object-type (:object-type (o/type-of ptr))
+        tid (o/tid-of-type object-type)]
+    (cond (isa? tid :oben/Aggregate)
           `(set! (gep ~ptr [0 ~@ks]) ~val)
           :else `(put-in (deref ~ptr) ~ks ~val))))
 
-(defmethod Container/put [::Ptr ::t/Value ::t/Value]
+(defmethod Container/put [::Ptr :oben/Value :oben/Value]
   [ptr key val]
   (Container/put-in ptr [key] val))
 

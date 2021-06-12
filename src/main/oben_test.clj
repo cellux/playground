@@ -1,8 +1,8 @@
 (ns oben-test
   (:require [oben])
+  (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.ast :as ast])
-  (:require [oben.core.types :as t])
   (:require [oben.core.types.Number :as Number])
   (:require [oben.core.types.Array :as Array])
   (:require [oben.core.types.Ptr :as Ptr])
@@ -226,23 +226,23 @@
 (m/fact (ast/parse 'u8) => Number/%u8)
 (m/fact (ast/parse 's8) => Number/%s8)
 
-(m/fact (t/type-of (ast/parse '(u8 0))) => Number/%u8)
-(m/fact (t/type-of (ast/parse '(s8 0))) => Number/%s8)
+(m/fact (o/type-of (ast/parse '(u8 0))) => Number/%u8)
+(m/fact (o/type-of (ast/parse '(s8 0))) => Number/%s8)
 
-(m/fact (t/type-of (ast/parse 0)) => Number/%u1)
-(m/fact (t/type-of (ast/parse 1)) => Number/%u1)
-(m/fact (t/type-of (ast/parse -1)) => Number/%s8)
-(m/fact (t/type-of (ast/parse 5)) => Number/%u8)
-(m/fact (t/type-of (ast/parse -5)) => Number/%s8)
+(m/fact (o/type-of (ast/parse 0)) => Number/%u1)
+(m/fact (o/type-of (ast/parse 1)) => Number/%u1)
+(m/fact (o/type-of (ast/parse -1)) => Number/%s8)
+(m/fact (o/type-of (ast/parse 5)) => Number/%u8)
+(m/fact (o/type-of (ast/parse -5)) => Number/%s8)
 
-(m/fact (t/type-of (ast/parse '(u8 -5))) => Number/%u8)
+(m/fact (o/type-of (ast/parse '(u8 -5))) => Number/%u8)
 (m/fact
  "reinterpreting a signed value as unsigned does not change its bit pattern"
- (ast/constant-value (ast/parse '(u8 -5))) => -5)
+ (o/constant-value (ast/parse '(u8 -5))) => -5)
 
 (m/fact
  "negating an UInt turns it into an SInt"
- (t/type-of (ast/parse '(- 5))) => Number/%s8)
+ (o/type-of (ast/parse '(- 5))) => Number/%s8)
 
 (oben/with-temp-context
   (let [f (oben/fn ^s32 [^u32 x]

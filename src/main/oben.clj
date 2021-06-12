@@ -1,11 +1,9 @@
 (ns oben
   (:refer-clojure :exclude [fn defn defmulti defmacro])
   (:require [clojure.core :as clj])
+  (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
-  (:require [oben.core.types :as t])
-  (:require [oben.core.util :as u])
   (:require [oben.core.ast :as ast])
-  (:require [omkamra.llvm.ir :as ir])
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.engine :as llvm-engine]))
 
@@ -56,10 +54,10 @@
 
 (clj/defn build-make-fn-args
   [decl env]
-  (let [[params body] (u/sanitize-typed-forms decl env vector? false false)]
+  (let [[params body] (o/sanitize-typed-forms decl env vector? false false)]
     (vector
      `(with-meta
-        (vector ~@(u/sanitize-typed-forms params env symbol? true true))
+        (vector ~@(o/sanitize-typed-forms params env symbol? true true))
         ~(meta params))
      `(quote ~body))))
 
@@ -80,7 +78,7 @@
      (alter-var-root m# vary-meta assoc :kind :oben/MACRO)
      m#))
 
-(def params->tids (comp (partial mapv t/tid-of) vector))
+(def params->tids (comp (partial mapv o/tid-of) vector))
 
 (clj/defmacro defmulti
   [name]

@@ -1,34 +1,34 @@
 (ns oben.core.types.Array
-  (:require [oben.core.types :as t])
+  (:require [oben.core.api :as o])
+  (:require [oben.core.ast :as ast])
   (:require [oben.core.types.Number :as Number])
   (:require [oben.core.types.Aggregate :as Aggregate])
   (:require [oben.core.protocols.Container :as Container])
-  (:require [oben.core.ast :as ast])
   (:require [oben.core.context :as ctx])
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m]))
 
-(t/define-typeclass Array [:oben.core.types/Aggregate]
+(o/define-typeclass Array [:oben/Aggregate]
   [element-type size]
   {:element-type element-type
    :size size})
 
-(defmethod t/compile ::Array
+(defmethod o/compile-type ::Array
   [{:keys [element-type size]}]
-  [:array (t/compile element-type) size])
+  [:array (o/compile-type element-type) size])
 
-(defmethod t/cast [::Array ::t/HostVector]
+(defmethod o/cast [::Array :oben/HostVector]
   [t elems force?]
   (assert (= (count elems) (:size t)))
   (let [elt (:element-type t)
-        casted-elems (mapv #(t/cast elt % false) elems)]
-    (assert (every? #(= elt %) (map t/type-of-node casted-elems)))
+        casted-elems (mapv #(o/cast elt % false) elems)]
+    (assert (every? #(= elt %) (map o/type-of-node casted-elems)))
     (ast/make-constant-node t elems
-      (fn [ctx]
-        (let [ctx (reduce ctx/compile-node ctx casted-elems)
-              const (ir/const (t/compile t)
-                              (mapv #(ctx/compiled-node ctx %) casted-elems))]
-          (ctx/save-ir ctx const))))))
+                            (fn [ctx]
+                              (let [ctx (reduce ctx/compile-node ctx casted-elems)
+                                    const (ir/const (o/compile-type t)
+                                                    (mapv #(ctx/compiled-node ctx %) casted-elems))]
+                                (ctx/save-ir ctx const))))))
 
 (defn find-element-type
   [type indices]
@@ -38,13 +38,13 @@
 
 (defn array-index?
   [node]
-  (and (ast/constant? node)
-       (isa? ::Number/UInt (t/tid-of node))))
+  (and (o/constant-node? node)
+       (isa? ::Number/UInt (o/tid-of node))))
 
-(defmethod Container/get-in [::Array ::t/HostVector]
+(defmethod Container/get-in [::Array :oben/HostVector]
   [self indices]
   (assert (every? array-index? indices))
-  (let [atype (t/type-of self)
+  (let [atype (o/type-of self)
         return-type (find-element-type atype indices)]
     (ast/make-node return-type
       (fn [ctx]
@@ -65,10 +65,10 @@
   [self index]
   (Container/get-in self [index]))
 
-(defmethod Container/assoc-in [::Array ::t/HostVector ::t/Value]
+(defmethod Container/assoc-in [::Array :oben/HostVector :oben/Value]
   [self indices value]
   (assert (every? array-index? indices))
-  (let [atype (t/type-of self)
+  (let [atype (o/type-of self)
         value-type (find-element-type atype indices)
         return-type atype]
     (ast/make-node return-type
@@ -90,7 +90,7 @@
               compile-indices
               compile-insertvalue))))))
 
-(defmethod Container/assoc [::Array ::Number/UInt ::t/Value]
+(defmethod Container/assoc [::Array ::Number/UInt :oben/Value]
   [self index value]
   (Container/assoc-in self [index] value))
 
@@ -106,4 +106,4 @@
   [element-type initializer]
   (let [size (count initializer)
         array-type (Array element-type size)]
-    (t/cast array-type initializer false)))
+    (o/cast array-type initializer false)))

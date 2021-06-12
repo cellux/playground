@@ -7,12 +7,12 @@
                             bit-not
                             bit-and-not])
   (:require [oben])
-  (:require [oben.core.types :as t])
+  (:require [oben.core.api :as o])
   (:require [clojure.string :as str]))
 
 (defn method-not-found
   [op & args]
-  (ex-info (format "method not found: (%s %s)" op (str/join " " (map t/tid-of args))) {}))
+  (ex-info (format "method not found: (%s %s)" op (str/join " " (map o/tid-of args))) {}))
 
 (defmacro define-nary-op
   [op]

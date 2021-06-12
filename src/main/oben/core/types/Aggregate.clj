@@ -1,7 +1,7 @@
 (ns oben.core.types.Aggregate
-  (:require [oben.core.types :as t]))
+  (:require [oben.core.api :as o]))
 
-(derive :oben.core.types/Aggregate :oben.core.types/Value)
+(derive :oben/Aggregate :oben/Value)
 
-(defmulti get-element-type (fn [t key] (t/tid-of-type t)))
-(defmulti get-element-index (fn [t key] (t/tid-of-type t)))
+(defmulti get-element-type (fn [t key] (o/tid-of-type t)))
+(defmulti get-element-index (fn [t key] (o/tid-of-type t)))

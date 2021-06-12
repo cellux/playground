@@ -1,6 +1,6 @@
 (ns oben.core.context
   (:require [clojure.core :as clj])
-  (:require [oben.core.types :as t])
+  (:require [oben.core.api :as o])
   (:require [oben.core.types.Fn :as Fn])
   (:require [omkamra.llvm.ir :as ir])
   (:require [omkamra.llvm.context :as llvm-context])
@@ -190,7 +190,7 @@
   (if-let [ir (get (:compiled-nodes ctx) node)]
     (letfn [(declare-previously-compiled-globals [ctx]
               (if (and (:global? (meta node)) (:name ir))
-                (if (isa? (t/tid-of node) ::Fn/Fn)
+                (if (isa? (o/tid-of node) ::Fn/Fn)
                   (if (contains? (:functions (:m ctx)) (:name ir))
                     ctx
                     (update ctx :m ir/add-function (dissoc ir :blocks)))

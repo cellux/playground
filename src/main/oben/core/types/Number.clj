@@ -1,5 +1,5 @@
 (ns oben.core.types.Number
-  (:require [oben.core.types :as t])
+  (:require [oben.core.api :as o])
   (:require [oben.core.ast :as ast])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.protocols.Eq :as Eq])
@@ -66,24 +66,24 @@
  (m/fact (float-size Float/MAX_VALUE) => 32)
  (m/fact (float-size Double/MAX_VALUE) => 64))
 
-(derive ::Number ::t/Value)
+(derive ::Number :oben/Value)
 
 (derive ::Int ::Number)
 
 (defmulti resize
   "Returns a numeric type with the typeclass of `t` but with size `size`."
-  (fn [t size] (t/tid-of-type t)))
+  (fn [t size] (o/tid-of-type t)))
 
 ;; UInt
 
-(t/define-typeclass UInt [::Int]
+(o/define-typeclass UInt [::Int]
   [size]
   {:size size})
 
 (m/facts
  (m/fact (UInt 32) => {:kind :oben/TYPE :class ::UInt :size 32}))
 
-(defmethod t/compile ::UInt
+(defmethod o/compile-type ::UInt
   [t]
   [:integer (:size t)])
 
@@ -91,19 +91,19 @@
   [t newsize]
   (UInt newsize))
 
-(t/define-type %u1 (UInt 1))
-(t/define-type %u8 (UInt 8))
-(t/define-type %u16 (UInt 16))
-(t/define-type %u32 (UInt 32))
-(t/define-type %u64 (UInt 64))
+(o/define-type %u1 (UInt 1))
+(o/define-type %u8 (UInt 8))
+(o/define-type %u16 (UInt 16))
+(o/define-type %u32 (UInt 32))
+(o/define-type %u64 (UInt 64))
 
 ;; SInt
 
-(t/define-typeclass SInt [::Int]
+(o/define-typeclass SInt [::Int]
   [size]
   {:size size})
 
-(defmethod t/compile ::SInt
+(defmethod o/compile-type ::SInt
   [t]
   [:integer (:size t)])
 
@@ -111,19 +111,19 @@
   [t newsize]
   (SInt newsize))
 
-(t/define-type %s1 (SInt 1))
-(t/define-type %s8 (SInt 8))
-(t/define-type %s16 (SInt 16))
-(t/define-type %s32 (SInt 32))
-(t/define-type %s64 (SInt 64))
+(o/define-type %s1 (SInt 1))
+(o/define-type %s8 (SInt 8))
+(o/define-type %s16 (SInt 16))
+(o/define-type %s32 (SInt 32))
+(o/define-type %s64 (SInt 64))
 
 ;; FP
 
-(t/define-typeclass FP [::Number]
+(o/define-typeclass FP [::Number]
   [size]
   {:size size})
 
-(defmethod t/compile ::FP
+(defmethod o/compile-type ::FP
   [t]
   (case (:size t)
     32 :float
@@ -133,37 +133,37 @@
   [t newsize]
   (FP newsize))
 
-(t/define-type %f32 (FP 32))
-(t/define-type %f64 (FP 64))
+(o/define-type %f32 (FP 32))
+(o/define-type %f64 (FP 64))
 
-(defmethod t/get-ubertype [::UInt ::UInt]
+(defmethod o/get-ubertype [::UInt ::UInt]
   [t1 t2]
   (UInt (max (:size t1) (:size t2))))
 
-(defmethod t/get-ubertype [::SInt ::SInt]
+(defmethod o/get-ubertype [::SInt ::SInt]
   [t1 t2]
   (SInt (max (:size t1) (:size t2))))
 
-(defmethod t/get-ubertype [::SInt ::UInt]
+(defmethod o/get-ubertype [::SInt ::UInt]
   [t1 t2]
   (SInt (max (:size t1) (:size t2))))
 
-(defmethod t/get-ubertype [::FP ::FP]
+(defmethod o/get-ubertype [::FP ::FP]
   [t1 t2]
   (FP (max (:size t1) (:size t2))))
 
-(defmethod t/get-ubertype [::FP ::SInt]
+(defmethod o/get-ubertype [::FP ::SInt]
   [t1 t2]
   (FP (max (:size t1) (:size t2))))
 
-(defmethod t/get-ubertype [::FP ::UInt]
+(defmethod o/get-ubertype [::FP ::UInt]
   [t1 t2]
   (FP (max (:size t1) (:size t2))))
 
 (m/facts
- (m/fact (t/ubertype-of (UInt 8) (UInt 32)) => (UInt 32))
- (m/fact (t/ubertype-of (SInt 8) (UInt 32)) => (SInt 32))
- (m/fact (t/ubertype-of (UInt 8) (FP 64)) => (FP 64)))
+ (m/fact (o/ubertype-of (UInt 8) (UInt 32)) => (UInt 32))
+ (m/fact (o/ubertype-of (SInt 8) (UInt 32)) => (SInt 32))
+ (m/fact (o/ubertype-of (UInt 8) (FP 64)) => (FP 64)))
 
 ;; parsing host numbers
 
@@ -171,17 +171,17 @@
   [type host-value]
   (ast/make-constant-node type host-value
                           (fn [ctx]
-                            (let [const (ir/const (t/compile type) host-value)]
+                            (let [const (ir/const (o/compile-type type) host-value)]
                               (ctx/save-ir ctx const)))))
 
-(defmethod ast/parse-host-value ::t/HostInteger
+(defmethod o/parse-host-value :oben/HostInteger
   [n]
   (let [type (if (neg? n)
                (SInt (integer-size n))
                (UInt (integer-size n)))]
     (make-constant-number-node type n)))
 
-(defmethod ast/parse-host-value ::t/HostFloat
+(defmethod o/parse-host-value :oben/HostFloat
   [x]
   (let [type (FP (float-size x))]
     (make-constant-number-node type x)))
@@ -202,20 +202,20 @@
   [op]
   `(defn ~op
      [~'node ~'size]
-     (let [node-type# (t/type-of ~'node)
-           result-size# (ast/constant-value ~'size)
+     (let [node-type# (o/type-of ~'node)
+           result-size# (o/constant-value ~'size)
            result-type# (resize node-type# result-size#)]
-       (if (ast/constant? ~'node)
+       (if (o/constant-node? ~'node)
          (make-constant-number-node result-type#
                                     (~(resize-constant-fns op)
-                                     (ast/constant-value ~'node)
+                                     (o/constant-value ~'node)
                                      result-size#))
          (ast/make-node result-type#
            (fn [ctx#]
              (let [ctx# (ctx/compile-node ctx# ~'node)
                    ins# (~(symbol "omkamra.llvm.ir" (str op))
                          (ctx/compiled-node ctx# ~'node)
-                         (t/compile result-type#)
+                         (o/compile-type result-type#)
                          {})]
                (ctx/compile-instruction ctx# ins#)))
            {:class ~(keyword (str (ns-name *ns*)) (str op))
@@ -233,15 +233,15 @@
   [op result-typeclass]
   `(defn ~op
      [~'node ~'size]
-     (let [node-type# (t/type-of ~'node)
-           result-size# (ast/constant-value ~'size)
+     (let [node-type# (o/type-of ~'node)
+           result-size# (o/constant-value ~'size)
            result-type# (~result-typeclass result-size#)]
        (ast/make-node result-type#
          (fn [ctx#]
            (let [ctx# (ctx/compile-node ctx# ~'node)
                  ins# (~(symbol "omkamra.llvm.ir" (str op))
                        (ctx/compiled-node ctx# ~'node)
-                       (t/compile result-type#)
+                       (o/compile-type result-type#)
                        {})]
              (ctx/compile-instruction ctx# ins#)))
          {:class ~(keyword (str (ns-name *ns*)) (str op))
@@ -256,12 +256,12 @@
 ;; (define-conversion-op inttoptr)
 ;; (define-conversion-op bitcast)
 
-(defmethod t/cast [::UInt ::UInt]
+(defmethod o/cast [::UInt ::UInt]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))
-        real-size (if (ast/constant? node)
-                    (integer-size (ast/constant-value node))
+        node-size (:size (o/type-of node))
+        real-size (if (o/constant-node? node)
+                    (integer-size (o/constant-value node))
                     node-size)]
     (cond
       (= t-size node-size)
@@ -274,12 +274,12 @@
       (throw (ex-info "rejected narrowing UInt->UInt conversion"
                       {:from node-size :to t-size})))))
 
-(defmethod t/cast [::UInt ::SInt]
+(defmethod o/cast [::UInt ::SInt]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))
-        real-size (if (ast/constant? node)
-                    (integer-size (ast/constant-value node))
+        node-size (:size (o/type-of node))
+        real-size (if (o/constant-node? node)
+                    (integer-size (o/constant-value node))
                     node-size)
         unsigned-type (UInt node-size)
         unsigned-node (vary-meta node assoc :type unsigned-type)]
@@ -294,12 +294,12 @@
       (throw (ex-info "rejected narrowing SInt->UInt conversion"
                       {:from node-size :to t-size})))))
 
-(defmethod t/cast [::UInt ::FP]
+(defmethod o/cast [::UInt ::FP]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))
-        real-size (if (ast/constant? node)
-                    (float-size (ast/constant-value node))
+        node-size (:size (o/type-of node))
+        real-size (if (o/constant-node? node)
+                    (float-size (o/constant-value node))
                     node-size)]
     (cond
       (or (>= t-size node-size) (<= real-size t-size) force?)
@@ -307,12 +307,12 @@
       :else
       (throw (ex-info "rejected narrowing FP->UInt conversion")))))
 
-(defmethod t/cast [::SInt ::SInt]
+(defmethod o/cast [::SInt ::SInt]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))
-        real-size (if (ast/constant? node)
-                    (integer-size (ast/constant-value node))
+        node-size (:size (o/type-of node))
+        real-size (if (o/constant-node? node)
+                    (integer-size (o/constant-value node))
                     node-size)]
     (cond (= t-size node-size)
           node
@@ -324,12 +324,12 @@
           (throw (ex-info "rejected narrowing SInt->SInt conversion"
                           {:from node-size :to t-size})))))
 
-(defmethod t/cast [::SInt ::UInt]
+(defmethod o/cast [::SInt ::UInt]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))
-        real-size (if (ast/constant? node)
-                    (integer-size (ast/constant-value node))
+        node-size (:size (o/type-of node))
+        real-size (if (o/constant-node? node)
+                    (integer-size (o/constant-value node))
                     node-size)
         signed-type (SInt node-size)
         signed-node (vary-meta node assoc :type signed-type)]
@@ -343,24 +343,24 @@
           (throw (ex-info "rejected narrowing SInt->UInt conversion"
                           {:from node-size :to t-size})))))
 
-(defmethod t/cast [::SInt ::FP]
+(defmethod o/cast [::SInt ::FP]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))
-        real-size (if (ast/constant? node)
-                    (float-size (ast/constant-value node))
+        node-size (:size (o/type-of node))
+        real-size (if (o/constant-node? node)
+                    (float-size (o/constant-value node))
                     node-size)]
     (cond (or (>= t-size node-size) (<= real-size t-size) force?)
           (fptosi node t-size)
           :else
           (throw (ex-info "rejected narrowing FP->SInt conversion")))))
 
-(defmethod t/cast [::FP ::FP]
+(defmethod o/cast [::FP ::FP]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))
-        real-size (if (ast/constant? node)
-                    (float-size (ast/constant-value node))
+        node-size (:size (o/type-of node))
+        real-size (if (o/constant-node? node)
+                    (float-size (o/constant-value node))
                     node-size)]
     (cond (= t-size node-size)
           node
@@ -372,16 +372,16 @@
           (throw (ex-info "rejected narrowing FP->FP conversion"
                           {:from node-size :to t-size})))))
 
-(defmethod t/cast [::FP ::UInt]
+(defmethod o/cast [::FP ::UInt]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))]
+        node-size (:size (o/type-of node))]
     (uitofp node t-size)))
 
-(defmethod t/cast [::FP ::SInt]
+(defmethod o/cast [::FP ::SInt]
   [t node force?]
   (let [t-size (:size t)
-        node-size (:size (t/type-of node))]
+        node-size (:size (o/type-of node))]
     (sitofp node t-size)))
 
 ;; algebraic and bitwise ops
@@ -389,11 +389,11 @@
 (defmacro define-binary-op
   [op-multifn arg-typeclass make-ir]
   `(letfn [(doit# [~'lhs ~'rhs]
-             (let [result-type# (t/ubertype-of (t/type-of ~'lhs)
-                                               (t/type-of ~'rhs))
+             (let [result-type# (o/ubertype-of (o/type-of ~'lhs)
+                                               (o/type-of ~'rhs))
                    ~'lhs (ast/parse (list 'cast result-type# ~'lhs))
                    ~'rhs (ast/parse (list 'cast result-type# ~'rhs))]
-               (if (isa? (t/tid-of-type result-type#) ~arg-typeclass)
+               (if (isa? (o/tid-of-type result-type#) ~arg-typeclass)
                  (ast/make-node result-type#
                    (fn [~'ctx]
                      (let [compile-op# (fn [~'ctx]
@@ -445,7 +445,7 @@
 
 (defmethod Bitwise/bit-not [::Int]
   [x]
-  (let [size (:size (t/type-of x))
+  (let [size (:size (o/type-of x))
         mask (if (< size 64)
                (- (bit-shift-left 1 size) 1)
                0xffffffffffffffffN)]
@@ -456,11 +456,11 @@
 (defmacro define-compare-op
   [op-multifn arg-typeclass make-ir pred]
   `(letfn [(doit# [~'lhs ~'rhs]
-             (let [ubertype# (t/ubertype-of (t/type-of ~'lhs)
-                                            (t/type-of ~'rhs))
+             (let [ubertype# (o/ubertype-of (o/type-of ~'lhs)
+                                            (o/type-of ~'rhs))
                    ~'lhs (ast/parse (list 'cast ubertype# ~'lhs))
                    ~'rhs (ast/parse (list 'cast ubertype# ~'rhs))]
-               (if (isa? (t/tid-of-type ubertype#) ~arg-typeclass)
+               (if (isa? (o/tid-of-type ubertype#) ~arg-typeclass)
                  (ast/make-node %u1
                    (fn [~'ctx]
                      (let [compile-op# (fn [~'ctx]
