@@ -78,101 +78,116 @@
 
 (o/define-typeclass UInt [::Int]
   [size]
-  {:size size})
+  (o/make-type
+   #(ctx/save-ir % [:integer size])
+   {:size size}))
 
 (m/facts
- (m/fact (UInt 32) => {:kind :oben/TYPE :class ::UInt :size 32}))
+ (let [mt (meta (UInt 32))]
+   (m/fact (:kind mt) => :oben/TYPE)
+   (m/fact (:class mt) => ::UInt)
+   (m/fact (:size mt) => 32)
+   (m/fact (type (:tid mt)) => clojure.lang.Keyword)
+   (m/fact (name (:tid mt)) => #"^UInt.\d+$")))
 
-(defmethod o/compile-type ::UInt
-  [t]
-  [:integer (:size t)])
+(def %u1 (UInt 1))
+(def %u8 (UInt 8))
+(def %u16 (UInt 16))
+(def %u32 (UInt 32))
+(def %u64 (UInt 64))
 
 (defmethod resize ::UInt
   [t newsize]
   (UInt newsize))
 
-(o/define-type %u1 (UInt 1))
-(o/define-type %u8 (UInt 8))
-(o/define-type %u16 (UInt 16))
-(o/define-type %u32 (UInt 32))
-(o/define-type %u64 (UInt 64))
-
 ;; SInt
 
 (o/define-typeclass SInt [::Int]
   [size]
-  {:size size})
+  (o/make-type
+      #(ctx/save-ir % [:integer size])
+      {:size size}))
 
-(defmethod o/compile-type ::SInt
-  [t]
-  [:integer (:size t)])
+(def %s1 (SInt 1))
+(def %s8 (SInt 8))
+(def %s16 (SInt 16))
+(def %s32 (SInt 32))
+(def %s64 (SInt 64))
 
 (defmethod resize ::SInt
   [t newsize]
   (SInt newsize))
 
-(o/define-type %s1 (SInt 1))
-(o/define-type %s8 (SInt 8))
-(o/define-type %s16 (SInt 16))
-(o/define-type %s32 (SInt 32))
-(o/define-type %s64 (SInt 64))
-
 ;; FP
 
 (o/define-typeclass FP [::Number]
   [size]
-  {:size size})
+  (o/make-type
+      (let [ir (case size
+                 32 :float
+                 64 :double)]
+        #(ctx/save-ir % ir))
+      {:size size}))
 
-(defmethod o/compile-type ::FP
-  [t]
-  (case (:size t)
-    32 :float
-    64 :double))
+(def %f32 (FP 32))
+(def %f64 (FP 64))
 
 (defmethod resize ::FP
   [t newsize]
   (FP newsize))
 
-(o/define-type %f32 (FP 32))
-(o/define-type %f64 (FP 64))
-
 (defmethod o/get-ubertype [::UInt ::UInt]
   [t1 t2]
-  (UInt (max (:size t1) (:size t2))))
+  (UInt (max (:size (meta t1))
+             (:size (meta t2)))))
 
 (defmethod o/get-ubertype [::SInt ::SInt]
   [t1 t2]
-  (SInt (max (:size t1) (:size t2))))
+  (SInt (max (:size (meta t1))
+             (:size (meta t2)))))
 
 (defmethod o/get-ubertype [::SInt ::UInt]
   [t1 t2]
-  (SInt (max (:size t1) (:size t2))))
+  (SInt (max (:size (meta t1))
+             (:size (meta t2)))))
 
 (defmethod o/get-ubertype [::FP ::FP]
   [t1 t2]
-  (FP (max (:size t1) (:size t2))))
+  (FP (max (:size (meta t1))
+           (:size (meta t2)))))
 
 (defmethod o/get-ubertype [::FP ::SInt]
   [t1 t2]
-  (FP (max (:size t1) (:size t2))))
+  (FP (max (:size (meta t1))
+           (:size (meta t2)))))
 
 (defmethod o/get-ubertype [::FP ::UInt]
   [t1 t2]
-  (FP (max (:size t1) (:size t2))))
+  (FP (max (:size (meta t1))
+           (:size (meta t2)))))
 
 (m/facts
- (m/fact (o/ubertype-of (UInt 8) (UInt 32)) => (UInt 32))
- (m/fact (o/ubertype-of (SInt 8) (UInt 32)) => (SInt 32))
- (m/fact (o/ubertype-of (UInt 8) (FP 64)) => (FP 64)))
+ (m/fact (o/ubertype-of (UInt 8) (UInt 32)) => (m/exactly (UInt 32)))
+ (m/fact (o/ubertype-of (SInt 8) (UInt 32)) => (m/exactly (SInt 32)))
+ (m/fact (o/ubertype-of (UInt 8) (FP 64)) => (m/exactly (FP 64))))
 
 ;; parsing host numbers
 
 (defn make-constant-number-node
   [type host-value]
-  (ast/make-constant-node type host-value
-                          (fn [ctx]
-                            (let [const (ir/const (o/compile-type type) host-value)]
-                              (ctx/save-ir ctx const)))))
+  (ast/make-constant-node
+   type host-value
+   (fn [ctx]
+     (letfn [(compile-type [ctx]
+               (ctx/compile-type ctx type))
+             (save-ir [ctx]
+               (ctx/save-ir
+                ctx
+                (ir/const (ctx/compiled-type ctx type)
+                          host-value)))]
+       (-> ctx
+           compile-type
+           save-ir)))))
 
 (defmethod o/parse-host-value :oben/HostInteger
   [n]
@@ -212,10 +227,11 @@
                                      result-size#))
          (ast/make-node result-type#
            (fn [ctx#]
-             (let [ctx# (ctx/compile-node ctx# ~'node)
+             (let [ctx# (ctx/compile-type ctx# result-type#)
+                   ctx# (ctx/compile-node ctx# ~'node)
                    ins# (~(symbol "omkamra.llvm.ir" (str op))
                          (ctx/compiled-node ctx# ~'node)
-                         (o/compile-type result-type#)
+                         (ctx/compiled-type ctx# result-type#)
                          {})]
                (ctx/compile-instruction ctx# ins#)))
            {:class ~(keyword (str (ns-name *ns*)) (str op))
@@ -238,10 +254,11 @@
            result-type# (~result-typeclass result-size#)]
        (ast/make-node result-type#
          (fn [ctx#]
-           (let [ctx# (ctx/compile-node ctx# ~'node)
+           (let [ctx# (ctx/compile-type ctx# result-type#)
+                 ctx# (ctx/compile-node ctx# ~'node)
                  ins# (~(symbol "omkamra.llvm.ir" (str op))
                        (ctx/compiled-node ctx# ~'node)
-                       (o/compile-type result-type#)
+                       (ctx/compiled-type ctx# result-type#)
                        {})]
              (ctx/compile-instruction ctx# ins#)))
          {:class ~(keyword (str (ns-name *ns*)) (str op))
@@ -258,8 +275,8 @@
 
 (defmethod o/cast [::UInt ::UInt]
   [t node force?]
-  (let [t-size (:size t)
-        node-size (:size (o/type-of node))
+  (let [t-size (:size (meta t))
+        node-size (:size (meta (o/type-of node)))
         real-size (if (o/constant-node? node)
                     (integer-size (o/constant-value node))
                     node-size)]
@@ -276,8 +293,8 @@
 
 (defmethod o/cast [::UInt ::SInt]
   [t node force?]
-  (let [t-size (:size t)
-        node-size (:size (o/type-of node))
+  (let [t-size (:size (meta t))
+        node-size (:size (meta (o/type-of node)))
         real-size (if (o/constant-node? node)
                     (integer-size (o/constant-value node))
                     node-size)
@@ -296,8 +313,8 @@
 
 (defmethod o/cast [::UInt ::FP]
   [t node force?]
-  (let [t-size (:size t)
-        node-size (:size (o/type-of node))
+  (let [t-size (:size (meta t))
+        node-size (:size (meta (o/type-of node)))
         real-size (if (o/constant-node? node)
                     (float-size (o/constant-value node))
                     node-size)]
@@ -309,8 +326,8 @@
 
 (defmethod o/cast [::SInt ::SInt]
   [t node force?]
-  (let [t-size (:size t)
-        node-size (:size (o/type-of node))
+  (let [t-size (:size (meta t))
+        node-size (:size (meta (o/type-of node)))
         real-size (if (o/constant-node? node)
                     (integer-size (o/constant-value node))
                     node-size)]
@@ -326,8 +343,8 @@
 
 (defmethod o/cast [::SInt ::UInt]
   [t node force?]
-  (let [t-size (:size t)
-        node-size (:size (o/type-of node))
+  (let [t-size (:size (meta t))
+        node-size (:size (meta (o/type-of node)))
         real-size (if (o/constant-node? node)
                     (integer-size (o/constant-value node))
                     node-size)
@@ -345,8 +362,8 @@
 
 (defmethod o/cast [::SInt ::FP]
   [t node force?]
-  (let [t-size (:size t)
-        node-size (:size (o/type-of node))
+  (let [t-size (:size (meta t))
+        node-size (:size (meta (o/type-of node)))
         real-size (if (o/constant-node? node)
                     (float-size (o/constant-value node))
                     node-size)]
@@ -357,8 +374,8 @@
 
 (defmethod o/cast [::FP ::FP]
   [t node force?]
-  (let [t-size (:size t)
-        node-size (:size (o/type-of node))
+  (let [t-size (:size (meta t))
+        node-size (:size (meta (o/type-of node)))
         real-size (if (o/constant-node? node)
                     (float-size (o/constant-value node))
                     node-size)]
@@ -374,14 +391,14 @@
 
 (defmethod o/cast [::FP ::UInt]
   [t node force?]
-  (let [t-size (:size t)
-        node-size (:size (o/type-of node))]
+  (let [t-size (:size (meta t))
+        node-size (:size (meta (o/type-of node)))]
     (uitofp node t-size)))
 
 (defmethod o/cast [::FP ::SInt]
   [t node force?]
-  (let [t-size (:size t)
-        node-size (:size (o/type-of node))]
+  (let [t-size (:size (meta t))
+        node-size (:size (meta (o/type-of node)))]
     (sitofp node t-size)))
 
 ;; algebraic and bitwise ops
@@ -445,7 +462,7 @@
 
 (defmethod Bitwise/bit-not [::Int]
   [x]
-  (let [size (:size (o/type-of x))
+  (let [size (:size (meta (o/type-of x)))
         mask (if (< size 64)
                (- (bit-shift-left 1 size) 1)
                0xffffffffffffffffN)]

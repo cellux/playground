@@ -12,7 +12,7 @@
 
 (defn method-not-found
   [op & args]
-  (ex-info (format "method not found: (%s %s)" op (str/join " " (map o/tid-of args))) {}))
+  (ex-info (format "method not found: (%s %s)" op (str/join " " (map o/tid-of-value args))) {}))
 
 (defmacro define-nary-op
   [op]

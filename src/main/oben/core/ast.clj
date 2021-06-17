@@ -26,7 +26,7 @@
 (defn funcall
   [op args]
   (assert (o/fnode? op))
-  (let [{:keys [return-type param-types]} (o/type-of op)
+  (let [{:keys [return-type param-types]} (meta (o/type-of op))
         args (mapv #(o/cast %1 %2 false) param-types args)]
     (make-node return-type
       (fn [ctx]

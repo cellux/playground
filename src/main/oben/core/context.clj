@@ -1,7 +1,6 @@
 (ns oben.core.context
   (:require [clojure.core :as clj])
   (:require [oben.core.api :as o])
-  (:require [oben.core.types.Fn :as Fn])
   (:require [omkamra.llvm.ir :as ir])
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.buffer :as llvm-buffer])
@@ -34,15 +33,16 @@
            :ee nil}
     :m (ir/module)
     :epoch 0
-    :node-id 0
-    :node-name nil
+    :next-id 0
+    :next-name nil
     :f nil
     :fdata nil
     :ftab (allocate-ftab ftabsize)
     :fid 0
     :ir nil
-    :compiled-node nil
+    :compiling-node nil
     :compiled-nodes {}
+    :compiling-type nil
     :compiled-types {}
     :mode :dev})
   ([]
@@ -52,12 +52,13 @@
   [ctx]
   (-> ctx
       (assoc :m (ir/module)
-             :node-id 0
-             :node-name nil
+             :next-id 0
+             :next-name nil
              :f nil
              :fdata nil
              :ir nil
-             :compiled-node nil)
+             :compiling-node nil
+             :compiling-type nil)
       (update :epoch inc)))
 
 (defn get-llvm-context
@@ -76,37 +77,37 @@
   [ctx ee]
   (assoc-in ctx [:llvm :ee] ee))
 
-(defn node-name-prefix
-  [node]
-  (or (some-> (meta node) :name name)
-      (some-> (meta node) :class name)
-      "node"))
-
-(defn assign-node-name
-  [ctx node]
-  (let [node-name (symbol (str (node-name-prefix node)
+(defn assign-next-name
+  [ctx prefix]
+  (let [next-name (symbol (str prefix
                                "."
                                (:epoch ctx)
                                "."
-                               (:node-id ctx)))]
+                               (:next-id ctx)))]
     (-> ctx
-        (update :node-id inc)
-        (assoc :node-name node-name))))
+        (update :next-id inc)
+        (assoc :next-name next-name))))
 
-(defn get-assigned-node-name
+(defn get-assigned-name
   [ctx]
-  (:node-name ctx))
+  (:next-name ctx))
+
+(defn node-name-prefix
+  [node default-prefix]
+   (or (some-> (meta node) :name name)
+       (some-> (meta node) :class name)
+       default-prefix))
 
 (defn add-label-block
   [ctx label-node]
   (letfn [(create-label-block
             [ctx label-node]
-            (let [block-name (keyword (get-assigned-node-name ctx))]
+            (let [block-name (keyword (get-assigned-name ctx))]
               (update-in ctx [:fdata :label-blocks]
                          assoc label-node
                          (ir/basic-block block-name))))]
     (-> ctx
-        (assign-node-name label-node)
+        (assign-next-name (node-name-prefix label-node "label"))
         (create-label-block label-node))))
 
 (defn get-label-block
@@ -190,35 +191,72 @@
   (if-let [ir (get (:compiled-nodes ctx) node)]
     (letfn [(declare-previously-compiled-globals [ctx]
               (if (and (:global? (meta node)) (:name ir))
-                (if (isa? (o/tid-of node) ::Fn/Fn)
+                (if (isa? (o/tid-of-node node) :oben.core.types.Fn/Fn)
                   (if (contains? (:functions (:m ctx)) (:name ir))
                     ctx
                     (update ctx :m ir/add-function (dissoc ir :blocks)))
                   (if (contains? (:globals (:m ctx)) (:name ir))
                     ctx
                     (update ctx :m ir/add-global (dissoc ir :initializer))))
-                ctx))
-            (save-ir [ctx]
-              (assoc ctx :ir ir))]
+                ctx))]
       (-> ctx
           declare-previously-compiled-globals
-          save-ir))
+          (save-ir ir)))
     (letfn [(save-node-ir [ctx]
               (update ctx :compiled-nodes
                       assoc node (:ir ctx)))]
       (let [saved ctx
             compile-fn node]
         (-> ctx
-            (assign-node-name node)
-            (assoc :compiled-node node)
+            (assoc :compiling-node node)
+            (assign-next-name (node-name-prefix node "node"))
             (dissoc :ir)
             compile-fn
             save-node-ir
-            (merge (select-keys saved [:compiled-node])))))))
+            (merge (select-keys saved [:compiling-node])))))))
 
 (defn compiled-node
   [ctx node]
   (get (:compiled-nodes ctx) node))
+
+(defn add-type-to-module-if-named
+  ([ctx ir]
+   (if-let [name (and (ir/struct-type? ir)
+                      (ir/struct-name ir))]
+     (if (contains? (:types (:m ctx)) name)
+       ctx
+       (update ctx :m ir/add-type ir))
+     ctx))
+  ([ctx]
+   (add-type-to-module-if-named ctx (:ir ctx))))
+
+(defn compile-type
+  [ctx type]
+  (if-let [ir (get (:compiled-types ctx) type)]
+    (-> ctx
+        (add-type-to-module-if-named ir)
+        (save-ir ir))
+    (letfn [(assign-name-if-named-type [ctx type]
+              (if-let [name (:name (meta type))]
+                (assign-next-name ctx name)
+                ctx))
+            (save-type-ir [ctx]
+              (update ctx :compiled-types
+                      assoc type (:ir ctx)))]
+      (let [saved ctx
+            compile-fn type]
+        (-> ctx
+            (assoc :compiling-type type)
+            (assign-name-if-named-type type)
+            (dissoc :ir)
+            compile-fn
+            save-type-ir
+            add-type-to-module-if-named
+            (merge (select-keys saved [:compiling-type])))))))
+
+(defn compiled-type
+  [ctx type]
+  (get (:compiled-types ctx) type))
 
 (defn with-blockbin
   [ctx blockbin-id f]
@@ -246,6 +284,11 @@
   [ctx node]
   (-> ctx
       (update :compiled-nodes dissoc node)))
+
+(defn forget-type
+  [ctx type]
+  (-> ctx
+      (update :compiled-types dissoc type)))
 
 (defn assemble-module
   [ctx]

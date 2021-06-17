@@ -3,6 +3,7 @@
   (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.ast :as ast])
+  (:require [oben.core.types.Void :as Void])
   (:require [oben.core.types.Number :as Number])
   (:require [oben.core.types.Array :as Array])
   (:require [oben.core.types.Ptr :as Ptr])
@@ -31,49 +32,27 @@
   [f]
   (println (get-ir f)))
 
-(defn gen-fname
-  [name return-type lhs-type rhs-type]
-  (symbol (str
-           name
-           \:
-           (first (str lhs-type))
-           (first (str rhs-type))
-           "->"
-           (first (str return-type)))))
+(defn compile-type
+  [t]
+  (let [ctx (ctx/new)]
+    (-> ctx
+        (ctx/compile-type t)
+        (ctx/compiled-type t))))
 
-(defmacro gen-param-list
-  [return-type lhs-type rhs-type]
-  `(with-meta [(with-meta (symbol "x") {:tag ~lhs-type})
-               (with-meta (symbol "y") {:tag ~rhs-type})]
-     {:tag ~return-type}))
-
-(defmacro with-operator-functions
-  [ops opnames types & body]
-  (let [combos (for [[op name] (map vector ops opnames)
-                     return-type types
-                     lhs-type types
-                     rhs-type types]
-                 [op name return-type lhs-type rhs-type])]
-    `(let ~(into [] (mapcat
-                     (fn [[op name return-type lhs-type rhs-type]]
-                       [(gen-fname name return-type lhs-type rhs-type)
-                        `(oben/fn
-                           ~(gen-param-list return-type lhs-type rhs-type)
-                           (~op ~'x ~'y))])
-                     combos))
-       ~@body)))
-
-#_(oben/with-temp-context
-    (with-operator-functions
-      [+ - * /]
-      [add sub mul div]
-      [u32 s32 f32]
-      (m/fact (add:ii->i 1 2) => 3)))
+(m/facts
+ "type constructors and named types"
+ (m/fact (compile-type (Void/%Void)) => :void)
+ (m/fact (compile-type Void/%void) => :void)
+ (m/fact (compile-type (Number/UInt 32)) => [:integer 32])
+ (m/fact (compile-type Number/%u32) => [:integer 32])
+ (m/fact (compile-type (Number/UInt 8)) => [:integer 8])
+ (m/fact (compile-type Number/%u8) => [:integer 8])
+ (m/fact (compile-type (Number/SInt 16)) => [:integer 16])
+ (m/fact (compile-type Number/%s16) => [:integer 16]))
 
 (m/facts
  "type constructors memoize the types they return"
- (m/fact (identical? (Number/UInt 32) (Number/UInt 32)))
- (m/fact (identical? (Number/UInt 32) Number/%u32)))
+ (m/fact (Number/UInt 32) => (m/exactly (Number/UInt 32))))
 
 (oben/with-temp-context
   (let [f (oben/fn ^u32 []
@@ -160,11 +139,27 @@
     (m/fact (f 1 2) => 12)))
 
 (oben/with-temp-context
+  (let [f (oben/fn ^u16 [^u32 x]
+            (cast! u16 x))]
+    (m/fact
+     "forced casts"
+     (f 65535) => -1
+     (f 65536) => 0
+     (f 65537) => 1)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^f32 [^u32 x]
+            (let [g (fn ^u32 [^f32 x] x)]
+              (g x)))]
+    (m/fact
+     "call to let-bound function"
+     (f 60) => 60.0)))
+
+(oben/with-temp-context
   (let [f (oben/fn ^f32 [^u32 x ^u32 y]
             (let [g (fn ^u32 [^u16 x ^u8 y] (+ x y))]
               (g (cast! u16 x) (cast! u8 y))))]
     (m/fact
-     "forced casts"
      (f 6 3) => 9.0)))
 
 (oben/with-temp-context
@@ -223,26 +218,29 @@
             (/ x y))]
     (m/fact (f 6.5 -3.25) => -2.0)))
 
-(m/fact (ast/parse 'u8) => Number/%u8)
-(m/fact (ast/parse 's8) => Number/%s8)
+(m/fact (ast/parse 'u8) => (m/exactly Number/%u8))
+(m/fact (ast/parse 's8) => (m/exactly Number/%s8))
 
-(m/fact (o/type-of (ast/parse '(u8 0))) => Number/%u8)
-(m/fact (o/type-of (ast/parse '(s8 0))) => Number/%s8)
+(m/fact (o/type-of (ast/parse '(u8 0))) => (m/exactly (Number/UInt 8)))
+(m/fact (o/type-of (ast/parse '(u8 0))) => (m/exactly Number/%u8))
 
-(m/fact (o/type-of (ast/parse 0)) => Number/%u1)
-(m/fact (o/type-of (ast/parse 1)) => Number/%u1)
-(m/fact (o/type-of (ast/parse -1)) => Number/%s8)
-(m/fact (o/type-of (ast/parse 5)) => Number/%u8)
-(m/fact (o/type-of (ast/parse -5)) => Number/%s8)
+(m/fact (o/type-of (ast/parse '(s8 0))) => (m/exactly (Number/SInt 8)))
+(m/fact (o/type-of (ast/parse '(s8 0))) => (m/exactly Number/%s8))
 
-(m/fact (o/type-of (ast/parse '(u8 -5))) => Number/%u8)
+(m/fact (o/type-of (ast/parse 0)) => (m/exactly Number/%u1))
+(m/fact (o/type-of (ast/parse 1)) => (m/exactly Number/%u1))
+(m/fact (o/type-of (ast/parse -1)) => (m/exactly Number/%s8))
+(m/fact (o/type-of (ast/parse 5)) => (m/exactly Number/%u8))
+(m/fact (o/type-of (ast/parse -5)) => (m/exactly Number/%s8))
+
+(m/fact (o/type-of (ast/parse '(u8 -5))) => (m/exactly Number/%u8))
 (m/fact
  "reinterpreting a signed value as unsigned does not change its bit pattern"
  (o/constant-value (ast/parse '(u8 -5))) => -5)
 
 (m/fact
  "negating an UInt turns it into an SInt"
- (o/type-of (ast/parse '(- 5))) => Number/%s8)
+ (o/type-of (ast/parse '(- 5))) => (m/exactly Number/%s8))
 
 (oben/with-temp-context
   (let [f (oben/fn ^s32 [^u32 x]

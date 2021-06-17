@@ -1,59 +1,87 @@
 (ns oben.core.api
   (:refer-clojure :exclude [cast resolve])
-  (:require [clojure.core :as clj]))
+  (:require [clojure.core :as clj])
+  (:require [clojure.string :as str]))
 
 (defn make-tid
-  [name]
+  [& name-components]
   (keyword (str (ns-name *ns*))
-           (str (clojure.core/name name))))
+           (str/join "." name-components)))
+
+(defn make-type
+  {:style/indent 1}
+  [compile-fn & opts]
+  (apply vary-meta compile-fn
+         merge
+         {:kind :oben/TYPE}
+         opts))
 
 (defmacro define-typeclass
   [name parents args & body]
-  (let [tid (make-tid name)]
-    `(do (def ~name
+  (let [typeclass-tid (make-tid name)]
+    `(let [tid-counter# (atom 0)]
+       (def ~name
+         (with-meta
            (memoize
-            (with-meta
-              (fn [~@args]
+            (fn [~@args]
+              (let [tid# (make-tid '~name (swap! tid-counter# inc))]
+                (derive tid# ~typeclass-tid)
                 (-> (do ~@body)
-                    (merge {:kind :oben/TYPE
-                            :class ~tid})
-                    (vary-meta assoc :tid ~tid)))
-              {:kind :oben/TYPECLASS})))
-         ~@(for [p parents]
-             `(derive ~tid ~p)))))
+                    (vary-meta
+                     merge {:class ~typeclass-tid
+                            :tid tid#})))))
+           {:kind :oben/TYPECLASS
+            :tid ~typeclass-tid}))
+       ~@(for [p parents]
+           `(derive ~typeclass-tid ~p))
+       #'~name)))
+
+(defn typeclass?
+  [t]
+  (and (fn? t)
+       (= :oben/TYPECLASS (:kind (meta t)))))
+
+(def tid-of-typeclass (comp :tid meta))
 
 (defmacro define-type
-  ([name type-constructor parents]
+  ([name constructor-form parents]
    (let [tid (make-tid name)]
-     `(let [t# ~type-constructor
+     `(let [t# ~constructor-form
             ptid# (:tid (meta t#))]
-        (def ~name (vary-meta t# assoc :tid ~tid))
+        (def ~name (vary-meta t# assoc
+                              :tid ~tid
+                              :name '~name))
         ~@(for [p parents]
             `(derive ~tid ~p))
-        (derive ~tid ptid#))))
-  ([name type-constructor]
-   `(define-type ~name ~type-constructor [])))
+        (derive ~tid ptid#)
+        #'~name)))
+  ([name constructor-form]
+   `(define-type ~name ~constructor-form [])))
 
 (defn type?
   [t]
-  (and (map? t)
-       (= (:kind t) :oben/TYPE)))
+  (and (fn? t)
+       (= :oben/TYPE (:kind (meta t)))))
 
 (def tid-of-type (comp :tid meta))
+
+(defn tid-of-type-or-typeclass
+  [x]
+  (cond (type? x) (tid-of-type x)
+        (typeclass? x) (tid-of-typeclass x)
+        :else (throw (ex-info "expected type or typeclass" {:arg x}))))
 
 (defn node?
   [x]
   (and (fn? x)
        (= :oben/NODE (:kind (meta x)))))
 
+(def nodeclass-of (comp :class meta))
+
 (def type-of-node (comp :type meta))
 (def type-of type-of-node)
 
-(def tid-of-node (comp :tid meta type-of))
-
-(defn nodeclass-of
-  [node]
-  (:class (meta node)))
+(def tid-of-node (comp tid-of-type type-of))
 
 (derive :oben/HostValue :oben/Any)
 
@@ -87,7 +115,7 @@
     (map? x) :oben/HostMap
     :else (throw (ex-info "no tid for host value" {:host-value x}))))
 
-(defn tid-of
+(defn tid-of-value
   [x]
   (cond (node? x) (tid-of-node x)
         (host-value? x) (tid-of-host-value x)
@@ -95,44 +123,17 @@
 
 (defmulti parse-host-value tid-of-host-value)
 
-(defmulti compile-type
-  "Compiles an Oben type into the corresponding LLVM type."
-  (fn [t] (tid-of-type t)))
-
 (defmulti cast
   "Returns an AST node which casts `x` to type `t`.
   If the cast cannot be accomplished without information loss, throws
   an error unless `force?` is true."
-  (fn [t x force?] [(tid-of-type t) (tid-of x)]))
+  (fn [t x force?] [(tid-of-type t) (tid-of-value x)]))
 
 (derive :oben/Value :oben/Any)
 
 (defn tangible-type?
   [t]
   (isa? (tid-of-type t) :oben/Value))
-
-;; Void
-
-;; we call this %Void to prevent a clash with java.lang.Void
-(define-typeclass %Void [:oben/Any]
-  [])
-
-(define-type %void (%Void))
-
-(defmethod compile-type ::%Void
-  [t]
-  :void)
-
-;; Unseen
-
-(define-typeclass %Unseen [:oben/Any]
-  [])
-
-(define-type %unseen (%Unseen))
-
-(defmethod compile-type ::%Unseen
-  [t]
-  :void)
 
 ;; get-ubertype
 
@@ -145,13 +146,17 @@
   [t1 t2]
   nil)
 
+(defn unseen?
+  [t]
+  (isa? (tid-of-type t) :oben.core.types.Unseen/%Unseen))
+
 (defn ubertype-of
   ([t]
    t)
   ([t1 t2]
    (cond (= t1 t2) t1
-         (= t1 %unseen) t2
-         (= t2 %unseen) t1
+         (unseen? t1) t2
+         (unseen? t2) t1
          :else (or (get-ubertype t1 t2)
                    (get-ubertype t2 t1)
                    (throw (ex-info "Cannot find übertype"

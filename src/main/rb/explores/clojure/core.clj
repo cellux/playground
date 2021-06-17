@@ -174,3 +174,11 @@
 (def test-fn-var-2 #'test-fn)
 
 (assert (= test-fn-var-1 test-fn-var-2))
+
+;; a map with varied metadata is the same map
+(let [m {:a 5 :b 8}]
+  (assert (= m (vary-meta m assoc :foo 1))))
+
+;; a function with varied metadata is not the same function (yikes)
+(let [f (fn [x] x)]
+  (assert (not= f (vary-meta f assoc :foo 1))))

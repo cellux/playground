@@ -1,7 +1,8 @@
 (ns oben.core.nodes
   (:require [oben.core.api :as o])
-  (:use [oben.core.api :only [%void %unseen]])
   (:require [oben.core.ast :as ast])
+  (:use [oben.core.types.Void :only [%void]])
+  (:use [oben.core.types.Unseen :only [%unseen]])
   (:require [oben.core.types.Number :as Number])
   (:require [oben.core.types.Ptr :as Ptr])
   (:require [oben.core.types.Fn :as Fn])
@@ -31,7 +32,7 @@
   [name]
   (ast/make-node %void
     (fn [ctx]
-      (let [self (:compiled-node ctx)
+      (let [self (:compiling-node ctx)
             label-block (ctx/get-label-block ctx self)]
         (-> ctx
             (ctx/append-bb label-block)
@@ -44,9 +45,10 @@
    (let [init-node (when init-node (ast/parse `(cast ~type ~init-node)))]
      (ast/make-node (Ptr/Ptr type)
        (fn [ctx]
-         (let [ins (ir/alloca
-                    (o/compile-type type)
-                    {:name (keyword (ctx/get-assigned-node-name ctx))})
+         (let [ctx (ctx/compile-type ctx type)
+               ins (ir/alloca
+                    (ctx/compiled-type ctx type)
+                    {:name (keyword (ctx/get-assigned-name ctx))})
                compile-var (fn [ctx]
                              (ctx/compile-instruction ctx ins))
                compile-store (fn [ctx]
@@ -72,14 +74,14 @@
   ([type]
    (cond (o/type? type) (%var type nil)
          (o/node? type) (let [init-node type
-                                type (o/type-of init-node)]
-                            (%var type init-node))
+                              type (o/type-of init-node)]
+                          (%var type init-node))
          :else (throw (ex-info "invalid var form")))))
 
 (defn %set!
   [target-node value-node]
-  (assert (isa? (o/tid-of target-node) ::Ptr/Ptr))
-  (let [object-type (:object-type (o/type-of target-node))
+  (assert (isa? (o/tid-of-node target-node) ::Ptr/Ptr))
+  (let [object-type (:object-type (meta (o/type-of target-node)))
         value-node (%cast object-type value-node)]
     (ast/make-node object-type
       (fn [ctx]
@@ -249,30 +251,29 @@
                     body-node)]
     (ast/make-node return-type
       (fn [ctx]
-        (let [return-type (o/compile-type return-type)]
-          (letfn [(compile-body [ctx]
-                    (ctx/compile-node ctx body-node))
-                  (register-body-value [ctx]
-                    (if tangible-body?
-                      (ctx/register-return-value ctx block-id
-                                                 (ctx/current-bb ctx)
-                                                 (ctx/compiled-node ctx body-node))
-                      ctx))
-                  (compile-return-label [ctx]
-                    (ctx/compile-node ctx return-label))
-                  (compile-phi [ctx return-values]
-                    (ctx/compile-instruction ctx (ir/phi return-values {})))
-                  (compile-result [ctx]
-                    (let [return-values (ctx/get-return-values ctx block-id)]
-                      (if (= (count return-values) 1)
-                        (ctx/save-ir ctx (val (first return-values)))
-                        (compile-phi ctx return-values))))]
-            (-> ctx
-                (ctx/add-label-block return-label)
-                compile-body
-                register-body-value
-                compile-return-label
-                compile-result))))
+        (letfn [(compile-body [ctx]
+                  (ctx/compile-node ctx body-node))
+                (register-body-value [ctx]
+                  (if tangible-body?
+                    (ctx/register-return-value ctx block-id
+                                               (ctx/current-bb ctx)
+                                               (ctx/compiled-node ctx body-node))
+                    ctx))
+                (compile-return-label [ctx]
+                  (ctx/compile-node ctx return-label))
+                (compile-phi [ctx return-values]
+                  (ctx/compile-instruction ctx (ir/phi return-values {})))
+                (compile-result [ctx]
+                  (let [return-values (ctx/get-return-values ctx block-id)]
+                    (if (= (count return-values) 1)
+                      (ctx/save-ir ctx (val (first return-values)))
+                      (compile-phi ctx return-values))))]
+          (-> ctx
+              (ctx/add-label-block return-label)
+              compile-body
+              register-body-value
+              compile-return-label
+              compile-result)))
       {:class :oben/block
        :children #{body-node}})))
 
@@ -297,7 +298,14 @@
   [name type]
   (ast/make-node type
     (fn [ctx]
-      (ctx/save-ir ctx (ir/param (keyword name) (o/compile-type type))))
+      (letfn [(compile-type [ctx]
+                (ctx/compile-type ctx type))
+              (save-ir [ctx]
+                (ctx/save-ir ctx (ir/param (keyword name)
+                                           (ctx/compiled-type ctx type))))]
+        (-> ctx
+            compile-type
+            save-ir)))
     {:class :oben/function-parameter}))
 
 (oben/defmacro %fn
@@ -315,12 +323,12 @@
     (ast/make-node (Fn/Fn return-type param-types)
       (fn [ctx]
         (let [saved ctx
-              fname (ctx/get-assigned-node-name ctx)
-              return-type (o/compile-type return-type)
+              fname (ctx/get-assigned-name ctx)
+              ctx (ctx/compile-type ctx return-type)
               ctx (reduce ctx/compile-node ctx params)
               f (ir/function fname
-                             return-type
-                             (map #(ctx/compiled-node ctx %) params))]
+                             (ctx/compiled-type ctx return-type)
+                             (mapv #(ctx/compiled-node ctx %) params))]
           (letfn [(compile-return [ctx]
                     (if void?
                       (ctx/compile-instruction ctx (ir/ret))
@@ -339,9 +347,7 @@
                 add-function-to-module
                 save-ir
                 (merge (select-keys saved
-                                    [:f
-                                     :fdata
-                                     :compiled-nodes]))))))
+                                    [:f :fdata :compiled-nodes]))))))
       {:class :oben/fn})))
 
 (defn %when
@@ -459,8 +465,8 @@
 (defn %gep
   [ptr keys]
   (assert (Ptr/pointer-node? ptr))
-  (assert (isa? (o/tid-of (first keys)) ::Number/Int))
-  (let [object-type (:object-type (o/type-of ptr))]
+  (assert (isa? (o/tid-of-node (first keys)) ::Number/Int))
+  (let [object-type (:object-type (meta (o/type-of ptr)))]
     ;; (assert (isa? (o/tid-of-type object-type) :oben/Aggregate))
     (let [[leaf-type indices] (determine-gep-leaf-type+indices object-type (next keys))
           indices (cons (as-gep-index (first keys)) indices)]

@@ -10,42 +10,63 @@
 
 (o/define-typeclass Array [:oben/Aggregate]
   [element-type size]
-  {:element-type element-type
-   :size size})
-
-(defmethod o/compile-type ::Array
-  [{:keys [element-type size]}]
-  [:array (o/compile-type element-type) size])
+  (o/make-type
+      (fn [ctx]
+        (letfn [(compile-element-type [ctx]
+                  (ctx/compile-type ctx element-type))
+                (save-ir [ctx]
+                  (ctx/save-ir
+                   ctx
+                   [:array
+                    (ctx/compiled-type ctx element-type)
+                    size]))]
+          (-> ctx
+              compile-element-type
+              save-ir)))
+    {:element-type element-type
+     :size size}))
 
 (defmethod o/cast [::Array :oben/HostVector]
   [t elems force?]
-  (assert (= (count elems) (:size t)))
-  (let [elt (:element-type t)
-        casted-elems (mapv #(o/cast elt % false) elems)]
-    (assert (every? #(= elt %) (map o/type-of-node casted-elems)))
-    (ast/make-constant-node t elems
-                            (fn [ctx]
-                              (let [ctx (reduce ctx/compile-node ctx casted-elems)
-                                    const (ir/const (o/compile-type t)
-                                                    (mapv #(ctx/compiled-node ctx %) casted-elems))]
-                                (ctx/save-ir ctx const))))))
+  (let [{:keys [element-type size]} (meta t)]
+    (assert (= (count elems) size))
+    (let [casted-elems (mapv #(o/cast element-type % false) elems)]
+      (assert (every? #(= element-type %) (map o/type-of-node casted-elems)))
+      (ast/make-constant-node
+          t elems
+          (fn [ctx]
+            (letfn [(compile-array-type [ctx]
+                      (ctx/compile-type ctx t))
+                    (compile-elems [ctx]
+                      (reduce ctx/compile-node ctx casted-elems))
+                    (save-ir [ctx]
+                      (ctx/save-ir
+                       ctx
+                       (ir/const (ctx/compiled-type ctx t)
+                                 (mapv #(ctx/compiled-node ctx %)
+                                       casted-elems))))]
+              (-> ctx
+                  compile-array-type
+                  compile-elems
+                  save-ir)))))))
 
-(defn find-element-type
-  [type indices]
+(defn find-innermost-element-type
+  [t indices]
   (if (seq indices)
-    (find-element-type (:element-type type) (next indices))
-    type))
+    (let [{:keys [element-type]} (meta t)]
+      (find-innermost-element-type element-type (next indices)))
+    t))
 
 (defn array-index?
   [node]
   (and (o/constant-node? node)
-       (isa? ::Number/UInt (o/tid-of node))))
+       (isa? (o/tid-of-node node) ::Number/UInt)))
 
 (defmethod Container/get-in [::Array :oben/HostVector]
   [self indices]
   (assert (every? array-index? indices))
   (let [atype (o/type-of self)
-        return-type (find-element-type atype indices)]
+        return-type (find-innermost-element-type atype indices)]
     (ast/make-node return-type
       (fn [ctx]
         (letfn [(compile-indices [ctx]
@@ -69,7 +90,7 @@
   [self indices value]
   (assert (every? array-index? indices))
   (let [atype (o/type-of self)
-        value-type (find-element-type atype indices)
+        value-type (find-innermost-element-type atype indices)
         return-type atype]
     (ast/make-node return-type
       (fn [ctx]
@@ -96,7 +117,7 @@
 
 (defmethod Aggregate/get-element-type ::Array
   [t key]
-  (:element-type t))
+  (:element-type (meta t)))
 
 (defmethod Aggregate/get-element-index ::Array
   [t key]

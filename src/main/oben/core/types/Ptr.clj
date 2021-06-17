@@ -10,7 +10,16 @@
 
 (o/define-typeclass Ptr [:oben/Value]
   [object-type]
-  {:object-type object-type})
+  (o/make-type
+      (fn [ctx]
+        (letfn [(compile-object-type [ctx]
+                  (ctx/compile-type ctx object-type))
+                (save-ir [ctx]
+                  (ctx/save-ir ctx [:ptr (ctx/compiled-type ctx object-type)]))]
+          (-> ctx
+              compile-object-type
+              save-ir)))
+    {:object-type object-type}))
 
 (defn pointer-type?
   [t]
@@ -20,13 +29,9 @@
   [x]
   (and (o/node? x) (pointer-type? (o/type-of x))))
 
-(defmethod o/compile-type ::Ptr
-  [{:keys [object-type]}]
-  [:ptr (o/compile-type object-type)])
-
 (defn %deref
   [ptr-node]
-  (let [object-type (:object-type (o/type-of ptr-node))]
+  (let [{:keys [object-type]} (meta (o/type-of ptr-node))]
     (ast/make-node object-type
       (fn [ctx]
         (letfn [(compile-pointer [ctx]
@@ -42,7 +47,7 @@
 
 (defmethod Container/get-in [::Ptr :oben/HostVector]
   [ptr ks]
-  (let [object-type (:object-type (o/type-of ptr))
+  (let [{:keys [object-type]} (meta (o/type-of ptr))
         tid (o/tid-of-type object-type)]
     (cond (isa? tid :oben/Aggregate)
           `(deref (gep ~ptr [0 ~@ks]))
@@ -54,7 +59,7 @@
 
 (defmethod Container/put-in [::Ptr :oben/HostVector :oben/Value]
   [ptr ks val]
-  (let [object-type (:object-type (o/type-of ptr))
+  (let [{:keys [object-type]} (meta (o/type-of ptr))
         tid (o/tid-of-type object-type)]
     (cond (isa? tid :oben/Aggregate)
           `(set! (gep ~ptr [0 ~@ks]) ~val)

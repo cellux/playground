@@ -303,7 +303,8 @@
 
 (defn struct-type?
   [t]
-  (tags-of-types-with-optional-name (first t)))
+  (clj/and (complex-type? t)
+           (tags-of-types-with-optional-name (first t))))
 
 (defn struct-name
   [t]

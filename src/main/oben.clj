@@ -1,5 +1,5 @@
 (ns oben
-  (:refer-clojure :exclude [fn defn defmulti defmacro])
+  (:refer-clojure :exclude [fn defn defmulti defmethod defmacro])
   (:require [clojure.core :as clj])
   (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
@@ -78,10 +78,17 @@
      (alter-var-root m# vary-meta assoc :kind :oben/MACRO)
      m#))
 
-(def params->tids (comp (partial mapv o/tid-of) vector))
+(def params->tids (comp (partial mapv o/tid-of-value) vector))
 
 (clj/defmacro defmulti
   [name]
   `(clj/defmulti ~name params->tids))
+
+(clj/defmacro defmethod
+  [multifn dispatch-val & fn-tail]
+  (assert (vector? dispatch-val))
+  `(clj/defmethod ~multifn
+     ~(mapv (comp o/tid-of-type-or-typeclass eval) dispatch-val)
+     ~@fn-tail))
 
 (require 'oben.core)
