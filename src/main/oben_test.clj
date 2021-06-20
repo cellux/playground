@@ -5,7 +5,6 @@
   (:require [oben.core.ast :as ast])
   (:require [oben.core.types.Void :as Void])
   (:require [oben.core.types.Number :as Number])
-  (:require [oben.core.types.Array :as Array])
   (:require [oben.core.types.Ptr :as Ptr])
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m])
@@ -709,7 +708,7 @@
      "pointer to aggregate supports get with variable index"
      (f 3) => 5)))
 
-(def u32array-3 (Array/Array Number/%u32 5))
+(def u32array-3 (oben/Array Number/%u32 5))
 
 (oben/with-temp-context
   (let [f (oben/fn ^u32 [^u32 index]
@@ -757,7 +756,7 @@
  => (throws clojure.lang.ExceptionInfo #"rejected narrowing UInt->UInt conversion"))
 
 (oben/with-temp-context
-  (let [atype (Array/Array Number/%u32 10)
+  (let [atype (oben/Array Number/%u32 10)
         a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
         f (oben/fn ^u32 [(Ptr/Ptr (Number/UInt 32)) a
                          ^u32 index]
@@ -765,7 +764,7 @@
     (m/fact (f a 3) => 6)))
 
 (oben/with-temp-context
-  (let [atype (Array/Array Number/%u32 10)
+  (let [atype (oben/Array Number/%u32 10)
         a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
         f (oben/fn ^u32 [(* u32) a
                          ^u32 index]
@@ -775,7 +774,7 @@
      (f a 3) => 6)))
 
 (oben/with-temp-context
-  (let [atype (Array/Array Number/%u32 10)
+  (let [atype (oben/Array Number/%u32 10)
         a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
         f (oben/fn ^u32 [(* u32) a]
             @a)]
@@ -783,7 +782,7 @@
      (f a) => 9)))
 
 (oben/with-temp-context
-  (let [atype (Array/Array Number/%u32 10)
+  (let [atype (oben/Array Number/%u32 10)
         a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
         f (oben/fn ^u32 [(* u32) a
                          ^u32 index

@@ -4,6 +4,7 @@
   (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.ast :as ast])
+  (:require [oben.core.types.Array :as Array])
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.engine :as llvm-engine]))
 
@@ -35,6 +36,8 @@
   [& body]
   `(with-context (ctx/new)
      ~@body))
+
+(def Array Array/Array)
 
 (clj/defn make-fn
   [name params body]
