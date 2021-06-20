@@ -124,7 +124,7 @@
   ([]
    (%nop)))
 
-(oben/defmacro %tagbody
+(o/defmacro %tagbody
   [& body]
   (let [tags (sort (filter keyword? body))
         _ (when (not= tags (distinct tags))
@@ -151,7 +151,7 @@
       {:class :oben/tagbody
        :children (set body)})))
 
-(oben/defmacro %go
+(o/defmacro %go
   [label-name]
   (if-let [label-node (get-in &env [:oben/tags label-name])]
     (ast/make-node %unseen
@@ -164,7 +164,7 @@
        :label-node label-node})
     (throw (ex-info "unknown go label" {:label label-name}))))
 
-(oben/defmacro %return-from
+(o/defmacro %return-from
   ([block-name form]
    (assert (map? (get-in &env [:oben/blocks block-name])))
    (let [{:keys [block-id return-label return-type]}
@@ -206,7 +206,7 @@
         :block-id block-id
         :return-type %void}))))
 
-(oben/defmacro %return
+(o/defmacro %return
   ([form]
    (list 'return-from :oben/fn-block form))
   ([]
@@ -228,7 +228,7 @@
   [& args]
   (keyword (apply str (map name args))))
 
-(oben/defmacro %block
+(o/defmacro %block
   [name & body]
   (let [block-id (gensym name)
         return-label (make-label (as-keyword name))
@@ -283,7 +283,7 @@
     node
     (vary-meta node assoc :name name)))
 
-(oben/defmacro %let
+(o/defmacro %let
   [[k v & rest] & body]
   (if rest
     `(let [~k ~v]
@@ -308,7 +308,7 @@
             save-ir)))
     {:class :oben/function-parameter}))
 
-(oben/defmacro %fn
+(o/defmacro %fn
   [params & body]
   (let [return-type (o/resolve-type-from-meta params)
         param-types (mapv o/resolve-type-from-meta params)
@@ -397,7 +397,7 @@
           then-node (throw (ex-info "cond without default branch"))
           :else cond-node)))
 
-(oben/defmacro %condp
+(o/defmacro %condp
   [pred expr & clauses]
   (letfn [(process [clauses]
             (loop [clauses clauses

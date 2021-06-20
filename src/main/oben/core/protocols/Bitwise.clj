@@ -6,7 +6,6 @@
                             bit-shift-right
                             bit-not
                             bit-and-not])
-  (:require [oben])
   (:require [oben.core.api :as o])
   (:require [clojure.string :as str]))
 
@@ -17,7 +16,7 @@
 (defmacro define-nary-op
   [op]
   `(do
-     (oben/defmulti ~op)
+     (o/defmulti ~op)
      (defmethod ~op :default
        ([~'x]
         (throw (method-not-found '~op ~'x)))
@@ -30,10 +29,10 @@
 (define-nary-op bit-or)
 (define-nary-op bit-xor)
 
-(oben/defmulti bit-shift-left)
-(oben/defmulti bit-shift-right)
+(o/defmulti bit-shift-left)
+(o/defmulti bit-shift-right)
 
-(oben/defmulti bit-not)
+(o/defmulti bit-not)
 
 (defn bit-and-not
   [lhs rhs]

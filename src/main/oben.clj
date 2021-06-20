@@ -1,5 +1,5 @@
 (ns oben
-  (:refer-clojure :exclude [fn defn defmulti defmethod defmacro])
+  (:refer-clojure :exclude [fn defn])
   (:require [clojure.core :as clj])
   (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
@@ -17,7 +17,7 @@
     (set! *ctx* new-ctx)
     (intern 'oben '*ctx* new-ctx)))
 
-(clj/defmacro with-context
+(defmacro with-context
   [ctx & body]
   `(binding [*ctx* ~ctx]
      (let [had-llvm-context# (ctx/get-llvm-context *ctx*)
@@ -31,7 +31,7 @@
            (llvm-context/dispose llvm-context#)))
        result#)))
 
-(clj/defmacro with-temp-context
+(defmacro with-temp-context
   [& body]
   `(with-context (ctx/new)
      ~@body))
@@ -61,34 +61,14 @@
         ~(meta params))
      `(quote ~body))))
 
-(clj/defmacro fn
+(defmacro fn
   [& decl]
   (let [[params body] (build-make-fn-args decl &env)]
     `(make-fn nil ~params ~body)))
 
-(clj/defmacro defn
+(defmacro defn
   [name & decl]
   (let [[params body] (build-make-fn-args decl &env)]
     `(def ~name (make-fn '~name ~params ~body))))
-
-(clj/defmacro defmacro
-  [& args]
-  `(let [m# (clj/defmacro ~@args)]
-     (alter-meta! m# dissoc :macro)
-     (alter-var-root m# vary-meta assoc :kind :oben/MACRO)
-     m#))
-
-(def params->tids (comp (partial mapv o/tid-of-value) vector))
-
-(clj/defmacro defmulti
-  [name]
-  `(clj/defmulti ~name params->tids))
-
-(clj/defmacro defmethod
-  [multifn dispatch-val & fn-tail]
-  (assert (vector? dispatch-val))
-  `(clj/defmethod ~multifn
-     ~(mapv (comp o/tid-of-type-or-typeclass eval) dispatch-val)
-     ~@fn-tail))
 
 (require 'oben.core)

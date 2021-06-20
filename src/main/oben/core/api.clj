@@ -1,5 +1,5 @@
 (ns oben.core.api
-  (:refer-clojure :exclude [cast resolve])
+  (:refer-clojure :exclude [cast resolve defmacro defmulti defmethod])
   (:require [clojure.core :as clj])
   (:require [clojure.string :as str]))
 
@@ -16,7 +16,7 @@
          {:kind :oben/TYPE}
          opts))
 
-(defmacro define-typeclass
+(clj/defmacro define-typeclass
   [name parents args & body]
   (let [typeclass-tid (make-tid name)]
     `(let [tid-counter# (atom 0)]
@@ -43,7 +43,7 @@
 
 (def tid-of-typeclass (comp :tid meta))
 
-(defmacro define-type
+(clj/defmacro define-type
   ([name constructor-form parents]
    (let [tid (make-tid name)]
      `(let [t# ~constructor-form
@@ -121,9 +121,9 @@
         (host-value? x) (tid-of-host-value x)
         :else (throw (ex-info "no tid for value" {:value x}))))
 
-(defmulti parse-host-value tid-of-host-value)
+(clj/defmulti parse-host-value tid-of-host-value)
 
-(defmulti cast
+(clj/defmulti cast
   "Returns an AST node which casts `x` to type `t`.
   If the cast cannot be accomplished without information loss, throws
   an error unless `force?` is true."
@@ -137,12 +137,12 @@
 
 ;; get-ubertype
 
-(defmulti get-ubertype
+(clj/defmulti get-ubertype
   "Returns the closest type to which both `t1` and `t2` can be cast to."
   (fn [t1 t2] [(tid-of-type t1)
                (tid-of-type t2)]))
 
-(defmethod get-ubertype :default
+(clj/defmethod get-ubertype :default
   [t1 t2]
   nil)
 
@@ -185,10 +185,29 @@
   (and (fn? x)
        (= :oben/FN (:kind (meta x)))))
 
+(clj/defmacro defmacro
+  [& args]
+  `(let [m# (clj/defmacro ~@args)]
+     (alter-meta! m# dissoc :macro)
+     (alter-var-root m# vary-meta assoc :kind :oben/MACRO)
+     m#))
+
 (defn oben-macro?
   [x]
   (and (fn? x)
        (= :oben/MACRO (:kind (meta x)))))
+
+(clj/defmacro defmulti
+  [name]
+  `(clj/defmulti ~name
+     (comp (partial mapv tid-of-value) vector)))
+
+(clj/defmacro defmethod
+  [multifn dispatch-val & fn-tail]
+  (assert (vector? dispatch-val))
+  `(clj/defmethod ~multifn
+     ~(mapv (comp tid-of-type-or-typeclass eval) dispatch-val)
+     ~@fn-tail))
 
 (defn multifn?
   [x]

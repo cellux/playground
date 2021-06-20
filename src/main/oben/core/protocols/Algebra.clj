@@ -1,6 +1,5 @@
 (ns oben.core.protocols.Algebra
   (:refer-clojure :exclude [+ - * / %])
-  (:require [oben])
   (:require [oben.core.api :as o])
   (:require [clojure.string :as str]))
 
@@ -11,7 +10,7 @@
 (defmacro define-nary-op
   [op]
   `(do
-     (oben/defmulti ~op)
+     (o/defmulti ~op)
      (defmethod ~op :default
        ([~'x]
         (throw (method-not-found '~op ~'x)))

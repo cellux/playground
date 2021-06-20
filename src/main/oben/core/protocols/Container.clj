@@ -1,13 +1,13 @@
 (ns oben.core.protocols.Container
   (:refer-clojure :exclude [get-in get
                             assoc assoc-in])
-  (:require [oben]))
+  (:require [oben.core.api :as o]))
 
-(oben/defmulti get-in)
-(oben/defmulti get)
+(o/defmulti get-in)
+(o/defmulti get)
 
-(oben/defmulti put-in)
-(oben/defmulti put)
+(o/defmulti put-in)
+(o/defmulti put)
 
-(oben/defmulti assoc-in)
-(oben/defmulti assoc)
+(o/defmulti assoc-in)
+(o/defmulti assoc)
