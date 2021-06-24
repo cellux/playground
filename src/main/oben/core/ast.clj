@@ -81,6 +81,9 @@
                         (o/fnode? op)
                         (funcall op (map #(parse % env) args))
 
+                        (o/typeclass? op)
+                        (eval form)
+
                         (o/type? op)
                         (o/cast op (parse (first args) env) false)
 

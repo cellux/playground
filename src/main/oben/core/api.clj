@@ -271,7 +271,19 @@
   [t env]
   (cond (symbol? t)
         (if (contains? env t)
-          t
+          (let [bound-value (get env t)]
+            (cond (instance? clojure.lang.Compiler$LocalBinding bound-value)
+                  ;; we are inside the expansion of a Clojure macro
+                  ;; let Clojure resolve the symbol to the local binding
+                  t
+
+                  (type? bound-value)
+                  ;; we are inside ast/parse
+                  ;; use the already parsed type as is
+                  bound-value
+
+                  :else
+                  (throw (ex-info "cannot sanitize local type binding" {:bound-value bound-value}))))
           `(resolve '~t))
 
         (list? t)

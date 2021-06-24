@@ -812,3 +812,25 @@
      "type tags on params define their types"
      (f 1 2) => 3)
     (m/fact (f 5 3) => 8)))
+
+(oben/with-temp-context
+  (let [f (oben/fn (Number/UInt 32) []
+            (let [return-type (Number/UInt 32)
+                  alias return-type
+                  f1 (fn return-type []
+                       (+ 5 2))
+                  f2 (fn alias []
+                       (- 7 3))]
+              (+ (f1) (f2))))]
+    (m/fact
+     "let-bound types"
+     (f) => 11)))
+
+;; (oben/with-temp-context
+;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])
+;;         len-by-ref (oben/fn ^f32 [(* vec2) v]
+;;                      (let [x (:x v)
+;;                            y (:y v)]
+;;                        (math/sqrt (+ (* x x) (* y y)))))]
+;;     (m/fact
+;;      (len-by-ref {:x 3 :y 4}) => 5)))
