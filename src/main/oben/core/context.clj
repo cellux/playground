@@ -88,6 +88,10 @@
         (update :next-id inc)
         (assoc :next-name next-name))))
 
+(defn clear-next-name
+  [ctx]
+  (dissoc ctx :next-name))
+
 (defn get-assigned-name
   [ctx]
   (:next-name ctx))
@@ -239,7 +243,7 @@
     (letfn [(assign-name-if-named-type [ctx type]
               (if-let [name (:name (meta type))]
                 (assign-next-name ctx name)
-                ctx))
+                (clear-next-name ctx)))
             (save-type-ir [ctx]
               (update ctx :compiled-types
                       assoc type (:ir ctx)))]
