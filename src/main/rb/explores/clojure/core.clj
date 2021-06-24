@@ -182,3 +182,16 @@
 ;; a function with varied metadata is not the same function (yikes)
 (let [f (fn [x] x)]
   (assert (not= f (vary-meta f assoc :foo 1))))
+
+(defmacro test-hidden-macro-params
+  [within-let? & args]
+  (assert (= &form (list* 'test-hidden-macro-params within-let? args)))
+  (if within-let?
+    (assert (and (map? &env)
+                 (every? #(instance? clojure.lang.Compiler$LocalBinding %) (vals &env))))
+    (assert (nil? &env))))
+
+(test-hidden-macro-params false :foo)
+
+(let [x 5]
+  (test-hidden-macro-params true :foo))
