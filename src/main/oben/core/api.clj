@@ -17,16 +17,17 @@
          opts))
 
 (clj/defmacro define-typeclass
-  [name parents args & body]
+  [name parents & fdecl]
   (let [typeclass-tid (make-tid name)]
-    `(let [tid-counter# (atom 0)]
+    `(let [tid-counter# (atom 0)
+           constructor# (fn ~@fdecl)]
        (def ~name
          (with-meta
            (memoize
-            (fn [~@args]
+            (fn [& args#]
               (let [tid# (make-tid '~name (swap! tid-counter# inc))]
                 (derive tid# ~typeclass-tid)
-                (-> (do ~@body)
+                (-> (apply constructor# args#)
                     (vary-meta
                      merge {:class ~typeclass-tid
                             :tid tid#})))))
