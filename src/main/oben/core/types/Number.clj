@@ -322,7 +322,8 @@
       (or (>= t-size node-size) (<= real-size t-size) force?)
       (fptoui node t-size)
       :else
-      (throw (ex-info "rejected narrowing FP->UInt conversion")))))
+      (throw (ex-info "rejected narrowing FP->UInt conversion"
+                      {:from node-size :to t-size})))))
 
 (defmethod o/cast [::SInt ::SInt]
   [t node force?]
@@ -370,7 +371,8 @@
     (cond (or (>= t-size node-size) (<= real-size t-size) force?)
           (fptosi node t-size)
           :else
-          (throw (ex-info "rejected narrowing FP->SInt conversion")))))
+          (throw (ex-info "rejected narrowing FP->SInt conversion"
+                          {:from node-size :to t-size})))))
 
 (defmethod o/cast [::FP ::FP]
   [t node force?]

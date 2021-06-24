@@ -76,7 +76,7 @@
          (o/node? type) (let [init-node type
                               type (o/type-of init-node)]
                           (%var type init-node))
-         :else (throw (ex-info "invalid var form")))))
+         :else (throw (ex-info "invalid var form" {:type type})))))
 
 (defn %set!
   [target-node value-node]
@@ -397,7 +397,7 @@
     (cond (seq rest) (%if cond-node
                           then-node
                           (apply %cond rest))
-          then-node (throw (ex-info "cond without default branch"))
+          then-node (throw (ex-info "cond without default branch" {}))
           :else cond-node)))
 
 (o/defmacro %condp
