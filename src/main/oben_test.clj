@@ -863,6 +863,117 @@
      "let-bound types"
      (f) => 21)))
 
+(defmacro parses-to-constant-value
+  [form value]
+  `(let [result# (ast/parse '~form)]
+     (m/fact (o/constant-node? result#) => m/truthy)
+     (m/fact (o/constant-value result#) => ~value)))
+
+(m/facts
+ (parses-to-constant-value 0 0)
+ (parses-to-constant-value 5 5)
+ (parses-to-constant-value -5 -5)
+ (parses-to-constant-value 0.5 0.5)
+ (parses-to-constant-value -0.5 -0.5))
+
+(m/facts
+ (parses-to-constant-value (cast u32 5.0) 5)
+ (parses-to-constant-value (cast s32 -5.0) -5)
+ (parses-to-constant-value (cast f32 5) 5.0)
+ (parses-to-constant-value (cast f32 -5) -5.0))
+
+(m/facts
+ (parses-to-constant-value (+ 3 5) 8)
+ (parses-to-constant-value (+ 3.0 5.0) 8.0)
+ (parses-to-constant-value (+ 3.0 5) 8.0)
+ (parses-to-constant-value (+ 3 5.0) 8.0))
+
+(m/facts
+ (parses-to-constant-value (- 3 5) -2)
+ (parses-to-constant-value (- 3.0 5.0) -2.0)
+ (parses-to-constant-value (- 3.0 5) -2.0)
+ (parses-to-constant-value (- 3 5.0) -2.0))
+
+(m/facts
+ (parses-to-constant-value (* 3 5) 15)
+ (parses-to-constant-value (* 3.0 5.0) 15.0)
+ (parses-to-constant-value (* 3.0 5) 15.0)
+ (parses-to-constant-value (* 3 5.0) 15.0))
+
+(m/facts
+ (parses-to-constant-value (/ 9 4) 2)
+ (parses-to-constant-value (/ 9.0 4.0) 2.25)
+ (parses-to-constant-value (/ 9.0 4) 2.25)
+ (parses-to-constant-value (/ 9 4.0) 2.25))
+
+(defmacro oben-expr
+  [return-type form]
+  `(let [f# (oben/fn ~return-type [] ~form)]
+     (f#)))
+
+(m/facts
+ (m/fact (oben-expr u32 (+ 250 10)) => 260)
+ (m/fact (oben-expr u32 (+ 250 100000)) => 100250)
+ (m/fact (oben-expr s16 (- -120 10)) => -130)
+ (m/fact (oben-expr s16 (- -120 100)) => -220))
+
+(m/facts
+ (parses-to-constant-value (/ -9 4) -2)
+ (parses-to-constant-value (/ -9.0 4.0) -2.25)
+ (parses-to-constant-value (/ -9.0 4) -2.25)
+ (parses-to-constant-value (/ -9 4.0) -2.25))
+
+(oben/with-temp-context
+  (m/fact (oben-expr s32 (/ -9 4)) => -2)
+  (m/fact (oben-expr f32 (/ -9.0 4.0)) => -2.25)
+  (m/fact (oben-expr f32 (/ -9.0 4)) => -2.25)
+  (m/fact (oben-expr f32 (/ -9 4.0)) => -2.25))
+
+(m/facts
+ (parses-to-constant-value (% 11 4) 3)
+ (parses-to-constant-value (% 11.0 4.0) 3.0)
+ (parses-to-constant-value (% 11.0 4) 3.0)
+ (parses-to-constant-value (% 11 4.0) 3.0))
+
+(oben/with-temp-context
+  (m/fact (oben-expr u32 (% 11 4)) => 3)
+  (m/fact (oben-expr f32 (% 11.0 4.0)) => 3.0)
+  (m/fact (oben-expr f32 (% 11.0 4)) => 3.0)
+  (m/fact (oben-expr f32 (% 11 4.0)) => 3.0))
+
+(m/facts
+ (parses-to-constant-value (% -11 4) -3)
+ (parses-to-constant-value (% -11.0 4.0) -3.0)
+ (parses-to-constant-value (% -11.0 4) -3.0)
+ (parses-to-constant-value (% -11 4.0) -3.0))
+
+(oben/with-temp-context
+  (m/fact (oben-expr s32 (% -11 4)) => -3)
+  (m/fact (oben-expr f32 (% -11.0 4.0)) => -3.0)
+  (m/fact (oben-expr f32 (% -11.0 4)) => -3.0)
+  (m/fact (oben-expr f32 (% -11 4.0)) => -3.0))
+
+(m/facts
+ (parses-to-constant-value (% 11 -4) 3)
+ (parses-to-constant-value (% 11.0 -4.0) 3.0)
+ (parses-to-constant-value (% 11.0 -4) 3.0)
+ (parses-to-constant-value (% 11 -4.0) 3.0))
+
+(oben/with-temp-context
+  (m/fact (oben-expr s32 (% 11 -4)) => 3)
+  (m/fact (oben-expr f32 (% 11.0 -4.0)) => 3.0)
+  (m/fact (oben-expr f32 (% 11.0 -4)) => 3.0)
+  (m/fact (oben-expr f32 (% 11 -4.0)) => 3.0))
+
+(m/facts
+ (parses-to-constant-value (bit-and 0xface 0xff) 0xce)
+ (parses-to-constant-value (bit-or 0xfa00 0xce) 0xface)
+ (parses-to-constant-value (bit-xor 0xfa00 0xfafa) 0x00fa)
+ (parses-to-constant-value (bit-shift-left 0xfa 4) 0xfa0)
+ (parses-to-constant-value (bit-shift-left 0xfa 8) 0xfa00)
+ (parses-to-constant-value (bit-shift-left 0xfa 12) 0xfa000)
+ (parses-to-constant-value (bit-shift-right 0xf0 3) 0x1e))
+
 ;; (oben/with-temp-context
 ;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])
 ;;         len-by-ref (oben/fn ^f32 [(* vec2) v]

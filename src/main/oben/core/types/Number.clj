@@ -246,28 +246,30 @@
 ;; conversion ops
 
 (defmacro define-conversion-op
-  [op result-typeclass]
+  [op result-typeclass const-op]
   `(defn ~op
      [~'node ~'size]
      (let [node-type# (o/type-of ~'node)
            result-size# (o/constant-value ~'size)
            result-type# (~result-typeclass result-size#)]
-       (ast/make-node result-type#
-         (fn [ctx#]
-           (let [ctx# (ctx/compile-type ctx# result-type#)
-                 ctx# (ctx/compile-node ctx# ~'node)
-                 ins# (~(symbol "omkamra.llvm.ir" (str op))
-                       (ctx/compiled-node ctx# ~'node)
-                       (ctx/compiled-type ctx# result-type#)
-                       {})]
-             (ctx/compile-instruction ctx# ins#)))
-         {:class ~(keyword (str (ns-name *ns*)) (str op))
-          :children #{~'node}}))))
+       (if (o/constant-node? ~'node)
+         (make-constant-number-node result-type# (~const-op (o/constant-value ~'node)))
+         (ast/make-node result-type#
+           (fn [ctx#]
+             (let [ctx# (ctx/compile-type ctx# result-type#)
+                   ctx# (ctx/compile-node ctx# ~'node)
+                   ins# (~(symbol "omkamra.llvm.ir" (str op))
+                         (ctx/compiled-node ctx# ~'node)
+                         (ctx/compiled-type ctx# result-type#)
+                         {})]
+               (ctx/compile-instruction ctx# ins#)))
+           {:class ~(keyword (str (ns-name *ns*)) (str op))
+            :children #{~'node}})))))
 
-(define-conversion-op fptoui UInt)
-(define-conversion-op fptosi SInt)
-(define-conversion-op uitofp FP)
-(define-conversion-op sitofp FP)
+(define-conversion-op fptoui UInt int)
+(define-conversion-op fptosi SInt int)
+(define-conversion-op uitofp FP float)
+(define-conversion-op sitofp FP float)
 
 ;; (define-conversion-op ptrtoint)
 ;; (define-conversion-op inttoptr)
@@ -406,57 +408,62 @@
 ;; algebraic and bitwise ops
 
 (defmacro define-binary-op
-  [op-multifn arg-typeclass make-ir]
+  [op-multifn arg-typeclass make-ir const-op]
   `(letfn [(doit# [~'lhs ~'rhs]
              (let [result-type# (o/ubertype-of (o/type-of ~'lhs)
                                                (o/type-of ~'rhs))
                    ~'lhs (ast/parse (list 'cast result-type# ~'lhs))
                    ~'rhs (ast/parse (list 'cast result-type# ~'rhs))]
                (if (isa? (o/tid-of-type result-type#) ~arg-typeclass)
-                 (ast/make-node result-type#
-                   (fn [~'ctx]
-                     (let [compile-op# (fn [~'ctx]
-                                         (let [~'ins (~make-ir
-                                                      (ctx/compiled-node ~'ctx ~'lhs)
-                                                      (ctx/compiled-node ~'ctx ~'rhs)
-                                                      {})]
-                                           (ctx/compile-instruction ~'ctx ~'ins)))]
-                       (-> ~'ctx
-                           (ctx/compile-node ~'lhs)
-                           (ctx/compile-node ~'rhs)
-                           compile-op#)))
-                   {:class :oben/binop
-                    :children (set [~'lhs ~'rhs])})
+                 (if (and (o/constant-node? ~'lhs)
+                          (o/constant-node? ~'rhs))
+                   (o/parse-host-value (~const-op
+                                        (o/constant-value ~'lhs)
+                                        (o/constant-value ~'rhs)))
+                   (ast/make-node result-type#
+                     (fn [~'ctx]
+                       (let [compile-op# (fn [~'ctx]
+                                           (let [~'ins (~make-ir
+                                                        (ctx/compiled-node ~'ctx ~'lhs)
+                                                        (ctx/compiled-node ~'ctx ~'rhs)
+                                                        {})]
+                                             (ctx/compile-instruction ~'ctx ~'ins)))]
+                         (-> ~'ctx
+                             (ctx/compile-node ~'lhs)
+                             (ctx/compile-node ~'rhs)
+                             compile-op#)))
+                     {:class :oben/binop
+                      :children (set [~'lhs ~'rhs])}))
                  (~op-multifn ~'lhs ~'rhs))))]
      (defmethod ~op-multifn [~arg-typeclass ::Number]
        [~'lhs ~'rhs]
        (doit# ~'lhs ~'rhs))))
 
-(define-binary-op Algebra/+ ::Int ir/add)
-(define-binary-op Algebra/+ ::FP ir/fadd)
+(define-binary-op Algebra/+ ::Int ir/add +)
+(define-binary-op Algebra/+ ::FP ir/fadd +)
 
-(define-binary-op Algebra/- ::Int ir/sub)
-(define-binary-op Algebra/- ::FP ir/fsub)
+(define-binary-op Algebra/- ::Int ir/sub -)
+(define-binary-op Algebra/- ::FP ir/fsub -)
 
-(define-binary-op Algebra/* ::Int ir/mul)
-(define-binary-op Algebra/* ::FP ir/fmul)
+(define-binary-op Algebra/* ::Int ir/mul *)
+(define-binary-op Algebra/* ::FP ir/fmul *)
 
-(define-binary-op Algebra// ::UInt ir/udiv)
-(define-binary-op Algebra// ::SInt ir/sdiv)
-(define-binary-op Algebra// ::FP ir/fdiv)
+(define-binary-op Algebra// ::UInt ir/udiv quot)
+(define-binary-op Algebra// ::SInt ir/sdiv quot)
+(define-binary-op Algebra// ::FP ir/fdiv /)
 
-(define-binary-op Algebra/% ::UInt ir/urem)
-(define-binary-op Algebra/% ::SInt ir/srem)
-(define-binary-op Algebra/% ::FP ir/frem)
+(define-binary-op Algebra/% ::UInt ir/urem rem)
+(define-binary-op Algebra/% ::SInt ir/srem rem)
+(define-binary-op Algebra/% ::FP ir/frem rem)
 
-(define-binary-op Bitwise/bit-and ::Int ir/and)
-(define-binary-op Bitwise/bit-or ::Int ir/or)
-(define-binary-op Bitwise/bit-xor ::Int ir/xor)
+(define-binary-op Bitwise/bit-and ::Int ir/and bit-and)
+(define-binary-op Bitwise/bit-or ::Int ir/or bit-or)
+(define-binary-op Bitwise/bit-xor ::Int ir/xor bit-xor)
 
-(define-binary-op Bitwise/bit-shift-left ::Int ir/shl)
+(define-binary-op Bitwise/bit-shift-left ::Int ir/shl bit-shift-left)
 
-(define-binary-op Bitwise/bit-shift-right ::UInt ir/lshr)
-(define-binary-op Bitwise/bit-shift-right ::SInt ir/ashr)
+(define-binary-op Bitwise/bit-shift-right ::UInt ir/lshr unsigned-bit-shift-right)
+(define-binary-op Bitwise/bit-shift-right ::SInt ir/ashr bit-shift-right)
 
 (defmethod Algebra/- [::Number]
   [x]
