@@ -277,22 +277,15 @@
       {:class :oben/block
        :children #{body-node}})))
 
-(defn ensure-node-name
-  [node name]
-  (if (:name (meta node))
-    node
-    (vary-meta node assoc :name name)))
-
 (o/defmacro %let
   [[k v & rest] & body]
   (if rest
     `(let [~k ~v]
        (let [~@rest]
          ~@body))
-    (ast/parse `(do ~@body)
-               (assoc &env k (ensure-node-name
-                              (ast/parse v &env)
-                              (as-keyword k))))))
+    (ast/parse
+     `(do ~@body)
+     (assoc &env k (ast/parse v &env)))))
 
 (defn function-parameter
   [name type]
