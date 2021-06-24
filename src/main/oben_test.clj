@@ -820,11 +820,15 @@
                   f1 (fn return-type []
                        (+ 5 2))
                   f2 (fn alias []
-                       (- 7 3))]
-              (+ (f1) (f2))))]
+                       (- 7 3))
+                  f3 (fn ^alias []
+                       (cast! alias (* 1.2 2)))
+                  f4 (fn (Number/UInt 32) []
+                       8)]
+              (+ (f1) (f2) (f3) (f4))))]
     (m/fact
      "let-bound types"
-     (f) => 11)))
+     (f) => 21)))
 
 ;; (oben/with-temp-context
 ;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])

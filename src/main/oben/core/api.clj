@@ -245,11 +245,11 @@
    (resolve sym {})))
 
 (defn resolve-type-from-meta
-  [x]
+  [x env]
   (if-let [m (meta x)]
     (if-let [tag (:tag m)]
       (if (symbol? tag)
-        (resolve tag)
+        (resolve tag env)
         (eval tag))
       (throw (ex-info "no tag field in metadata of value"
                       {:value x :meta m})))

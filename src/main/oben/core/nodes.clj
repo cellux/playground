@@ -313,12 +313,13 @@
 (o/defmacro %fn
   [& decl]
   (let [[params body] (collect-param-and-body-forms decl &env)
-        return-type (o/resolve-type-from-meta params)
-        param-types (mapv o/resolve-type-from-meta params)
+        return-type (o/resolve-type-from-meta params &env)
+        param-types (mapv #(o/resolve-type-from-meta % &env) params)
         param-names (mapv o/drop-meta params)
         params (mapv function-parameter param-names param-types)
         void? (= return-type %void)
-        env (into {} (map vector param-names params))
+        local-types (into {} (filter #(o/type? (val %)) &env))
+        env (into local-types (map vector param-names params))
         body-node (ast/parse `(block :oben/fn-block ~@body) env)
         body-node (if void?
                     body-node
