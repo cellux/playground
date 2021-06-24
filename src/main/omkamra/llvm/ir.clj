@@ -280,8 +280,8 @@
                (str/join ", "))))
 
 (defn- format-struct-type
-  [format-string [_ name element-types]]
-  (->> element-types
+  [format-string [_ name field-types]]
+  (->> field-types
        (map render-type)
        (str/join ", ")
        (format format-string)))
@@ -308,7 +308,7 @@
 
 (defn struct-name
   [t]
-  (let [[_ name element-types] t]
+  (let [[_ name field-types] t]
     name))
 
 (defn render-type
@@ -399,7 +399,7 @@
 
 (defmethod render-literal :struct
   [type fields]
-  (let [[_ name element-types] type]
+  (let [[_ name field-types] type]
     (format "{ %s }" (str/join ", " (map render-typed-value fields)))))
 
 (def
@@ -1174,8 +1174,8 @@
         (recur elt (rest indices)))
 
       (:struct :packed-struct)
-      (let [[_ name element-types] type]
-        (recur (nth element-types (:value (first indices)))
+      (let [[_ name field-types] type]
+        (recur (nth field-types (:value (first indices)))
                (rest indices))))
     type))
 
