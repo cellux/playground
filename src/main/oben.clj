@@ -1,5 +1,5 @@
 (ns oben
-  (:refer-clojure :exclude [fn defn])
+  (:refer-clojure :exclude [fn defn defmacro defmulti defmethod])
   (:require [clojure.core :as clj])
   (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
@@ -18,7 +18,7 @@
     (set! *ctx* new-ctx)
     (intern 'oben '*ctx* new-ctx)))
 
-(defmacro with-context
+(clj/defmacro with-context
   [ctx & body]
   `(binding [*ctx* ~ctx]
      (let [had-llvm-context# (ctx/get-llvm-context *ctx*)
@@ -32,7 +32,7 @@
            (llvm-context/dispose llvm-context#)))
        result#)))
 
-(defmacro with-temp-context
+(clj/defmacro with-temp-context
   [& body]
   `(with-context (ctx/new)
      ~@body))
@@ -75,14 +75,30 @@
         ~(meta params))
      `(quote ~body))))
 
-(defmacro fn
+(clj/defmacro fn
   [& decl]
   (let [[params body] (build-make-fn-args decl &env)]
     `(make-fn nil ~params ~body)))
 
-(defmacro defn
+(clj/defmacro defn
   [name & decl]
   (let [[params body] (build-make-fn-args decl &env)]
     `(def ~name (make-fn '~name ~params ~body))))
+
+(clj/defmacro define-typeclass
+  [& args]
+  `(o/define-typeclass ~@args))
+
+(clj/defmacro defmacro
+  [& args]
+  `(o/defmacro ~@args))
+
+(clj/defmacro defmulti
+  [& args]
+  `(o/defmulti ~@args))
+
+(clj/defmacro defmethod
+  [& args]
+  `(o/defmethod ~@args))
 
 (require 'oben.core)
