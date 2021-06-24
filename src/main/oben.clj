@@ -57,10 +57,21 @@
 
 (clj/defn build-make-fn-args
   [decl env]
-  (let [[params body] (o/sanitize-typed-forms decl env vector? false false)]
+  (let [quote-preserving-meta (clj/fn [form]
+                                `(with-meta '~form ~(meta form)))
+        quote-tag-if-unbound-symbol (clj/fn [form]
+                                      (let [m (meta form)]
+                                        (if (and (symbol? (:tag m))
+                                                 (not (contains? env (:tag m))))
+                                          (vary-meta form update :tag #(list 'quote %))
+                                          form)))
+        [params body] (o/sanitize-typed-forms decl env vector? false
+                                              quote-tag-if-unbound-symbol)]
     (vector
      `(with-meta
-        (vector ~@(o/sanitize-typed-forms params env symbol? true true))
+        (vector ~@(o/sanitize-typed-forms params env symbol? true
+                                          (comp quote-preserving-meta
+                                                quote-tag-if-unbound-symbol)))
         ~(meta params))
      `(quote ~body))))
 

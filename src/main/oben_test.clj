@@ -793,3 +793,22 @@
      (nth a 3) => 6
      (f a 3 21)
      (nth a 3) => 21)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^u32 []
+            (let [f* (fn ^u32 []
+                       (+ 5 2))]
+              (f*)))]
+    (m/fact
+     "a type tag on the param vector defines the return type of the function"
+     (f) => 7)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^u32 [^u32 x ^u32 y]
+            (let [f* (fn ^u32 [^u32 x ^u32 y]
+                       (+ x y))]
+              (f* x y)))]
+    (m/fact
+     "type tags on params define their types"
+     (f 1 2) => 3)
+    (m/fact (f 5 3) => 8)))

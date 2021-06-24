@@ -285,33 +285,22 @@
 
         :else t))
 
-(defn quote-tag-if-unbound-symbol
-  [m env]
-  (if (and (symbol? (:tag m))
-           (not (contains? env (:tag m))))
-    (update m :tag #(list 'quote %))
-    m))
-
 (defn sanitize-typed-forms
-  [forms env obj-form? quote-obj? process-all?]
-  (letfn [(q [obj]
-            `(with-meta '~obj ~(meta obj)))]
-    (loop [result []
-           forms forms
-           m nil]
-      (if-let [head (first forms)]
-        (if (and (nil? (meta head)) (nil? m))
-          (recur result (next forms) {:tag (sanitize-type-form head env)})
-          (cond (obj-form? head)
-                (let [obj (-> (if m
-                                (vary-meta head merge m)
-                                head)
-                              (vary-meta quote-tag-if-unbound-symbol env))
-                      obj (if quote-obj? (q obj) obj)]
-                  (if process-all?
-                    (recur (conj result obj) (next forms) nil)
-                    (vector obj (next forms))))
+  [forms env obj-form? process-all? fixup]
+  (loop [result []
+         forms forms
+         m nil]
+    (if-let [head (first forms)]
+      (if (and (nil? (meta head)) (nil? m))
+        (recur result (next forms) {:tag (sanitize-type-form head env)})
+        (cond (obj-form? head)
+              (let [obj (fixup (if m
+                                 (vary-meta head merge m)
+                                 head))]
+                (if process-all?
+                  (recur (conj result obj) (next forms) nil)
+                  (vector obj (next forms))))
 
-                (list? head)
-                (recur result (next forms) (assoc m :tag (sanitize-type-form head env)))))
-        result))))
+              (list? head)
+              (recur result (next forms) (assoc m :tag (sanitize-type-form head env)))))
+      result)))

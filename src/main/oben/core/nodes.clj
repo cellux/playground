@@ -301,9 +301,19 @@
             save-ir)))
     {:class :oben/function-parameter}))
 
+(defn collect-param-and-body-forms
+  [decl env]
+  (let [[params body] (o/sanitize-typed-forms decl env vector? false identity)]
+    (vector
+     (with-meta
+       (o/sanitize-typed-forms params env symbol? true identity)
+       (meta params))
+     body)))
+
 (o/defmacro %fn
-  [params & body]
-  (let [return-type (o/resolve-type-from-meta params)
+  [& decl]
+  (let [[params body] (collect-param-and-body-forms decl &env)
+        return-type (o/resolve-type-from-meta params)
         param-types (mapv o/resolve-type-from-meta params)
         param-names (mapv o/drop-meta params)
         params (mapv function-parameter param-names param-types)
