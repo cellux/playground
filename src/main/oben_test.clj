@@ -815,6 +815,39 @@
 
 (oben/with-temp-context
   (let [f (oben/fn (Number/UInt 32) []
+            (let [f* (fn (Number/UInt 32) []
+                       (+ 5 2))]
+              (f*)))]
+    (m/fact
+     "a list before the param vector is evaluated and moved to the type tag"
+     (f) => 7)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^u32 [u32 x u32 y]
+            (let [f* (fn ^u32 [u32 x u32 y]
+                       (+ x y))]
+              (f* x y)))]
+    (m/fact
+     "a symbol before a param is used as a type designator"
+     (f 5 3) => 8)))
+
+(oben/with-temp-context
+  (let [f (oben/fn ^u32 [u32 a
+                         ^u32 b
+                         (Number/UInt 32) c
+                         Number/%u32 d]
+            (let [f* (fn ^u32 [u32 a
+                               ^u32 b
+                               (Number/UInt 32) c
+                               Number/%u32 d]
+                       (+ a b c d))]
+              (f* a b c d)))]
+    (m/fact
+     "type designators"
+     (f 5 3 1 6) => 15)))
+
+(oben/with-temp-context
+  (let [f (oben/fn (Number/UInt 32) []
             (let [return-type (Number/UInt 32)
                   alias return-type
                   f1 (fn return-type []
