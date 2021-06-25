@@ -16,6 +16,11 @@
          {:kind :oben/TYPE}
          opts))
 
+(defn type?
+  [t]
+  (and (fn? t)
+       (= :oben/TYPE (:kind (meta t)))))
+
 (clj/defmacro define-typeclass
   [name parents & fdecl]
   (let [typeclass-tid (make-tid name)]
@@ -58,11 +63,6 @@
         #'~name)))
   ([name constructor-form]
    `(define-type ~name ~constructor-form [])))
-
-(defn type?
-  [t]
-  (and (fn? t)
-       (= :oben/TYPE (:kind (meta t)))))
 
 (def tid-of-type (comp :tid meta))
 
@@ -116,13 +116,13 @@
     (map? x) :oben/HostMap
     :else (throw (ex-info "no tid for host value" {:host-value x}))))
 
+(clj/defmulti parse-host-value tid-of-host-value)
+
 (defn tid-of-value
   [x]
   (cond (node? x) (tid-of-node x)
         (host-value? x) (tid-of-host-value x)
         :else (throw (ex-info "no tid for value" {:value x}))))
-
-(clj/defmulti parse-host-value tid-of-host-value)
 
 (clj/defmulti cast
   "Returns an AST node which casts `x` to type `t`.
@@ -218,17 +218,22 @@
   [x]
   (with-meta x nil))
 
+(defn- var-in-namespace?
+  [v ns]
+  (and (var? v) (= (:ns (meta v)) ns)))
+
 (defn- find-oben-var
   [sym]
-  (let [sym-without-ns (symbol (name sym))
-        v (ns-resolve (the-ns 'oben.core) sym-without-ns)]
-    (if (= (:ns (meta v)) (the-ns 'oben.core))
+  (let [ns-oben-core (the-ns 'oben.core)
+        sym-without-ns (symbol (name sym))
+        v (ns-resolve ns-oben-core sym-without-ns)]
+    (if (var-in-namespace? v ns-oben-core)
       v nil)))
 
 (defn- find-clojure-var
   [sym]
   (let [v (clj/resolve sym)]
-    (if (= (:ns (meta v)) (the-ns 'clojure.core))
+    (if (var-in-namespace? v (the-ns 'clojure.core))
       (throw (ex-info "oben symbol resolves to a var in clojure.core" {:sym sym}))
       v)))
 
@@ -238,8 +243,8 @@
        (when-let [v (or (find-oben-var sym)
                         (find-clojure-var sym))]
          (let [value (var-get v)]
-           (if (oben-fn? value)
-             (:fnode (meta value))
+           (if (instance? clojure.lang.IMeta value)
+             (or (:oben/node (meta value)) value)
              value)))
        (throw (ex-info "cannot resolve symbol" {:sym sym}))))
   ([sym]
@@ -270,7 +275,7 @@
     (recur (list 'oben.core.types.Ptr/Ptr form)
            (dec count))))
 
-(defn sanitize-type-form
+(defn prep-type-designator-for-eval
   [t env]
   (cond (symbol? t)
         (if (contains? env t)
@@ -295,8 +300,8 @@
             (let [pointee (first rest)]
               (assert pointee)
               (assert (nil? (next rest)))
-              (sanitize-type-form (wrap-in-ptr pointee (count (str op))) env))
-            (map #(sanitize-type-form % env) t)))
+              (prep-type-designator-for-eval (wrap-in-ptr pointee (count (str op))) env))
+            (map #(prep-type-designator-for-eval % env) t)))
 
         :else t))
 
@@ -307,7 +312,7 @@
          m nil]
     (if-let [head (first forms)]
       (if (and (nil? (meta head)) (nil? m))
-        (recur result (next forms) {:tag (sanitize-type-form head env)})
+        (recur result (next forms) {:tag (prep-type-designator-for-eval head env)})
         (cond (obj-form? head)
               (let [obj (fixup (if m
                                  (vary-meta head merge m)
@@ -317,5 +322,5 @@
                   (vector obj (next forms))))
 
               (list? head)
-              (recur result (next forms) (assoc m :tag (sanitize-type-form head env)))))
+              (recur result (next forms) (assoc m :tag (prep-type-designator-for-eval head env)))))
       result)))

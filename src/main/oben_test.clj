@@ -13,7 +13,7 @@
 (defn get-ctx
   [f]
   (assert (= (:kind (meta f)) :oben/FN))
-  (let [fnode (:fnode (meta f))]
+  (let [fnode (:oben/node (meta f))]
     (-> oben/*ctx*
         (ctx/next-epoch)
         (ctx/forget-node fnode)

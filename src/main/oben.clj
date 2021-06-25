@@ -8,9 +8,7 @@
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.engine :as llvm-engine]))
 
-(def
-  ^{:dynamic true}
-  *ctx* (ctx/new))
+(def ^:dynamic *ctx* (ctx/new))
 
 (clj/defn set-*ctx*!
   [new-ctx]
@@ -53,7 +51,7 @@
               result (apply invoker args)]
           (set-*ctx*! ctx)
           result))
-      {:kind :oben/FN :fnode fnode})))
+      {:kind :oben/FN :oben/node fnode})))
 
 (clj/defn build-make-fn-args
   [decl env]
