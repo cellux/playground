@@ -53,35 +53,21 @@
           result))
       {:kind :oben/FN :oben/node fnode})))
 
-(clj/defn build-make-fn-args
-  [decl env]
-  (let [quote-preserving-meta (clj/fn [form]
-                                `(with-meta '~form ~(meta form)))
-        quote-tag-if-unbound-symbol (clj/fn [form]
-                                      (let [m (meta form)]
-                                        (if (and (symbol? (:tag m))
-                                                 (not (contains? env (:tag m))))
-                                          (vary-meta form update :tag #(list 'quote %))
-                                          form)))
-        [params body] (o/sanitize-typed-forms decl env vector? false
-                                              quote-tag-if-unbound-symbol)]
-    (vector
-     `(with-meta
-        (vector ~@(o/sanitize-typed-forms params env symbol? true
-                                          (comp quote-preserving-meta
-                                                quote-tag-if-unbound-symbol)))
-        ~(meta params))
-     `(quote ~body))))
-
 (clj/defmacro fn
   [& decl]
-  (let [[params body] (build-make-fn-args decl &env)]
-    `(make-fn nil ~params ~body)))
+  (let [[params body] (o/split-after vector? decl)
+        params (first (o/move-types-to-tags params))
+        _ (assert (vector? params))
+        params (o/quote-all-except-locals-and-tagged-symbols params &env)]
+    `(make-fn nil ~params '~body)))
 
 (clj/defmacro defn
   [name & decl]
-  (let [[params body] (build-make-fn-args decl &env)]
-    `(def ~name (make-fn '~name ~params ~body))))
+  (let [[params body] (o/split-after vector? decl)
+        params (first (o/move-types-to-tags params))
+        _ (assert (vector? params))
+        params (o/quote-all-except-locals-and-tagged-symbols params &env)]
+    `(def ~name (make-fn nil ~params '~body))))
 
 (clj/defmacro define-typeclass
   [& args]

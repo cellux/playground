@@ -23,8 +23,8 @@
           (-> ctx
               compile-element-type
               save-ir)))
-    {:element-type element-type
-     :size size}))
+      {:element-type element-type
+       :size size}))
 
 (defmethod o/cast [::Array :oben/HostVector]
   [t elems force?]

@@ -1,7 +1,8 @@
 (ns oben.core.api
   (:refer-clojure :exclude [cast resolve defmacro defmulti defmethod])
   (:require [clojure.core :as clj])
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str])
+  (:require [clojure.walk :as walk]))
 
 (defn make-tid
   [& name-components]
@@ -21,21 +22,29 @@
   (and (fn? t)
        (= :oben/TYPE (:kind (meta t)))))
 
+(declare constant-value)
+
+(defn replace-constant-nodes-with-values
+  [args]
+  (walk/postwalk constant-value args))
+
 (clj/defmacro define-typeclass
   [name parents & fdecl]
   (let [typeclass-tid (make-tid name)]
     `(let [tid-counter# (atom 0)
-           constructor# (fn ~@fdecl)]
+           constructor# (fn ~@fdecl)
+           construct-type# (memoize
+                            (fn [args#]
+                              (let [tid# (make-tid '~name (swap! tid-counter# inc))]
+                                (derive tid# ~typeclass-tid)
+                                (-> (apply constructor# args#)
+                                    (vary-meta
+                                     merge {:class ~typeclass-tid
+                                            :tid tid#})))))]
        (def ~name
          (with-meta
-           (memoize
-            (fn [& args#]
-              (let [tid# (make-tid '~name (swap! tid-counter# inc))]
-                (derive tid# ~typeclass-tid)
-                (-> (apply constructor# args#)
-                    (vary-meta
-                     merge {:class ~typeclass-tid
-                            :tid tid#})))))
+           (fn [& args#]
+             (construct-type# (replace-constant-nodes-with-values args#)))
            {:kind :oben/TYPECLASS
             :tid ~typeclass-tid}))
        ~@(for [p parents]
@@ -254,9 +263,7 @@
   ([x env]
    (if-let [m (meta x)]
      (if-let [tag (:tag m)]
-       (if (symbol? tag)
-         (resolve tag env)
-         (eval tag))
+       tag
        (throw (ex-info "no tag field in metadata of value"
                        {:value x :meta m})))
      (throw (ex-info "no metadata on value"
@@ -275,52 +282,82 @@
     (recur (list 'oben.core.types.Ptr/Ptr form)
            (dec count))))
 
-(defn prep-type-designator-for-eval
-  [t env]
-  (cond (symbol? t)
-        (if (contains? env t)
-          (let [bound-value (get env t)]
-            (cond (instance? clojure.lang.Compiler$LocalBinding bound-value)
-                  ;; we are inside the expansion of a Clojure macro
-                  ;; let Clojure resolve the symbol to the local binding
-                  t
+(defn replace-stars-with-ptr
+  [form]
+  (if (list? form)
+    (let [[op & rest] form]
+      (if (and (symbol? op) (all-stars? (str op)))
+        (let [pointee (first rest)]
+          (assert pointee)
+          (assert (nil? (next rest)))
+          (wrap-in-ptr pointee (count (str op))))
+        form))
+    form))
 
-                  (type? bound-value)
-                  ;; we are inside ast/parse
-                  ;; use the already parsed type as is
-                  bound-value
-
-                  :else
-                  (throw (ex-info "cannot sanitize local type binding" {:bound-value bound-value}))))
-          `(resolve '~t))
-
-        (list? t)
-        (let [[op & rest] t]
-          (if (and (symbol? op) (all-stars? (str op)))
-            (let [pointee (first rest)]
-              (assert pointee)
-              (assert (nil? (next rest)))
-              (prep-type-designator-for-eval (wrap-in-ptr pointee (count (str op))) env))
-            (map #(prep-type-designator-for-eval % env) t)))
-
-        :else t))
-
-(defn sanitize-typed-forms
-  [forms env obj-form? process-all? fixup]
+(defn move-types-to-tags
+  [expr]
+  (assert (sequential? expr))
   (loop [result []
-         forms forms
+         forms (seq expr)
          m nil]
     (if-let [head (first forms)]
-      (if (and (nil? (meta head)) (nil? m))
-        (recur result (next forms) {:tag (prep-type-designator-for-eval head env)})
-        (cond (obj-form? head)
-              (let [obj (fixup (if m
-                                 (vary-meta head merge m)
-                                 head))]
-                (if process-all?
-                  (recur (conj result obj) (next forms) nil)
-                  (vector obj (next forms))))
+      (cond (:tag (meta head))
+            (recur (conj result (if (vector? head)
+                                  (with-meta
+                                    (move-types-to-tags head)
+                                    (meta head))
+                                  head))
+                   (next forms)
+                   nil)
 
-              (list? head)
-              (recur result (next forms) (assoc m :tag (prep-type-designator-for-eval head env)))))
+            (nil? m)
+            (recur result
+                   (next forms)
+                   {:tag head})
+
+            :else
+            (recur result
+                   (cons (with-meta head m) (next forms))
+                   nil))
+      (cond (list? expr) (apply list result)
+            (vector? expr) result
+            :else (seq result)))))
+
+(defn tagged?
+  [x]
+  (:tag (meta x)))
+
+(defn quote-all-except-locals-and-tagged-symbols
+  [form env]
+  (let [result (cond (symbol? form)
+                     (if (and (not (tagged? form))
+                              (contains? env form))
+                       form
+                       (list 'quote form))
+
+                     (vector? form)
+                     (apply list 'vector (map #(quote-all-except-locals-and-tagged-symbols % env) form))
+
+                     (map? form)
+                     (reduce-kv (fn [result k v]
+                                  (assoc result
+                                         (quote-all-except-locals-and-tagged-symbols k env)
+                                         (quote-all-except-locals-and-tagged-symbols v env)))
+                                {} form)
+
+                     (sequential? form)
+                     (apply list 'list (map #(quote-all-except-locals-and-tagged-symbols % env) form))
+
+                     :else form)]
+    (if (and (instance? clojure.lang.IMeta form) (meta form))
+      (if (:tag (meta form))
+        (list 'with-meta
+              result
+              (update (meta form) :tag quote-all-except-locals-and-tagged-symbols env))
+        result)
       result)))
+
+(defn split-after
+  [pred coll]
+  (let [[beg end] (split-with (complement pred) coll)]
+    (vector (concat beg (list (first end))) (next end))))

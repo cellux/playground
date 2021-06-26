@@ -7,6 +7,7 @@
   (:require [oben.core.types.Number :as Number])
   (:require [oben.core.types.Ptr :as Ptr])
   (:require [omkamra.llvm.ir :as ir])
+  (:require [clojure.walk :as walk])
   (:require [midje.sweet :as m])
   (:use [midje.repl]))
 
@@ -103,12 +104,7 @@
             (bit-not x))]
     (m/fact
      "symbols inside type designators can be resolved via bindings in the local environment"
-     (f 0) => 65535))
-  (let [f (oben/fn ^u32 [u8 ^u16 x]
-            (bit-not x))]
-    (m/fact
-     "type designators override existing type tag within metadata"
-     (f 0) => 255)))
+     (f 0) => 65535)))
 
 (oben/with-temp-context
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
@@ -738,6 +734,23 @@
      "void functions return nil"
      (f) => nil)))
 
+(m/facts
+ (m/fact (Ptr/Ptr (oben/Array Number/%u64 10))
+         => (m/exactly (Ptr/Ptr (oben/Array Number/%u64 10))))
+ (let [actual (ast/parse '(Array u64 10))
+       expected (oben/Array Number/%u64 10)]
+   (m/fact actual => (m/exactly expected))))
+
+(m/facts
+ (let [result (ast/parse (with-meta 'x {:tag '(* (Array u64 10))}))
+       expected-type (Ptr/Ptr (oben/Array Number/%u64 10))]
+   (m/fact result => 'x)
+   (m/fact (:tag (meta result)) => (m/exactly expected-type)))
+ (let [result (ast/parse (with-meta 'ret {:tag (list '* (list 'Array 'u64 10))}))
+       expected-type (Ptr/Ptr (oben/Array Number/%u64 10))]
+   (m/fact result => 'ret)
+   (m/fact (:tag (meta result)) => (m/exactly expected-type))))
+
 (oben/with-temp-context
   (let [f (oben/fn ^void [(* (Array u64 10)) ret]
             (put ret 0 (cast u1 0))
@@ -973,6 +986,92 @@
  (parses-to-constant-value (bit-shift-left 0xfa 8) 0xfa00)
  (parses-to-constant-value (bit-shift-left 0xfa 12) 0xfa000)
  (parses-to-constant-value (bit-shift-right 0xf0 3) 0x1e))
+
+(m/facts
+ (m/fact (o/replace-stars-with-ptr '(* u32))
+         => '(oben.core.types.Ptr/Ptr u32))
+ (m/fact (o/replace-stars-with-ptr '(** u32))
+         => '(oben.core.types.Ptr/Ptr (oben.core.types.Ptr/Ptr u32)))
+ (m/fact (o/replace-stars-with-ptr '(UInt 32)) => '(UInt 32))
+ (m/fact (o/replace-stars-with-ptr '[* u32]) => '[* u32])
+ (m/fact (o/replace-stars-with-ptr '*) => '*)
+ (m/fact (o/replace-stars-with-ptr 'foo) => 'foo)
+ (m/fact (o/replace-stars-with-ptr "foo") => "foo"))
+
+(defn replace-with-non-empty-tag
+  [x]
+  (or (:tag (meta x)) x))
+
+(defmacro check-equal-value-and-tag
+  [actual expected]
+  `(let [actual# ~actual
+         actual-meta# (walk/postwalk replace-with-non-empty-tag actual#)
+         expected# ~expected
+         expected-meta# (walk/postwalk replace-with-non-empty-tag expected#)]
+     (m/fact actual# => expected#)
+     (m/fact actual-meta# => expected-meta#)))
+
+(m/facts
+ (check-equal-value-and-tag
+  (o/move-types-to-tags '(u32 f))
+  (list (with-meta 'f {:tag 'u32})))
+ (check-equal-value-and-tag
+  (o/move-types-to-tags '(u32 f f64 g))
+  (list (with-meta 'f {:tag 'u32})
+        (with-meta 'g {:tag 'f64})))
+ (check-equal-value-and-tag
+  (o/move-types-to-tags '(u32 [^u32 x f32 y]))
+  (list (with-meta (vector (with-meta 'x {:tag 'u32})
+                           (with-meta 'y {:tag 'f32})) {:tag 'u32})))
+ (check-equal-value-and-tag
+  (o/move-types-to-tags '((Struct [^f32 x u16 y]) x))
+  (list (with-meta 'x {:tag (list 'Struct (vector (with-meta 'x {:tag 'f32})
+                                                  'u16 'y))}))))
+
+(defmacro quote-all-except-locals-and-tagged-symbols
+  [form env]
+  (list 'quote (o/quote-all-except-locals-and-tagged-symbols form (eval env))))
+
+(m/facts
+ (m/fact
+  (quote-all-except-locals-and-tagged-symbols
+   x
+   {})
+  => '(quote x))
+ (m/fact
+  (quote-all-except-locals-and-tagged-symbols
+   x
+   {'x 5})
+  => 'x)
+ (m/fact
+  (quote-all-except-locals-and-tagged-symbols
+   (fn u32 [^f32 x f32 y])
+   {})
+  => '(list 'fn 'u32 (vector (with-meta 'x {:tag 'f32}) 'f32 'y)))
+ (m/fact
+  (quote-all-except-locals-and-tagged-symbols
+   (fn u32 [^f32 x f32 y])
+   {'f32 :bound})
+  => '(list 'fn 'u32 (vector (with-meta 'x {:tag f32}) f32 'y)))
+ (m/fact
+  (quote-all-except-locals-and-tagged-symbols
+   (fn u32 [^{:tag (UInt 32)} x f32 y])
+   {'f32 :bound})
+  => '(list 'fn 'u32 (vector (with-meta 'x {:tag (list 'UInt 32)}) f32 'y)))
+ (m/fact
+  (quote-all-except-locals-and-tagged-symbols
+   (fn f32 [^{:tag (UInt 32)} x f32 y])
+   {'f32 :bound 'UInt :bound})
+  => '(list 'fn f32 (vector (with-meta 'x {:tag (list UInt 32)}) f32 'y)))
+ (m/fact
+  "symbols with type tags are protected from evaluation"
+  (quote-all-except-locals-and-tagged-symbols
+   (fn f32 [^{:tag (UInt 32)} x f32 y])
+   {'f32 :bound 'UInt :bound 'x :bound})
+  => '(list 'fn f32 (vector (with-meta 'x {:tag (list UInt 32)}) f32 'y))))
+
+(m/facts
+ (m/fact (o/split-after keyword? [1 2 3 :foo 4 5]) => [[1 2 3 :foo] [4 5]]))
 
 ;; (oben/with-temp-context
 ;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])

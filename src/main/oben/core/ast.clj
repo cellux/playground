@@ -46,7 +46,11 @@
    (letfn [(die []
              (throw (ex-info "cannot parse form" {:form form :env env})))
            (annotate [form]
-             (remove nil? (list (meta form) form)))]
+             (remove nil? (list (meta form) form)))
+           (parse-type-designator [td]
+             (-> td
+                 o/replace-stars-with-ptr
+                 (parse env)))]
      (try
        (cond
          (o/node? form)
@@ -56,7 +60,9 @@
          form
 
          (symbol? form)
-         (o/resolve form env)
+         (if (:tag (meta form))
+           (vary-meta form update :tag parse-type-designator)
+           (o/resolve form env))
 
          (number? form)
          (o/parse-host-value form)
@@ -65,7 +71,11 @@
          form
 
          (vector? form)
-         (mapv #(parse % env) form)
+         (if (:tag (meta form))
+           (with-meta
+             (mapv #(parse % env) form)
+             (update (meta form) :tag parse-type-designator))
+           (mapv #(parse % env) form))
 
          (map? form)
          (reduce-kv (fn [result k v]
@@ -80,9 +90,6 @@
                result (cond
                         (o/fnode? op)
                         (funcall op (map #(parse % env) args))
-
-                        (o/typeclass? op)
-                        (eval form)
 
                         (o/type? op)
                         (o/cast op (parse (first args) env) false)
