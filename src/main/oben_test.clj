@@ -1073,6 +1073,23 @@
 (m/facts
  (m/fact (o/split-after keyword? [1 2 3 :foo 4 5]) => [[1 2 3 :foo] [4 5]]))
 
+(o/defmulti determine-bit-size)
+
+(o/defmethod determine-bit-size [Number/%u64] [_] 64)
+(o/defmethod determine-bit-size [Number/%u32] [_] 32)
+(o/defmethod determine-bit-size [Number/%u8] [_] 8)
+(o/defmethod determine-bit-size [Number/UInt] [_] :uint)
+(o/defmethod determine-bit-size [Number/FP] [_] :float)
+
+(m/facts
+ "dispatch by type or typeclass"
+ (m/fact (determine-bit-size (ast/parse 250)) => 8)
+ (m/fact (determine-bit-size (ast/parse 270)) => :uint)
+ (m/fact (determine-bit-size (ast/parse 65535)) => :uint)
+ (m/fact (determine-bit-size (ast/parse 65536)) => 32)
+ (m/fact (determine-bit-size (ast/parse Long/MAX_VALUE)) => 64)
+ (m/fact (determine-bit-size (ast/parse -5.0)) => :float))
+
 ;; (oben/with-temp-context
 ;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])
 ;;         len-by-ref (oben/fn ^f32 [(* vec2) v]
