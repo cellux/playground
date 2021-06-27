@@ -336,6 +336,8 @@
 (defn invoker
   [ctx f]
   (let [address (get-function-address ctx f)
+        _ (when (zero? address)
+            (throw (ex-info "cannot get function address" {:function f})))
         result-type (:result-type f)
         param-types (map :type (:params f))
         cc (CallContext/getCallContext

@@ -309,43 +309,57 @@
         return-type (o/resolve-type-from-meta params &env)
         param-types (mapv #(o/resolve-type-from-meta % &env) params)
         param-names (mapv o/drop-meta params)
-        params (mapv function-parameter param-names param-types)
-        void? (= return-type %void)
-        local-types (into {} (filter #(o/type? (val %)) &env))
-        env (into local-types (map vector param-names params))
-        body-node (ast/parse `(block :oben/fn-block ~@body) env)
-        body-node (if void?
-                    body-node
-                    (%cast return-type body-node))]
-    (ast/make-node (Fn/Fn return-type param-types)
-      (fn [ctx]
-        (let [saved ctx
-              fname (ctx/get-assigned-name ctx)
-              ctx (ctx/compile-type ctx return-type)
-              ctx (reduce ctx/compile-node ctx params)
-              f (ir/function fname
-                             (ctx/compiled-type ctx return-type)
-                             (mapv #(ctx/compiled-node ctx %) params))]
-          (letfn [(compile-return [ctx]
-                    (if void?
-                      (ctx/compile-instruction ctx (ir/ret))
-                      (let [ret (ir/ret (ctx/compiled-node ctx body-node))]
-                        (ctx/compile-instruction ctx ret))))
-                  (add-function-to-module [ctx]
-                    (update ctx :m ir/add-function (:f ctx)))
-                  (save-ir [ctx]
-                    (ctx/save-ir ctx (:f ctx)))]
+        params (mapv function-parameter param-names param-types)]
+    (if (seq body)
+      (let [void? (= return-type %void)
+            local-types (into {} (filter #(o/type? (val %)) &env))
+            env (into local-types (map vector param-names params))
+            body-node (ast/parse `(block :oben/fn-block ~@body) env)
+            body-node (if void?
+                        body-node
+                        (%cast return-type body-node))]
+        (ast/make-node (Fn/Fn return-type param-types)
+          (fn [ctx]
+            (let [saved ctx
+                  fname (ctx/get-assigned-name ctx)
+                  ctx (ctx/compile-type ctx return-type)
+                  ctx (reduce ctx/compile-node ctx params)
+                  f (ir/function fname
+                                 (ctx/compiled-type ctx return-type)
+                                 (mapv #(ctx/compiled-node ctx %) params))]
+              (letfn [(compile-return [ctx]
+                        (if void?
+                          (ctx/compile-instruction ctx (ir/ret))
+                          (let [ret (ir/ret (ctx/compiled-node ctx body-node))]
+                            (ctx/compile-instruction ctx ret))))
+                      (add-function-to-module [ctx]
+                        (update ctx :m ir/add-function (:f ctx)))
+                      (save-ir [ctx]
+                        (ctx/save-ir ctx (:f ctx)))]
+                (-> ctx
+                    (assoc :f f)
+                    (assoc :fdata ctx/init-fdata)
+                    (ctx/compile-node body-node)
+                    compile-return
+                    ctx/collect-blocks
+                    add-function-to-module
+                    save-ir
+                    (merge (select-keys saved
+                                        [:f :fdata :compiled-nodes]))))))
+          {:class :oben/fn}))
+      (ast/make-node (Fn/Fn return-type param-types)
+        (fn [ctx]
+          (let [fname (-> ctx :compiling-node meta :name)
+                _ (assert fname)
+                ctx (ctx/compile-type ctx return-type)
+                ctx (reduce ctx/compile-node ctx params)
+                f (ir/function fname
+                               (ctx/compiled-type ctx return-type)
+                               (mapv #(ctx/compiled-node ctx %) params))]
             (-> ctx
-                (assoc :f f)
-                (assoc :fdata ctx/init-fdata)
-                (ctx/compile-node body-node)
-                compile-return
-                ctx/collect-blocks
-                add-function-to-module
-                save-ir
-                (merge (select-keys saved
-                                    [:f :fdata :compiled-nodes]))))))
-      {:class :oben/fn})))
+                (update :m ir/add-function f)
+                (ctx/save-ir f))))
+        {:class :oben/fn}))))
 
 (defn %when
   [cond-node & then-nodes]

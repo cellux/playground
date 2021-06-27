@@ -3,6 +3,7 @@
   (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.ast :as ast])
+  (:require [oben.core.math :as math])
   (:require [oben.core.types.Void :as Void])
   (:require [oben.core.types.Number :as Number])
   (:require [oben.core.types.Ptr :as Ptr])
@@ -1089,6 +1090,17 @@
  (m/fact (determine-bit-size (ast/parse 65536)) => 32)
  (m/fact (determine-bit-size (ast/parse Long/MAX_VALUE)) => 64)
  (m/fact (determine-bit-size (ast/parse -5.0)) => :float))
+
+(oben/with-temp-context
+  (m/fact
+   "cannot get address of LLVM intrinsics"
+   (math/llvm.sqrt.f32 25.0)
+   => (throws clojure.lang.ExceptionInfo #"cannot get function address")))
+
+(oben/with-temp-context
+  (let [sqrt (oben/fn ^f32 [^f32 x]
+               (math/sqrt x))]
+    (m/fact (sqrt 25.0) => 5.0)))
 
 ;; (oben/with-temp-context
 ;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])
