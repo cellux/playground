@@ -67,7 +67,7 @@
         params (first (o/move-types-to-tags params))
         _ (assert (vector? params))
         params (o/quote-all-except-locals params &env)]
-    `(def ~name (make-fn nil ~params '~body))))
+    `(def ~name (make-fn '~name ~params '~body))))
 
 (clj/defmacro define-typeclass
   [& args]
