@@ -452,7 +452,7 @@
 (defn determine-gep-leaf-type+indices
   ([t keys indices]
    (if-let [k (first keys)]
-     (let [element-index (as-gep-index (Aggregate/get-element-index t k))
+     (let [element-index (Aggregate/get-element-index t k)
            element-type (Aggregate/get-element-type t k)]
        (recur element-type (next keys) (conj indices element-index)))
      [t indices]))
@@ -464,9 +464,10 @@
   (assert (Ptr/pointer-node? ptr))
   (assert (isa? (o/tid-of-node (first keys)) ::Number/Int))
   (let [object-type (:object-type (meta (o/type-of ptr)))]
-    ;; (assert (isa? (o/tid-of-type object-type) :oben/Aggregate))
+    (when (> (count keys) 1)
+      (assert (isa? (o/tid-of-type object-type) :oben/Aggregate)))
     (let [[leaf-type indices] (determine-gep-leaf-type+indices object-type (next keys))
-          indices (cons (as-gep-index (first keys)) indices)]
+          indices (map as-gep-index (cons (first keys) indices))]
       (ast/make-node (Ptr/Ptr leaf-type)
         (fn [ctx]
           (letfn [(compile-ptr [ctx]
