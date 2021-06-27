@@ -327,7 +327,7 @@
   [x]
   (:tag (meta x)))
 
-(defn quote-all-except-locals-and-tagged-symbols
+(defn quote-all-except-locals
   [form env]
   (let [result (cond (symbol? form)
                      (if (and (not (tagged? form))
@@ -336,24 +336,24 @@
                        (list 'quote form))
 
                      (vector? form)
-                     (apply list 'vector (map #(quote-all-except-locals-and-tagged-symbols % env) form))
+                     (apply list 'vector (map #(quote-all-except-locals % env) form))
 
                      (map? form)
                      (reduce-kv (fn [result k v]
                                   (assoc result
-                                         (quote-all-except-locals-and-tagged-symbols k env)
-                                         (quote-all-except-locals-and-tagged-symbols v env)))
+                                         (quote-all-except-locals k env)
+                                         (quote-all-except-locals v env)))
                                 {} form)
 
                      (sequential? form)
-                     (apply list 'list (map #(quote-all-except-locals-and-tagged-symbols % env) form))
+                     (apply list 'list (map #(quote-all-except-locals % env) form))
 
                      :else form)]
     (if (and (instance? clojure.lang.IMeta form) (meta form))
       (if (:tag (meta form))
         (list 'with-meta
               result
-              (update (meta form) :tag quote-all-except-locals-and-tagged-symbols env))
+              (update (meta form) :tag quote-all-except-locals env))
         result)
       result)))
 

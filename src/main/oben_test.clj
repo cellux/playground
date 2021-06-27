@@ -1028,44 +1028,44 @@
   (list (with-meta 'x {:tag (list 'Struct (vector (with-meta 'x {:tag 'f32})
                                                   'u16 'y))}))))
 
-(defmacro quote-all-except-locals-and-tagged-symbols
+(defmacro quote-all-except-locals
   [form env]
-  (list 'quote (o/quote-all-except-locals-and-tagged-symbols form (eval env))))
+  (list 'quote (o/quote-all-except-locals form (eval env))))
 
 (m/facts
  (m/fact
-  (quote-all-except-locals-and-tagged-symbols
+  (quote-all-except-locals
    x
    {})
   => '(quote x))
  (m/fact
-  (quote-all-except-locals-and-tagged-symbols
+  (quote-all-except-locals
    x
    {'x 5})
   => 'x)
  (m/fact
-  (quote-all-except-locals-and-tagged-symbols
+  (quote-all-except-locals
    (fn u32 [^f32 x f32 y])
    {})
   => '(list 'fn 'u32 (vector (with-meta 'x {:tag 'f32}) 'f32 'y)))
  (m/fact
-  (quote-all-except-locals-and-tagged-symbols
+  (quote-all-except-locals
    (fn u32 [^f32 x f32 y])
    {'f32 :bound})
   => '(list 'fn 'u32 (vector (with-meta 'x {:tag f32}) f32 'y)))
  (m/fact
-  (quote-all-except-locals-and-tagged-symbols
+  (quote-all-except-locals
    (fn u32 [^{:tag (UInt 32)} x f32 y])
    {'f32 :bound})
   => '(list 'fn 'u32 (vector (with-meta 'x {:tag (list 'UInt 32)}) f32 'y)))
  (m/fact
-  (quote-all-except-locals-and-tagged-symbols
+  (quote-all-except-locals
    (fn f32 [^{:tag (UInt 32)} x f32 y])
    {'f32 :bound 'UInt :bound})
   => '(list 'fn f32 (vector (with-meta 'x {:tag (list UInt 32)}) f32 'y)))
  (m/fact
   "symbols with type tags are protected from evaluation"
-  (quote-all-except-locals-and-tagged-symbols
+  (quote-all-except-locals
    (fn f32 [^{:tag (UInt 32)} x f32 y])
    {'f32 :bound 'UInt :bound 'x :bound})
   => '(list 'fn f32 (vector (with-meta 'x {:tag (list UInt 32)}) f32 'y))))

@@ -58,7 +58,7 @@
   (let [[params body] (o/split-after vector? decl)
         params (first (o/move-types-to-tags params))
         _ (assert (vector? params))
-        params (o/quote-all-except-locals-and-tagged-symbols params &env)]
+        params (o/quote-all-except-locals params &env)]
     `(make-fn nil ~params '~body)))
 
 (clj/defmacro defn
@@ -66,7 +66,7 @@
   (let [[params body] (o/split-after vector? decl)
         params (first (o/move-types-to-tags params))
         _ (assert (vector? params))
-        params (o/quote-all-except-locals-and-tagged-symbols params &env)]
+        params (o/quote-all-except-locals params &env)]
     `(def ~name (make-fn nil ~params '~body))))
 
 (clj/defmacro define-typeclass
