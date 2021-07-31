@@ -6,7 +6,7 @@
 
 (defpattern* p1
   [:program 1]
-  [:bind {:bmul 1/4}
+  [:bind {:step 1/4}
    (for [note [:e-5 :d#5]]
      [:nw note 1])
    (for [note [:e-5 :d#5 :e-5 :b-4 :d-5 :c-5]]
