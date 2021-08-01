@@ -82,23 +82,20 @@
         timeline events)))
    timeline pq))
 
-(def registered-plugins (atom #{}))
+(def registered-targets (atom #{}))
 
-(defn register-plugin
-  [plugin]
-  (swap! registered-plugins conj plugin))
+(defn register-target
+  [target]
+  (swap! registered-targets conj target))
 
-(def registered-transports (atom #{}))
+(defn unregister-target
+  [target]
+  (swap! registered-targets disj target))
 
-(defn register-transport
-  [transport]
-  (swap! registered-transports conj transport))
-
-(defn unregister-transport
-  [transport]
-  (swap! registered-transports disj transport))
-
-(defrecord Sequencer [config bpm playing timeline position pattern-queue player plugins transports]
+(defrecord Sequencer [config bpm
+                      timeline position pattern-queue
+                      playing player-thread
+                      targets]
 
   protocols/Sequencer
 
@@ -109,14 +106,10 @@
 
   (play [this pf bindings]
     (protocols/start this)
-    (let [init-pattern {:sequencer this
-                        :position 0
+    (let [init-pattern {:position 0
                         :align 1
                         :events []}
-          init-bindings (-> (reduce (fn [result plugin]
-                                      (merge result (protocols/get-default-bindings plugin)))
-                                    {} @plugins)
-                            (merge bindings))
+          init-bindings (assoc bindings :sequencer this)
           pattern (pf init-pattern init-bindings)]
       (swap! pattern-queue conj pattern)
       :queued))
@@ -134,45 +127,46 @@
      :position @position
      :pattern-queue @pattern-queue})
 
-  protocols/Transport
+  protocols/Target
 
   (start [this]
     (if @playing
       :already-playing
-      (let [transports @transports]
-        (doseq [t transports]
+      (let [targets @targets]
+        (doseq [t targets]
           (protocols/start t))
         (reset! playing true)
-        (reset! player (future
-                         (try
-                           (loop [pos @position
-                                  tl @timeline]
-                             (if @playing
-                               (let [tick-start (System/nanoTime)]
-                                 (when-let [callbacks (get tl pos)]
-                                   (doseq [cb callbacks]
-                                     (cb)))
-                                 (let [pq (switch! pattern-queue [])]
-                                   (swap! timeline merge-pattern-queue pos pq))
-                                 (let [tick-duration (ticks->ns 1 @bpm)
-                                       elapsed (- (System/nanoTime) tick-start)
-                                       remaining (- tick-duration elapsed)]
-                                   (nanosleep remaining))
-                                 (recur (swap! position inc)
-                                        (swap! timeline dissoc pos)))
-                               :stopped))
-                           (catch Exception e
-                             (print-cause-trace e)
-                             :crashed)
-                           (finally
-                             (doseq [t transports]
-                               (protocols/stop t))))))
+        (reset! player-thread
+                (future
+                  (try
+                    (loop [pos @position
+                           tl @timeline]
+                      (if @playing
+                        (let [tick-start (System/nanoTime)]
+                          (when-let [callbacks (get tl pos)]
+                            (doseq [cb callbacks]
+                              (cb)))
+                          (let [pq (switch! pattern-queue [])]
+                            (swap! timeline merge-pattern-queue pos pq))
+                          (let [tick-duration (ticks->ns 1 @bpm)
+                                elapsed (- (System/nanoTime) tick-start)
+                                remaining (- tick-duration elapsed)]
+                            (nanosleep remaining))
+                          (recur (swap! position inc)
+                                 (swap! timeline dissoc pos)))
+                        :stopped))
+                    (catch Exception e
+                      (print-cause-trace e)
+                      :crashed)
+                    (finally
+                      (doseq [t targets]
+                        (protocols/stop t))))))
         :started)))
 
   (stop [this]
     (do
       (reset! playing false)
-      @@player))
+      @@player-thread))
 
   (restart [this]
     (protocols/stop this)
@@ -186,9 +180,8 @@
                     :timeline (atom {})
                     :position (atom 0)
                     :pattern-queue (atom [])
-                    :player (atom nil)
-                    :plugins registered-plugins
-                    :transports registered-transports}))
+                    :player-thread (atom nil)
+                    :targets registered-targets}))
   ([]
    (create-sequencer {})))
 
@@ -196,21 +189,11 @@
 
 (def ^:dynamic *sequencer* (create-sequencer))
 
-(defn clear!
-  []
-  (protocols/clear! *sequencer*))
-
-(defn status
-  []
-  (protocols/status *sequencer*))
-
-(defn stop
-  []
-  (protocols/stop *sequencer*))
-
-(defn restart
-  []
-  (protocols/restart *sequencer*))
+(defn clear! [] (protocols/clear! *sequencer*))
+(defn status [] (protocols/status *sequencer*))
+(defn start [] (protocols/start *sequencer*))
+(defn stop [] (protocols/stop *sequencer*))
+(defn restart [] (protocols/restart *sequencer*))
 
 ;; patterns
 
@@ -251,8 +234,8 @@
     (number? x) (compile-pattern [:wait x])
     (var? x) (compile-pattern [:var x])
     (fn? x) (compile-pattern [:call x])
-    (sequential? x) (compile-pattern (apply vector :seq (map compile x)))
-    (set? x) (compile-pattern (apply vector :mix (map compile x)))
+    (sequential? x) (compile-pattern (cons :seq (map compile x)))
+    (set? x) (compile-pattern (cons :mix (map compile x)))
     :else (throw (ex-info "unable to compile" {:value x}))))
 
 (defmethod compile-pattern :call
@@ -318,7 +301,8 @@
 (defmethod compile-pattern :sched
   [[_ & body]]
   (let [pf (compile-pattern (cons :seq body))]
-    (pfn [{:keys [sequencer position] :as pattern} bindings]
+    (pfn [{:keys [position] :as pattern}
+          {:keys [sequencer] :as bindings}]
       ;; position - 2: callback executed, future
       ;;   invokes (play sequencer ...) in a separate thread which
       ;;   applies pf to the initial pattern and bindings, then adds
@@ -330,8 +314,7 @@
       ;; scheduled position is not in the past
       (let [sched-pos (- position 2)
             callback #(future (protocols/play sequencer pf bindings))]
-        (update pattern :events
-                conj [sched-pos callback])))))
+        (update pattern :events conj [sched-pos callback])))))
 
 (defmulti resolve-binding
   (fn [key value]
@@ -347,20 +330,22 @@
         new-bindings (reduce-kv
                       (fn [result k v]
                         (assoc result k (resolve-binding k v)))
-                      {} bindings)]
+                      {} (if-let [t (:target bindings)]
+                           (merge (protocols/get-default-bindings t) bindings)
+                           bindings))]
     (pfn [pattern parent-bindings]
       (pf pattern (merge parent-bindings new-bindings)))))
 
-(defmacro deftransport
-  [name transport]
+(defmacro deftarget
+  [name target]
   `(do
      (when-let [pv# (resolve '~name)]
        (let [p# (var-get pv#)]
-         (when (contains? @registered-transports p#)
+         (when (contains? @registered-targets p#)
            (protocols/stop p#)
-           (unregister-transport p#))))
-     (def ~name ~transport)
-     (register-transport ~name)
+           (unregister-target p#))))
+     (def ~name ~target)
+     (register-target ~name)
      :defined))
 
 (defmacro defpattern

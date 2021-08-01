@@ -1,7 +1,7 @@
 (ns omkamra.cowbells.fluidsynth
   (:require
    [clojure.java.io :as jio]
-   [omkamra.cowbells.midi]
+   [omkamra.cowbells.midi :as midi]
    [omkamra.sequencer.protocols :as protocols]
    [omkamra.fluidsynth.settings :as fluid-settings]
    [omkamra.fluidsynth.synth :as fluid-synth]
@@ -19,7 +19,7 @@
       doall))
 
 (defrecord FluidSynth [config settings synth soundfonts audio-driver]
-  omkamra.cowbells.midi/MidiDevice
+  midi/MidiDevice
 
   (note-on [{:keys [synth]} channel key velocity]
     (fluid-synth/noteon @synth channel key velocity))
@@ -36,7 +36,7 @@
   (all-sounds-off [{:keys [synth]} channel]
     (fluid-synth/all-sounds-off @synth channel))
 
-  protocols/Transport
+  protocols/Target
 
   (start [this]
     (if @synth
@@ -63,7 +63,10 @@
 
   (restart [this]
     (protocols/stop [this])
-    (protocols/start [this])))
+    (protocols/start [this]))
+
+  (get-default-bindings [this]
+    midi/default-bindings))
 
 (def default-config
   {:fluid-settings

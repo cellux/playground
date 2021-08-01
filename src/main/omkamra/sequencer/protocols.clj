@@ -6,10 +6,8 @@
   (bpm! [this new-bpm])
   (status [this]))
 
-(defprotocol Transport
+(defprotocol Target
   (start [this])
   (stop [this])
-  (restart [this]))
-
-(defprotocol Plugin
+  (restart [this])
   (get-default-bindings [this]))

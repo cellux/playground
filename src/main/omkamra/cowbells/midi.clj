@@ -7,7 +7,9 @@
    [omkamra.clojure.util :refer [deep-merge]]))
 
 (def scale-steps
-  {:major [2 2 1 2 2 2]})
+  {:major [2 2 1 2 2 2]
+   :minor [2 1 2 2 1 2]
+   :harmonic-minor [2 1 2 2 1 3]})
 
 (defn steps->offsets
   ([steps offsets last-offset]
@@ -88,9 +90,10 @@
 (defmethod compile-pattern :program
   [[_ program]]
   (pfn [pattern
-        {:keys [midi-device channel] :as bindings}]
-       (-> pattern
-           (sequencer/add-callback #(program-change midi-device channel program)))))
+        {:keys [target channel] :as bindings}]
+    (assert target "target is unbound")
+    (-> pattern
+        (sequencer/add-callback #(program-change target channel program)))))
 
 (defn degree->key
   [{:keys [root scale octave shift] :as bindings} degree]
@@ -109,6 +112,10 @@
     (vec x)
     (vector x)))
 
+(defn advance
+  [pattern beats]
+  (update pattern :position + (beats->ticks beats)))
+
 (defmethod compile-pattern :note
   [[_ notes & [note->key]]]
   (let [chord? (set? notes)
@@ -116,24 +123,24 @@
                    ensure-vector
                    (map (if note->key identity resolve-note)))]
     (pfn [pattern
-          {:keys [midi-device channel velocity dur step] :as bindings}]
-         (let [keys (if note->key
-                      (map #(note->key bindings %) notes)
-                      notes)
-               advance-position (if chord?
-                                  identity
-                                  (fn [pattern]
-                                    (update pattern :position
-                                            + (beats->ticks step))))]
-           (reduce (fn [pattern key]
-                     (-> pattern
-                         (sequencer/add-callback
-                          #(note-on midi-device channel key velocity))
-                         (sequencer/add-callback-after
-                          (and dur (sequencer/beats->ticks dur))
-                          #(note-off midi-device channel key))
-                         advance-position))
-                   pattern keys)))))
+          {:keys [target channel velocity dur step] :as bindings}]
+      (assert target "target is unbound")
+      (let [keys (if note->key
+                   (map #(note->key bindings %) notes)
+                   notes)
+            advance-between-notes (if chord?
+                                    identity
+                                    #(advance % step))]
+        (-> (reduce (fn [pattern key]
+                      (-> pattern
+                          (sequencer/add-callback
+                           #(note-on target channel key velocity))
+                          (sequencer/add-callback-after
+                           (and dur (sequencer/beats->ticks dur))
+                           #(note-off target channel key))
+                          advance-between-notes))
+                    pattern keys)
+            (advance step))))))
 
 (defmethod compile-pattern :nw
   [[_ note wait]]
@@ -146,25 +153,22 @@
 (defmethod compile-pattern :all-notes-off
   [[_]]
   (pfn [pattern
-        {:keys [midi-device channel] :as bindings}]
-    (sequencer/add-callback pattern #(all-notes-off midi-device channel))))
+        {:keys [target channel] :as bindings}]
+    (assert target "target is unbound")
+    (sequencer/add-callback pattern #(all-notes-off target channel))))
 
 (defmethod compile-pattern :all-sounds-off
   [[_]]
   (pfn [pattern
-        {:keys [midi-device channel] :as bindings}]
-    (sequencer/add-callback pattern #(all-sounds-off midi-device channel))))
+        {:keys [target channel] :as bindings}]
+    (assert target "target is unbound")
+    (sequencer/add-callback pattern #(all-sounds-off target channel))))
 
-(defonce midi-plugin
-  (reify omkamra.sequencer.protocols/Plugin
-    (get-default-bindings [this]
-      {:midi-device nil
-       :channel 0
-       :root (nao->midi :c-5)
-       :scale (scales :major)
-       :velocity 96
-       :octave 0
-       :shift 0
-       :step 1})))
-
-(sequencer/register-plugin midi-plugin)
+(def default-bindings
+  {:channel 0
+   :root (nao->midi :c-5)
+   :scale (scales :major)
+   :velocity 96
+   :octave 0
+   :shift 0
+   :step 1})
