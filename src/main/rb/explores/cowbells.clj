@@ -10,6 +10,28 @@
 ;; (omkamra.sequencer/stop)
 ;; (omkamra.sequencer/restart)
 
+(defpattern* midi-note
+  [:bind {:target synth}
+   [:program 0]
+   [:note 64]])
+
+(defpattern* midi-notes
+  [:bind {:target synth}
+   [:program 0]
+   [:note [64 59 68]]])
+
+(defpattern* midi-notes-with-step-and-duration
+  [:bind {:target synth
+          :step 2
+          :dur 1/2}
+   [:program 0]
+   [:note [64 59 68]]])
+
+(defpattern* chords-of-midi-notes
+  [:bind {:target synth}
+   [:program 0]
+   [:note [#{64 59 68} 64 59 68]]])
+
 (defpattern* major-scale
   [:bind {:target synth
           :scale :major}
@@ -88,16 +110,23 @@
    :oct 12                              ; octave
    })
 
-(def chords
-  {:M []                                ; major
-   :M7 []                               ; major seventh
-   :M6 []                               ; major sixth
-   :m []                                ; minor
-   :m7 []                               ; minor seventh
-   :dim []                              ; diminished
-   :dim7 []                             ; diminished seventh
-   :m7b5 []                             ; half-diminished
-   })
+(def scale-degrees
+  {:tonic 0
+   :supertonic 1
+   :mediant 2
+   :subdominant 3
+   :dominant 4
+   :submediant 5
+   :leading-tone 6})
+
+(def mode-shifts
+  {:ionian 0
+   :dorian 1
+   :phrygian 2
+   :lydian 3
+   :mixolydian 4
+   :aeolian 5
+   :locrian 6})
 
 (defpattern* I-V_ii-ii-V-in-c
   [:bind {:target synth
@@ -114,7 +143,7 @@
           :velocity 100}
    [:program 0]
    [:degree #{0 2 4}]
-   3/2
+   1/2
    [:bind {:velocity 70
            :step 1/4}
     [:degree [3 7 11]]]
@@ -142,14 +171,12 @@
    [:mix
     [:bind {:channel 5}
      [:program 5]
-     [:seq
-      (for [d (range 15)]
-        [:seq [:degree d] 1])]]
+     (for [d (range 15)]
+       [:degree d])]
     [:bind {:channel 0}
      [:program 4]
-     [:seq
-      (for [d (range 15)]
-        [:seq [:degree (- 14 d)] 1])]]]])
+     (for [d (range 15)]
+       [:degree (- 14 d)])]]])
 
 (defpattern< plonk
   [:bind {:target synth

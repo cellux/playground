@@ -10,4 +10,7 @@
   (start [this])
   (stop [this])
   (restart [this])
-  (get-default-bindings [this]))
+  (get-default-bindings [this])
+  (compile-form [this form])
+  (compile-pattern [this pattern])
+  (resolve-binding [this k v]))

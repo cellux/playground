@@ -1,9 +1,8 @@
 (ns omkamra.cowbells.midi
   (:require
    [clojure.string :as str]
-   [omkamra.sequencer :as sequencer
-    :refer [compile-pattern resolve-binding pfn beats->ticks]]
-   [omkamra.sequencer.protocols]
+   [omkamra.sequencer :as sequencer :refer [pfn beats->ticks]]
+   [omkamra.sequencer.protocols :as protocols]
    [omkamra.clojure.util :refer [deep-merge]]))
 
 (def scale-steps
@@ -69,13 +68,12 @@
                          (throw (ex-info "unknown scale" {:name x})))
         :else (throw (ex-info "invalid scale" {:value x}))))
 
-(defmethod resolve-binding :root
-  [_ value]
-  (resolve-note value))
-
-(defmethod resolve-binding :scale
-  [_ value]
-  (resolve-scale value))
+(defn resolve-binding
+  [key value]
+  (case key
+    :root (resolve-note value)
+    :scale (resolve-scale value)
+    value))
 
 (defprotocol MidiDevice
   (note-on [this channel key velocity])
@@ -86,6 +84,16 @@
   (bank-select [this channel bank])
   (all-notes-off [this channel])
   (all-sounds-off [this channel]))
+
+(defmulti compile-pattern first)
+
+(defmethod compile-pattern :default
+  [pattern]
+  (throw (ex-info "cannot compile pattern" {:pattern pattern})))
+
+(defn compile-form
+  [form]
+  (throw (ex-info "cannot compile form" {:form form})))
 
 (defmethod compile-pattern :program
   [[_ program]]
@@ -118,37 +126,42 @@
 
 (defmethod compile-pattern :note
   [[_ notes & [note->key]]]
-  (let [chord? (set? notes)
-        notes (->> notes
-                   ensure-vector
-                   (map (if note->key identity resolve-note)))]
-    (pfn [pattern
-          {:keys [target channel velocity dur step] :as bindings}]
-      (assert target "target is unbound")
-      (let [keys (if note->key
-                   (map #(note->key bindings %) notes)
-                   notes)
-            advance-between-notes (if chord?
-                                    identity
-                                    #(advance % step))]
-        (-> (reduce (fn [pattern key]
-                      (-> pattern
-                          (sequencer/add-callback
-                           #(note-on target channel key velocity))
-                          (sequencer/add-callback-after
-                           (and dur (sequencer/beats->ticks dur))
-                           #(note-off target channel key))
-                          advance-between-notes))
-                    pattern keys)
-            (advance step))))))
+  (cond
+    (vector? notes)
+    (apply vector :seq (map #(vector :note % note->key) notes))
+
+    (set? notes)
+    [:seq
+     (apply vector :mix (map #(vector :note % note->key) notes))
+     [:wait 1]]
+
+    (and (keyword? notes) (nil? note->key))
+    [:note (resolve-note notes)]
+
+    :else
+    (let [note notes]
+      (pfn [pattern
+            {:keys [target channel velocity dur step] :as bindings}]
+        (assert target "target is unbound")
+        (let [key (if note->key
+                    (note->key bindings note)
+                    note)]
+          (assert (midi-note? key))
+          (-> pattern
+              (sequencer/add-callback
+               #(note-on target channel key velocity))
+              (sequencer/add-callback-after
+               (and dur (sequencer/beats->ticks dur))
+               #(note-off target channel key))
+              (advance step)))))))
 
 (defmethod compile-pattern :nw
   [[_ note wait]]
-  (compile-pattern [:seq [:note note] [:wait wait]]))
+  [:seq [:note note] [:wait wait]])
 
 (defmethod compile-pattern :degree
   [[_ degrees]]
-  (compile-pattern [:note degrees degree->key]))
+  [:note degrees degree->key])
 
 (defmethod compile-pattern :all-notes-off
   [[_]]

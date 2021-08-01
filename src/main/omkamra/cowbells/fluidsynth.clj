@@ -66,7 +66,16 @@
     (protocols/start [this]))
 
   (get-default-bindings [this]
-    midi/default-bindings))
+    midi/default-bindings)
+
+  (compile-form [this form]
+    (midi/compile-form form))
+
+  (compile-pattern [this pattern]
+    (midi/compile-pattern pattern))
+
+  (resolve-binding [this k v]
+    (midi/resolve-binding k v)))
 
 (def default-config
   {:fluid-settings
