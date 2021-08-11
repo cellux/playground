@@ -2,13 +2,14 @@
  ["src/main"]
 
  :deps
- {ring/ring-core {:mvn/version "1.8.1"}
+ {org.clojure/clojurescript {:mvn/version "1.10.866"}
+  org.clojure/java.data {:mvn/version "1.0.86"}
+  ring/ring-core {:mvn/version "1.8.1"}
   ring/ring-jetty-adapter {:mvn/version "1.8.1"}
   http-kit/http-kit {:mvn/version "2.4.0"}
   com.github.jnr/jnr-ffi {:mvn/version "2.2.3"}
-  insn/insn {:mvn/version "0.2.1"}
+  insn/insn {:mvn/version "0.5.2"}
   ;; io.kubernetes/client-java {:mvn/version "10.0.0"}
-  org.clojure/java.data {:mvn/version "1.0.86"}
   com.jcraft/jsch {:mvn/version "0.1.55"}
   com.jcraft/jsch.agentproxy.core {:mvn/version "0.0.9"}
   com.jcraft/jsch.agentproxy.jsch {:mvn/version "0.0.9"}
@@ -25,7 +26,8 @@
   martian-httpkit/martian-httpkit {:mvn/version "0.1.14"}
   com.github.jhg023/Pbbl {:mvn/version "1.0.2"}
   midje/midje {:mvn/version "1.9.10"}
-  com.clojure-goes-fast/clj-java-decompiler {:mvn/version "0.3.0"}}
+  com.clojure-goes-fast/clj-java-decompiler {:mvn/version "0.3.0"}
+  instaparse/instaparse {:mvn/version "1.4.10"}}
 
  :aliases
  {:cljs
