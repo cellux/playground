@@ -1,8 +1,6 @@
 (ns omkamra.jnr.util
   (:require
-   [clojure.string :as str]
-   [insn.core :as insn]
-   [insn.util :refer [type-desc]]))
+   [clojure.string :as str]))
 
 (defn qualified-name?
   [s]

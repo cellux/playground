@@ -2,7 +2,6 @@
   (:require
    [clojure.string :as str]
    [insn.core :as insn]
-   [insn.util :refer [type-desc]]
    [omkamra.jnr.util :refer [qualified-class-name]]))
 
 (defn build-struct-field
