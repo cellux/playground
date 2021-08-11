@@ -242,11 +242,23 @@
              (number? x) [:wait x]
              (var? x) [:var x]
              (fn? x) [:call x]
-             (sequential? x) (compile-pattern (cons :seq x))
-             (set? x) (compile-pattern (cons :mix x))
+             (sequential? x) (when (seq x)
+                               (if (next x)
+                                 (compile-pattern (cons :seq x))
+                                 x))
+             (set? x) (when (seq x)
+                        (if (next x)
+                          (compile-pattern (cons :mix x))
+                          x))
+             (nil? x) [:nop]
              :else (if *compile-target*
                      (protocols/compile-form *compile-target* x)
                      (throw (ex-info "unable to compile form" {:form x})))))))
+
+(defmethod compile-pattern :nop
+  [[_]]
+  (pfn [pattern bindings]
+    pattern))
 
 (defmethod compile-pattern :call
   [[_ callback]]
@@ -338,16 +350,20 @@
 
 (defmethod compile-pattern :bind
   [[_ bindings & body]]
-  (binding [*compile-target* (or (:target bindings)
-                                 *compile-target*)]
-    (let [pf (compile-pattern (cons :seq body))
-          default-bindings (get-default-bindings)
-          new-bindings (reduce-kv
-                        (fn [result k v]
-                          (assoc result k (resolve-binding k v)))
-                        {} bindings)]
+  (if (fn? bindings)
+    (let [pf (compile-pattern (cons :seq body))]
       (pfn [pattern parent-bindings]
-        (pf pattern (merge default-bindings parent-bindings new-bindings))))))
+        (pf pattern (bindings parent-bindings))))
+    (binding [*compile-target* (or (:target bindings)
+                                   *compile-target*)]
+      (let [pf (compile-pattern (cons :seq body))
+            default-bindings (get-default-bindings)
+            new-bindings (reduce-kv
+                          (fn [result k v]
+                            (assoc result k (resolve-binding k v)))
+                          {} bindings)]
+        (pfn [pattern parent-bindings]
+          (pf pattern (merge default-bindings parent-bindings new-bindings)))))))
 
 (defmacro deftarget
   [name target]
