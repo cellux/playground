@@ -27,7 +27,8 @@
   com.github.jhg023/Pbbl {:mvn/version "1.0.2"}
   midje/midje {:mvn/version "1.9.10"}
   com.clojure-goes-fast/clj-java-decompiler {:mvn/version "0.3.0"}
-  instaparse/instaparse {:mvn/version "1.4.10"}}
+  instaparse/instaparse {:mvn/version "1.4.10"}
+  cljfx/cljfx {:mvn/version "1.7.14"}}
 
  :aliases
  {:cljs
