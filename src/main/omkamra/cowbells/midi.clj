@@ -1,9 +1,12 @@
 (ns omkamra.cowbells.midi
   (:require
    [clojure.string :as str]
+   [clojure.java.io :as jio]
+   [clojure.edn :as edn]
    [omkamra.sequencer :as sequencer :refer [pfn beats->ticks]]
    [omkamra.sequencer.protocols :as protocols]
-   [omkamra.clojure.util :refer [deep-merge]]))
+   [omkamra.clojure.util :refer [deep-merge]]
+   [instaparse.core :as insta]))
 
 (def scale-steps
   {:major [2 2 1 2 2 2]
@@ -34,7 +37,7 @@
    \a 9
    \b 11})
 
-(def re-nao #"([cdefgabCDEFGAB])([-#]?)([0-9])$")
+(def re-nao #"([cdefgabCDEFGAB])([-#])([0-9])$")
 
 (defn nao?
   [x]
@@ -43,11 +46,11 @@
 
 (defn nao->midi
   [nao]
-  (let [[_ note sep octave] (->> (name nao)
+  (let [[_ note sep oct] (->> (name nao)
                                  str/lower-case
                                  (re-matches re-nao)
                                  (map first))]
-    (+ (* 12 (- (int octave) 0x30))
+    (+ (* 12 (- (int oct) 0x30))
        (note-offsets note)
        (if (= \# sep) 1 0))))
 
@@ -76,7 +79,7 @@
     value))
 
 (defprotocol MidiDevice
-  (note-on [this channel key velocity])
+  (note-on [this channel key vel])
   (note-off [this channel key])
   (cc [this channel ctrl value])
   (pitch-bend [this channel value])
@@ -91,28 +94,146 @@
   [pattern]
   (throw (ex-info "cannot compile pattern" {:pattern pattern})))
 
+(def parse-string (insta/parser (jio/resource "omkamra/cowbells/midi.bnf")))
+
+(defn parse
+  ([s start]
+   (parse-string s :start start))
+  ([s]
+   (parse s :expr)))
+
+(defn group?
+  [x]
+  (and (vector x)
+       (#{:seq :mix1} (first x))))
+
+(defn simplify
+  [x]
+  (if (and (group? x)
+           (= (count x) 2))
+    (second x)
+    x))
+
+(def binding-modifiers
+  #{:channel
+    :dur
+    :step
+    :oct
+    :semi
+    :vel
+    :scale
+    :shift
+    :root})
+
+(defn binding-modifier?
+  [x]
+  (and (vector x)
+       (binding-modifiers (first x))))
+
+(defn extract-bindings-from-stem
+  ([stem bindings]
+   (if (group? stem)
+     (loop [items (next stem)
+            new-stem [(first stem)]
+            new-bindings bindings]
+       (if (seq items)
+         (if (binding-modifier? (first items))
+           (recur (next items)
+                  new-stem
+                  (conj new-bindings (first items)))
+           (recur (next items)
+                  (conj new-stem (first items))
+                  new-bindings))
+         [(simplify new-stem) new-bindings]))
+     [stem bindings]))
+  ([stem]
+   (extract-bindings-from-stem stem (sorted-map))))
+
+(defn wrap-in-seq-if-binding-modifier
+  [x]
+  (if (binding-modifier? x)
+    [:seq x]
+    x))
+
+(defn postprocess
+  [[tag & rest]]
+  (case tag
+    :expr (let [[stem & mods] rest
+                stem (-> stem postprocess wrap-in-seq-if-binding-modifier)
+                [stem bindings] (extract-bindings-from-stem stem)
+                bindings (into bindings (map postprocess mods))]
+            (if (seq bindings)
+              [:bind bindings stem]
+              stem))
+    (:seq :mix1) (simplify (apply vector tag (map postprocess rest)))
+    (:uint :int) (Integer/parseInt (first rest))
+    (:uratio :ratio) (let [[num denom] rest]
+                       (/ (if (empty? num) 1 (Integer/parseInt num))
+                          (Integer/parseInt denom)))
+    :program [:program (postprocess (first rest))]
+    :midi-note [:note (postprocess (first rest))]
+    :scale-degree [:degree (postprocess (first rest))]
+    :nao [:note (nao->midi (first rest))]
+    :rest (let [[length] rest]
+            [:wait (if length (postprocess length) 1)])
+    :align [:wait (- (postprocess (first rest)))]
+    :channel [:channel (postprocess (first rest))]
+    :dur [:dur (postprocess (first rest))]
+    :step [:step [:mul
+                  [:binding-of :step]
+                  (postprocess (first rest))]]
+    :oct (let [[op amount] rest
+               cmd (if (= op "^") :add :sub)
+               amount (if amount (postprocess amount) 1)]
+           [:oct [cmd [:binding-of :oct] amount]])
+    :semi (let [[op amount] rest
+                cmd (if (= op "#") :add :sub)
+                amount (if amount (postprocess amount) 1)]
+            [:semi [cmd [:binding-of :semi] amount]])
+    :vel (if (string? (first rest))
+           (let [[op amount] rest
+                 cmd (if (= op "+") :add :sub)
+                 amount (postprocess amount)]
+             [:vel [cmd [:binding-of :vel] amount]])
+           [:vel (postprocess (first rest))])
+    :scale [:scale (keyword (first rest))]
+    :shift (let [[op amount] rest
+                 cmd (if (= op ">") :add :sub)
+                 amount (if amount (postprocess amount) 1)]
+             [:shift [cmd [:binding-of :shift] amount]])
+    :root (let [note (postprocess (first rest))]
+            (case (first note)
+              :note [:root (second note)]
+              :degree [:root [:degree->key (second note)]]))))
+
+(defn compile-string
+  [s]
+  (postprocess (parse (str "(" s ")"))))
+
 (defn compile-form
   [form]
-  (throw (ex-info "cannot compile form" {:form form})))
+  (if (string? form)
+    (compile-string form)
+    (throw (ex-info "cannot compile form" {:form form}))))
 
 (defmethod compile-pattern :program
   [[_ program]]
-  (pfn [pattern
-        {:keys [target channel] :as bindings}]
+  (pfn [pattern {:keys [target channel] :as bindings}]
     (assert target "target is unbound")
     (-> pattern
         (sequencer/add-callback #(program-change target channel program)))))
 
 (defn degree->key
-  [{:keys [root scale octave shift] :as bindings} degree]
+  [{:keys [root scale oct shift semi] :as bindings} degree]
   (let [index (+ degree shift)
         scale-size (count scale)]
     (+ root
-       (* 12 octave)
+       (* 12 oct)
        (* 12 (if (neg? index)
                (- (inc (quot (dec (- index)) scale-size)))
                (quot index scale-size)))
-       (scale (mod index scale-size)))))
+       (scale (mod index scale-size))
+       semi)))
 
 (defn ensure-vector
   [x]
@@ -125,23 +246,22 @@
   (update pattern :position + (beats->ticks beats)))
 
 (defmethod compile-pattern :note
-  [[_ notes & [note->key]]]
+  [[_ note-desc & [note->key]]]
   (cond
-    (vector? notes)
-    (apply vector :seq (map #(vector :note % note->key) notes))
+    (vector? note-desc)
+    (apply vector :seq (map #(vector :note % note->key) note-desc))
 
-    (set? notes)
+    (set? note-desc)
     [:seq
-     (apply vector :mix (map #(vector :note % note->key) notes))
+     (apply vector :mix (map #(vector :note % note->key) note-desc))
      [:wait 1]]
 
-    (and (keyword? notes) (nil? note->key))
-    [:note (resolve-note notes)]
+    (and (keyword? note-desc) (nil? note->key))
+    [:note (resolve-note note-desc)]
 
     :else
-    (let [note notes]
-      (pfn [pattern
-            {:keys [target channel velocity dur step] :as bindings}]
+    (let [note note-desc]
+      (pfn [pattern {:keys [target channel vel dur step] :as bindings}]
         (assert target "target is unbound")
         (let [key (if note->key
                     (note->key bindings note)
@@ -149,7 +269,7 @@
           (assert (midi-note? key))
           (-> pattern
               (sequencer/add-callback
-               #(note-on target channel key velocity))
+               #(note-on target channel key vel))
               (sequencer/add-callback-after
                (and dur (sequencer/beats->ticks dur))
                #(note-off target channel key))
@@ -165,23 +285,35 @@
 
 (defmethod compile-pattern :all-notes-off
   [[_]]
-  (pfn [pattern
-        {:keys [target channel] :as bindings}]
+  (pfn [pattern {:keys [target channel] :as bindings}]
     (assert target "target is unbound")
     (sequencer/add-callback pattern #(all-notes-off target channel))))
 
 (defmethod compile-pattern :all-sounds-off
   [[_]]
-  (pfn [pattern
-        {:keys [target channel] :as bindings}]
+  (pfn [pattern {:keys [target channel] :as bindings}]
     (assert target "target is unbound")
     (sequencer/add-callback pattern #(all-sounds-off target channel))))
+
+(defmulti compile-bind-form first)
+
+(defmethod compile-bind-form :default
+  [form]
+  (throw (ex-info "unable to compile bind form" {:form form})))
+
+(defmethod compile-bind-form :degree->key
+  [[_ degree]]
+  (let [degree (sequencer/compile-bind-expr degree)]
+    (fn [bindings]
+      (let [degree (degree bindings)]
+        (degree->key bindings degree)))))
 
 (def default-bindings
   {:channel 0
    :root (nao->midi :c-5)
    :scale (scales :major)
-   :velocity 96
-   :octave 0
+   :vel 96
+   :oct 0
    :shift 0
+   :semi 0
    :step 1})

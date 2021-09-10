@@ -140,14 +140,14 @@
   [:bind {:target synth
           :channel 0
           :scale :major
-          :velocity 100}
+          :vel 100}
    [:program 0]
    [:degree #{0 2 4}]
    1/2
-   [:bind {:velocity 70
+   [:bind {:vel 70
            :step 1/4}
     [:degree [3 7 11]]]
-   [:bind {:velocity 60
+   [:bind {:vel 60
            :step 1/2}
     [:degree [0 2 4]]]])
 
@@ -181,14 +181,14 @@
 (defpattern< plonk
   [:bind {:target synth
           :shift -3
-          :velocity 60}
+          :vel 60}
    [:program 0]
    [:seq [:degree 3] 1/4 [:degree 5] 1/4]])
 
 (defpattern* note-test
   [:bind {:target synth}
    [:program 50]
-   [:bind {:dur 3 :velocity 80}
+   [:bind {:dur 3 :vel 80}
     [:note [:c-4 :e-4]]]])
 
 (defpattern* strings
@@ -199,13 +199,13 @@
   ;; organ: 18 19 68 73
   [:bind {:target synth}
    [:program 89]
-   [:bind {:velocity 70 :octave 0}
+   [:bind {:vel 70 :oct 0}
     [:note [:e-4 :g-3 :c-2]]]])
 
 (defpattern* strings
   [:bind {:target synth}
    [:program 89]
-   [:bind {:velocity 70 :octave -1 :shift -1}
+   [:bind {:vel 70 :oct -1 :shift -1}
     [:degree [-7 0 7 14]]]])
 
 (defpattern* kuss

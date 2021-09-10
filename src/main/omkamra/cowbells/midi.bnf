@@ -1,0 +1,72 @@
+<ws> = <#"\s+">
+<opt-ws> = <#"\s*">
+
+uint = #"[0-9]+"
+int = #"[+-]?[0-9]+"
+uratio = #"[0-9]*" <"/"> #"[0-9]+"
+ratio = #"[+-]?[0-9]*" <"/"> #"[0-9]+"
+<unum> = uratio / uint
+<num> = ratio / int
+
+program = <"p"> uint
+
+<command> = program
+
+midi-note = <#"[mM]"> uint
+nao = #"[cdefgabCDEFGAB][-#][0-9]"
+scale-degree = int
+
+<abs-note> = midi-note | nao
+<rel-note> = scale-degree
+<note> = abs-note | rel-note
+
+rest = (<","> unum) / <",">
+align = <"%"> unum
+
+<event> = command | note | rest | align
+
+seq = <"("> opt-ws (group-item opt-ws)* <")">
+mix1 = <"{"> opt-ws (group-item opt-ws)* <"}">
+
+<group> = seq | mix1
+
+<stem> = event | group
+
+channel = <"c"> uint
+
+<env-mod> = channel
+
+dur = <"~"> unum
+step = <"."> unum
+
+<time-mod> = dur | step
+
+oct = (#"[_^]" uint) / #"[_^]"
+semi = (#"[#bB]" uint) / #"[#bB]"
+
+<pitch-mod> = oct | semi
+
+vel = <"v"> #"[+-]"? uint
+
+<volume-mod> = vel
+
+scale = <"&("> #"[a-z0-9]+" <")">
+shift = (#"[<>]" uint) / #"[<>]"
+
+<scale-mod> = scale | shift
+
+root = <"@"> note
+
+<root-mod> = root
+
+<binding-mod> = env-mod
+              | time-mod
+              | pitch-mod
+              | volume-mod
+              | scale-mod
+              | root-mod
+
+expr = stem binding-mod+
+     / stem
+
+<group-item> = expr / binding-mod+

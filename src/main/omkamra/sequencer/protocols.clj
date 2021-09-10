@@ -13,4 +13,5 @@
   (get-default-bindings [this])
   (compile-form [this form])
   (compile-pattern [this pattern])
+  (compile-bind-form [this expr])
   (resolve-binding [this k v]))

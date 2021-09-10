@@ -21,8 +21,8 @@
 (defrecord FluidSynth [config settings synth soundfonts audio-driver]
   midi/MidiDevice
 
-  (note-on [{:keys [synth]} channel key velocity]
-    (fluid-synth/noteon @synth channel key velocity))
+  (note-on [{:keys [synth]} channel key vel]
+    (fluid-synth/noteon @synth channel key vel))
 
   (note-off [{:keys [synth]} channel key]
     (fluid-synth/noteoff @synth channel key))
@@ -73,6 +73,9 @@
 
   (compile-pattern [this pattern]
     (midi/compile-pattern pattern))
+
+  (compile-bind-form [this expr]
+    (midi/compile-bind-form expr))
 
   (resolve-binding [this k v]
     (midi/resolve-binding k v)))
