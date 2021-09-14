@@ -1,4 +1,5 @@
-(ns omkamra.osc.transport)
+(ns omkamra.osc.transport
+  (:refer-clojure :exclude [send]))
 
 (defprotocol Transport
   (send [_ osc-packet])
