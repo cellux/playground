@@ -2,7 +2,7 @@
   (:require
    [clojure.java.io :as jio]
    [omkamra.cowbells.midi :as midi]
-   [omkamra.sequencer.protocols :as protocols]
+   [omkamra.sequencer.protocols.Target :as Target]
    [omkamra.fluidsynth.settings :as fluid-settings]
    [omkamra.fluidsynth.synth :as fluid-synth]
    [omkamra.fluidsynth.audio.driver :as fluid-audio-driver]
@@ -36,7 +36,7 @@
   (all-sounds-off [{:keys [synth]} channel]
     (fluid-synth/all-sounds-off @synth channel))
 
-  protocols/Target
+  Target/protocol
 
   (start [this]
     (if @synth
@@ -62,8 +62,8 @@
       :already-stopped))
 
   (restart [this]
-    (protocols/stop [this])
-    (protocols/start [this]))
+    (Target/stop this)
+    (Target/start this))
 
   (get-default-bindings [this]
     midi/default-bindings)

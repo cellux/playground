@@ -45,25 +45,25 @@
  "0v-5" [:bind {:vel [:sub [:binding-of :vel] 5]} [:degree 0]]
  "0v+10" [:bind {:vel [:add [:binding-of :vel] 10]} [:degree 0]]
  "3&(minor)" [:bind {:scale :minor} [:degree 3]]
- "0>" [:bind {:shift [:add [:binding-of :shift] 1]} [:degree 0]]
- "0>2" [:bind {:shift [:add [:binding-of :shift] 2]} [:degree 0]]
- "0<" [:bind {:shift [:sub [:binding-of :shift] 1]} [:degree 0]]
- "0<2" [:bind {:shift [:sub [:binding-of :shift] 2]} [:degree 0]]
+ "0>" [:bind {:mode [:add [:binding-of :mode] 1]} [:degree 0]]
+ "0>2" [:bind {:mode [:add [:binding-of :mode] 2]} [:degree 0]]
+ "0<" [:bind {:mode [:sub [:binding-of :mode] 1]} [:degree 0]]
+ "0<2" [:bind {:mode [:sub [:binding-of :mode] 2]} [:degree 0]]
  "0@m60" [:bind {:root 60} [:degree 0]]
  "0@3" [:bind {:root [:degree->key 3]} [:degree 0]]
  "0@-5" [:bind {:root [:degree->key -5]} [:degree 0]]
  "0@f#2" [:bind {:root 30} [:degree 0]]
- "3>5.2^" [:bind {:shift [:add [:binding-of :shift] 5]
+ "3>5.2^" [:bind {:mode [:add [:binding-of :mode] 5]
                   :step [:mul [:binding-of :step] 2]
                   :oct [:add [:binding-of :oct] 1]}
            [:degree 3]]
- ">5 .2 ^ 3" [:bind {:shift [:add [:binding-of :shift] 5]
+ ">5 .2 ^ 3" [:bind {:mode [:add [:binding-of :mode] 5]
                      :step [:mul [:binding-of :step] 2]
                      :oct [:add [:binding-of :oct] 1]}
               [:degree 3]]
  "(>5 3 ,/2 .2_)~/4.2/3 %4 0@m60" [:seq
                                    [:bind {:dur 1/4
-                                           :shift [:add [:binding-of :shift] 5]
+                                           :mode [:add [:binding-of :mode] 5]
                                            :step [:mul [:binding-of :step] 2/3]
                                            :oct [:sub [:binding-of :oct] 1]}
                                     [:seq [:degree 3] [:wait 1/2]]]

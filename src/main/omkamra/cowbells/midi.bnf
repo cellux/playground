@@ -9,8 +9,9 @@ ratio = #"[+-]?[0-9]*" <"/"> #"[0-9]+"
 <num> = ratio / int
 
 program = <"p"> uint
+clear = <"---">
 
-<command> = program
+<command> = program | clear
 
 midi-note = <#"[mM]"> uint
 nao = #"[cdefgabCDEFGAB][-#][0-9]"
@@ -46,14 +47,14 @@ semi = (#"[#bB]" uint) / #"[#bB]"
 
 <pitch-mod> = oct | semi
 
-vel = <"v"> #"[+-]"? uint
+vel = <"v"> #"[*/+-]"? uint
 
 <volume-mod> = vel
 
 scale = <"&("> #"[a-z0-9]+" <")">
-shift = (#"[<>]" uint) / #"[<>]"
+mode = (#"[<>]" uint) / #"[<>]"
 
-<scale-mod> = scale | shift
+<scale-mod> = scale | mode
 
 root = <"@"> note
 

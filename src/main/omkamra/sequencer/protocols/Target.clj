@@ -1,12 +1,6 @@
-(ns omkamra.sequencer.protocols)
+(ns omkamra.sequencer.protocols.Target)
 
-(defprotocol Sequencer
-  (clear! [this])
-  (play [this pf] [this pf bindings])
-  (bpm! [this new-bpm])
-  (status [this]))
-
-(defprotocol Target
+(defprotocol protocol
   (start [this])
   (stop [this])
   (restart [this])

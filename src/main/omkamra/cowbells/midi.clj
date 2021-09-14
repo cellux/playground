@@ -4,7 +4,6 @@
    [clojure.java.io :as jio]
    [clojure.edn :as edn]
    [omkamra.sequencer :as sequencer :refer [pfn beats->ticks]]
-   [omkamra.sequencer.protocols :as protocols]
    [omkamra.clojure.util :refer [deep-merge]]
    [instaparse.core :as insta]))
 
@@ -122,7 +121,7 @@
     :semi
     :vel
     :scale
-    :shift
+    :mode
     :root})
 
 (defn binding-modifier?
@@ -171,6 +170,7 @@
                        (/ (if (empty? num) 1 (Integer/parseInt num))
                           (Integer/parseInt denom)))
     :program [:program (postprocess (first rest))]
+    :clear [:clear]
     :midi-note [:note (postprocess (first rest))]
     :scale-degree [:degree (postprocess (first rest))]
     :nao [:note (nao->midi (first rest))]
@@ -192,15 +192,19 @@
             [:semi [cmd [:binding-of :semi] amount]])
     :vel (if (string? (first rest))
            (let [[op amount] rest
-                 cmd (if (= op "+") :add :sub)
+                 cmd (case (first op)
+                       \+ :add
+                       \- :sub
+                       \* :mul
+                       \/ :div)
                  amount (postprocess amount)]
              [:vel [cmd [:binding-of :vel] amount]])
            [:vel (postprocess (first rest))])
     :scale [:scale (keyword (first rest))]
-    :shift (let [[op amount] rest
-                 cmd (if (= op ">") :add :sub)
-                 amount (if amount (postprocess amount) 1)]
-             [:shift [cmd [:binding-of :shift] amount]])
+    :mode (let [[op amount] rest
+                cmd (if (= op ">") :add :sub)
+                amount (if amount (postprocess amount) 1)]
+            [:mode [cmd [:binding-of :mode] amount]])
     :root (let [note (postprocess (first rest))]
             (case (first note)
               :note [:root (second note)]
@@ -224,8 +228,8 @@
         (sequencer/add-callback #(program-change target channel program)))))
 
 (defn degree->key
-  [{:keys [root scale oct shift semi] :as bindings} degree]
-  (let [index (+ degree shift)
+  [{:keys [root scale mode oct semi] :as bindings} degree]
+  (let [index (+ degree mode)
         scale-size (count scale)]
     (+ root
        (* 12 oct)
@@ -242,8 +246,8 @@
     (vector x)))
 
 (defn advance
-  [pattern beats]
-  (update pattern :position + (beats->ticks beats)))
+  [pattern beats tpb]
+  (update pattern :position + (beats->ticks beats tpb)))
 
 (defmethod compile-pattern :note
   [[_ note-desc & [note->key]]]
@@ -261,23 +265,20 @@
 
     :else
     (let [note note-desc]
-      (pfn [pattern {:keys [target channel vel dur step] :as bindings}]
+      (pfn [pattern {:keys [target channel vel dur step sequencer] :as bindings}]
         (assert target "target is unbound")
         (let [key (if note->key
                     (note->key bindings note)
-                    note)]
+                    note)
+              tpb (:tpb sequencer)]
           (assert (midi-note? key))
           (-> pattern
               (sequencer/add-callback
                #(note-on target channel key vel))
               (sequencer/add-callback-after
-               (and dur (sequencer/beats->ticks dur))
+               (and dur (beats->ticks dur tpb))
                #(note-off target channel key))
-              (advance step)))))))
-
-(defmethod compile-pattern :nw
-  [[_ note wait]]
-  [:seq [:note note] [:wait wait]])
+              (advance step tpb)))))))
 
 (defmethod compile-pattern :degree
   [[_ degrees]]
@@ -314,6 +315,6 @@
    :scale (scales :major)
    :vel 96
    :oct 0
-   :shift 0
+   :mode 0
    :semi 0
    :step 1})

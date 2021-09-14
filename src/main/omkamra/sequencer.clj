@@ -1,10 +1,11 @@
 (ns omkamra.sequencer
-  (:require [clojure.stacktrace :refer [print-cause-trace]])
-  (:require [omkamra.sequencer.protocols :as proto])
-  (:import (java.util.concurrent TimeUnit)))
+  (:require [omkamra.sequencer.protocols.Sequencer :as Sequencer]
+            [omkamra.sequencer.protocols.Target :as Target])
+  (:import (java.util.concurrent TimeUnit))
+  (:require [clojure.stacktrace :refer [print-cause-trace]]))
 
 (def thread-sleep-precision-ns
-  "this should be figured out adaptively"
+  "maybe this could be figured out adaptively"
   (.toNanos TimeUnit/MILLISECONDS 2))
 
 (defn nanosleep
@@ -17,10 +18,6 @@
             (.sleep TimeUnit/NANOSECONDS sleep-dur))
           (Thread/yield))
         (recur (- end (System/nanoTime)))))))
-
-(def ^:private tpb
-  "Number of ticks per beat"
-  64)
 
 (defn beats->ms
   [beats bpm]
@@ -35,17 +32,17 @@
       (* 1000 1000)))
 
 (defn beats->ticks
-  [beats]
+  [beats tpb]
   (* beats tpb))
 
 (defn ticks->ms
-  [ticks bpm]
+  [ticks tpb bpm]
   (let [beats-per-tick (/ 1.0 tpb)]
     (beats->ms (* ticks beats-per-tick) bpm)))
 
 (defn ticks->ns
-  [ticks bpm]
-  (-> (ticks->ms ticks bpm)
+  [ticks tpb bpm]
+  (-> (ticks->ms ticks tpb bpm)
       (* 1000 1000)))
 
 (defn switch!
@@ -96,110 +93,12 @@
 
 (def ^:dynamic *compile-target* nil)
 
-(defrecord Sequencer [config bpm
-                      timeline position pattern-queue
-                      playing player-thread
-                      targets]
-
-  proto/Sequencer
-
-  (clear! [this]
-    (reset! timeline {})
-    (reset! pattern-queue [])
-    :cleared)
-
-  (play [this pf bindings]
-    (proto/start this)
-    (let [init-pattern {:position 0
-                        :align 1
-                        :events []}
-          init-bindings (assoc bindings :sequencer this)
-          pattern (pf init-pattern init-bindings)]
-      (swap! pattern-queue conj pattern)
-      :queued))
-
-  (play [this pf]
-    (proto/play this pf {}))
-
-  (bpm! [this new-bpm]
-    (reset! bpm new-bpm))
-
-  (status [this]
-    {:bpm @bpm
-     :playing @playing
-     :timeline @timeline
-     :position @position
-     :pattern-queue @pattern-queue})
-
-  proto/Target
-
-  (start [this]
-    (if @playing
-      :already-playing
-      (let [targets @targets]
-        (doseq [t targets]
-          (proto/start t))
-        (reset! playing true)
-        (reset! player-thread
-                (future
-                  (try
-                    (loop [pos @position
-                           tl @timeline]
-                      (if @playing
-                        (let [tick-start (System/nanoTime)]
-                          (when-let [callbacks (get tl pos)]
-                            (doseq [cb callbacks]
-                              (cb)))
-                          (let [pq (switch! pattern-queue [])]
-                            (swap! timeline merge-pattern-queue pos pq))
-                          (let [tick-duration (ticks->ns 1 @bpm)
-                                elapsed (- (System/nanoTime) tick-start)
-                                remaining (- tick-duration elapsed)]
-                            (nanosleep remaining))
-                          (recur (swap! position inc)
-                                 (swap! timeline dissoc pos)))
-                        :stopped))
-                    (catch Exception e
-                      (print-cause-trace e)
-                      :crashed)
-                    (finally
-                      (doseq [t targets]
-                        (proto/stop t))))))
-        :started)))
-
-  (stop [this]
-    (do
-      (reset! playing false)
-      @@player-thread))
-
-  (restart [this]
-    (proto/stop this)
-    (proto/start this)))
-
-(defn create-sequencer
-  ([config]
-   (map->Sequencer {:config config
-                    :bpm (atom (get config :bpm 120))
-                    :playing (atom false)
-                    :timeline (atom {})
-                    :position (atom 0)
-                    :pattern-queue (atom [])
-                    :player-thread (atom nil)
-                    :targets registered-targets}))
-  ([]
-   (create-sequencer {})))
-
-(def new create-sequencer)
-
-(def ^:dynamic *sequencer* (create-sequencer))
-
-(defn clear! [] (proto/clear! *sequencer*))
-(defn status [] (proto/status *sequencer*))
-(defn start [] (proto/start *sequencer*))
-(defn stop [] (proto/stop *sequencer*))
-(defn restart [] (proto/restart *sequencer*))
-
 ;; patterns
+
+(def init-pattern
+  {:position 0
+   :align 1
+   :events []})
 
 (defn add-callback
   [{:keys [position] :as pattern} callback]
@@ -230,12 +129,6 @@
 
 (defmulti compile-pattern first)
 
-(defmethod compile-pattern :default
-  [pattern]
-  (if *compile-target*
-    (proto/compile-pattern *compile-target* pattern)
-    (throw (ex-info "unable to compile pattern" {:pattern pattern}))))
-
 (defn compile-form
   [x]
   (if (pattern-function? x)
@@ -249,8 +142,14 @@
              (set? x) (compile-pattern (cons :mix x))
              (nil? x) (compile-pattern [:nop])
              :else (if *compile-target*
-                     (proto/compile-form *compile-target* x)
+                     (Target/compile-form *compile-target* x)
                      (throw (ex-info "unable to compile form" {:form x})))))))
+
+(defmethod compile-pattern :default
+  [pattern]
+  (if *compile-target*
+    (Target/compile-pattern *compile-target* pattern)
+    (throw (ex-info "unable to compile pattern" {:pattern pattern}))))
 
 (defmethod compile-pattern :nop
   [[_]]
@@ -265,16 +164,23 @@
 (defmethod compile-pattern :align
   [[_ align]]
   (pfn [pattern bindings]
-    (let [step (:step bindings)]
-      (assoc pattern :align (beats->ticks (* align step))))))
+    (let [{:keys [step sequencer]} bindings
+          tpb (:tpb sequencer)]
+      (assoc pattern :align (beats->ticks (* align step) tpb)))))
+
+(defmethod compile-pattern :clear
+  [[_]]
+  (pfn [pattern bindings]
+    init-pattern))
 
 (defmethod compile-pattern :wait
   [[_ steps]]
   (if (zero? steps)
     (compile-pattern [:nop])
     (pfn [pattern bindings]
-      (let [step (:step bindings)
-            ticks (beats->ticks (* steps step))]
+      (let [{:keys [step sequencer]} bindings
+            tpb (:tpb sequencer)
+            ticks (beats->ticks (* steps step) tpb)]
         (if (pos? ticks)
           (update pattern :position + ticks)
           (update pattern :position align-position (- ticks)))))))
@@ -331,7 +237,7 @@
       ;; merge-pattern-queue takes care of ensuring that the actually
       ;; scheduled position is not in the past
       (let [sched-pos (- position 2)
-            callback #(future (proto/play sequencer pf bindings))]
+            callback #(future (Sequencer/play sequencer pf bindings))]
         (update pattern :events conj [sched-pos callback])))))
 
 (declare compile-bind-expr)
@@ -341,7 +247,7 @@
 (defmethod compile-bind-form :default
   [form]
   (if *compile-target*
-    (proto/compile-bind-form *compile-target* form)
+    (Target/compile-bind-form *compile-target* form)
     (throw (ex-info "unable to compile bind form" {:form form}))))
 
 (defmethod compile-bind-form :add
@@ -388,7 +294,7 @@
 
 (defn resolve-binding
   [key value]
-  (or (and *compile-target* (proto/resolve-binding *compile-target* key value))
+  (or (and *compile-target* (Target/resolve-binding *compile-target* key value))
       value))
 
 (defn bindings->updater
@@ -404,7 +310,7 @@
 
 (defn get-default-bindings
   []
-  (or (and *compile-target* (proto/get-default-bindings *compile-target*))
+  (or (and *compile-target* (Target/get-default-bindings *compile-target*))
       {}))
 
 (defmethod compile-pattern :bind
@@ -421,13 +327,122 @@
                              (merge bindings)
                              update-bindings)))))))
 
+;; sequencer
+
+(defrecord Sequencer [config bpm tpb
+                      timeline position pattern-queue
+                      playing player-thread
+                      targets]
+
+  Sequencer/protocol
+
+  (clear! [this]
+    (reset! timeline {})
+    (reset! pattern-queue [])
+    :cleared)
+
+  (play [this pf bindings]
+    (Target/start this)
+    (let [init-pattern init-pattern
+          init-bindings (assoc bindings :sequencer this)
+          pf (compile-form pf)
+          pattern (pf init-pattern init-bindings)]
+      (swap! pattern-queue conj pattern)
+      :queued))
+
+  (play [this pf]
+    (Sequencer/play this pf {}))
+
+  (bpm! [this new-bpm]
+    (reset! bpm new-bpm))
+
+  (status [this]
+    {:bpm @bpm
+     :tpb tpb
+     :playing @playing
+     :timeline @timeline
+     :position @position
+     :pattern-queue @pattern-queue})
+
+  Target/protocol
+
+  (start [this]
+    (if @playing
+      :already-playing
+      (let [targets @targets]
+        (doseq [t targets]
+          (Target/start t))
+        (reset! playing true)
+        (reset! player-thread
+                (future
+                  (try
+                    (loop [pos @position
+                           tl @timeline]
+                      (if @playing
+                        (let [tick-start (System/nanoTime)]
+                          (when-let [callbacks (get tl pos)]
+                            (doseq [cb callbacks]
+                              (cb)))
+                          (let [pq (switch! pattern-queue [])]
+                            (swap! timeline merge-pattern-queue pos pq))
+                          (let [tick-duration (ticks->ns 1 tpb @bpm)
+                                elapsed (- (System/nanoTime) tick-start)
+                                remaining (- tick-duration elapsed)]
+                            (nanosleep remaining))
+                          (recur (swap! position inc)
+                                 (swap! timeline dissoc pos)))
+                        :stopped))
+                    (catch Exception e
+                      (print-cause-trace e)
+                      :crashed)
+                    (finally
+                      (doseq [t targets]
+                        (Target/stop t))))))
+        :started)))
+
+  (stop [this]
+    (do
+      (reset! playing false)
+      @@player-thread))
+
+  (restart [this]
+    (Target/stop this)
+    (Target/start this)))
+
+(defn create-sequencer
+  ([config]
+   (map->Sequencer {:config config
+                    :bpm (atom (get config :bpm 120))
+                    :tpb (get config :tpb 64)
+                    :playing (atom false)
+                    :timeline (atom {})
+                    :position (atom 0)
+                    :pattern-queue (atom [])
+                    :player-thread (atom nil)
+                    :targets registered-targets}))
+  ([]
+   (create-sequencer {})))
+
+(def new create-sequencer)
+
+(def ^:dynamic *sequencer* (create-sequencer))
+
+(defn clear! [] (Sequencer/clear! *sequencer*))
+(defn play [& args] (apply Sequencer/play *sequencer* args))
+(defn bpm! [new-bpm] (Sequencer/bpm! *sequencer* new-bpm))
+(defn status [] (Sequencer/status *sequencer*))
+
+(defn start [] (Target/start *sequencer*))
+(defn stop [] (Target/stop *sequencer*))
+(defn restart [] (Target/restart *sequencer*))
+
 (defmacro deftarget
   [name target]
   `(do
      (when-let [tv# (resolve '~name)]
        (let [t# (var-get tv#)]
          (when (contains? @registered-targets t#)
-           (proto/stop t#)
+           (Target/stop t#)
            (unregister-target t#))))
      (def ~name ~target)
      (register-target ~name)
@@ -444,7 +459,7 @@
   [name & body]
   `(do
      (defpattern ~name ~@body)
-     (proto/play *sequencer* ~name)))
+     (Sequencer/play *sequencer* ~name)))
 
 (defmacro defpattern<
   [name & body]
