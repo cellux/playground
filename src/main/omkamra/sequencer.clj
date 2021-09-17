@@ -459,7 +459,7 @@
   [name & body]
   `(do
      (defpattern ~name ~@body)
-     (Sequencer/play *sequencer* ~name)))
+     (omkamra.sequencer.protocols.Sequencer/play *sequencer* ~name)))
 
 (defmacro defpattern<
   [name & body]
