@@ -178,7 +178,8 @@
             [:wait (if length (postprocess length) 1)])
     :align [:wait (- (postprocess (first rest)))]
     :channel [:channel (postprocess (first rest))]
-    :dur [:dur (postprocess (first rest))]
+    :dur (let [[beats] rest]
+           [:dur (if beats (postprocess beats) nil)])
     :step [:step [:mul
                   [:binding-of :step]
                   (postprocess (first rest))]]
@@ -276,7 +277,9 @@
               (sequencer/add-callback
                #(note-on target channel key vel))
               (sequencer/add-callback-after
-               (and dur (beats->ticks dur tpb))
+               ;; we decrease dur by one tick to ensure that a
+               ;; successive note at the same pitch isn't cut
+               (and dur (pos? dur) (dec (beats->ticks dur tpb)))
                #(note-off target channel key))
               (advance step tpb)))))))
 

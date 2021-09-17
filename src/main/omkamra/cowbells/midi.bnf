@@ -37,7 +37,7 @@ channel = <"c"> uint
 
 <env-mod> = channel
 
-dur = <"~"> unum
+dur = (<"~"> unum) / <"~">
 step = <"."> unum
 
 <time-mod> = dur | step

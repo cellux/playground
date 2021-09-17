@@ -30,6 +30,7 @@
  "0~2" [:bind {:dur 2} [:degree 0]]
  "0~1/2" [:bind {:dur 1/2} [:degree 0]]
  "0~/2" [:bind {:dur 1/2} [:degree 0]]
+ "0~" [:bind {:dur nil} [:degree 0]]
  "0.2" [:bind {:step [:mul [:binding-of :step] 2]} [:degree 0]]
  "0.1/2" [:bind {:step [:mul [:binding-of :step] 1/2]} [:degree 0]]
  "0./2" [:bind {:step [:mul [:binding-of :step] 1/2]} [:degree 0]]
