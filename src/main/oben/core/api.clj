@@ -5,9 +5,57 @@
   (:require [clojure.walk :as walk]))
 
 (defn make-tid
+  "Generates a namespaced keyword to identify a type or type class."
   [& name-components]
   (keyword (str (ns-name *ns*))
            (str/join "." name-components)))
+
+(defn has-kind?
+  [kind obj]
+  (= kind (:kind (meta obj))))
+
+;; type classes
+
+(defn typeclass?
+  [t]
+  (and (fn? t) (has-kind? :oben/TYPECLASS t)))
+
+(declare constant->value)
+
+(defn replace-constant-nodes-with-their-values
+  [args]
+  (walk/postwalk constant->value args))
+
+(clj/defmacro define-typeclass
+  [name parents & fdecl]
+  (let [typeclass-id (make-tid name)]
+    `(let [tid-counter# (atom 0)
+           constructor# (fn ~@fdecl)
+           construct-type# (memoize
+                            (fn [args#]
+                              (let [tid# (make-tid '~name (swap! tid-counter# inc))]
+                                (derive tid# ~typeclass-id)
+                                (-> (apply constructor# args#)
+                                    (vary-meta
+                                     merge {:class ~typeclass-id
+                                            :tid tid#})))))]
+       (def ~name
+         (with-meta
+           (fn [& args#]
+             (construct-type# (replace-constant-nodes-with-their-values args#)))
+           {:kind :oben/TYPECLASS
+            :tid ~typeclass-id}))
+       ~@(for [p parents]
+           `(derive ~typeclass-id ~p))
+       #'~name)))
+
+(def tid-of-typeclass (comp :tid meta))
+
+;; types
+
+(defn type?
+  [t]
+  (and (fn? t) (has-kind? :oben/TYPE t)))
 
 (defn make-type
   {:style/indent 1}
@@ -16,47 +64,6 @@
          merge
          {:kind :oben/TYPE}
          opts))
-
-(defn type?
-  [t]
-  (and (fn? t)
-       (= :oben/TYPE (:kind (meta t)))))
-
-(declare constant-value)
-
-(defn replace-constant-nodes-with-values
-  [args]
-  (walk/postwalk constant-value args))
-
-(clj/defmacro define-typeclass
-  [name parents & fdecl]
-  (let [typeclass-tid (make-tid name)]
-    `(let [tid-counter# (atom 0)
-           constructor# (fn ~@fdecl)
-           construct-type# (memoize
-                            (fn [args#]
-                              (let [tid# (make-tid '~name (swap! tid-counter# inc))]
-                                (derive tid# ~typeclass-tid)
-                                (-> (apply constructor# args#)
-                                    (vary-meta
-                                     merge {:class ~typeclass-tid
-                                            :tid tid#})))))]
-       (def ~name
-         (with-meta
-           (fn [& args#]
-             (construct-type# (replace-constant-nodes-with-values args#)))
-           {:kind :oben/TYPECLASS
-            :tid ~typeclass-tid}))
-       ~@(for [p parents]
-           `(derive ~typeclass-tid ~p))
-       #'~name)))
-
-(defn typeclass?
-  [t]
-  (and (fn? t)
-       (= :oben/TYPECLASS (:kind (meta t)))))
-
-(def tid-of-typeclass (comp :tid meta))
 
 (clj/defmacro define-type
   ([name constructor-form parents]
@@ -81,17 +88,18 @@
         (typeclass? x) (tid-of-typeclass x)
         :else (throw (ex-info "expected type or typeclass" {:arg x}))))
 
+;; nodes
+
 (defn node?
   [x]
-  (and (fn? x)
-       (= :oben/NODE (:kind (meta x)))))
+  (and (fn? x) (has-kind? :oben/NODE x)))
 
 (def nodeclass-of (comp :class meta))
 
 (def type-of-node (comp :type meta))
 (def type-of type-of-node)
 
-(def tid-of-node (comp tid-of-type type-of))
+(def tid-of-node (comp tid-of-type type-of-node))
 
 (derive :oben/HostValue :oben/Any)
 
@@ -148,7 +156,8 @@
 ;; get-ubertype
 
 (clj/defmulti get-ubertype
-  "Returns the closest type to which both `t1` and `t2` can be cast to."
+  "Returns the closest type to which both `t1` and `t2` can be cast
+  to. If there is no such type, returns nil."
   (fn [t1 t2] [(tid-of-type t1)
                (tid-of-type t2)]))
 
@@ -179,21 +188,19 @@
   (and (node? x)
        (= (nodeclass-of x) :oben/constant)))
 
-(defn constant-value
+(defn constant->value
+  "If the argument is a constant node, return its value.
+  Otherwise return the argument unchanged."
   [x]
   (if (constant-node? x)
-    (:value (meta x))
+    (:host-value (meta x))
     x))
 
 (defn fnode?
+  "Returns true if the argument is an AST node representing an Oben function."
   [x]
   (and (node? x)
        (= (nodeclass-of x) :oben/fn)))
-
-(defn- oben-fn?
-  [x]
-  (and (fn? x)
-       (= :oben/FN (:kind (meta x)))))
 
 (clj/defmacro defmacro
   [& args]
@@ -204,10 +211,10 @@
 
 (defn oben-macro?
   [x]
-  (and (fn? x)
-       (= :oben/MACRO (:kind (meta x)))))
+  (and (fn? x) (has-kind? :oben/MACRO x)))
 
 (clj/defmacro defmulti
+  "Defines a multi-fn that dispatches by the tid of its arguments."
   [name]
   `(clj/defmulti ~name
      (comp (partial mapv tid-of-value) vector)))
@@ -233,10 +240,10 @@
 
 (defn- find-oben-var
   [sym]
-  (let [ns-oben-core (the-ns 'oben.core)
+  (let [oben-core-ns (the-ns 'oben.core)
         sym-without-ns (symbol (name sym))
-        v (ns-resolve ns-oben-core sym-without-ns)]
-    (if (var-in-namespace? v ns-oben-core)
+        v (ns-resolve oben-core-ns sym-without-ns)]
+    (if (var-in-namespace? v oben-core-ns)
       v nil)))
 
 (defn- find-clojure-var
@@ -294,6 +301,10 @@
         form))
     form))
 
+(defn tagged?
+  [x]
+  (:tag (meta x)))
+
 (defn move-types-to-tags
   [expr]
   (assert (sequential? expr))
@@ -301,7 +312,7 @@
          forms (seq expr)
          m nil]
     (if-let [head (first forms)]
-      (cond (:tag (meta head))
+      (cond (tagged? head)
             (recur (conj result (if (vector? head)
                                   (with-meta
                                     (move-types-to-tags head)
@@ -322,10 +333,6 @@
       (cond (list? expr) (apply list result)
             (vector? expr) result
             :else (seq result)))))
-
-(defn tagged?
-  [x]
-  (:tag (meta x)))
 
 (defn quote-all-except-locals
   [form env]
@@ -350,7 +357,7 @@
 
                      :else form)]
     (if (and (instance? clojure.lang.IMeta form) (meta form))
-      (if (:tag (meta form))
+      (if (tagged? form)
         (list 'with-meta
               result
               (update (meta form) :tag quote-all-except-locals env))

@@ -17,11 +17,11 @@
 
 (defn make-constant-node
   {:style/indent 1}
-  [type value compile-fn]
+  [type host-value compile-fn]
   (make-node type
              compile-fn
              {:class :oben/constant
-              :value value}))
+              :host-value host-value}))
 
 (defn funcall
   [op args]

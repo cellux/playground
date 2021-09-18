@@ -14,20 +14,20 @@
 
 (defn get-ctx
   [f]
-  (assert (= (:kind (meta f)) :oben/FN))
+  (assert (oben/fn? f))
   (let [fnode (:oben/node (meta f))]
     (-> oben/*ctx*
         (ctx/next-epoch)
         (ctx/forget-node fnode)
         (ctx/compile-node fnode))))
 
-(defn get-m
+(defn get-module
   [f]
   (:m (get-ctx f)))
 
 (defn get-ir
   [f]
-  (ir/render-module (get-m f)))
+  (ir/render-module (get-module f)))
 
 (defn dump-ir
   [f]
@@ -73,7 +73,8 @@
   (let [f (oben/fn (Number/UInt 32) []
             (+ 5 2))]
     (m/fact
-     "a list before the param vector is evaluated and moved to the type tag"
+     "a list before the param vector is evaluated and moved to the
+     vector's type tag"
      (f) => 7)))
 
 (oben/with-temp-context
@@ -232,7 +233,7 @@
 (m/fact (o/type-of (ast/parse '(u8 -5))) => (m/exactly Number/%u8))
 (m/fact
  "reinterpreting a signed value as unsigned does not change its bit pattern"
- (o/constant-value (ast/parse '(u8 -5))) => -5)
+ (o/constant->value (ast/parse '(u8 -5))) => -5)
 
 (m/fact
  "negating an UInt turns it into an SInt"
@@ -881,7 +882,7 @@
   [form value]
   `(let [result# (ast/parse '~form)]
      (m/fact (o/constant-node? result#) => m/truthy)
-     (m/fact (o/constant-value result#) => ~value)))
+     (m/fact (o/constant->value result#) => ~value)))
 
 (m/facts
  (parses-to-constant-value 0 0)

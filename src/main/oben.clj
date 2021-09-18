@@ -1,16 +1,16 @@
 (ns oben
-  (:refer-clojure :exclude [fn defn defmacro defmulti defmethod])
+  (:refer-clojure :exclude [fn fn? defn defmacro defmulti defmethod])
   (:require [clojure.core :as clj])
   (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.ast :as ast])
-  (:require [oben.core.types.Array :as Array])
+  (:require [oben.core.types.Array])
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.engine :as llvm-engine]))
 
 (def ^:dynamic *ctx* (ctx/new))
 
-(clj/defn set-*ctx*!
+(clj/defn set-ctx!
   [new-ctx]
   (if (thread-bound? #'*ctx*)
     (set! *ctx* new-ctx)
@@ -35,7 +35,7 @@
   `(with-context (ctx/new)
      ~@body))
 
-(def Array Array/Array)
+(def Array oben.core.types.Array/Array)
 
 (clj/defn make-fn
   [name params body]
@@ -49,9 +49,14 @@
               ctx (ctx/assemble-module ctx)
               invoker (ctx/invoker ctx f)
               result (apply invoker args)]
-          (set-*ctx*! ctx)
+          (set-ctx! ctx)
           result))
       {:kind :oben/FN :oben/node fnode})))
+
+(clj/defn fn?
+  "Returns true if the argument is a Clojure wrapper around an Oben function."
+  [x]
+  (and (clj/fn? x) (o/has-kind? :oben/FN x)))
 
 (clj/defmacro fn
   [& decl]

@@ -16,7 +16,7 @@
 (defn allocate-ftab
   [size]
   (.asLongBuffer
-   (doto (ByteBuffer/allocateDirect size)
+   (doto (ByteBuffer/allocateDirect (* size Long/BYTES))
      (.order (ByteOrder/nativeOrder)))))
 
 (def blockbin-ids [:entry :init :main :exit])
@@ -270,8 +270,9 @@
 
 (defn collect-blocks
   [ctx]
-  (let [referenced-block? (set (concat (vals (get-in ctx [:fdata :label-blocks]))
-                                       (mapcat keys (vals (get-in ctx [:fdata :return-values])))))]
+  (let [label-blocks (vals (get-in ctx [:fdata :label-blocks]))
+        return-blocks (mapcat keys (vals (get-in ctx [:fdata :return-values])))
+        referenced-block? (set (concat label-blocks return-blocks))]
     (letfn [(collect? [bb]
               (or (:name bb)
                   (seq (:instructions bb))
@@ -314,7 +315,7 @@
 
 (defn get-function-address
   [ctx f]
-  (let [ee (get-in ctx [:llvm :ee])]
+  (let [ee (get-llvm-execution-engine ctx)]
     (llvm-engine/get-function-address ee (str (:name f)))))
 
 (defn jnr-type-of

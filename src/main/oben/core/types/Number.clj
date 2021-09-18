@@ -218,12 +218,12 @@
   `(defn ~op
      [~'node ~'size]
      (let [node-type# (o/type-of ~'node)
-           result-size# (o/constant-value ~'size)
+           result-size# (o/constant->value ~'size)
            result-type# (resize node-type# result-size#)]
        (if (o/constant-node? ~'node)
          (make-constant-number-node result-type#
                                     (~(resize-constant-fns op)
-                                     (o/constant-value ~'node)
+                                     (o/constant->value ~'node)
                                      result-size#))
          (ast/make-node result-type#
            (fn [ctx#]
@@ -250,10 +250,10 @@
   `(defn ~op
      [~'node ~'size]
      (let [node-type# (o/type-of ~'node)
-           result-size# (o/constant-value ~'size)
+           result-size# (o/constant->value ~'size)
            result-type# (~result-typeclass result-size#)]
        (if (o/constant-node? ~'node)
-         (make-constant-number-node result-type# (~const-op (o/constant-value ~'node)))
+         (make-constant-number-node result-type# (~const-op (o/constant->value ~'node)))
          (ast/make-node result-type#
            (fn [ctx#]
              (let [ctx# (ctx/compile-type ctx# result-type#)
@@ -280,7 +280,7 @@
   (let [t-size (:size (meta t))
         node-size (:size (meta (o/type-of node)))
         real-size (if (o/constant-node? node)
-                    (integer-size (o/constant-value node))
+                    (integer-size (o/constant->value node))
                     node-size)]
     (cond
       (= t-size node-size)
@@ -298,7 +298,7 @@
   (let [t-size (:size (meta t))
         node-size (:size (meta (o/type-of node)))
         real-size (if (o/constant-node? node)
-                    (integer-size (o/constant-value node))
+                    (integer-size (o/constant->value node))
                     node-size)
         unsigned-type (UInt node-size)
         unsigned-node (vary-meta node assoc :type unsigned-type)]
@@ -318,7 +318,7 @@
   (let [t-size (:size (meta t))
         node-size (:size (meta (o/type-of node)))
         real-size (if (o/constant-node? node)
-                    (float-size (o/constant-value node))
+                    (float-size (o/constant->value node))
                     node-size)]
     (cond
       (or (>= t-size node-size) (<= real-size t-size) force?)
@@ -332,7 +332,7 @@
   (let [t-size (:size (meta t))
         node-size (:size (meta (o/type-of node)))
         real-size (if (o/constant-node? node)
-                    (integer-size (o/constant-value node))
+                    (integer-size (o/constant->value node))
                     node-size)]
     (cond (= t-size node-size)
           node
@@ -349,7 +349,7 @@
   (let [t-size (:size (meta t))
         node-size (:size (meta (o/type-of node)))
         real-size (if (o/constant-node? node)
-                    (integer-size (o/constant-value node))
+                    (integer-size (o/constant->value node))
                     node-size)
         signed-type (SInt node-size)
         signed-node (vary-meta node assoc :type signed-type)]
@@ -368,7 +368,7 @@
   (let [t-size (:size (meta t))
         node-size (:size (meta (o/type-of node)))
         real-size (if (o/constant-node? node)
-                    (float-size (o/constant-value node))
+                    (float-size (o/constant->value node))
                     node-size)]
     (cond (or (>= t-size node-size) (<= real-size t-size) force?)
           (fptosi node t-size)
@@ -381,7 +381,7 @@
   (let [t-size (:size (meta t))
         node-size (:size (meta (o/type-of node)))
         real-size (if (o/constant-node? node)
-                    (float-size (o/constant-value node))
+                    (float-size (o/constant->value node))
                     node-size)]
     (cond (= t-size node-size)
           node
@@ -418,8 +418,8 @@
                  (if (and (o/constant-node? ~'lhs)
                           (o/constant-node? ~'rhs))
                    (o/parse-host-value (~const-op
-                                        (o/constant-value ~'lhs)
-                                        (o/constant-value ~'rhs)))
+                                        (o/constant->value ~'lhs)
+                                        (o/constant->value ~'rhs)))
                    (ast/make-node result-type#
                      (fn [~'ctx]
                        (let [compile-op# (fn [~'ctx]
