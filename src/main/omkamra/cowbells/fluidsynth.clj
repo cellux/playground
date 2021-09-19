@@ -74,8 +74,8 @@
   (compile-pattern [this pattern]
     (midi/compile-pattern pattern))
 
-  (compile-bind-form [this expr]
-    (midi/compile-bind-form expr))
+  (compile-bind-expr [this k expr]
+    (midi/compile-bind-expr k expr))
 
   (resolve-binding [this k v]
     (midi/resolve-binding k v)))

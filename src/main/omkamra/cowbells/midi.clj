@@ -180,17 +180,15 @@
     :channel [:channel (postprocess (first rest))]
     :dur (let [[beats] rest]
            [:dur (if beats (postprocess beats) nil)])
-    :step [:step [:mul
-                  [:binding-of :step]
-                  (postprocess (first rest))]]
+    :step [:step [:mul (postprocess (first rest))]]
     :oct (let [[op amount] rest
                cmd (if (= op "^") :add :sub)
                amount (if amount (postprocess amount) 1)]
-           [:oct [cmd [:binding-of :oct] amount]])
+           [:oct [cmd amount]])
     :semi (let [[op amount] rest
                 cmd (if (= op "#") :add :sub)
                 amount (if amount (postprocess amount) 1)]
-            [:semi [cmd [:binding-of :semi] amount]])
+            [:semi [cmd amount]])
     :vel (if (string? (first rest))
            (let [[op amount] rest
                  cmd (case (first op)
@@ -199,13 +197,13 @@
                        \* :mul
                        \/ :div)
                  amount (postprocess amount)]
-             [:vel [cmd [:binding-of :vel] amount]])
+             [:vel [cmd amount]])
            [:vel (postprocess (first rest))])
     :scale [:scale (keyword (first rest))]
     :mode (let [[op amount] rest
                 cmd (if (= op ">") :add :sub)
                 amount (if amount (postprocess amount) 1)]
-            [:mode [cmd [:binding-of :mode] amount]])
+            [:mode [cmd amount]])
     :root (let [note (postprocess (first rest))]
             (case (first note)
               :note [:root (second note)]
@@ -299,15 +297,17 @@
     (assert target "target is unbound")
     (sequencer/add-callback pattern #(all-sounds-off target channel))))
 
-(defmulti compile-bind-form first)
+(defmulti compile-bind-expr
+  (fn [k expr]
+    (first expr)))
 
-(defmethod compile-bind-form :default
-  [form]
-  (throw (ex-info "unable to compile bind form" {:form form})))
+(defmethod compile-bind-expr :default
+  [k expr]
+  (throw (ex-info "unable to compile bind expression" {:expr expr})))
 
-(defmethod compile-bind-form :degree->key
-  [[_ degree]]
-  (let [degree (sequencer/compile-bind-expr degree)]
+(defmethod compile-bind-expr :degree->key
+  [k [_ degree]]
+  (let [degree (sequencer/compile-binding k degree)]
     (fn [bindings]
       (let [degree (degree bindings)]
         (degree->key bindings degree)))))

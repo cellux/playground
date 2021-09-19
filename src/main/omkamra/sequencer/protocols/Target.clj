@@ -7,5 +7,5 @@
   (get-default-bindings [this])
   (compile-form [this form])
   (compile-pattern [this pattern])
-  (compile-bind-form [this expr])
+  (compile-bind-expr [this k expr])
   (resolve-binding [this k v]))

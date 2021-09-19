@@ -241,72 +241,60 @@
             callback #(future (Sequencer/play sequencer pf bindings))]
         (update pattern :events conj [sched-pos callback])))))
 
-(declare compile-bind-expr)
-
-(defmulti compile-bind-form first)
-
-(defmethod compile-bind-form :default
-  [form]
-  (if *compile-target*
-    (Target/compile-bind-form *compile-target* form)
-    (throw (ex-info "unable to compile bind form" {:form form}))))
-
-(defmethod compile-bind-form :add
-  [[_ x y]]
-  (let [x (compile-bind-expr x)
-        y (compile-bind-expr y)]
-    (fn [bindings] (+ (x bindings) (y bindings)))))
-
-(defmethod compile-bind-form :sub
-  [[_ x y]]
-  (let [x (compile-bind-expr x)
-        y (compile-bind-expr y)]
-    (fn [bindings] (- (x bindings) (y bindings)))))
-
-(defmethod compile-bind-form :mul
-  [[_ x y]]
-  (let [x (compile-bind-expr x)
-        y (compile-bind-expr y)]
-    (fn [bindings] (* (x bindings) (y bindings)))))
-
-(defmethod compile-bind-form :div
-  [[_ x y]]
-  (let [x (compile-bind-expr x)
-        y (compile-bind-expr y)]
-    (fn [bindings] (/ (x bindings) (y bindings)))))
-
-(defmethod compile-bind-form :binding-of
-  [[_ k]]
-  (let [k (compile-bind-expr k)]
-    (fn [bindings]
-      (let [k (k bindings)]
-        (get bindings k)))))
-
-(defn bind-form?
-  [x]
-  (and (vector? x)
-       (keyword? (first x))))
-
-(defn compile-bind-expr
-  [x]
-  (if (bind-form? x)
-    (compile-bind-form x)
-    (fn [bindings] x)))
-
 (defn resolve-binding
   [key value]
   (or (and *compile-target* (Target/resolve-binding *compile-target* key value))
       value))
 
+(defn bind-expr?
+  [x]
+  (and (vector? x)
+       (keyword? (first x))))
+
+(defmulti compile-bind-expr
+  (fn [k expr]
+    (first expr)))
+
+(defn compile-binding
+  [k form]
+  (if (bind-expr? form)
+    (compile-bind-expr k form)
+    (constantly (resolve-binding k form))))
+
+(defmethod compile-bind-expr :default
+  [k expr]
+  (if *compile-target*
+    (Target/compile-bind-expr *compile-target* k expr)
+    (throw (ex-info "unable to compile bind expression" {:expr expr}))))
+
+(defmacro compile-binop-bind-expr
+  [name op]
+  `(defmethod compile-bind-expr ~name
+     [~'k [~'_ ~'x ~'y]]
+     (if ~'y
+       (let [~'x (compile-binding ~'k ~'x)
+             ~'y (compile-binding ~'k ~'y)]
+         (fn [~'bindings] (~op (~'x ~'bindings) (~'y ~'bindings))))
+       (compile-bind-expr ~'k [~name [:binding-of ~'k] ~'x]))))
+
+(compile-binop-bind-expr :add +)
+(compile-binop-bind-expr :sub -)
+(compile-binop-bind-expr :mul *)
+(compile-binop-bind-expr :div /)
+
+(defmethod compile-bind-expr :binding-of
+  [k [_ arg]]
+  (let [arg (compile-binding k arg)]
+    (fn [bindings]
+      (let [arg (arg bindings)]
+        (get bindings arg)))))
+
 (defn bindings->updater
   [bindings]
   (reduce-kv
    (fn [f k v]
-     (if (bind-form? v)
-       (let [calculate-bind-value (compile-bind-form v)]
-         (comp #(assoc % k (calculate-bind-value %)) f))
-       (let [v (resolve-binding k v)]
-         (comp #(assoc % k v) f))))
+     (let [calculate-bind-value (compile-binding k v)]
+       (comp #(assoc % k (calculate-bind-value %)) f)))
    identity bindings))
 
 (defn get-default-bindings
