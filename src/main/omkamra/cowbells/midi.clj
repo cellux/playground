@@ -8,7 +8,8 @@
    [instaparse.core :as insta]))
 
 (def scale-steps
-  {:major [2 2 1 2 2 2]
+  {:chroma [1 1 1 1 1 1 1 1 1 1 1]
+   :major [2 2 1 2 2 2]
    :minor [2 1 2 2 1 2]
    :harmonic-minor [2 1 2 2 1 3]})
 
