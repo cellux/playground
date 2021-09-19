@@ -442,12 +442,18 @@
   `(do
      (when-let [tv# (resolve '~name)]
        (let [t# (var-get tv#)]
-         (when (contains? @registered-targets t#)
-           (Target/stop t#)
-           (unregister-target t#))))
-     (def ~name ~target)
-     (register-target ~name)
-     :defined))
+         (if (contains? @registered-targets t#)
+           (do
+             (Target/stop t#)
+             (unregister-target t#)
+             (def ~name ~target)
+             (register-target ~name)
+             (Target/start ~name)
+             :updated)
+           (do
+             (def ~name ~target)
+             (register-target ~name)
+             :defined))))))
 
 (defmacro defpattern
   [name & body]
