@@ -1,11 +1,8 @@
 (ns rb.explores.cowbells.fur-elise
-  (:require [omkamra.sequencer
-             :as sequencer
-             :refer [bpm!]])
-  (:require [rb.explores.cowbells 
-             :refer [with-piano]]))
+  (:require [omkamra.sequencer :as sequencer])
+  (:require [rb.explores.cowbells :refer [with-piano]]))
 
-(bpm! 120)
+(sequencer/bpm! 120)
 
 (def p0 "
 (4 3#)
@@ -138,7 +135,7 @@
 (def p101 p5)
 
 (def p104 "
-{(.2~3 0 ,) (_2.2~3 {0 -7} ,)}
+{(.2~ 0 ,) (_2.2~ {0 -7} ,)}
 ")
 
 (defn fur-elise

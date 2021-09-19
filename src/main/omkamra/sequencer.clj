@@ -4,20 +4,21 @@
   (:import (java.util.concurrent TimeUnit))
   (:require [clojure.stacktrace :refer [print-cause-trace]]))
 
-(def thread-sleep-precision-ns
-  "maybe this could be figured out adaptively"
+(def nanosleep-default-precision
   (.toNanos TimeUnit/MILLISECONDS 2))
 
 (defn nanosleep
-  [ns]
-  (let [end (+ (System/nanoTime) ns)]
-    (loop [time-left ns]
-      (when (pos? time-left)
-        (if (> time-left thread-sleep-precision-ns)
-          (let [sleep-dur (- time-left thread-sleep-precision-ns)]
-            (.sleep TimeUnit/NANOSECONDS sleep-dur))
-          (Thread/yield))
-        (recur (- end (System/nanoTime)))))))
+  ([ns precision]
+   (let [end (+ (System/nanoTime) ns)]
+     (loop [time-left ns]
+       (when (pos? time-left)
+         (if (> time-left precision)
+           (let [sleep-dur (- time-left precision)]
+             (.sleep TimeUnit/NANOSECONDS sleep-dur))
+           (Thread/yield))
+         (recur (- end (System/nanoTime)))))))
+  ([ns]
+   (nanosleep ns nanosleep-default-precision)))
 
 (defn beats->ms
   [beats bpm]
@@ -452,13 +453,20 @@
   [name & body]
   (let [result (if (resolve name) :updated :defined)]
     `(do
+       (def ~name [:seq ~@body])
+       ~result)))
+
+(defmacro defpattern!
+  [name & body]
+  (let [result (if (resolve name) :updated :defined)]
+    `(do
        (def ~name (compile-pattern [:seq ~@body]))
        ~result)))
 
 (defmacro defpattern*
   [name & body]
   `(do
-     (defpattern ~name ~@body)
+     (defpattern! ~name ~@body)
      (omkamra.sequencer.protocols.Sequencer/play *sequencer* ~name)))
 
 (defmacro defpattern<
@@ -467,8 +475,8 @@
         [op result] (if (and v
                              (pattern-function? (var-get v))
                              (:looping? (meta v)))
-                      ['defpattern :updated]
-                      ['defpattern* :looping])]
+                      [`defpattern! :updated]
+                      [`defpattern* :looping])]
     `(do
        (~op ~name [:seq ~@body [:sched #'~name]])
        (alter-meta! #'~name assoc :looping? true)

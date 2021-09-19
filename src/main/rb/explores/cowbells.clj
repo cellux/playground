@@ -14,13 +14,8 @@
   `[:bind {:target synth}
     ~@body])
 
-(defmacro with-synth-program
-  [program & body]
-  `(with-synth
-     [:program ~program]
-     ~@body))
-
 (defmacro with-piano
   [& body]
-  `(with-synth-program 0
+  `(with-synth
+     [:program 0]
      ~@body))
