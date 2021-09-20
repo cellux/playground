@@ -1,34 +1,41 @@
 (ns rb.explores.cowbells.fur-elise
-  (:require [omkamra.sequencer :as sequencer])
-  (:require [rb.explores.cowbells :refer [with-piano]]))
+  (:require [omkamra.cowbells :as cowbells])
+  (:require [omkamra.cowbells.fluidsynth]))
 
+(cowbells/defproject fur-elise
+  {:target [:fluidsynth "/usr/share/soundfonts/FluidR3_GM.sf2"]
+   :bpm 120
+   :root :a-4
+   :scale :minor
+   :step 1/2
+   :dur 1})
 
-(def p0 "
+(defp p0 "
 (4 3#)
 ")
 
-(def p1 "
+(defp p1 "
 {(4 3# 4 1 3 2)}
 {(0.2 , -5 -3 0)  (_2 0 4 7)}
 {(1.2 , -3 -1# 1) (_2 -3 4 6#)}
 {(2.2 , -3 4 3#)  (_2 0 4 7)}
 ")
 
-(def p5 "
+(defp p5 "
 {(4 3# 4 1 3 2)}
 {(0.2 , -5 -3 0) (_2 0 4 7)}
 {(1.2 , -3 2 1)  (_2 -3 4 6#)}
 ")
 
-(def p8a "
+(defp p8a "
 {(0.4) (_2 0 4 7 ,)}
 ")
 
-(def p8b "
+(defp p8b "
 {(0.2 , 1 2 3) (_2 0 4 7 , ,2)}
 ")
 
-(def p9 "
+(defp p9 "
 {(4.3 -1 5 4)    (_2 2 6 9)}
 {(3.3 -2 4 3)    (_2 -1 6 8)}
 {(2.3 -3 3 2)    (_2 0 4 7)}
@@ -37,30 +44,30 @@
 {(4.2 , 3# 4 3#) (, 3# 4)}
 ")
 
-(def p15 p1)
-(def p19 p5)
+(defp p15 p1)
+(defp p19 p5)
 
-(def p22 p8b)
+(defp p22 p8b)
 
-(def p23 "
+(defp p23 "
 {(0.2 , {v-10 (2 2 2) (-3 -2 {-3 -1})})
  (_2 0 4 7 (v-20 {8b 9} {7 9} {v-10 6 8b 9}))}
 ")
 
-(def p24 "
+(defp p24 "
 {(2.4 (./2 5.3 4.1))         (_2 5 7 9 7 9 7)}
 {((.2 4 3) (./2 8b.3 7.1))   (_2 5 8b 10 8b 10 8b)}
 {(7 6 5 4 3 2)               (_2 5 9 {v60 8b 6 5} 9 {v60 8b 6 5} 9)}
 {((.2 1b 0) (./2 0 -1 0 1b)) (_2 5 7 9 7 9 7)}
 ")
 
-(def p28 "
+(defp p28 "
 {(2.4 3 3#)          (_2 5 7 9 7 9 7)}
 {(4.3 4 5 2)         (_2 4 7 9 7 {v60 3 10} 5)}
 {(2.4 (./2 3.3 1.1)) (_2 6 11 6 11 6 12)}
 ")
 
-(def p31 "
+(defp p31 "
 {(./2 2 6 -1 6 0 6 1 6 2 6 3 6)
  ({.2 -5 -3} , {-2 -1} {-3 -1} {-4 -2 -1})}
 {(./2 4 6 9 8 7 6 5 4 3 6 5 3)
@@ -79,25 +86,25 @@
 (4 3# 4 3# 4 3#)
 ")
 
-(def p39 p1)
-(def p43 p5)
-(def p46 p8b)
+(defp p39 p1)
+(defp p43 p5)
+(defp p46 p8b)
 
-(def p47 p9)
+(defp p47 p9)
 
-(def p53 p1)
-(def p57 p5)
+(defp p53 p1)
+(defp p57 p5)
 
-(def p60 "
+(defp p60 "
 {(~1.2 0 , ,) (_2 0 0 0 0 0 0)}
 ")
 
-(def p61 "
+(defp p61 "
 {({~2.6 -3 -1 1b 2#}) (_2 0 0 0 0 0 0)}
 {({~2.4 -2 0 3} {2# 4} {~3/2 3 5}) (_2 0 0 0 0 0 0)}
 ")
 
-(def p63 "
+(defp p63 "
 {({~2.4 -1# 3 5} {~1.2 -1# 3 5}) (_2 0 0 0 0 0 0)}
 {({~2.6 0 2 4}) (_2 0 0 0 0 0 0)}
 {({~2.4 -2 3} {-3 2} {-4 1}) (_2 {(0 0 0 0 0 0) (<4 0 0 0 0 0 0)})}
@@ -106,9 +113,9 @@
 {({~.6 -5 0}) (_2 {0 -7} 0 0 0 0 0)}
 ")
 
-(def p69 p61)
+(defp p69 p61)
 
-(def p71 "
+(defp p71 "
 {({~2.4 3 5} {.2 3 5}) (_2 0 0 0 0 0 0)}
 {({~.6 3 5}) (_2b 1 1 1 1 1 1)}
 {({~2.4 -1 4b} {3 -2} {2 -3b}) (_2b 1 1 1 1 1 1)}
@@ -118,7 +125,7 @@
 {({~2.2 -3 1} ,2 ,2) (_2 {~2.2 2 4#} ,2 ,2)}
 ")
 
-(def p78 "
+(defp p78 "
 {(.2/3 -7 -5 -3 0 2 4 3 2 1) (_2.2~7/4 -7 , {7 9 11})}
 {(.2/3 0 2 4 7 9 11 10 9 8) (_2.2~7/4 {7 9 11} , {7 9 11})}
 {(.2/3 0 2 4 7 9 11 10 9 8) (_2.2~7/4 {7 9 11} , {7 9 11})}
@@ -126,50 +133,29 @@
 {(.2/3 9# 9 8 8b 7 6# 6 5# 5)}
 ")
 
-(def p83 p1)
-(def p87 p5)
-(def p90 p8b)
-(def p91 p9)
-(def p97 p1)
-(def p101 p5)
+(defp p83 p1)
+(defp p87 p5)
+(defp p90 p8b)
+(defp p91 p9)
+(defp p97 p1)
+(defp p101 p5)
 
-(def p104 "
+(defp p104 "
 {(.2~ 0 ,) (_2.2~ {0 -7} ,)}
 ")
 
-(defn fur-elise
-  ([pattern]
-   (if pattern
-     (sequencer/play
-      (with-piano
-        [:bpm 120]
-        [:bind {:root :a-4
-                :scale :minor
-                :step 1/2
-                :dur 1}
-         pattern]))
-     (sequencer/clear!)))
-  ([]
-   (fur-elise
-    [p0
-     p1 p5 p8a
-     p1 p5 p8b
-     p9 p15 p19 p22
-     p9 p15 p19 p23
-     p24 p28 p31
-     p39 p43 p46 p47
-     p53 p57 p60
-     p61 p63
-     p69 p71 p78
-     p83 p87 p90 p91
-     p97 p101 p104])))
+(defp all
+  [p0
+   p1 p5 p8a
+   p1 p5 p8b
+   p9 p15 p19 p22
+   p9 p15 p19 p23
+   p24 p28 p31
+   p39 p43 p46 p47
+   p53 p57 p60
+   p61 p63
+   p69 p71 p78
+   p83 p87 p90 p91
+   p97 p101 p104])
 
-(defmacro def*
-  [name & body]
-  `(do
-     (def ~name ~@body)
-     (fur-elise ~name)))
-
-;; (fur-elise)
-;; (fur-elise nil)
-;; (fur-elise p31)
+(activate-defp)

@@ -82,7 +82,24 @@
         timeline events)))
    timeline pq))
 
-(def registered-targets (atom #{}))
+;; targets
+
+(defonce target-factories (atom #{}))
+
+(defn register-target-factory
+  [factory]
+  (swap! target-factories conj factory))
+
+(defn make-target
+  [descriptor]
+  (loop [factories (vec @target-factories)]
+    (if-let [make-target (first factories)]
+      (or (make-target descriptor)
+          (recur (next factories)))
+      (throw (ex-info "unable to find target factory which understands descriptor"
+                      {:descriptor descriptor})))))
+
+(defonce registered-targets (atom #{}))
 
 (defn register-target
   [target]

@@ -2,6 +2,7 @@
   (:require
    [clojure.java.io :as jio]
    [omkamra.cowbells.midi :as midi]
+   [omkamra.sequencer :as sequencer]
    [omkamra.sequencer.protocols.Target :as Target]
    [omkamra.fluidsynth.settings :as fluid-settings]
    [omkamra.fluidsynth.synth :as fluid-synth]
@@ -99,3 +100,18 @@
       :synth (atom nil)
       :soundfonts (atom [])
       :audio-driver (atom nil)})))
+
+(defn make-target
+  [descriptor]
+  (when (and (vector? descriptor)
+              (= :fluidsynth (first descriptor)))
+     (let [config (second descriptor)]
+       (cond (string? config)
+             (recur [:fluidsynth {:soundfonts {:default config}}])
+             (map? config)
+             (if (:soundfonts config)
+               (omkamra.cowbells.fluidsynth/new config)
+               (recur [:fluidsynth {:soundfonts config}]))
+             :else (throw (ex-info "invalid descriptor" {:descriptor descriptor}))))))
+
+(sequencer/register-target-factory make-target)
