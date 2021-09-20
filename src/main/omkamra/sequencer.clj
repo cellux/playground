@@ -241,6 +241,11 @@
             callback #(future (Sequencer/play sequencer pf bindings))]
         (update pattern :events conj [sched-pos callback])))))
 
+(defmethod compile-pattern :bpm
+  [[_ new-bpm]]
+  (pfn [pattern {:keys [sequencer] :as bindings}]
+    (add-callback pattern #(Sequencer/bpm! sequencer new-bpm))))
+
 (defn resolve-binding
   [key value]
   (or (and *compile-target* (Target/resolve-binding *compile-target* key value))

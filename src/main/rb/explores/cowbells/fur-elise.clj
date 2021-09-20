@@ -2,7 +2,6 @@
   (:require [omkamra.sequencer :as sequencer])
   (:require [rb.explores.cowbells :refer [with-piano]]))
 
-(sequencer/bpm! 120)
 
 (def p0 "
 (4 3#)
@@ -143,6 +142,7 @@
    (if pattern
      (sequencer/play
       (with-piano
+        [:bpm 120]
         [:bind {:root :a-4
                 :scale :minor
                 :step 1/2
