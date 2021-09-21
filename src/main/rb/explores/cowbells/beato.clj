@@ -1,14 +1,12 @@
 (ns rb.explores.cowbells.beato
-  (:require [omkamra.sequencer :as sequencer])
-  (:require [rb.explores.cowbells :refer [with-piano]]))
+  (:require [omkamra.cowbells :as cowbells])
+  (:require [omkamra.cowbells.fluidsynth]))
 
-(sequencer/bpm! 120)
-
-(defmacro defp
-  "Define defp as an alias to defpattern. This ensures that loading this
-  file as a whole does not play the patterns."
-  [name & body]
-  `(sequencer/defpattern ~name ~@body))
+(cowbells/defproject beato
+  {:target [:fluidsynth "/usr/share/soundfonts/FluidR3_GM.sf2"]
+   :root :c-4
+   :scale :chroma
+   :bpm 120})
 
 (def major-tonic-chords [0 2 5])
 (def major-predom-chords [1 3])
@@ -63,6 +61,7 @@
      [:bind {:dur nil} [:degree -12]]]))
 
 (defp interchords
+  [:program 1]
   [:bind {:scale :chroma
           :root [:add :c-3 (rand-int 12)]
           :dur 2}
@@ -91,11 +90,4 @@
    :aeolian 5
    :locrian 6})
 
-(defmacro defp
-  "Redefine defp as an alias to defpattern*. Result: when the user
-  evaluates a defp form the (re)defined pattern will be played through the
-  global sequencer."
-  [name & body]
-  `(sequencer/defpattern* ~name
-     (with-piano
-       ~@body)))
+(eof)
