@@ -45,6 +45,7 @@
                (dec left))))))
 
 (defp interwalk
+  {:channel 0}
   [:program 33]
   (letfn [(tri [distance]
             [[:degree 0]
@@ -61,6 +62,7 @@
      [:bind {:dur nil} [:degree -12]]]))
 
 (defp interchords
+  {:channel 1}
   [:program 1]
   [:bind {:scale :chroma
           :root [:add :c-3 (rand-int 12)]

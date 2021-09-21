@@ -20,8 +20,9 @@
                                      {}
                                      (or (:targets project-options)
                                          {:default (:target project-options)}))
-                :bindings ~(dissoc project-options :sequencer :targets :target :bpm)
+                :bindings ~(dissoc project-options :sequencer :targets :target :bpm :snap)
                 :bpm ~(or (:bpm project-options) 120)
+                :snap ~(or (:snap project-options) 0)
                 :silent (atom ~silent?)}))
           (register-targets [start?]
             `(doseq [~'t (vals (:targets ~project-name))]
@@ -42,6 +43,7 @@
                     [:bind (merge (:bindings ~project-name)
                                   {:target (-> ~project-name :targets :default)})
                      [:bpm (:bpm ~project-name)]
+                     [:snap (:snap ~project-name)]
                      [:seq ~'form]])))
                (defn ~'start
                  []

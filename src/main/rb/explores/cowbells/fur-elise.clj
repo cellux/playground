@@ -2,6 +2,8 @@
   (:require [omkamra.cowbells :as cowbells])
   (:require [omkamra.cowbells.fluidsynth]))
 
+(ns-unmap *ns* 'fur-elise)
+
 (cowbells/defproject fur-elise
   {:target [:fluidsynth "/usr/share/soundfonts/FluidR3_GM.sf2"]
    :bpm 120

@@ -57,10 +57,12 @@
 
 (defn align-position
   [position alignment]
-  (let [m (mod position alignment)]
-    (if (zero? m)
-      position
-      (- (+ position alignment) m))))
+  (if (zero? alignment)
+    position
+    (let [m (mod position alignment)]
+      (if (zero? m)
+        position
+        (- (+ position alignment) m)))))
 
 (defn conjv
   [v x]
@@ -70,13 +72,13 @@
   "Merge each pattern in pq into the timeline starting at start-pos."
   [timeline start-pos pq]
   (reduce
-   (fn [timeline {:keys [align events] :as pattern}]
-     (let [aligned-start-pos (align-position start-pos align)]
+   (fn [timeline {:keys [snap events] :as pattern}]
+     (let [snapped-start-pos (align-position start-pos snap)]
        (reduce
         (fn [timeline [position callback :as event]]
           ;; avoid scheduling callbacks to start-pos as that's
           ;; already in the past
-          (let [absolute-pos (+ aligned-start-pos (int position))
+          (let [absolute-pos (+ snapped-start-pos (int position))
                 adjusted-pos (max absolute-pos (inc start-pos))]
             (update timeline adjusted-pos conjv callback)))
         timeline events)))
@@ -115,7 +117,7 @@
 
 (def init-pattern
   {:position 0
-   :align 1
+   :snap 0
    :events []})
 
 (defn add-callback
@@ -179,12 +181,12 @@
   (pfn [pattern bindings]
     (add-callback pattern callback)))
 
-(defmethod compile-pattern :align
-  [[_ align]]
+(defmethod compile-pattern :snap
+  [[_ beats]]
   (pfn [pattern bindings]
-    (let [{:keys [step sequencer]} bindings
+    (let [{:keys [sequencer]} bindings
           tpb (:tpb sequencer)]
-      (assoc pattern :align (beats->ticks (* align step) tpb)))))
+      (assoc pattern :snap (beats->ticks beats tpb)))))
 
 (defmethod compile-pattern :clear
   [[_]]
