@@ -2,10 +2,8 @@
   (:require
    [clojure.string :as str]
    [clojure.java.io :as jio]
-   [clojure.edn :as edn]
    [omkamra.sequencer :as sequencer :refer [pfn beats->ticks]]
    [omkamra.cowbells.protocols.MidiDevice :as MidiDevice]
-   [omkamra.clojure.util :refer [deep-merge]]
    [instaparse.core :as insta]))
 
 (def scale-steps
@@ -38,6 +36,7 @@
    \a 9
    \b 11})
 
+;; NAO = Note And Octave
 (def re-nao #"([cdefgabCDEFGAB])([-#])([0-9])$")
 
 (defn nao?
@@ -45,7 +44,7 @@
   (and (keyword? x)
        (re-matches re-nao (name x))))
 
-(defn nao->midi
+(defn nao->midi-note
   [nao]
   (let [[_ note sep oct] (->> (name nao)
                                  str/lower-case
@@ -59,10 +58,10 @@
   [x]
   (and (integer? x) (<= 0 x 127)))
 
-(defn resolve-note
+(defn resolve-midi-note
   [x]
   (cond (midi-note? x) x
-        (nao? x) (nao->midi x)
+        (nao? x) (nao->midi-note x)
         :else (throw (ex-info "invalid note" {:value x}))))
 
 (defn resolve-scale
@@ -73,11 +72,11 @@
         :else (throw (ex-info "invalid scale" {:value x}))))
 
 (defn resolve-binding
-  [key value]
-  (case key
-    :root (resolve-note value)
-    :scale (resolve-scale value)
-    value))
+  [k v]
+  (case k
+    :root (resolve-midi-note v)
+    :scale (resolve-scale v)
+    v))
 
 (defmulti compile-pattern first)
 
@@ -128,13 +127,14 @@
             new-stem [(first stem)]
             new-bindings bindings]
        (if (seq items)
-         (if (binding-modifier? (first items))
-           (recur (next items)
-                  new-stem
-                  (conj new-bindings (first items)))
-           (recur (next items)
-                  (conj new-stem (first items))
-                  new-bindings))
+         (let [head (first items)]
+           (if (binding-modifier? head)
+             (recur (next items)
+                    new-stem
+                    (conj new-bindings head))
+             (recur (next items)
+                    (conj new-stem head)
+                    new-bindings)))
          [(simplify new-stem) new-bindings]))
      [stem bindings]))
   ([stem]
@@ -165,7 +165,7 @@
     :clear [:clear]
     :midi-note [:note (postprocess (first rest))]
     :scale-degree [:degree (postprocess (first rest))]
-    :nao [:note (nao->midi (first rest))]
+    :nao [:note (nao->midi-note (first rest))]
     :rest (let [[length] rest]
             [:wait (if length (postprocess length) 1)])
     :align [:wait (- (postprocess (first rest)))]
@@ -230,12 +230,6 @@
        (scale (mod index scale-size))
        semi)))
 
-(defn ensure-vector
-  [x]
-  (if (coll? x)
-    (vec x)
-    (vector x)))
-
 (defn advance
   [pattern beats tpb]
   (update pattern :position + (beats->ticks beats tpb)))
@@ -252,7 +246,7 @@
      [:wait 1]]
 
     (and (keyword? note-desc) (nil? note->key))
-    [:note (resolve-note note-desc)]
+    [:note (resolve-midi-note note-desc)]
 
     :else
     (let [note note-desc]
@@ -274,8 +268,8 @@
               (advance step tpb)))))))
 
 (defmethod compile-pattern :degree
-  [[_ degrees]]
-  [:note degrees degree->key])
+  [[_ desc]]
+  [:note desc degree->key])
 
 (defmethod compile-pattern :all-notes-off
   [[_]]
@@ -306,7 +300,7 @@
 
 (def default-bindings
   {:channel 0
-   :root (nao->midi :c-5)
+   :root (nao->midi-note :c-5)
    :scale (scales :major)
    :vel 96
    :oct 0

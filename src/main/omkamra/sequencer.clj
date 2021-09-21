@@ -92,7 +92,7 @@
 
 (defn make-target
   [descriptor]
-  (loop [factories (vec @target-factories)]
+  (loop [factories (seq @target-factories)]
     (if-let [make-target (first factories)]
       (or (make-target descriptor)
           (recur (next factories)))
@@ -201,44 +201,72 @@
             ticks (beats->ticks (* steps step) tpb)]
         (if (pos? ticks)
           (update pattern :position + ticks)
-          (update pattern :position align-position (- ticks)))))))
+          (let [alignment (- ticks)]
+            (update pattern :position align-position alignment)))))))
 
 (defmethod compile-pattern :var
   [[_ v]]
   (pfn [pattern bindings]
     (let [pf (var-get v)]
+      (assert (pattern-function? pf))
       (pf pattern bindings))))
+
+(defn collect-bindings
+  [items]
+  (loop [items items
+         bindings {}
+         body []]
+    (if (seq items)
+      (let [head (first items)]
+        (if (map? head)
+          (recur (next items)
+                 (merge bindings head)
+                 body)
+          (recur (next items)
+                 bindings
+                 (conj body head))))
+      [bindings body])))
 
 (defmethod compile-pattern :seq
   [[_ & body]]
   (if (nil? body)
     (compile-pattern [:nop])
-    (if (nil? (next body))
-      (compile-form (first body))
-      (let [pfs (mapv compile-form body)]
-        (pfn [pattern bindings]
-          (reduce (fn [pattern pf]
-                    (pf pattern bindings))
-                  pattern pfs))))))
+    (let [[bindings body] (collect-bindings body)]
+      (if (seq bindings)
+        (compile-pattern `(:bind ~bindings [:seq ~@body]))
+        (if (nil? (next body))
+          (compile-form (first body))
+          (let [pfs (mapv compile-form body)]
+            (pfn [pattern bindings]
+              (reduce (fn [pattern pf]
+                        (pf pattern bindings))
+                      pattern pfs))))))))
 
 (defmethod compile-pattern :mix
   [[_ & body]]
-  (let [pfs (mapv compile-form body)]
-    (pfn [pattern bindings]
-      (let [{:keys [position]} pattern]
-        (reduce (fn [pattern pf]
-                  (-> (pf pattern bindings)
-                      (assoc :position position)))
-                pattern pfs)))))
+  (let [[bindings body] (collect-bindings body)]
+    (if (seq bindings)
+      (compile-pattern `(:bind ~bindings [:mix ~@body]))
+      (let [pfs (mapv compile-form body)]
+        (pfn [pattern bindings]
+          (let [{:keys [position]} pattern]
+            (reduce (fn [pattern pf]
+                      (-> (pf pattern bindings)
+                          (assoc :position position)))
+                    pattern pfs)))))))
 
 (defmethod compile-pattern :mix1
-  [[_ leader & rest]]
-  (let [leader-pf (compile-form leader)
-        rest-pf (compile-pattern (cons :mix rest))]
-    (pfn [pattern bindings]
-      (-> pattern
-          (rest-pf bindings)
-          (leader-pf bindings)))))
+  [[_ & body]]
+  (let [[bindings body] (collect-bindings body)]
+    (if (seq bindings)
+      (compile-pattern `(:bind ~bindings [:mix1 ~@body]))
+      (let [[leader & rest] body
+            leader-pf (compile-form leader)
+            rest-pf (compile-pattern (cons :mix rest))]
+        (pfn [pattern bindings]
+          (-> pattern
+              (rest-pf bindings)
+              (leader-pf bindings)))))))
 
 (defmethod compile-pattern :sched
   [[_ & body]]
@@ -264,9 +292,9 @@
     (add-callback pattern #(Sequencer/bpm! sequencer new-bpm))))
 
 (defn resolve-binding
-  [key value]
-  (or (and *compile-target* (Target/resolve-binding *compile-target* key value))
-      value))
+  [k v]
+  (or (and *compile-target* (Target/resolve-binding *compile-target* k v))
+      v))
 
 (defn bind-expr?
   [x]
@@ -446,54 +474,3 @@
 (defn start [] (Target/start *sequencer*))
 (defn stop [] (Target/stop *sequencer*))
 (defn restart [] (Target/restart *sequencer*))
-
-(defmacro deftarget
-  [name target]
-  `(do
-     (when-let [tv# (resolve '~name)]
-       (let [t# (var-get tv#)]
-         (if (contains? @registered-targets t#)
-           (do
-             (Target/stop t#)
-             (unregister-target t#)
-             (def ~name ~target)
-             (register-target ~name)
-             (Target/start ~name)
-             :updated)
-           (do
-             (def ~name ~target)
-             (register-target ~name)
-             :defined))))))
-
-(defmacro defpattern
-  [name & body]
-  (let [result (if (resolve name) :updated :defined)]
-    `(do
-       (def ~name [:seq ~@body])
-       ~result)))
-
-(defmacro defpattern!
-  [name & body]
-  (let [result (if (resolve name) :updated :defined)]
-    `(do
-       (def ~name (compile-pattern [:seq ~@body]))
-       ~result)))
-
-(defmacro defpattern*
-  [name & body]
-  `(do
-     (defpattern! ~name ~@body)
-     (omkamra.sequencer.protocols.Sequencer/play *sequencer* ~name)))
-
-(defmacro defpattern<
-  [name & body]
-  (let [v (resolve name)
-        [op result] (if (and v
-                             (pattern-function? (var-get v))
-                             (:looping? (meta v)))
-                      [`defpattern! :updated]
-                      [`defpattern* :looping])]
-    `(do
-       (~op ~name [:seq ~@body [:sched #'~name]])
-       (alter-meta! #'~name assoc :looping? true)
-       ~result)))

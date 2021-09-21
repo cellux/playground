@@ -4,63 +4,84 @@
             [omkamra.sequencer.protocols.Target :as Target]))
 
 (defmacro defproject
-  [name options]
+  [project-name project-options]
+  (assert (and (map? project-options)
+               (or (map? (:targets project-options))
+                   (:target project-options))))
   (letfn [(unregister-targets []
-            `(doseq [~'t (vals (:targets ~name))]
+            `(doseq [~'t (vals (:targets ~project-name))]
                (Target/stop ~'t)
                (sequencer/unregister-target ~'t)))
           (define-project-config [silent?]
-            `(def ~name
-               {:sequencer ~(or (:sequencer options) `sequencer/*sequencer*)
+            `(def ~project-name
+               {:sequencer ~(or (:sequencer project-options) `sequencer/*sequencer*)
                 :targets ~(reduce-kv (fn [targets k v]
                                        (assoc targets k `(sequencer/make-target ~v)))
                                      {}
-                                     (or (:targets options)
-                                         {:default (:target options)}))
-                :bindings ~(dissoc options :sequencer :targets :target :bpm)
-                :bpm ~(or (:bpm options) 120)
+                                     (or (:targets project-options)
+                                         {:default (:target project-options)}))
+                :bindings ~(dissoc project-options :sequencer :targets :target :bpm)
+                :bpm ~(or (:bpm project-options) 120)
                 :silent (atom ~silent?)}))
           (register-targets [start?]
-            `(doseq [~'t (vals (:targets ~name))]
+            `(doseq [~'t (vals (:targets ~project-name))]
                (sequencer/register-target ~'t)
                ~@(when start?
-                   `((when (:playing (Sequencer/status (:sequencer ~name)))
-                       (Target/start ~'t))))))
+                   (list `(when (:playing (Sequencer/status (:sequencer ~project-name)))
+                            (Target/start ~'t))))))
           (define-helpers []
             `(do
                (defn ~'clear!
                  []
-                 (Sequencer/clear! (:sequencer ~name)))
+                 (Sequencer/clear! (:sequencer ~project-name)))
                (defn ~'play
                  [~'form]
-                 (when (not @(:silent ~name))
+                 (when-not @(:silent ~project-name)
                    (Sequencer/play
-                    (:sequencer ~name)
-                    [:bind (merge (:bindings ~name)
-                                  {:target (-> ~name :targets :default)})
-                     [:bpm (:bpm ~name)]
+                    (:sequencer ~project-name)
+                    [:bind (merge (:bindings ~project-name)
+                                  {:target (-> ~project-name :targets :default)})
+                     [:bpm (:bpm ~project-name)]
                      [:seq ~'form]])))
                (defn ~'start
                  []
-                 (Target/start (:sequencer ~name)))
+                 (Target/start (:sequencer ~project-name)))
                (defn ~'stop
                  []
-                 (Target/stop (:sequencer ~name)))
+                 (Target/stop (:sequencer ~project-name)))
                (defn ~'restart
                  []
-                 (Target/restart (:sequencer ~name)))
+                 (Target/restart (:sequencer ~project-name)))
                (defmacro ~'defp
-                 [~'name ~'& ~'body]
-                 (let [~'result (if (resolve ~'name) :updated :defined)]
+                 ~'[pattern-name & body]
+                 (let [~'v (resolve ~'pattern-name)
+                       ~'looping? (::looping? (meta ~'v))
+                       ~'result (if ~'v :updated :defined)]
                    `(do
-                      (def ~~'name [:seq ~@~'body])
-                      (~'~'play ~~'name)
+                      (def ~~'pattern-name [:seq ~@~'body])
+                      ~@(when-not ~'looping?
+                          (list `(~'~'play ~~'pattern-name)))
                       ~~'result)))
-               (defn ~'activate-defp
+               (defmacro ~'defp<
+                 ~'[pattern-name & body]
+                 (let [~'v (resolve ~'pattern-name)
+                       ~'looping? (::looping? (meta ~'v))
+                       ~'result (if ~'v :updated :looping)]
+                   `(do
+                      ;; pre-compile the pattern to avoid unnecessary
+                      ;; recompilation at every loop iteration
+                      (def ~~'pattern-name (sequencer/compile-pattern
+                                            [:bind {:target (-> ~'~project-name :targets :default)}
+                                             [:seq ~@~'body [:sched (var ~~'pattern-name)]]]))
+                      (alter-meta! (var ~~'pattern-name) assoc ::looping? true)
+                      ~@(when-not ~'looping?
+                          (list `(~'~'play ~~'pattern-name)))
+                      ~~'result)))
+               (defn ~'eof
                  []
-                 (reset! (:silent ~name) false))))]
+                 (reset! (:silent ~project-name) false))))]
     `(do
-       ~@(if (resolve name)
+       ~@(if (resolve project-name)
            (list
             (unregister-targets)
             (define-project-config false)
@@ -69,4 +90,5 @@
            (list
             (define-project-config true)
             (register-targets false)
-            (define-helpers))))))
+            (define-helpers)))
+       #'~project-name)))
