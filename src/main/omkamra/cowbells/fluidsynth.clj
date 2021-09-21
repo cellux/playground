@@ -2,6 +2,7 @@
   (:require
    [clojure.java.io :as jio]
    [omkamra.cowbells.midi :as midi]
+   [omkamra.cowbells.protocols.MidiDevice :as MidiDevice]
    [omkamra.sequencer :as sequencer]
    [omkamra.sequencer.protocols.Target :as Target]
    [omkamra.fluidsynth.settings :as fluid-settings]
@@ -20,7 +21,7 @@
       doall))
 
 (defrecord FluidSynth [config settings synth soundfonts audio-driver]
-  midi/MidiDevice
+  MidiDevice/protocol
 
   (note-on [{:keys [synth]} channel key vel]
     (fluid-synth/noteon @synth channel key vel))

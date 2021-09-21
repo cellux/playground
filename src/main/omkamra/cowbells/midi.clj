@@ -4,6 +4,7 @@
    [clojure.java.io :as jio]
    [clojure.edn :as edn]
    [omkamra.sequencer :as sequencer :refer [pfn beats->ticks]]
+   [omkamra.cowbells.protocols.MidiDevice :as MidiDevice]
    [omkamra.clojure.util :refer [deep-merge]]
    [instaparse.core :as insta]))
 
@@ -77,16 +78,6 @@
     :root (resolve-note value)
     :scale (resolve-scale value)
     value))
-
-(defprotocol MidiDevice
-  (note-on [this channel key vel])
-  (note-off [this channel key])
-  (cc [this channel ctrl value])
-  (pitch-bend [this channel value])
-  (program-change [this channel program])
-  (bank-select [this channel bank])
-  (all-notes-off [this channel])
-  (all-sounds-off [this channel]))
 
 (defmulti compile-pattern first)
 
@@ -225,7 +216,7 @@
   (pfn [pattern {:keys [target channel] :as bindings}]
     (assert target "target is unbound")
     (-> pattern
-        (sequencer/add-callback #(program-change target channel program)))))
+        (sequencer/add-callback #(MidiDevice/program-change target channel program)))))
 
 (defn degree->key
   [{:keys [root scale mode oct semi] :as bindings} degree]
@@ -274,12 +265,12 @@
           (assert (midi-note? key))
           (-> pattern
               (sequencer/add-callback
-               #(note-on target channel key vel))
+               #(MidiDevice/note-on target channel key vel))
               (sequencer/add-callback-after
                ;; we decrease dur by one tick to ensure that a
                ;; successive note at the same pitch isn't cut
                (and dur (pos? dur) (dec (beats->ticks dur tpb)))
-               #(note-off target channel key))
+               #(MidiDevice/note-off target channel key))
               (advance step tpb)))))))
 
 (defmethod compile-pattern :degree
@@ -290,13 +281,13 @@
   [[_]]
   (pfn [pattern {:keys [target channel] :as bindings}]
     (assert target "target is unbound")
-    (sequencer/add-callback pattern #(all-notes-off target channel))))
+    (sequencer/add-callback pattern #(MidiDevice/all-notes-off target channel))))
 
 (defmethod compile-pattern :all-sounds-off
   [[_]]
   (pfn [pattern {:keys [target channel] :as bindings}]
     (assert target "target is unbound")
-    (sequencer/add-callback pattern #(all-sounds-off target channel))))
+    (sequencer/add-callback pattern #(MidiDevice/all-sounds-off target channel))))
 
 (defmulti compile-bind-expr
   (fn [k expr]
