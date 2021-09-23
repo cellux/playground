@@ -2,15 +2,13 @@
   (:require [omkamra.cowbells :as cowbells])
   (:require [omkamra.cowbells.fluidsynth]))
 
+(ns-unmap *ns* 'beato)
+
 (cowbells/defproject beato
   {:target [:fluidsynth "/usr/share/soundfonts/FluidR3_GM.sf2"]
    :root :c-4
    :scale :chroma
    :bpm 120})
-
-(def major-tonic-chords [0 2 5])
-(def major-predom-chords [1 3])
-(def major-dom-chords [4 6])
 
 (def intervals
   {:uni 0                               ; unison
@@ -27,6 +25,46 @@
    :M7 11                               ; major seventh
    :p8 12                               ; perfect eighth / octave
    })
+
+(def interval-consonances
+  {0 5                                  ; open consonance
+   1 1                                  ; sharp dissonance
+   2 2                                  ; mild dissonance
+   3 3                                  ; soft consonance
+   4 3                                  ; soft consonance
+   5 4                                  ; consonance or dissonance
+   6 2                                  ; neutral or restless
+   7 5                                  ; open consonance
+   8 3                                  ; soft consonance
+   9 3                                  ; soft consonance
+   10 2                                 ; mild dissonance
+   11 1                                 ; sharp dissonance
+   12 5                                 ; open consonance
+   })
+
+(defp all-intervals
+  [:program 0]
+  {:dur 2}
+  (for [end (sort (vals intervals))]
+    [[{:vel [:sub 20]} [:degree 0]]
+     [:degree end]]))
+
+(defn rand-around
+  [center radius]
+  (+ center (- radius (rand (* radius 2)))))
+
+(defp rising-arpeggios
+  (letfn [(rising-arpeggio [n]
+            (let [base (rand-nth [0 3 4 5 7])]
+              (loop [degrees []
+                     degree base
+                     left n]
+                (if (pos? left)
+                  (recur (conj degrees degree)
+                         (+ degree (rand-nth [3 4 5 7]))
+                         (dec left))
+                  (map #(vector {:step [:mul (rand-around 1.1 0.1)]} [:degree %]) degrees)))))]
+    [#(play [{:step 1/3} (rising-arpeggio (+ 5 (rand-int 3)))]) [:wait 6]]))
 
 (defn shuffled-distances
   []
@@ -91,5 +129,9 @@
    :mixolydian 4
    :aeolian 5
    :locrian 6})
+
+(def major-tonic-chords [0 2 5])
+(def major-predom-chords [1 3])
+(def major-dom-chords [4 6])
 
 (eof)

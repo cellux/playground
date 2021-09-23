@@ -45,6 +45,14 @@
                      [:bpm (:bpm ~project-name)]
                      [:snap (:snap ~project-name)]
                      [:seq ~'form]])))
+               (defn ~'hush
+                 []
+                 (~'clear!)
+                 (~'play
+                  (for [~'i (range 16)]
+                    [{:channel ~'i}
+                     [:all-notes-off]
+                     [:all-sounds-off]])))
                (defn ~'start
                  []
                  (Target/start (:sequencer ~project-name)))
@@ -75,10 +83,17 @@
                       (def ~~'pattern-name (sequencer/compile-pattern
                                             [:bind {:target (-> ~'~project-name :targets :default)}
                                              [:seq ~@~'body [:sched (var ~~'pattern-name)]]]))
-                      (alter-meta! (var ~~'pattern-name) assoc ::looping? true)
+                      (when-not @(:silent ~'~project-name)
+                        (alter-meta! (var ~~'pattern-name) assoc ::looping? true))
                       ~@(when-not ~'looping?
                           (list `(~'~'play ~~'pattern-name)))
                       ~~'result)))
+               (defmacro ~'defp-
+                 ~'[& args]
+                 `(~'~'clear!))
+               (defmacro ~'defp--
+                 ~'[& args]
+                 `(~'~'hush))
                (defn ~'eof
                  []
                  (reset! (:silent ~project-name) false))))]
