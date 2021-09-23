@@ -301,7 +301,7 @@
 (def default-bindings
   {:channel 0
    :root (nao->midi-note :c-5)
-   :scale (scales :major)
+   :scale (scales :chroma)
    :vel 96
    :oct 0
    :mode 0
