@@ -3,7 +3,7 @@
    [clojure.java.io :as jio]
    [omkamra.jsch.channel :as channel]))
 
-(defn new
+(defn create
   [{:keys [jsch] :as client} host]
   (let [session (.getSession jsch host)]
     (.connect session)
@@ -19,7 +19,7 @@
 
 (defn exec
   [session command]
-  (let [channel (channel/new session :exec)]
+  (let [channel (channel/create session :exec)]
     (.setCommand channel command)
     (let [stdout-reader (future (slurp (.getInputStream channel)))
           stderr-reader (future (slurp (.getErrStream channel)))]

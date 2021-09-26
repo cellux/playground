@@ -43,10 +43,10 @@
   (start [this]
     (if @synth
       :already-started
-      (let [fluid-synth (fluid-synth/new settings)
+      (let [fluid-synth (fluid-synth/create settings)
             fluid-soundfonts (load-soundfonts fluid-synth
                                               (:soundfonts config))
-            fluid-audio-driver (fluid-audio-driver/new fluid-synth)]
+            fluid-audio-driver (fluid-audio-driver/create fluid-synth)]
         (reset! synth fluid-synth)
         (reset! soundfonts fluid-soundfonts)
         (reset! audio-driver fluid-audio-driver)
@@ -91,10 +91,10 @@
     {:sample-rate 48000.0}}
    :soundfonts {}})
 
-(defn new
+(defn create
   [config]
   (let [config (deep-merge default-config config)
-        fluid-settings (fluid-settings/new (:fluid-settings config))]
+        fluid-settings (fluid-settings/create (:fluid-settings config))]
     (map->FluidSynth
      {:config config
       :settings fluid-settings
@@ -111,7 +111,7 @@
              (recur [:fluidsynth {:soundfonts {:default config}}])
              (map? config)
              (if (:soundfonts config)
-               (omkamra.cowbells.fluidsynth/new config)
+               (create config)
                (recur [:fluidsynth {:soundfonts config}]))
              :else (throw (ex-info "invalid descriptor" {:descriptor descriptor}))))))
 

@@ -8,7 +8,7 @@
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.engine :as llvm-engine]))
 
-(def ^:dynamic *ctx* (ctx/new))
+(def ^:dynamic *ctx* (ctx/create))
 
 (clj/defn set-ctx!
   [new-ctx]
@@ -32,7 +32,7 @@
 
 (clj/defmacro with-temp-context
   [& body]
-  `(with-context (ctx/new)
+  `(with-context (ctx/create)
      ~@body))
 
 (def Array oben.core.types.Array/Array)

@@ -1,6 +1,6 @@
 (ns omkamra.jsch.channel)
 
-(defn new
+(defn create
   [session type]
   (.openChannel session (name type)))
 

@@ -27,7 +27,7 @@
   (when hosts-file
     (.setKnownHosts jsch hosts-file)))
 
-(defn new
+(defn create
   ([config]
    (let [config-repository (or (:config-repository config)
                                (get-openssh-config-repository)
@@ -44,7 +44,7 @@
               (.setIdentityRepository identity-repository)
               (set-known-hosts-if-exists known-hosts-file))}))
   ([]
-   (omkamra.jsch.client/new {})))
+   (create {})))
 
 (defn get-identity-names
   [client]
@@ -53,7 +53,7 @@
 
 (defn exec
   [client host command]
-  (let [session (session/new client host)]
+  (let [session (session/create client host)]
     (try
       (session/exec session command)
       (finally

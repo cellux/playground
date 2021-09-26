@@ -26,21 +26,13 @@
    :p8 12                               ; perfect eighth / octave
    })
 
-(def interval-consonances
-  {0 5                                  ; open consonance
-   1 1                                  ; sharp dissonance
-   2 2                                  ; mild dissonance
-   3 3                                  ; soft consonance
-   4 3                                  ; soft consonance
-   5 4                                  ; consonance or dissonance
-   6 2                                  ; neutral or restless
-   7 5                                  ; open consonance
-   8 3                                  ; soft consonance
-   9 3                                  ; soft consonance
-   10 2                                 ; mild dissonance
-   11 1                                 ; sharp dissonance
-   12 5                                 ; open consonance
-   })
+(def consonances
+  {:sharp #{1 11}
+   :mild #{2 10}
+   :soft #{3 4 8 9}
+   :either #{5}
+   :neutral #{6}
+   :open #{0 7 12}})
 
 (defp all-intervals
   [:program 0]
@@ -48,6 +40,36 @@
   (for [end (sort (vals intervals))]
     [[{:vel [:sub 20]} [:degree 0]]
      [:degree end]]))
+
+(defn lfo
+  [period lo hi]
+  (let [incr (/ (* 2 Math/PI) period)
+        nxt (fn nxt [phase]
+              (lazy-seq (cons (- hi (* (- hi lo) (/ (+ 1.0 (Math/cos phase)) 2)))
+                              (nxt (mod (+ phase incr) (* 2 Math/PI))))))]
+    (nxt 0)))
+
+(defn next!
+  [series]
+  (let [head (first @series)]
+    (swap! series rest)
+    head))
+
+(defp circle-of-fifths
+  [:program (rand-nth [11 24 64 91 103])]
+  {:dur 1/2 :step 1/2}
+  (loop [i 0
+         note 0
+         notes []]
+    (if (= i 12)
+      (for [n notes]
+        (let [vels (atom (cycle [0 30 25]))
+              durs (atom (cycle [3/2 1/3 1/2 1]))]
+          [:bind {:root [:degree->key n]}
+           [{:scale :major} (map #(vector {:vel [:sub (next! vels)]
+                                           :dur (next! durs)}
+                                          [:degree %]) (range 0 8))]]))
+      (recur (inc i) (mod (+ note 7) 12) (conj notes note)))))
 
 (defn rand-around
   [center radius]

@@ -165,7 +165,7 @@
    {:driver "pulseaudio"
     :period-size 1024}})
 
-(defn new
+(defn create
   [settings]
   (reduce (fn [&settings [k v]]
             (apply-setting &settings (name k) v))

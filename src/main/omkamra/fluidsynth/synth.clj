@@ -2,13 +2,13 @@
   (:require [omkamra.fluidsynth.api :refer [$fl]]
             [omkamra.fluidsynth.settings :as settings]))
 
-(defn new
+(defn create
   ([settings]
    (if (map? settings)
-     (omkamra.fluidsynth.synth/new (settings/new settings))
+     (create (settings/create settings))
      (.new_fluid_synth $fl settings)))
   ([]
-   (omkamra.fluidsynth.synth/new settings/default-settings)))
+   (create settings/default-settings)))
 
 (defn delete
   [&synth]

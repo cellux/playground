@@ -450,7 +450,7 @@
     (Target/stop this)
     (Target/start this)))
 
-(defn create-sequencer
+(defn create
   ([config]
    (map->Sequencer {:config config
                     :bpm (atom (get config :bpm 120))
@@ -462,11 +462,9 @@
                     :player-thread (atom nil)
                     :targets registered-targets}))
   ([]
-   (create-sequencer {})))
+   (create {})))
 
-(def new create-sequencer)
-
-(def ^:dynamic *sequencer* (create-sequencer))
+(def ^:dynamic *sequencer* (create))
 
 (defn clear! [] (Sequencer/clear! *sequencer*))
 (defn play [& args] (apply Sequencer/play *sequencer* args))

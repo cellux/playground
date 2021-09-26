@@ -27,7 +27,7 @@
    :label-blocks {}
    :return-values {}})
 
-(defn new
+(defn create
   ([ftabsize]
    {:llvm {:context nil
            :ee nil}
@@ -46,7 +46,7 @@
     :compiled-types {}
     :mode :dev})
   ([]
-   (oben.core.context/new default-ftab-size)))
+   (create default-ftab-size)))
 
 (defn next-epoch
   [ctx]

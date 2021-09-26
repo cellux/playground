@@ -6,5 +6,5 @@
 
 (defn exec
   [host command]
-  (let [client (client/new)]
+  (let [client (client/create)]
     (client/exec client host command)))

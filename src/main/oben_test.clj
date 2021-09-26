@@ -35,7 +35,7 @@
 
 (defn compile-type
   [t]
-  (let [ctx (ctx/new)]
+  (let [ctx (ctx/create)]
     (-> ctx
         (ctx/compile-type t)
         (ctx/compiled-type t))))
