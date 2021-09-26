@@ -50,9 +50,9 @@
     (nxt 0)))
 
 (defn next!
-  [series]
-  (let [head (first @series)]
-    (swap! series rest)
+  [acoll]
+  (let [head (first @acoll)]
+    (swap! acoll rest)
     head))
 
 (defp circle-of-fifths
