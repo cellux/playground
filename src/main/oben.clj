@@ -4,54 +4,48 @@
   (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.ast :as ast])
+  (:require [oben.core.target :as target])
   (:require [oben.core.types.Array])
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.engine :as llvm-engine]))
 
-(def ^:dynamic *ctx* (ctx/create))
+(clj/defn create-inprocess-target
+  []
+  (target/create {:type :inprocess}))
 
-(clj/defn set-ctx!
-  [new-ctx]
-  (if (thread-bound? #'*ctx*)
-    (set! *ctx* new-ctx)
-    (intern 'oben '*ctx* new-ctx)))
+(when (nil? oben.core.target/*current-target*)
+  (intern 'oben.core.target '*current-target* (create-inprocess-target)))
 
-(clj/defmacro with-context
-  [ctx & body]
-  `(binding [*ctx* ~ctx]
-     (let [had-llvm-context# (ctx/get-llvm-context *ctx*)
-           had-llvm-ee# (ctx/get-llvm-execution-engine *ctx*)
-           result# (do ~@body)]
-       (when-not had-llvm-ee#
-         (when-let [llvm-ee# (ctx/get-llvm-execution-engine *ctx*)]
-           (llvm-engine/dispose llvm-ee#)))
-       (when-not had-llvm-context#
-         (when-let [llvm-context# (ctx/get-llvm-context *ctx*)]
-           (llvm-context/dispose llvm-context#)))
-       result#)))
-
-(clj/defmacro with-temp-context
-  [& body]
-  `(with-context (ctx/create)
+(clj/defmacro with-target
+  [t & body]
+  `(binding [oben.core.target/*current-target* ~t]
      ~@body))
+
+(clj/defmacro with-temp-target
+  [& body]
+  `(let [t# (create-inprocess-target)
+         result# (with-target t# ~@body)]
+     (target/dispose t#)
+     result#))
 
 (def Array oben.core.types.Array/Array)
 
 (clj/defn make-fn
   [name params body]
-  (let [fnode (-> (ast/parse `(fn ~params ~@body))
-                  (vary-meta assoc :name name))]
+  (let [meta {:kind :oben/FN
+              :platform->fnode (atom {})}]
     (with-meta
       (clj/fn [& args]
         (assert (= (count args) (count params)))
-        (let [ctx (ctx/compile-node (ctx/next-epoch *ctx*) fnode)
-              f (ctx/compiled-node ctx fnode)
-              ctx (ctx/assemble-module ctx)
-              invoker (ctx/invoker ctx f)
-              result (apply invoker args)]
-          (set-ctx! ctx)
-          result))
-      {:kind :oben/FN :oben/node fnode})))
+        (let [platform (target/platform oben.core.target/*current-target*)
+              fnodes (:platform->fnode meta)
+              fnode (or (get @fnodes platform)
+                        (let [fnode (-> (ast/parse `(fn ~params ~@body))
+                                        (vary-meta assoc :name name))]
+                          (swap! fnodes assoc platform fnode)
+                          fnode))]
+          (target/invoke-function oben.core.target/*current-target* fnode args)))
+      meta)))
 
 (clj/defn fn?
   "Returns true if the argument is a Clojure wrapper around an Oben function."

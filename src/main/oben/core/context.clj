@@ -69,6 +69,12 @@
   [ctx llvm-context]
   (assoc-in ctx [:llvm :context] llvm-context))
 
+(defn dispose-llvm-context
+  [ctx]
+  (when-let [llvm-context (get-llvm-context ctx)]
+    (llvm-context/dispose llvm-context))
+  (update ctx :llvm dissoc :context))
+
 (defn get-llvm-execution-engine
   [ctx]
   (get-in ctx [:llvm :ee]))
@@ -76,6 +82,12 @@
 (defn set-llvm-execution-engine
   [ctx ee]
   (assoc-in ctx [:llvm :ee] ee))
+
+(defn dispose-llvm-execution-engine
+  [ctx]
+  (when-let [llvm-engine (get-llvm-execution-engine ctx)]
+    (llvm-engine/dispose llvm-engine))
+  (update ctx :llvm dissoc :ee))
 
 (defn assign-next-name
   [ctx prefix]
