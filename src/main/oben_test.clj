@@ -8,31 +8,9 @@
   (:require [oben.core.types.Void :as Void])
   (:require [oben.core.types.Number :as Number])
   (:require [oben.core.types.Ptr :as Ptr])
-  (:require [omkamra.llvm.ir :as ir])
   (:require [clojure.walk :as walk])
   (:require [midje.sweet :as m])
   (:use [midje.repl]))
-
-(defn get-ctx
-  [f]
-  (assert (oben/fn? f))
-  (let [fnode (o/extract-platform-specific-fnode f)]
-    (-> (target/ctx target/*current-target*)
-        (ctx/next-epoch)
-        (ctx/forget-node fnode)
-        (ctx/compile-node fnode))))
-
-(defn get-module
-  [f]
-  (:m (get-ctx f)))
-
-(defn get-ir
-  [f]
-  (ir/render-module (get-module f)))
-
-(defn dump-ir
-  [f]
-  (println (get-ir f)))
 
 (defn compile-type
   [t]

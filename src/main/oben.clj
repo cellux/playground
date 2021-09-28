@@ -28,6 +28,13 @@
      (target/dispose t#)
      result#))
 
+(clj/defmacro with-dump-target
+  [& body]
+  `(let [t# (target/create {:type :dump})
+         result# (with-target t# ~@body)]
+     (target/dispose t#)
+     result#))
+
 (def Array oben.core.types.Array/Array)
 
 (clj/defn make-fn
