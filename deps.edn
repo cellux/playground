@@ -4,6 +4,7 @@
  :deps
  {org.clojure/clojurescript {:mvn/version "1.10.866"}
   org.clojure/java.data {:mvn/version "1.0.86"}
+  com.taoensso/encore {:mvn/version "3.19.0"}
   ring/ring-core {:mvn/version "1.8.1"}
   ring/ring-jetty-adapter {:mvn/version "1.8.1"}
   http-kit/http-kit {:mvn/version "2.4.0"}
