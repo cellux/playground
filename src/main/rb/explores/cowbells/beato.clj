@@ -76,6 +76,7 @@
   (+ center (- radius (rand (* radius 2)))))
 
 (defp rising-arpeggios
+  [:program 1]
   (letfn [(rising-arpeggio [n]
             (let [base (rand-nth [0 3 4 5 7])]
               (loop [degrees []
@@ -152,8 +153,70 @@
    :aeolian 5
    :locrian 6})
 
-(def major-tonic-chords [0 2 5])
-(def major-predom-chords [1 3])
-(def major-dom-chords [4 6])
+(defp diatonic-triad-categories
+  [:program 1]
+  {:scale :major
+   :root :c-4
+   :step 2}
+  ;; major
+  "{0 2 4}"
+  ;; augmented
+  "{0 2 4#}"
+  ;; diminished
+  "{0 2b 4b}"
+  ;; minor
+  "{0 2b 4}"
+  )
+
+(defn diatonic-chords
+  [scale n]
+  [{:scale scale}
+   (for [mode (range 8)]
+     [{:mode mode}
+      (when (= mode 7) {:dur nil})
+      [:degree (set (take n (iterate #(+ % 2) 0)))]])])
+
+(defn diatonic-triads
+  [scale]
+  (diatonic-chords scale 3))
+
+(defp diatonic-triads-in-c-major
+  [:program 1]
+  {:root :c-4 :step 2 :dur 2}
+  (diatonic-triads :major))
+
+(defn diatonic-seventh-chords
+  [scale]
+  (diatonic-chords scale 4))
+
+(defp diatonic-seventh-chords-in-c-major
+  [:program 1]
+  {:root :c-4 :step 2 :dur 2}
+  (diatonic-seventh-chords :major))
+
+(defp diatonic-seventh-chords-in-c-harmonic-major
+  [:program 1]
+  {:root :c-4 :step 2 :dur 2}
+  (diatonic-seventh-chords :harmonic-major))
+
+(defp diatonic-seventh-chords-in-c-double-harmonic-major
+  [:program 1]
+  {:root :c-4 :step 2 :dur 2}
+  (diatonic-seventh-chords :double-harmonic-major))
+
+(defp diatonic-seventh-chords-in-c-natural-minor
+  [:program 1]
+  {:root :c-4 :step 2 :dur 2}
+  (diatonic-seventh-chords :minor))
+
+(defp diatonic-seventh-chords-in-c-melodic-minor
+  [:program 1]
+  {:root :c-4 :step 2 :dur 2}
+  (diatonic-seventh-chords :melodic-minor))
+
+(defp diatonic-seventh-chords-in-c-harmonic-minor
+  [:program 1]
+  {:root :c-4 :step 2 :dur 2}
+  (diatonic-seventh-chords :harmonic-minor))
 
 (eof)

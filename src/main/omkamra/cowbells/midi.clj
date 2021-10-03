@@ -9,8 +9,11 @@
 (def scale-steps
   {:chroma [1 1 1 1 1 1 1 1 1 1 1]
    :major [2 2 1 2 2 2]
+   :harmonic-major [2 2 1 2 1 3]
+   :double-harmonic-major [1 3 1 2 1 3]
    :minor [2 1 2 2 1 2]
-   :harmonic-minor [2 1 2 2 1 3]})
+   :harmonic-minor [2 1 2 2 1 3]
+   :melodic-minor [2 1 2 2 2 2]})
 
 (defn steps->offsets
   ([steps offsets last-offset]
