@@ -254,11 +254,11 @@
       (throw (ex-info "oben symbol resolves to a var in clojure.core" {:sym sym}))
       v)))
 
-(defn extract-platform-specific-fnode
+(defn extract-target-specific-fnode
   [value]
-  (when (instance? clojure.lang.IMeta value)
-    (when-let [fnodes (:platform->fnode (meta value))]
-      (get @fnodes (target/platform target/*current-target*)))))
+  (when (and (clj/fn? value) (has-kind? :oben/FN value))
+    (let [parse-fn (:parse-fn (meta value))]
+      (parse-fn (target/current)))))
 
 (defn resolve
   ([sym env]
@@ -266,7 +266,7 @@
        (when-let [v (or (find-oben-var sym)
                         (find-clojure-var sym))]
          (let [value (var-get v)]
-           (or (extract-platform-specific-fnode value) value)))
+           (or (extract-target-specific-fnode value) value)))
        (throw (ex-info "cannot resolve symbol" {:sym sym}))))
   ([sym]
    (resolve sym {})))

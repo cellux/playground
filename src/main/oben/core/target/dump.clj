@@ -7,7 +7,7 @@
 (defrecord DumpTarget [ctx]
   Target/protocol
 
-  (platform [this]
+  (attrs [this]
     :TODO)
 
   (compile-function [this fnode]

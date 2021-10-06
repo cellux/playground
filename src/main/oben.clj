@@ -9,55 +9,46 @@
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.engine :as llvm-engine]))
 
-(clj/defn create-inprocess-target
-  []
-  (target/create {:type :inprocess}))
-
-(when (nil? oben.core.target/*current-target*)
-  (intern 'oben.core.target '*current-target* (create-inprocess-target)))
+(def Array oben.core.types.Array/Array)
 
 (clj/defmacro with-target
-  [t & body]
-  `(binding [oben.core.target/*current-target* ~t]
-     ~@body))
+  [& args]
+  `(target/with-target ~@args))
+
+(clj/defmacro with-temp-target-of-type
+  [type & body]
+  `(let [t# (target/create {:type ~type})
+         result# (target/with-target t# ~@body)]
+     (target/dispose t#)
+     result#))
 
 (clj/defmacro with-temp-target
   [& body]
-  `(let [t# (create-inprocess-target)
-         result# (with-target t# ~@body)]
-     (target/dispose t#)
-     result#))
+  `(with-temp-target-of-type :inprocess ~@body))
 
 (clj/defmacro with-dump-target
   [& body]
-  `(let [t# (target/create {:type :dump})
-         result# (with-target t# ~@body)]
-     (target/dispose t#)
-     result#))
-
-(def Array oben.core.types.Array/Array)
-
-(clj/defn make-fn
-  [name params body]
-  (let [meta {:kind :oben/FN
-              :platform->fnode (atom {})}]
-    (with-meta
-      (clj/fn [& args]
-        (assert (= (count args) (count params)))
-        (let [platform (target/platform oben.core.target/*current-target*)
-              fnodes (:platform->fnode meta)
-              fnode (or (get @fnodes platform)
-                        (let [fnode (-> (ast/parse `(fn ~params ~@body))
-                                        (vary-meta assoc :name name))]
-                          (swap! fnodes assoc platform fnode)
-                          fnode))]
-          (target/invoke-function oben.core.target/*current-target* fnode args)))
-      meta)))
+  `(with-temp-target-of-type :dump ~@body))
 
 (clj/defn fn?
   "Returns true if the argument is a Clojure wrapper around an Oben function."
   [x]
   (and (clj/fn? x) (o/has-kind? :oben/FN x)))
+
+(clj/defn make-fn
+  [name params body]
+  (let [parse-fn (memoize
+                  (clj/fn [target]
+                    (-> (ast/parse `(~'fn ~params ~@body))
+                        (vary-meta assoc :name name))))]
+    (with-meta
+      (clj/fn [& args]
+        (assert (= (count args) (count params)))
+        (let [target (target/current)
+              fnode (parse-fn target)]
+          (target/invoke-function target fnode args)))
+      {:kind :oben/FN
+       :parse-fn parse-fn})))
 
 (clj/defmacro fn
   [& decl]
