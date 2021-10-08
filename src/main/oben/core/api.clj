@@ -3,7 +3,8 @@
   (:require [clojure.core :as clj])
   (:require [clojure.string :as str])
   (:require [clojure.walk :as walk])
-  (:require [oben.core.target :as target]))
+  (:require [oben.core.target :as target])
+  (:import [java.util WeakHashMap]))
 
 (defn make-tid
   "Generates a namespaced keyword to identify a type or type class."
@@ -230,6 +231,37 @@
 (defn multifn?
   [x]
   (instance? clojure.lang.MultiFn x))
+
+(defn ensure-vector
+  [x]
+  (if (vector? x)
+    x
+    (vector x)))
+
+(def all-portables (new WeakHashMap))
+
+(defn portable?
+  [x]
+  (.containsKey all-portables x))
+
+(clj/defmacro defportable
+  "Defines a multifn which returns a value that depends on selected
+  target attributes"
+  [name dispatch-attrs & body]
+  (letfn [(gen-defmulti []
+            (let [v (clj/resolve name)]
+              (when (or (nil? v)
+                        (not (portable? (var-get v))))
+                (list `(clj/defmulti ~name
+                         (fn [~'attrs]
+                           (mapv ~'attrs ~(ensure-vector dispatch-attrs))))
+                      `(.put all-portables ~name true)))))
+          (gen-defmethod [dispatch-value method-body]
+            `(clj/defmethod ~name ~(ensure-vector dispatch-value) [~'_] ~@method-body))]
+    `(do
+       ~@(gen-defmulti)
+       ~@(for [[dispatch-value method-body] (partition 2 body)]
+           (gen-defmethod dispatch-value method-body)))))
 
 (defn drop-meta
   [x]

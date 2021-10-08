@@ -1,6 +1,7 @@
 (ns oben.core.ast
   (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
+  (:require [oben.core.target :as target])
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m]))
 
@@ -62,7 +63,12 @@
          (symbol? form)
          (if (:tag (meta form))
            (vary-meta form update :tag parse-type-designator)
-           (o/resolve form env))
+           (let [result (o/resolve form env)]
+             (if (o/portable? result)
+               (let [target (target/current)
+                     attrs (target/attrs target)]
+                 (parse (result attrs) env))
+               result)))
 
          (number? form)
          (o/parse-host-value form)

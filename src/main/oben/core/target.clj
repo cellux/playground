@@ -30,7 +30,7 @@
 
 (defn attrs
   [this]
-  (Target/attrs @this))
+  (:attrs @this))
 
 (defn invoke-function
   [this fnode args]
@@ -44,7 +44,6 @@
 
 (defmacro with-target
   [t & body]
-  (cond (keyword? t) `(with-target {:type ~t})
-        (map? t) `(with-target (create ~t))
-        :else `(binding [*current-target* ~t]
-                 ~@body)))
+  (cond (keyword? t) `(with-target {:type ~t} ~@body)
+        (map? t) `(with-target (create ~t) ~@body)
+        :else `(binding [*current-target* ~t] ~@body)))

@@ -1082,6 +1082,37 @@
                (math/sqrt x))]
     (m/fact (sqrt 25.0) => 5.0)))
 
+(o/defportable c-long :arch
+  :x86-64 (Number/%s64)
+  :i386 (Number/%s32))
+
+(m/fact (o/portable? c-long))
+
+(o/defportable c-long :arch
+  :aarch64 (Number/%s64))
+
+(m/fact (o/resolve `c-long) => o/portable?)
+
+(m/facts
+ (m/fact
+  (oben/with-target
+    {:type :inprocess
+     :attrs {:arch :x86-64}}
+    (ast/parse `c-long))
+  => (m/exactly Number/%s64))
+ (m/fact
+  (oben/with-target
+    {:type :inprocess
+     :attrs {:arch :i386}}
+    (ast/parse `c-long))
+  => (m/exactly Number/%s32))
+ (m/fact
+  (oben/with-target
+    {:type :inprocess
+     :attrs {:arch :aarch64}}
+    (ast/parse `c-long))
+  => (m/exactly Number/%s64)))
+
 ;; (oben/with-temp-target
 ;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])
 ;;         len-by-ref (oben/fn ^f32 [(* vec2) v]

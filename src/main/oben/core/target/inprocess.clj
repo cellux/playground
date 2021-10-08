@@ -3,11 +3,8 @@
   (:require [oben.core.protocols.Target :as Target])
   (:require [oben.core.context :as ctx]))
 
-(defrecord InProcessTarget [ctx]
+(defrecord InProcessTarget [ctx attrs]
   Target/protocol
-
-  (attrs [this]
-    :TODO)
 
   (compile-function [this fnode]
     (let [ctx (ctx/compile-node (ctx/next-epoch ctx) fnode)
@@ -25,6 +22,7 @@
       (assoc this :ctx ctx))))
 
 (defn create
-  [opts]
+  [{:keys [attrs] :as opts}]
   (map->InProcessTarget
-   {:ctx (ctx/create)}))
+   {:ctx (ctx/create)
+    :attrs attrs}))

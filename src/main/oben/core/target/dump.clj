@@ -4,11 +4,8 @@
   (:require [oben.core.context :as ctx])
   (:require [omkamra.llvm.ir :as ir]))
 
-(defrecord DumpTarget [ctx]
+(defrecord DumpTarget [ctx attrs]
   Target/protocol
-
-  (attrs [this]
-    :TODO)
 
   (compile-function [this fnode]
     (assoc this :ctx (-> ctx
@@ -25,6 +22,7 @@
     this))
 
 (defn create
-  [opts]
+  [{:keys [attrs] :as opts}]
   (map->DumpTarget
-   {:ctx (ctx/create)}))
+   {:ctx (ctx/create)
+    :attrs attrs}))
