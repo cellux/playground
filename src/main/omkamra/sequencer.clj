@@ -385,7 +385,9 @@
   (play [this pf bindings]
     (Target/start this)
     (let [init-pattern init-pattern
-          init-bindings (assoc bindings :sequencer this)
+          init-bindings (merge {:step 1}
+                               bindings
+                               {:sequencer this})
           pf (compile-form pf)
           pattern (pf init-pattern init-bindings)]
       (swap! pattern-queue conj pattern)
