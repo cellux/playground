@@ -11,14 +11,6 @@
                            Invoker HeapInvocationBuffer ArrayFlags))
   (:require [midje.sweet :as m]))
 
-(def default-ftab-size 65536)
-
-(defn allocate-ftab
-  [size]
-  (.asLongBuffer
-   (doto (ByteBuffer/allocateDirect (* size Long/BYTES))
-     (.order (ByteOrder/nativeOrder)))))
-
 (def blockbin-ids [:entry :init :main :exit])
 
 (def init-fdata
@@ -28,25 +20,21 @@
    :return-values {}})
 
 (defn create
-  ([ftabsize]
-   {:llvm {:context nil
-           :ee nil}
-    :m (ir/module)
-    :epoch 0
-    :next-id 0
-    :next-name nil
-    :f nil
-    :fdata nil
-    :ftab (allocate-ftab ftabsize)
-    :fid 0
-    :ir nil
-    :compiling-node nil
-    :compiled-nodes {}
-    :compiling-type nil
-    :compiled-types {}
-    :mode :dev})
-  ([]
-   (create default-ftab-size)))
+  []
+  {:llvm {:context nil
+          :ee nil}
+   :m (ir/module)
+   :epoch 0
+   :next-id 0
+   :next-name nil
+   :f nil
+   :fdata nil
+   :ir nil
+   :compiling-node nil
+   :compiled-nodes {}
+   :compiling-type nil
+   :compiled-types {}
+   :mode :dev})
 
 (defn next-epoch
   [ctx]
