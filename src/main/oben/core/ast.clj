@@ -65,9 +65,7 @@
            (vary-meta form update :tag parse-type-designator)
            (let [result (o/resolve form env)]
              (if (o/portable? result)
-               (let [target (target/current)
-                     attrs (target/attrs target)]
-                 (parse (result attrs) env))
+               (parse (result (target/current)) env)
                result)))
 
          (number? form)

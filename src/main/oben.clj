@@ -12,8 +12,8 @@
 (def Array oben.core.types.Array/Array)
 
 (clj/defmacro with-target
-  [& args]
-  `(target/with-target ~@args))
+  [t & body]
+  `(target/with-target ~t ~@body))
 
 (clj/defmacro with-temp-target-of-type
   [type & body]
@@ -37,23 +37,23 @@
 
 (clj/defn make-fn
   [name params body]
-  (let [parse-fn (memoize
-                  (clj/fn [target]
-                    (-> (ast/parse `(~'fn ~params ~@body))
-                        (vary-meta assoc :name name))))]
+  (let [parse-for-target (memoize
+                          (clj/fn [target]
+                            (-> (ast/parse (list* 'fn params body))
+                                (vary-meta assoc :name name))))]
     (with-meta
       (clj/fn [& args]
         (assert (= (count args) (count params)))
         (let [target (target/current)
-              fnode (parse-fn target)]
+              fnode (parse-for-target target)]
           (target/invoke-function target fnode args)))
       {:kind :oben/FN
-       :parse-fn parse-fn})))
+       :parse-for-target parse-for-target})))
 
 (clj/defmacro fn
   [& decl]
   (let [[params body] (o/split-after vector? decl)
-        params (first (o/move-types-to-tags params))
+        params (first (o/move-types-to-meta params))
         _ (assert (vector? params))
         params (o/quote-all-except-locals params &env)]
     `(make-fn nil ~params '~body)))
@@ -61,7 +61,7 @@
 (clj/defmacro defn
   [name & decl]
   (let [[params body] (o/split-after vector? decl)
-        params (first (o/move-types-to-tags params))
+        params (first (o/move-types-to-meta params))
         _ (assert (vector? params))
         params (o/quote-all-except-locals params &env)]
     `(def ~name (make-fn '~name ~params '~body))))

@@ -106,7 +106,7 @@
   (loop [nodes nodes
          result []]
     (if-let [head (first nodes)]
-      (if (= (o/nodeclass-of head) :oben/return-from)
+      (if (= (o/class-of-node head) :oben/return-from)
         (conj result head)
         (recur (next nodes) (conj result head)))
       result)))
@@ -238,7 +238,7 @@
         body-node (ast/parse `(do ~@body) env)
         find-return-nodes (fn [node]
                             (->> (node-descendants node)
-                                 (filter #(and (= (o/nodeclass-of %) :oben/return-from)
+                                 (filter #(and (= (o/class-of-node %) :oben/return-from)
                                                (= (:block-id (meta %)) block-id)))))
         return-type (->> (find-return-nodes body-node)
                          (map (comp :return-type meta))
@@ -305,7 +305,7 @@
 (o/defmacro %fn
   [& decl]
   (let [[params body] (o/split-after vector? decl)
-        params (ast/parse (first (o/move-types-to-tags params)) &env)
+        params (ast/parse (first (o/move-types-to-meta params)) &env)
         _ (assert (vector? params))
         return-type (o/resolve-type-from-meta params &env)
         param-types (mapv #(o/resolve-type-from-meta % &env) params)
@@ -315,7 +315,7 @@
       (let [void? (= return-type %void)
             local-types (into {} (filter #(o/type? (val %)) &env))
             env (into local-types (map vector param-names params))
-            body-node (ast/parse `(block :oben/fn-block ~@body) env)
+            body-node (ast/parse (list* 'block :oben/fn-block body) env)
             body-node (if void?
                         body-node
                         (%cast return-type body-node))]

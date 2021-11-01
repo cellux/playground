@@ -994,18 +994,18 @@
 
 (m/facts
  (check-equal-value-and-tag
-  (o/move-types-to-tags '(u32 f))
+  (o/move-types-to-meta '(u32 f))
   (list (with-meta 'f {:tag 'u32})))
  (check-equal-value-and-tag
-  (o/move-types-to-tags '(u32 f f64 g))
+  (o/move-types-to-meta '(u32 f f64 g))
   (list (with-meta 'f {:tag 'u32})
         (with-meta 'g {:tag 'f64})))
  (check-equal-value-and-tag
-  (o/move-types-to-tags '(u32 [^u32 x f32 y]))
+  (o/move-types-to-meta '(u32 [^u32 x f32 y]))
   (list (with-meta (vector (with-meta 'x {:tag 'u32})
                            (with-meta 'y {:tag 'f32})) {:tag 'u32})))
  (check-equal-value-and-tag
-  (o/move-types-to-tags '((Struct [^f32 x u16 y]) x))
+  (o/move-types-to-meta '((Struct [^f32 x u16 y]) x))
   (list (with-meta 'x {:tag (list 'Struct (vector (with-meta 'x {:tag 'f32})
                                                   'u16 'y))}))))
 

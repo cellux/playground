@@ -7,7 +7,8 @@
   (:import [java.util WeakHashMap]))
 
 (defn make-tid
-  "Generates a namespaced keyword to identify a type or type class."
+  "Generates a namespaced keyword for unique identification of a type
+  or type class."
   [& name-components]
   (keyword (str (ns-name *ns*))
            (str/join "." name-components)))
@@ -33,18 +34,18 @@
   (let [typeclass-id (make-tid name)]
     `(let [tid-counter# (atom 0)
            constructor# (fn ~@fdecl)
-           construct-type# (memoize
-                            (fn [args#]
-                              (let [tid# (make-tid '~name (swap! tid-counter# inc))]
-                                (derive tid# ~typeclass-id)
-                                (-> (apply constructor# args#)
-                                    (vary-meta
-                                     merge {:class ~typeclass-id
-                                            :tid tid#})))))]
+           make-type# (memoize
+                       (fn [args#]
+                         (let [tid# (make-tid '~name (swap! tid-counter# inc))]
+                           (derive tid# ~typeclass-id)
+                           (-> (apply constructor# args#)
+                               (vary-meta
+                                merge {:class ~typeclass-id
+                                       :tid tid#})))))]
        (def ~name
          (with-meta
            (fn [& args#]
-             (construct-type# (replace-constant-nodes-with-their-values args#)))
+             (make-type# (replace-constant-nodes-with-their-values args#)))
            {:kind :oben/TYPECLASS
             :tid ~typeclass-id}))
        ~@(for [p parents]
@@ -96,12 +97,14 @@
   [x]
   (and (fn? x) (has-kind? :oben/NODE x)))
 
-(def nodeclass-of (comp :class meta))
+(def class-of-node (comp :class meta))
 
 (def type-of-node (comp :type meta))
 (def type-of type-of-node)
 
 (def tid-of-node (comp tid-of-type type-of-node))
+
+;; host values
 
 (derive :oben/HostValue :oben/Any)
 
@@ -168,6 +171,7 @@
   nil)
 
 (defn unseen?
+  "A value with an unseen type never sees the light of the day."
   [t]
   (isa? (tid-of-type t) :oben.core.types.Unseen/%Unseen))
 
@@ -188,7 +192,7 @@
 (defn constant-node?
   [x]
   (and (node? x)
-       (= (nodeclass-of x) :oben/constant)))
+       (= (class-of-node x) :oben/constant)))
 
 (defn constant->value
   "If the argument is a constant node, return its value.
@@ -202,7 +206,7 @@
   "Returns true if the argument is an AST node representing an Oben function."
   [x]
   (and (node? x)
-       (= (nodeclass-of x) :oben/fn)))
+       (= (class-of-node x) :oben/fn)))
 
 (clj/defmacro defmacro
   [& args]
@@ -253,8 +257,9 @@
               (when (or (nil? v)
                         (not (portable? (var-get v))))
                 (list `(clj/defmulti ~name
-                         (fn [~'attrs]
-                           (mapv ~'attrs ~(ensure-vector dispatch-attrs))))
+                         (fn [~'target]
+                           (let [~'attr-map (target/attrs ~'target)]
+                             (mapv ~'attr-map ~(ensure-vector dispatch-attrs)))))
                       `(.put all-portables ~name true)))))
           (gen-defmethod [dispatch-value method-body]
             `(clj/defmethod ~name ~(ensure-vector dispatch-value) [~'_] ~@method-body))]
@@ -289,8 +294,8 @@
 (defn extract-target-specific-fnode
   [value]
   (when (and (clj/fn? value) (has-kind? :oben/FN value))
-    (let [parse-fn (:parse-fn (meta value))]
-      (parse-fn (target/current)))))
+    (let [parse-for-target (:parse-for-target (meta value))]
+      (parse-for-target (target/current)))))
 
 (defn resolve
   ([sym env]
@@ -342,7 +347,7 @@
   [x]
   (:tag (meta x)))
 
-(defn move-types-to-tags
+(defn move-types-to-meta
   [expr]
   (assert (sequential? expr))
   (loop [result []
@@ -352,7 +357,7 @@
       (cond (tagged? head)
             (recur (conj result (if (vector? head)
                                   (with-meta
-                                    (move-types-to-tags head)
+                                    (move-types-to-meta head)
                                     (meta head))
                                   head))
                    (next forms)
