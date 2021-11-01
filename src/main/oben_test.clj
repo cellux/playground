@@ -1113,6 +1113,31 @@
     (ast/parse `c-long))
   => (m/exactly Number/%s64)))
 
+(o/defportable* timezone-delta
+  [target]
+  (let [lang (get (target/attrs target) :timezone)]
+    (case lang
+      :cest 2
+      :cet 1)))
+
+(m/fact (o/resolve `timezone-delta) => o/portable?)
+
+(m/facts
+ (m/fact
+  (-> (oben/with-target
+        {:type :inprocess
+         :attrs {:timezone :cest}}
+        (ast/parse `timezone-delta))
+      o/constant->value)
+  => 2)
+ (m/fact
+  (-> (oben/with-target
+        {:type :inprocess
+         :attrs {:timezone :cet}}
+        (ast/parse `timezone-delta))
+      o/constant->value)
+  => 1))
+
 ;; (oben/with-temp-target
 ;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])
 ;;         len-by-ref (oben/fn ^f32 [(* vec2) v]

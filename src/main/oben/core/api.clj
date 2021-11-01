@@ -268,6 +268,19 @@
        ~@(for [[dispatch-value method-body] (partition 2 body)]
            (gen-defmethod dispatch-value method-body)))))
 
+(clj/defmacro defportable*
+  "Defines a function which returns a value that depends on the
+  current target"
+  [name params & body]
+  (assert (and (vector? params)
+               (= (count params) 1)
+               (symbol? (first params))))
+  `(do
+     (defn ~name
+       ~params
+       ~@body)
+     (.put all-portables ~name true)))
+
 (defn drop-meta
   [x]
   (with-meta x nil))
