@@ -24,7 +24,7 @@
              {:class :oben/constant
               :host-value host-value}))
 
-(defn funcall
+(defn make-funcall-node
   [op args]
   (assert (o/fnode? op))
   (let [{:keys [return-type param-types]} (meta (o/type-of op))
@@ -93,7 +93,7 @@
                args (next form)
                result (cond
                         (o/fnode? op)
-                        (funcall op (map #(parse % env) args))
+                        (make-funcall-node op (map #(parse % env) args))
 
                         (o/type? op)
                         (o/cast op (parse (first args) env) false)

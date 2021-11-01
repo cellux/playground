@@ -292,8 +292,8 @@
 (defn- find-oben-var
   [sym]
   (let [oben-core-ns (the-ns 'oben.core)
-        sym-without-ns (symbol (name sym))
-        v (ns-resolve oben-core-ns sym-without-ns)]
+        unqualified-sym (symbol (name sym))
+        v (ns-resolve oben-core-ns unqualified-sym)]
     (if (var-in-namespace? v oben-core-ns)
       v nil)))
 
