@@ -5,37 +5,34 @@
 (def blockbin-ids [:entry :init :main :exit])
 
 (def init-fdata
-  {:blockbins (reduce #(assoc %1 %2 (list)) {} blockbin-ids)
+  {:blockbins (into {} (map #(vector % (list)) blockbin-ids))
    :blockbin-id :main
    :label-blocks {}
    :return-values {}})
 
+(defn reset
+  [ctx]
+  (assoc ctx
+         :m (ir/module)
+         :next-id 0
+         :next-name nil
+         :f nil
+         :fdata nil
+         :ir nil
+         :compiling-node nil
+         :compiling-type nil))
+
 (defn create
   []
-  {:m (ir/module)
-   :epoch 0
-   :next-id 0
-   :next-name nil
-   :f nil
-   :fdata nil
-   :ir nil
-   :compiling-node nil
-   :compiled-nodes {}
-   :compiling-type nil
-   :compiled-types {}
-   :mode :dev})
+  (let [ctx {:epoch 0
+             :compiled-nodes {}
+             :compiled-types {}
+             :mode :dev}]
+    (reset ctx)))
 
 (defn next-epoch
   [ctx]
-  (-> ctx
-      (assoc :m (ir/module)
-             :next-id 0
-             :next-name nil
-             :f nil
-             :fdata nil
-             :ir nil
-             :compiling-node nil
-             :compiling-type nil)
+  (-> (reset ctx)
       (update :epoch inc)))
 
 (defn assign-next-name
