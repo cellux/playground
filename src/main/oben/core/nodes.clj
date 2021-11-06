@@ -459,13 +459,12 @@
       (go :while))
     :end))
 
-(def gep-index-type
-  (memoize
-   (fn [target]
-     (let [attrs (target/attrs target)
-           address-size (:address-size attrs)]
-       (assert address-size "missing target attribute: address-size")
-       (Number/UInt address-size)))))
+(defn gep-index-type
+  [target]
+  (let [attrs (target/attrs target)
+        address-size (:address-size attrs)]
+    (assert address-size "missing target attribute: address-size")
+    (Number/UInt address-size)))
 
 (defn as-gep-index
   [index]
