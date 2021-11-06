@@ -2,7 +2,8 @@
   (:require [oben.core.target :as target])
   (:require [oben.core.protocols.Target :as Target])
   (:require [oben.core.context :as ctx])
-  (:require [omkamra.llvm.ir :as ir]))
+  (:require [omkamra.llvm.ir :as ir])
+  (:require [omkamra.llvm.platform :as platform]))
 
 (defrecord DumpTarget [ctx attrs]
   Target/protocol
@@ -15,6 +16,8 @@
 
   (invoke-function [this fnode args]
     (-> (:m ctx)
+        (assoc :data-layout platform/data-layout
+               :target-triple platform/target-triple)
         ir/render-module
         println))
 
@@ -25,4 +28,5 @@
   [{:keys [attrs] :as opts}]
   (map->DumpTarget
    {:ctx (ctx/create)
-    :attrs attrs}))
+    :attrs (assoc attrs
+                  :address-size platform/address-size)}))

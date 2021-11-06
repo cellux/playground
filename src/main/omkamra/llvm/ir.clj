@@ -3,116 +3,13 @@
   (:require [clojure.core :as clj])
   (:require [midje.sweet :as m])
   (:require [clojure.string :as str])
-  (:import (java.nio ByteOrder))
-  (:import (java.util IdentityHashMap))
-  (:import (com.kenai.jffi Platform Platform$OS Platform$CPU)))
+  (:import (java.util IdentityHashMap)))
 
 (def i1 [:integer 1])
 (def i8 [:integer 8])
 (def i16 [:integer 16])
 (def i32 [:integer 32])
 (def i64 [:integer 64])
-
-(def platform-byte-order
-  (condp = (ByteOrder/nativeOrder)
-    ByteOrder/BIG_ENDIAN :big-endian
-    ByteOrder/LITTLE_ENDIAN :little-endian))
-
-(def known-operating-systems
-  {Platform$OS/DARWIN :darwin
-   Platform$OS/FREEBSD :freebsd
-   Platform$OS/NETBSD :netbsd
-   Platform$OS/OPENBSD :openbsd
-   Platform$OS/DRAGONFLY :dragonfly
-   Platform$OS/LINUX :linux
-   Platform$OS/SOLARIS :solaris
-   Platform$OS/WINDOWS :windows
-   Platform$OS/AIX :aix
-   Platform$OS/ZLINUX :zos})
-
-(def platform (Platform/getPlatform))
-
-(def platform-os
-  (let [os (.getOS platform)]
-    (clj/or (known-operating-systems os)
-            (throw (ex-info "unknown operating system" {:os os})))))
-
-(def platform-object-format
-  (case platform-os
-    (:linux :solaris :freebsd :netbsd :openbsd :dragonfly) :elf
-    :darwin :mach-o
-    :windows :coff))
-
-(def known-cpu-architectures
-  {Platform$CPU/I386 :i386
-   Platform$CPU/X86_64 :x86_64
-   Platform$CPU/PPC :powerpc
-   Platform$CPU/PPC64 :powerpc64
-   Platform$CPU/PPC64LE :powerpc64le
-   Platform$CPU/SPARC :sparc
-   Platform$CPU/SPARCV9 :sparcv9
-   Platform$CPU/S390X :s390x
-   Platform$CPU/ARM :arm
-   Platform$CPU/AARCH64 :aarch64})
-
-(def platform-arch
-  (let [cpu (.getCPU platform)]
-    (clj/or (known-cpu-architectures cpu)
-            (throw (ex-info "unknown CPU architecture" {:cpu cpu})))))
-
-(def platform-mangling-mode
-  (case platform-object-format
-    :elf :elf
-    :mach-o :mach-o
-    :coff (case platform-arch
-            :i386 :windows-x86-coff
-            :x86_64 :windows-coff)))
-
-(def platform-address-size
-  (.addressSize platform))
-
-(def platform-pointer-layout
-  {:size platform-address-size :abi platform-address-size})
-
-(def platform-integer-layout
-  [{:size 64
-    :abi (if (clj/or (= platform-address-size 64)
-                     (= platform-os :windows))
-           64 32)}])
-
-(def platform-float-layout
-  (-> []
-      (conj {:size 64 :abi (if (clj/or (= platform-address-size 64)
-                                       (= platform-os :windows))
-                             64 32)})
-      (conj {:size 80 :abi (if (clj/or (= platform-address-size 64)
-                                       (= platform-os :darwin))
-                             128 32)})))
-
-(def platform-legal-int-widths
-  (case platform-address-size
-    32 [8 16 32]
-    64 [8 16 32 64]))
-
-(def platform-natural-stack-alignment
-  (if (clj/and (= platform-address-size 32)
-               (= platform-os :windows))
-    32 128))
-
-(def platform-data-layout
-  {:byte-order platform-byte-order
-   :mangling-mode platform-mangling-mode
-   :pointer-layout platform-pointer-layout
-   :integer-layout platform-integer-layout
-   :float-layout platform-float-layout
-   :legal-int-widths platform-legal-int-widths
-   :natural-stack-alignment platform-natural-stack-alignment})
-
-(def platform-target-triple
-  {:arch platform-arch
-   :vendor :unknown
-   :os platform-os
-   :env :unknown})
 
 (defmulti render-data-layout-item first)
 
@@ -298,13 +195,13 @@
   [t]
   "opaque")
 
-(def tags-of-types-with-optional-name
+(def struct-type-tags
   #{:struct :packed-struct :opaque-struct})
 
 (defn struct-type?
   [t]
   (clj/and (complex-type? t)
-           (tags-of-types-with-optional-name (first t))))
+           (struct-type-tags (first t))))
 
 (defn struct-name
   [t]
@@ -325,11 +222,10 @@
  (m/fact (render-type :void) => "void")
  (m/fact (render-type :float) => "float")
  (m/fact (render-type :&) => "...")
- (m/fact (render-type :&) => "...")
  (m/fact (render-type [:integer 16]) => "i16")
  (m/fact (render-type [:array [:integer 8] 3]) => "[3 x i8]")
  (m/fact (render-type [:vector [:integer 8] 3]) => "<3 x i8>")
- (m/fact (render-type [:ptr [:integer 8] 3]) => "i8*")
+ (m/fact (render-type [:ptr [:integer 8]]) => "i8*")
  (m/fact (render-type [:fn [:integer 8] [[:ptr [:integer 16]] [:integer 32]]])
          => "i8 (i16*, i32)")
  (m/fact (render-type [:struct nil [[:integer 8] [:ptr [:integer 16]] [:integer 32]]])
@@ -399,8 +295,7 @@
 
 (defmethod render-literal :struct
   [type fields]
-  (let [[_ name field-types] type]
-    (format "{ %s }" (str/join ", " (map render-typed-value fields)))))
+  (format "{ %s }" (str/join ", " (map render-typed-value fields))))
 
 (def
   ^{:private true
@@ -635,6 +530,12 @@
   (render-instruction
    (add {:type i32 :name 6}
         (const i32 1)
+        {:name :inc}))
+  => "%inc = add i32 %6, 1")
+ (m/fact
+  (render-instruction
+   (add {:type i32 :name 6}
+        (const i32 1)
         {:nsw true
          :name :inc}))
   => "%inc = add nsw i32 %6, 1")
@@ -682,8 +583,9 @@
   (render-instruction
    (sdiv {:type i32 :name 6}
          {:type i32 :name 7}
-         {:name :div}))
-  => "%div = sdiv i32 %6, %7"))
+         {:name :div
+          :exact true}))
+  => "%div = sdiv exact i32 %6, %7"))
 
 (define-binary-op fdiv [])
 
@@ -1482,7 +1384,9 @@ end:
 
 (defn add-type
   [m t]
-  (update m :types assoc (struct-name t) t))
+  (let [name (struct-name t)]
+    (assert name)
+    (update m :types assoc name t)))
 
 (defn global
   [name type opts]
@@ -1494,7 +1398,9 @@ end:
 
 (defn add-global
   [m g]
-  (update m :globals assoc (:name g) g))
+  (let [name (:name g)]
+    (assert name)
+    (update m :globals assoc name g)))
 
 (defn render-global
   [{:keys [name object-type linkage
@@ -1580,7 +1486,9 @@ end:
 
 (defn add-function
   [m f]
-  (update m :functions assoc (:name f) f))
+  (let [name (:name f)]
+    (assert name)
+    (update m :functions assoc name f)))
 
 (defn add-bb
   [f bb]
@@ -1692,13 +1600,15 @@ entry:
   => "declare i32 @printf(i8*, ...) #1"))
 
 (defn module
-  []
-  {:data-layout platform-data-layout
-   :target-triple platform-target-triple
-   :types {}
-   :globals {}
-   :functions {}
-   :attribute-groups {}})
+  ([opts]
+   (assoc opts
+          :types {}
+          :globals {}
+          :functions {}
+          :attribute-groups {}))
+  ([]
+   (module {:data-layout nil
+            :target-triple nil})))
 
 (defn render-module
   [{:keys [data-layout
@@ -1707,6 +1617,8 @@ entry:
            globals
            functions
            attribute-groups]}]
+  (assert data-layout "missing module option: data-layout")
+  (assert target-triple "missing module option: target-triple")
   (with-out-str
     (printf "target datalayout = \"%s\"\n" (render-data-layout data-layout))
     (printf "target triple = \"%s\"\n" (render-target-triple target-triple))
@@ -1758,20 +1670,17 @@ entry:
                            {:dso-local true
                             :function-attrs attrs})
                  (add-bb entry))]
-    (-> (module)
-        (assoc :data-layout
-               {:byte-order :little-endian,
-                :mangling-mode :elf,
-                :pointer-layout {:size 32, :abi 32},
-                :integer-layout [{:size 64, :abi 32}],
-                :float-layout [{:size 64, :abi 32} {:size 80, :abi 32}],
-                :legal-int-widths [8 16 32],
-                :natural-stack-alignment 128}
-               :target-triple
-               {:arch :i386,
-                :vendor :unknown,
-                :os :linux,
-                :env :unknown})
+    (-> (module {:data-layout {:byte-order :little-endian,
+                               :mangling-mode :elf,
+                               :pointer-layout {:size 32, :abi 32},
+                               :integer-layout [{:size 64, :abi 32}],
+                               :float-layout [{:size 64, :abi 32} {:size 80, :abi 32}],
+                               :legal-int-widths [8 16 32],
+                               :natural-stack-alignment 128}
+                 :target-triple {:arch :i386,
+                                 :vendor :unknown,
+                                 :os :linux,
+                                 :env :unknown}})
         (add-function main)
         (add-type [:packed-struct :foo [[:integer 8] [:ptr [:integer 16]] [:integer 32]]])
         (render-module)))

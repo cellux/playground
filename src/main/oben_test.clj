@@ -1083,7 +1083,7 @@
     (m/fact (sqrt 25.0) => 5.0)))
 
 (o/defportable c-long :arch
-  :x86-64 (Number/%s64)
+  :x86_64 (Number/%s64)
   :i386 (Number/%s32))
 
 (m/fact (o/portable? c-long))
@@ -1097,7 +1097,7 @@
  (m/fact
   (oben/with-target
     {:type :inprocess
-     :attrs {:arch :x86-64}}
+     :attrs {:arch :x86_64}}
     (ast/parse `c-long))
   => (m/exactly Number/%s64))
  (m/fact

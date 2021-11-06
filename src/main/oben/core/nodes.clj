@@ -8,6 +8,7 @@
   (:require [oben.core.types.Fn :as Fn])
   (:require [oben.core.types.Aggregate :as Aggregate])
   (:require [oben.core.context :as ctx])
+  (:require [oben.core.target :as target])
   (:require [omkamra.llvm.ir :as ir]))
 
 (defn %nop
@@ -458,11 +459,17 @@
       (go :while))
     :end))
 
-(def gep-index-type (Number/UInt ir/platform-address-size))
+(def gep-index-type
+  (memoize
+   (fn [target]
+     (let [attrs (target/attrs target)
+           address-size (:address-size attrs)]
+       (assert address-size "missing target attribute: address-size")
+       (Number/UInt address-size)))))
 
 (defn as-gep-index
   [index]
-  (o/cast gep-index-type index false))
+  (o/cast (gep-index-type (target/current)) index false))
 
 (defn determine-gep-leaf-type+indices
   ([t keys indices]

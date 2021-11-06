@@ -3,11 +3,11 @@
   (:require [oben.core.protocols.Target :as Target])
   (:require [oben.core.context :as ctx])
   (:require [omkamra.llvm.ir :as ir])
+  (:require [omkamra.llvm.platform :as platform])
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.buffer :as llvm-buffer])
   (:require [omkamra.llvm.module :as llvm-module])
   (:require [omkamra.llvm.engine :as llvm-engine])
-  (:import (java.nio ByteBuffer ByteOrder))
   (:import (com.kenai.jffi Type CallContext CallingConvention
                            Invoker HeapInvocationBuffer ArrayFlags)))
 
@@ -41,8 +41,11 @@
 
 (defn assemble-module
   [ctx]
-  (if (seq (:m ctx))
-    (let [module-src (ir/render-module (:m ctx))
+  (if (:m ctx)
+    (let [m (assoc (:m ctx)
+                   :data-layout platform/data-layout
+                   :target-triple platform/target-triple)
+          module-src (ir/render-module m)
           buf (llvm-buffer/from-string module-src)
           llvm-context (or (get-llvm-context ctx)
                            (llvm-context/create))
@@ -170,4 +173,5 @@
   [{:keys [attrs] :as opts}]
   (map->InProcessTarget
    {:ctx (ctx/create)
-    :attrs attrs}))
+    :attrs (assoc attrs
+                  :address-size platform/address-size)}))
