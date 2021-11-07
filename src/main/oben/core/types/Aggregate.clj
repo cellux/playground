@@ -17,7 +17,7 @@
     (let [first-index (first indices)
           _ (assert (valid-key? t first-index))
           element-type (get-element-type t first-index)]
-      (find-innermost-element-type element-type (next indices)))
+      (recur element-type (next indices)))
     t))
 
 (defmethod Container/get-in [:oben/Aggregate :oben/HostVector]
@@ -45,10 +45,8 @@
 
 (defmethod Container/assoc-in [:oben/Aggregate :oben/HostVector :oben/Value]
   [self indices value]
-  (let [atype (o/type-of self)
-        value-type (find-innermost-element-type atype indices)
-        return-type atype]
-    (ast/make-node return-type
+  (let [atype (o/type-of self)]
+    (ast/make-node atype
       (fn [ctx]
         (letfn [(compile-indices [ctx]
                   (reduce ctx/compile-node ctx indices))
