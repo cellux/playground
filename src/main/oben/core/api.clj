@@ -61,7 +61,6 @@
   (and (fn? t) (has-kind? :oben/TYPE t)))
 
 (defn make-type
-  {:style/indent 1}
   [compile-fn & opts]
   (apply vary-meta compile-fn
          merge

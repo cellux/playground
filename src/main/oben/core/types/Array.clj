@@ -11,20 +11,20 @@
 (o/define-typeclass Array [:oben/Aggregate]
   [element-type size]
   (o/make-type
-      (fn [ctx]
-        (letfn [(compile-element-type [ctx]
-                  (ctx/compile-type ctx element-type))
-                (save-ir [ctx]
-                  (ctx/save-ir
-                   ctx
-                   [:array
-                    (ctx/compiled-type ctx element-type)
-                    size]))]
-          (-> ctx
-              compile-element-type
-              save-ir)))
-      {:element-type element-type
-       :size size}))
+   (fn [ctx]
+     (letfn [(compile-element-type [ctx]
+               (ctx/compile-type ctx element-type))
+             (save-ir [ctx]
+               (ctx/save-ir
+                ctx
+                [:array
+                 (ctx/compiled-type ctx element-type)
+                 size]))]
+       (-> ctx
+           compile-element-type
+           save-ir)))
+   {:element-type element-type
+    :size size}))
 
 (defmethod o/cast [::Array :oben/HostVector]
   [t elems force?]

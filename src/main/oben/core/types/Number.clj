@@ -105,8 +105,8 @@
 (o/define-typeclass SInt [::Int]
   [size]
   (o/make-type
-      #(ctx/save-ir % [:integer size])
-      {:size size}))
+   #(ctx/save-ir % [:integer size])
+   {:size size}))
 
 (def %s1 (SInt 1))
 (def %s8 (SInt 8))
@@ -123,11 +123,11 @@
 (o/define-typeclass FP [::Number]
   [size]
   (o/make-type
-      (let [ir (case size
-                 32 :float
-                 64 :double)]
-        #(ctx/save-ir % ir))
-      {:size size}))
+   (let [ir (case size
+              32 :float
+              64 :double)]
+     #(ctx/save-ir % ir))
+   {:size size}))
 
 (def %f32 (FP 32))
 (def %f64 (FP 64))

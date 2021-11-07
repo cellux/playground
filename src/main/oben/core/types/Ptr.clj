@@ -11,15 +11,15 @@
 (o/define-typeclass Ptr [:oben/Value]
   [object-type]
   (o/make-type
-      (fn [ctx]
-        (letfn [(compile-object-type [ctx]
-                  (ctx/compile-type ctx object-type))
-                (save-ir [ctx]
-                  (ctx/save-ir ctx [:ptr (ctx/compiled-type ctx object-type)]))]
-          (-> ctx
-              compile-object-type
-              save-ir)))
-    {:object-type object-type}))
+   (fn [ctx]
+     (letfn [(compile-object-type [ctx]
+               (ctx/compile-type ctx object-type))
+             (save-ir [ctx]
+               (ctx/save-ir ctx [:ptr (ctx/compiled-type ctx object-type)]))]
+       (-> ctx
+           compile-object-type
+           save-ir)))
+   {:object-type object-type}))
 
 (defn pointer-type?
   [t]
