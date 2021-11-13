@@ -195,3 +195,13 @@
 
 (let [x 5]
   (test-hidden-macro-params true :foo))
+
+(let [dict {:keys 1 :a 3}
+      {x :keys y :a} dict]
+  (assert (= x 1))
+  (assert (= y 3)))
+
+(let [dict {:keys 1 :a 3}
+      {:keys [keys a]} dict]
+  (assert (= keys 1))
+  (assert (= a 3)))
