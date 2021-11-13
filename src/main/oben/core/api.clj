@@ -247,7 +247,7 @@
   [x]
   (.containsKey all-portables x))
 
-(clj/defmacro defportable
+(clj/defmacro defportable-by-attrs
   "Defines a multifn which returns a value that depends on selected
   target attributes"
   [name dispatch-attrs & body]
@@ -267,7 +267,7 @@
        ~@(for [[dispatch-value method-body] (partition 2 body)]
            (gen-defmethod dispatch-value method-body)))))
 
-(clj/defmacro defportable*
+(clj/defmacro defportable-by-target
   "Defines a function which returns a value that depends on the
   current target"
   [name params & body]
@@ -279,6 +279,23 @@
        ~params
        ~@body)
      (.put all-portables ~name true)))
+
+(clj/defmacro defportable
+  [name params & body]
+  (cond (keyword? params)
+        `(defportable-by-attrs ~name [~params] ~@body)
+
+        (and (vector? params)
+             (every? keyword? params))
+        `(defportable-by-attrs ~name ~params ~@body)
+
+        (and (vector? params)
+             (= (count params) 1)
+             (symbol? (first params)))
+        `(defportable-by-target ~name ~params ~@body)
+
+        :else
+        (throw (ex-info "cannot expand defportable form" {:form &form}))))
 
 (defn drop-meta
   [x]
@@ -303,19 +320,12 @@
       (throw (ex-info "oben symbol resolves to a var in clojure.core" {:sym sym}))
       v)))
 
-(defn extract-target-specific-fnode
-  [value]
-  (when (and (clj/fn? value) (has-kind? :oben/FN value))
-    (let [parse-for-target (:parse-for-target (meta value))]
-      (parse-for-target (target/current)))))
-
 (defn resolve
   ([sym env]
    (or (get env sym)
        (when-let [v (or (find-oben-var sym)
                         (find-clojure-var sym))]
-         (let [value (var-get v)]
-           (or (extract-target-specific-fnode value) value)))
+         (var-get v))
        (throw (ex-info "cannot resolve symbol" {:sym sym}))))
   ([sym]
    (resolve sym {})))

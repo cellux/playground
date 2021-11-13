@@ -62,11 +62,19 @@
 
          (symbol? form)
          (if (:tag (meta form))
+           ;; symbol with type tag, e.g. function parameter
            (vary-meta form update :tag parse-type-designator)
+           ;; variable reference
            (let [result (o/resolve form env)]
-             (if (o/portable? result)
-               (parse (result (target/current)) env)
-               result)))
+             (cond (o/portable? result)
+                   (parse (result (target/current)) env)
+
+                   (and (instance? clojure.lang.IMeta result)
+                        (:parse-for-target (meta result)))
+                   (let [parse-for-target (:parse-for-target (meta result))]
+                     (parse-for-target (target/current)))
+
+                   :else result)))
 
          (number? form)
          (o/parse-host-value form)

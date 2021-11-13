@@ -1088,7 +1088,7 @@
 
 (m/fact (o/portable? c-long))
 
-(o/defportable c-long :arch
+(o/defportable c-long [:arch]
   :aarch64 (Number/%s64))
 
 (m/fact (o/resolve `c-long) => o/portable?)
@@ -1113,10 +1113,10 @@
     (ast/parse `c-long))
   => (m/exactly Number/%s64)))
 
-(o/defportable* timezone-delta
+(o/defportable timezone-delta
   [target]
-  (let [lang (get (target/attrs target) :timezone)]
-    (case lang
+  (let [attrs (target/attrs target)]
+    (case (:timezone attrs)
       :cest 2
       :cet 1)))
 
@@ -1139,10 +1139,10 @@
   => 1))
 
 ;; (oben/with-temp-target
-;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])
-;;         len-by-ref (oben/fn ^f32 [(* vec2) v]
-;;                      (let [x (:x v)
-;;                            y (:y v)]
-;;                        (math/sqrt (+ (* x x) (* y y)))))]
+;;   (let [vec2 (oben/struct [^f32 x ^f32 y])
+;;         vec2-len (oben/fn ^f32 [vec2 v]
+;;                    (let [x (:x v)
+;;                          y (:y v)]
+;;                      (math/sqrt (+ (* x x) (* y y)))))]
 ;;     (m/fact
-;;      (len-by-ref {:x 3 :y 4}) => 5)))
+;;      (vec2-len {:x 3 :y 4}) => 5)))
