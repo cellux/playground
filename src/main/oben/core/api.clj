@@ -331,16 +331,14 @@
    (resolve sym {})))
 
 (defn resolve-type-from-meta
-  ([x env]
-   (if-let [m (meta x)]
-     (if-let [tag (:tag m)]
-       tag
-       (throw (ex-info "no tag field in metadata of value"
-                       {:value x :meta m})))
-     (throw (ex-info "no metadata on value"
-                     {:value x}))))
-  ([x]
-   (resolve-type-from-meta x {})))
+  [x]
+  (if-let [m (meta x)]
+    (if-let [tag (:tag m)]
+      tag
+      (throw (ex-info "no tag field in metadata of value"
+                      {:value x :meta m})))
+    (throw (ex-info "no metadata on value"
+                    {:value x}))))
 
 (defn all-stars?
   [s]

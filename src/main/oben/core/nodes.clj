@@ -308,8 +308,8 @@
   (let [[params body] (o/split-after vector? decl)
         params (ast/parse (first (o/move-types-to-meta params)) &env)
         _ (assert (vector? params))
-        return-type (o/resolve-type-from-meta params &env)
-        param-types (mapv #(o/resolve-type-from-meta % &env) params)
+        return-type (o/resolve-type-from-meta params)
+        param-types (mapv o/resolve-type-from-meta params)
         param-names (mapv o/drop-meta params)
         params (mapv function-parameter param-names param-types)]
     (if (seq body)
