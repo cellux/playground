@@ -54,7 +54,7 @@
     :elf :elf
     :mach-o :mach-o
     :coff (case arch
-            :i386 :windows-x86-coff
+            :i386 :windows-coff-x86
             :x86_64 :windows-coff)))
 
 (def address-size

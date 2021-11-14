@@ -23,10 +23,11 @@
   [[_ mode]]
   (str "m:" (case mode
               :elf "e"
-              :mips "m"
+              :goff "l"
               :mach-o "o"
-              :windows-x86-coff "x"
+              :mips "m"
               :windows-coff "w"
+              :windows-coff-x86 "x"
               :xcoff "a")))
 
 (defmethod render-data-layout-item :pointer-layout
