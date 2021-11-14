@@ -8,6 +8,8 @@
   (:require [oben.core.types.Void :as Void])
   (:require [oben.core.types.Number :as Number])
   (:require [oben.core.types.Ptr :as Ptr])
+  (:require [oben.core.types.Aggregate :as Aggregate])
+  (:require [oben.core.protocols.Container :as Container])
   (:require [clojure.walk :as walk])
   (:require [midje.sweet :as m])
   (:use [midje.repl]))
@@ -1138,11 +1140,37 @@
       o/constant->value)
   => 1))
 
-;; (oben/with-temp-target
+(oben/with-temp-target
+  (let [vec2 (ast/parse (oben/struct [^f32 x ^f32 y]))
+        m (meta vec2)]
+    (m/fact (isa? (o/tid-of-type vec2) :oben.core.types.Struct/Struct) => m/truthy)
+    (m/fact (:field-names m) => [:x :y])
+    (m/fact (:field-types m) => [Number/%f32 Number/%f32])
+    (m/fact (Aggregate/valid-key? vec2 :x) => m/truthy)
+    (m/fact (Aggregate/valid-key? vec2 :y) => m/truthy)
+    (m/fact (Aggregate/valid-key? vec2 :z) => m/falsey)
+    (m/fact (Aggregate/get-element-type vec2 :x) => (m/exactly Number/%f32))
+    (m/fact (Aggregate/get-element-type vec2 :y) => (m/exactly Number/%f32))
+    (m/fact (o/constant->value (Aggregate/parse-key vec2 :x)) => 0)
+    (m/fact (o/constant->value (Aggregate/parse-key vec2 :y)) => 1)))
+
+;; (oben/with-dump-target
 ;;   (let [vec2 (oben/struct [^f32 x ^f32 y])
+;;         vec2-x (oben/fn ^f32 [vec2 v]
+;;                  (:x v))]
+;;     (m/fact
+;;      (vec2-x {:x 3 :y 4}) => 3)))
+
+;; (oben/with-dump-target
+;;   (let [vec2 (oben/struct [^f32 x ^f32 y])
+;;         vec2-x (oben/fn ^f32 [vec2 v]
+;;                  (:x v))
 ;;         vec2-len (oben/fn ^f32 [vec2 v]
 ;;                    (let [x (:x v)
 ;;                          y (:y v)]
 ;;                      (math/sqrt (+ (* x x) (* y y)))))]
 ;;     (m/fact
-;;      (vec2-len {:x 3 :y 4}) => 5)))
+;;      (vec2-x {:x 3 :y 4}) => 3)
+;;      (m/fact
+;;       (vec2-len {:x 3 :y 4}) => 5)
+;;     ))

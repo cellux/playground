@@ -42,6 +42,25 @@
       {:class :oben/funcall
        :children (set (cons op args))})))
 
+(defn provides-target-specific-parser?
+  [form]
+  (and (instance? clojure.lang.IMeta form)
+       (:parse-for-target (meta form))))
+
+(defn parse-for-target
+  [target form]
+  (let [parse (:parse-for-target (meta form))]
+    (parse target)))
+
+(defn parses-to-itself?
+  [form]
+  (or (keyword? form)
+      (fn? form)
+      (o/node? form)
+      (o/type? form)
+      (o/oben-macro? form)
+      (o/multifn? form)))
+
 (defn parse
   ([form env]
    (letfn [(die []
@@ -54,10 +73,10 @@
                  (parse env)))]
      (try
        (cond
-         (o/node? form)
-         form
+         (provides-target-specific-parser? form)
+         (parse-for-target (target/current) form)
 
-         (o/type? form)
+         (parses-to-itself? form)
          form
 
          (symbol? form)
@@ -66,21 +85,12 @@
            (vary-meta form update :tag parse-type-designator)
            ;; variable reference
            (let [result (o/resolve form env)]
-             (cond (o/portable? result)
-                   (parse (result (target/current)) env)
-
-                   (and (instance? clojure.lang.IMeta result)
-                        (:parse-for-target (meta result)))
-                   (let [parse-for-target (:parse-for-target (meta result))]
-                     (parse-for-target (target/current)))
-
-                   :else result)))
+             (if (o/portable? result)
+               (parse (result (target/current)) env)
+               (parse result env))))
 
          (number? form)
          (o/parse-host-value form)
-
-         (keyword? form)
-         form
 
          (vector? form)
          (if (:tag (meta form))
@@ -111,6 +121,9 @@
 
                         (or (fn? op) (o/multifn? op))
                         (apply op (map #(parse % env) args))
+
+                        (keyword? op)
+                        (list* 'get (first args) op (rest args))
 
                         :else (die))]
            (parse result env))

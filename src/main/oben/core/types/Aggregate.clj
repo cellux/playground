@@ -8,22 +8,32 @@
 (derive :oben/Aggregate :oben/Value)
 
 (defmulti valid-key? (fn [t key] (o/tid-of-type t)))
+(defmulti parse-key (fn [t key] (o/tid-of-type t)))
 (defmulti get-element-type (fn [t key] (o/tid-of-type t)))
-(defmulti get-element-index (fn [t key] (o/tid-of-type t)))
 
 (defn find-innermost-element-type
-  [t indices]
-  (if (seq indices)
-    (let [first-index (first indices)
-          _ (assert (valid-key? t first-index))
-          element-type (get-element-type t first-index)]
-      (recur element-type (next indices)))
+  [t keys]
+  (if (seq keys)
+    (let [first-key (first keys)
+          _ (assert (valid-key? t first-key))
+          element-type (get-element-type t first-key)]
+      (recur element-type (next keys)))
     t))
 
+(defn parse-keys
+  [t keys]
+  (when (seq keys)
+    (let [first-key (first keys)
+          _ (assert (valid-key? t first-key))
+          element-type (get-element-type t first-key)]
+      (cons (parse-key t first-key)
+            (parse-keys element-type (next keys))))))
+
 (defmethod Container/get-in [:oben/Aggregate :oben/HostVector]
-  [self indices]
+  [self keys]
   (let [atype (o/type-of self)
-        return-type (find-innermost-element-type atype indices)]
+        return-type (find-innermost-element-type atype keys)
+        indices (parse-keys atype keys)]
     (ast/make-node return-type
       (fn [ctx]
         (letfn [(compile-indices [ctx]
@@ -39,13 +49,14 @@
               compile-indices
               compile-extractvalue))))))
 
-(defmethod Container/get [:oben/Aggregate :oben/Value]
-  [self index]
-  (Container/get-in self [index]))
+(defmethod Container/get [:oben/Aggregate :oben/Any]
+  [self key]
+  (Container/get-in self [key]))
 
 (defmethod Container/assoc-in [:oben/Aggregate :oben/HostVector :oben/Value]
-  [self indices value]
-  (let [atype (o/type-of self)]
+  [self keys value]
+  (let [atype (o/type-of self)
+        indices (parse-keys atype keys)]
     (ast/make-node atype
       (fn [ctx]
         (letfn [(compile-indices [ctx]
@@ -65,6 +76,6 @@
               compile-indices
               compile-insertvalue))))))
 
-(defmethod Container/assoc [:oben/Aggregate :oben/Value :oben/Value]
-  [self index value]
-  (Container/assoc-in self [index] value))
+(defmethod Container/assoc [:oben/Aggregate :oben/Any :oben/Value]
+  [self key value]
+  (Container/assoc-in self [key] value))

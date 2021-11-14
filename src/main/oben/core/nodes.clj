@@ -473,7 +473,7 @@
 (defn determine-gep-leaf-type+indices
   ([t keys indices]
    (if-let [k (first keys)]
-     (let [element-index (Aggregate/get-element-index t k)
+     (let [element-index (Aggregate/parse-key t k)
            element-type (Aggregate/get-element-type t k)]
        (recur element-type (next keys) (conj indices element-index)))
      [t indices]))

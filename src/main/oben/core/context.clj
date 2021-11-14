@@ -150,6 +150,8 @@
 
 (defn compile-node
   [ctx node]
+  (when-not (o/node? node)
+    (throw (ex-info "expected node" {:actual node})))
   (if-let [ir (get (:compiled-nodes ctx) node)]
     (letfn [(declare-previously-compiled-globals [ctx]
               (if (and (:global? (meta node)) (:name ir))

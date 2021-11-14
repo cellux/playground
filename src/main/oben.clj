@@ -1,15 +1,19 @@
 (ns oben
-  (:refer-clojure :exclude [fn fn? defn defmacro defmulti defmethod])
+  (:refer-clojure :exclude [fn fn? defn
+                            struct defstruct
+                            defmacro defmulti defmethod])
   (:require [clojure.core :as clj])
   (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.ast :as ast])
   (:require [oben.core.target :as target])
   (:require [oben.core.types.Array])
+  (:require [oben.core.types.Struct])
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.engine :as llvm-engine]))
 
 (def Array oben.core.types.Array/Array)
+(def Struct oben.core.types.Struct/Struct)
 
 (clj/defmacro with-target
   [t & body]
@@ -65,6 +69,31 @@
         _ (assert (vector? params))
         params (o/quote-all-except-locals params &env)]
     `(def ~name (make-fn '~name ~params '~body))))
+
+(clj/defn make-struct
+  [name fields]
+  (let [parse-for-target (memoize
+                          (clj/fn [target]
+                            (-> (ast/parse (list 'oben.core.types.Struct/Struct fields))
+                                (vary-meta assoc :name name))))]
+    (with-meta
+      {}
+      {:kind :oben/STRUCT
+       :parse-for-target parse-for-target})))
+
+(clj/defmacro struct
+  [fields]
+  (let [fields (o/move-types-to-meta fields)
+        _ (assert (vector? fields))
+        fields (o/quote-all-except-locals fields &env)]
+    `(make-struct nil ~fields)))
+
+(clj/defmacro defstruct
+  [name fields]
+  (let [fields (o/move-types-to-meta fields)
+        _ (assert (vector? fields))
+        fields (o/quote-all-except-locals fields &env)]
+    `(def ~name (make-struct '~name ~fields))))
 
 (clj/defmacro define-typeclass
   [& args]
