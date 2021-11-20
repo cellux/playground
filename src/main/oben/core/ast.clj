@@ -24,24 +24,6 @@
              {:class :oben/constant
               :host-value host-value}))
 
-(defn make-funcall-node
-  [op args]
-  (assert (o/fnode? op))
-  (let [{:keys [return-type param-types]} (meta (o/type-of op))
-        args (mapv #(o/cast %1 %2 false) param-types args)]
-    (make-node return-type
-      (fn [ctx]
-        (letfn [(compile-args [ctx]
-                  (reduce ctx/compile-node ctx args))
-                (compile-call [ctx]
-                  (let [ctx (ctx/compile-node ctx op)
-                        ins (ir/call (ctx/compiled-node ctx op)
-                                     (map #(ctx/compiled-node ctx %) args))]
-                    (ctx/compile-instruction ctx ins)))]
-          (-> ctx compile-args compile-call)))
-      {:class :oben/funcall
-       :children (set (cons op args))})))
-
 (defn provides-target-specific-parser?
   [form]
   (and (instance? clojure.lang.IMeta form)
@@ -111,7 +93,7 @@
                args (next form)
                result (cond
                         (o/fnode? op)
-                        (make-funcall-node op (map #(parse % env) args))
+                        (list* 'funcall op (map #(parse % env) args))
 
                         (o/type? op)
                         (o/cast op (parse (first args) env) false)

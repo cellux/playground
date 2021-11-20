@@ -363,6 +363,24 @@
                 (ctx/save-ir f))))
         {:class :oben/fn}))))
 
+(defn %funcall
+  [fnode & args]
+  (assert (o/fnode? fnode))
+  (let [{:keys [return-type param-types]} (meta (o/type-of fnode))
+        args (mapv #(o/cast %1 %2 false) param-types args)]
+    (ast/make-node return-type
+      (fn [ctx]
+        (letfn [(compile-args [ctx]
+                  (reduce ctx/compile-node ctx args))
+                (compile-call [ctx]
+                  (let [ctx (ctx/compile-node ctx fnode)
+                        ins (ir/call (ctx/compiled-node ctx fnode)
+                                     (map #(ctx/compiled-node ctx %) args))]
+                    (ctx/compile-instruction ctx ins)))]
+          (-> ctx compile-args compile-call)))
+      {:class :oben/funcall
+       :children (set (cons fnode args))})))
+
 (defn %when
   [cond-node & then-nodes]
   (let [cond-node (%cast Number/%u1 cond-node)

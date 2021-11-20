@@ -66,6 +66,7 @@
 
 (def let oben.core.nodes/%let)
 (def fn oben.core.nodes/%fn)
+(def funcall oben.core.nodes/%funcall)
 
 (def when oben.core.nodes/%when)
 (def if oben.core.nodes/%if)
