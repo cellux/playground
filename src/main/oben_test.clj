@@ -1117,10 +1117,9 @@
 
 (o/defportable timezone-delta
   [target]
-  (let [attrs (target/attrs target)]
-    (case (:timezone attrs)
-      :cest 2
-      :cet 1)))
+  (case (target/getattr target :timezone)
+    :cest 2
+    :cet 1))
 
 (m/fact (o/resolve `timezone-delta) => o/portable?)
 

@@ -32,6 +32,13 @@
   [this]
   (:attrs @this))
 
+(defn getattr
+  [this name]
+  (let [attr-map (attrs this)]
+    (if (contains? attr-map name)
+      (get attr-map name)
+      (throw (ex-info "missing target attribute" {:name name})))))
+
 (defn invoke-function
   [this fnode args]
   (swap! this Target/compile-function fnode)
