@@ -1,6 +1,5 @@
 (ns oben.core.types.Aggregate
   (:require [oben.core.api :as o])
-  (:require [oben.core.ast :as ast])
   (:require [oben.core.protocols.Container :as Container])
   (:require [oben.core.context :as ctx])
   (:require [omkamra.llvm.ir :as ir]))
@@ -34,7 +33,7 @@
   (let [atype (o/type-of self)
         return-type (find-innermost-element-type atype keys)
         indices (parse-keys atype keys)]
-    (ast/make-node return-type
+    (o/make-node return-type
       (fn [ctx]
         (letfn [(compile-indices [ctx]
                   (reduce ctx/compile-node ctx indices))
@@ -57,7 +56,7 @@
   [self keys value]
   (let [atype (o/type-of self)
         indices (parse-keys atype keys)]
-    (ast/make-node atype
+    (o/make-node atype
       (fn [ctx]
         (letfn [(compile-indices [ctx]
                   (reduce ctx/compile-node ctx indices))

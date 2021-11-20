@@ -2,7 +2,6 @@
   (:require [oben])
   (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
-  (:require [oben.core.ast :as ast])
   (:require [oben.core.target :as target])
   (:require [oben.core.math :as math])
   (:require [oben.core.types.Void :as Void])
@@ -196,29 +195,29 @@
             (/ x y))]
     (m/fact (f 6.5 -3.25) => -2.0)))
 
-(m/fact (ast/parse 'u8) => (m/exactly Number/%u8))
-(m/fact (ast/parse 's8) => (m/exactly Number/%s8))
+(m/fact (o/parse 'u8) => (m/exactly Number/%u8))
+(m/fact (o/parse 's8) => (m/exactly Number/%s8))
 
-(m/fact (o/type-of (ast/parse '(u8 0))) => (m/exactly (Number/UInt 8)))
-(m/fact (o/type-of (ast/parse '(u8 0))) => (m/exactly Number/%u8))
+(m/fact (o/type-of (o/parse '(u8 0))) => (m/exactly (Number/UInt 8)))
+(m/fact (o/type-of (o/parse '(u8 0))) => (m/exactly Number/%u8))
 
-(m/fact (o/type-of (ast/parse '(s8 0))) => (m/exactly (Number/SInt 8)))
-(m/fact (o/type-of (ast/parse '(s8 0))) => (m/exactly Number/%s8))
+(m/fact (o/type-of (o/parse '(s8 0))) => (m/exactly (Number/SInt 8)))
+(m/fact (o/type-of (o/parse '(s8 0))) => (m/exactly Number/%s8))
 
-(m/fact (o/type-of (ast/parse 0)) => (m/exactly Number/%u1))
-(m/fact (o/type-of (ast/parse 1)) => (m/exactly Number/%u1))
-(m/fact (o/type-of (ast/parse -1)) => (m/exactly Number/%s8))
-(m/fact (o/type-of (ast/parse 5)) => (m/exactly Number/%u8))
-(m/fact (o/type-of (ast/parse -5)) => (m/exactly Number/%s8))
+(m/fact (o/type-of (o/parse 0)) => (m/exactly Number/%u1))
+(m/fact (o/type-of (o/parse 1)) => (m/exactly Number/%u1))
+(m/fact (o/type-of (o/parse -1)) => (m/exactly Number/%s8))
+(m/fact (o/type-of (o/parse 5)) => (m/exactly Number/%u8))
+(m/fact (o/type-of (o/parse -5)) => (m/exactly Number/%s8))
 
-(m/fact (o/type-of (ast/parse '(u8 -5))) => (m/exactly Number/%u8))
+(m/fact (o/type-of (o/parse '(u8 -5))) => (m/exactly Number/%u8))
 (m/fact
  "reinterpreting a signed value as unsigned does not change its bit pattern"
- (o/constant->value (ast/parse '(u8 -5))) => -5)
+ (o/constant->value (o/parse '(u8 -5))) => -5)
 
 (m/fact
  "negating an UInt turns it into an SInt"
- (o/type-of (ast/parse '(- 5))) => (m/exactly Number/%s8))
+ (o/type-of (o/parse '(- 5))) => (m/exactly Number/%s8))
 
 (oben/with-temp-target
   (let [f (oben/fn ^s32 [^u32 x]
@@ -720,16 +719,16 @@
 (m/facts
  (m/fact (Ptr/Ptr (oben/Array Number/%u64 10))
          => (m/exactly (Ptr/Ptr (oben/Array Number/%u64 10))))
- (let [actual (ast/parse '(Array u64 10))
+ (let [actual (o/parse '(Array u64 10))
        expected (oben/Array Number/%u64 10)]
    (m/fact actual => (m/exactly expected))))
 
 (m/facts
- (let [result (ast/parse (with-meta 'x {:tag '(* (Array u64 10))}))
+ (let [result (o/parse (with-meta 'x {:tag '(* (Array u64 10))}))
        expected-type (Ptr/Ptr (oben/Array Number/%u64 10))]
    (m/fact result => 'x)
    (m/fact (:tag (meta result)) => (m/exactly expected-type)))
- (let [result (ast/parse (with-meta 'ret {:tag (list '* (list 'Array 'u64 10))}))
+ (let [result (o/parse (with-meta 'ret {:tag (list '* (list 'Array 'u64 10))}))
        expected-type (Ptr/Ptr (oben/Array Number/%u64 10))]
    (m/fact result => 'ret)
    (m/fact (:tag (meta result)) => (m/exactly expected-type))))
@@ -861,7 +860,7 @@
 
 (defmacro parses-to-constant-value
   [form value]
-  `(let [result# (ast/parse '~form)]
+  `(let [result# (o/parse '~form)]
      (m/fact (o/constant-node? result#) => m/truthy)
      (m/fact (o/constant->value result#) => ~value)))
 
@@ -1066,12 +1065,12 @@
 
 (m/facts
  "dispatch by type or typeclass"
- (m/fact (determine-bit-size (ast/parse 250)) => 8)
- (m/fact (determine-bit-size (ast/parse 270)) => :uint)
- (m/fact (determine-bit-size (ast/parse 65535)) => :uint)
- (m/fact (determine-bit-size (ast/parse 65536)) => 32)
- (m/fact (determine-bit-size (ast/parse Long/MAX_VALUE)) => 64)
- (m/fact (determine-bit-size (ast/parse -5.0)) => :float))
+ (m/fact (determine-bit-size (o/parse 250)) => 8)
+ (m/fact (determine-bit-size (o/parse 270)) => :uint)
+ (m/fact (determine-bit-size (o/parse 65535)) => :uint)
+ (m/fact (determine-bit-size (o/parse 65536)) => 32)
+ (m/fact (determine-bit-size (o/parse Long/MAX_VALUE)) => 64)
+ (m/fact (determine-bit-size (o/parse -5.0)) => :float))
 
 (oben/with-temp-target
   (m/fact
@@ -1100,19 +1099,19 @@
   (oben/with-target
     {:type :inprocess
      :attrs {:arch :x86_64}}
-    (ast/parse `c-long))
+    (o/parse `c-long))
   => (m/exactly Number/%s64))
  (m/fact
   (oben/with-target
     {:type :inprocess
      :attrs {:arch :i386}}
-    (ast/parse `c-long))
+    (o/parse `c-long))
   => (m/exactly Number/%s32))
  (m/fact
   (oben/with-target
     {:type :inprocess
      :attrs {:arch :aarch64}}
-    (ast/parse `c-long))
+    (o/parse `c-long))
   => (m/exactly Number/%s64)))
 
 (o/defportable timezone-delta
@@ -1128,19 +1127,19 @@
   (-> (oben/with-target
         {:type :inprocess
          :attrs {:timezone :cest}}
-        (ast/parse `timezone-delta))
+        (o/parse `timezone-delta))
       o/constant->value)
   => 2)
  (m/fact
   (-> (oben/with-target
         {:type :inprocess
          :attrs {:timezone :cet}}
-        (ast/parse `timezone-delta))
+        (o/parse `timezone-delta))
       o/constant->value)
   => 1))
 
 (oben/with-temp-target
-  (let [vec2 (ast/parse (oben/struct [^f32 x ^f32 y]))
+  (let [vec2 (o/parse (oben/struct [^f32 x ^f32 y]))
         m (meta vec2)]
     (m/fact (isa? (o/tid-of-type vec2) :oben.core.types.Struct/Struct) => m/truthy)
     (m/fact (:field-names m) => [:x :y])

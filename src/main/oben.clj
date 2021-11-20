@@ -5,7 +5,6 @@
   (:require [clojure.core :as clj])
   (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
-  (:require [oben.core.ast :as ast])
   (:require [oben.core.target :as target])
   (:require [oben.core.types.Array])
   (:require [oben.core.types.Struct])
@@ -43,7 +42,7 @@
   [name params body]
   (let [parse-for-target (memoize
                           (clj/fn [target]
-                            (-> (ast/parse (list* 'fn params body))
+                            (-> (o/parse (list* 'fn params body))
                                 (vary-meta assoc :name name))))]
     (with-meta
       (clj/fn [& args]
@@ -74,7 +73,7 @@
   [name fields]
   (let [parse-for-target (memoize
                           (clj/fn [target]
-                            (-> (ast/parse (list 'oben.core.types.Struct/Struct fields))
+                            (-> (o/parse (list 'oben.core.types.Struct/Struct fields))
                                 (vary-meta assoc :name name))))]
     (with-meta
       {}

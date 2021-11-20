@@ -1,6 +1,5 @@
 (ns oben.core.types.Struct
   (:require [oben.core.api :as o])
-  (:require [oben.core.ast :as ast])
   (:require [oben.core.types.Aggregate :as Aggregate])
   (:require [oben.core.types.Number :as Number])
   (:require [oben.core.protocols.Container :as Container])
@@ -37,23 +36,23 @@
   (let [{:keys [field-names field-types name->index]} (meta t)]
     (assert (= (count elems) (count field-names)))
     (let [casted-elems (mapv #(o/cast %1 %2 false) field-types elems)]
-      (ast/make-constant-node
-          t elems
-          (fn [ctx]
-            (letfn [(compile-struct-type [ctx]
-                      (ctx/compile-type ctx t))
-                    (compile-elems [ctx]
-                      (reduce ctx/compile-node ctx casted-elems))
-                    (save-ir [ctx]
-                      (ctx/save-ir
-                       ctx
-                       (ir/const (ctx/compiled-type ctx t)
-                                 (mapv #(ctx/compiled-node ctx %)
-                                       casted-elems))))]
-              (-> ctx
-                  compile-struct-type
-                  compile-elems
-                  save-ir)))))))
+      (o/make-constant-node
+       t elems
+       (fn [ctx]
+         (letfn [(compile-struct-type [ctx]
+                   (ctx/compile-type ctx t))
+                 (compile-elems [ctx]
+                   (reduce ctx/compile-node ctx casted-elems))
+                 (save-ir [ctx]
+                   (ctx/save-ir
+                    ctx
+                    (ir/const (ctx/compiled-type ctx t)
+                              (mapv #(ctx/compiled-node ctx %)
+                                    casted-elems))))]
+           (-> ctx
+               compile-struct-type
+               compile-elems
+               save-ir)))))))
 
 (defmethod o/cast [::Struct :oben/HostMap]
   [t fields force?]

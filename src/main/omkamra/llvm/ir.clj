@@ -1,8 +1,8 @@
 (ns omkamra.llvm.ir
   (:refer-clojure :exclude [and or load])
   (:require [clojure.core :as clj])
-  (:require [midje.sweet :as m])
   (:require [clojure.string :as str])
+  (:require [midje.sweet :as m])
   (:import (java.util IdentityHashMap)))
 
 (def i1 [:integer 1])

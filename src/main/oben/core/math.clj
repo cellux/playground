@@ -1,7 +1,6 @@
 (ns oben.core.math
   (:require [oben])
   (:require [oben.core.api :as o])
-  (:require [oben.core.ast :as ast])
   (:require [oben.core.types.Number :as Number]))
 
 (oben/defn llvm.sqrt.f32 ^f32 [^f32 val])

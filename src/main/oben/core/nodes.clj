@@ -1,8 +1,7 @@
 (ns oben.core.nodes
   (:require [oben.core.api :as o])
-  (:require [oben.core.ast :as ast])
-  (:use [oben.core.types.Void :only [%void]])
-  (:use [oben.core.types.Unseen :only [%unseen]])
+  (:require [oben.core.types.Void :refer [%void]])
+  (:require [oben.core.types.Unseen :refer [%unseen]])
   (:require [oben.core.types.Number :as Number])
   (:require [oben.core.types.Ptr :as Ptr])
   (:require [oben.core.types.Fn :as Fn])
@@ -13,7 +12,7 @@
 
 (defn %nop
   [& _]
-  (ast/make-node %void
+  (o/make-node %void
     identity
     {:class :oben/nop}))
 
@@ -31,7 +30,7 @@
 
 (defn make-label
   [name]
-  (ast/make-node %void
+  (o/make-node %void
     (fn [ctx]
       (let [self (:compiling-node ctx)
             label-block (ctx/get-label-block ctx self)]
@@ -43,8 +42,8 @@
 
 (defn %var
   ([type init-node]
-   (let [init-node (when init-node (ast/parse `(cast ~type ~init-node)))]
-     (ast/make-node (Ptr/Ptr type)
+   (let [init-node (when init-node (o/parse `(cast ~type ~init-node)))]
+     (o/make-node (Ptr/Ptr type)
        (fn [ctx]
          (let [ctx (ctx/compile-type ctx type)
                ins (ir/alloca
@@ -84,7 +83,7 @@
   (assert (isa? (o/tid-of-node target-node) ::Ptr/Ptr))
   (let [object-type (:object-type (meta (o/type-of target-node)))
         value-node (%cast object-type value-node)]
-    (ast/make-node object-type
+    (o/make-node object-type
       (fn [ctx]
         (letfn [(compile-store [ctx]
                   (ctx/compile-instruction
@@ -116,7 +115,7 @@
   ([head & tail]
    (if (seq tail)
      (let [body (drop-all-after-first-return (cons head tail))]
-       (ast/make-node (o/type-of (last body))
+       (o/make-node (o/type-of (last body))
          (fn [ctx]
            (reduce ctx/compile-node ctx body))
          {:class :oben/do
@@ -138,8 +137,8 @@
                               (tag-nodes expr)
                               expr))
         body (map keyword->tag-node body)
-        body (map #(ast/parse % env) body)]
-    (ast/make-node %void
+        body (map #(o/parse % env) body)]
+    (o/make-node %void
       (fn [ctx]
         (letfn [(register-tag-blocks [ctx]
                   (reduce ctx/add-label-block
@@ -155,7 +154,7 @@
 (o/defmacro %go
   [label-name]
   (if-let [label-node (get-in &env [:oben/tags label-name])]
-    (ast/make-node %unseen
+    (o/make-node %unseen
       (fn [ctx]
         (if-let [label-block (ctx/get-label-block ctx label-node)]
           (ctx/compile-instruction ctx (ir/br label-block))
@@ -171,9 +170,9 @@
    (let [{:keys [block-id return-label return-type]}
          (get-in &env [:oben/blocks block-name])
          value-node (if return-type
-                      (ast/parse `(cast ~return-type ~form) &env)
-                      (ast/parse form &env))]
-     (ast/make-node %unseen
+                      (o/parse `(cast ~return-type ~form) &env)
+                      (o/parse form &env))]
+     (o/make-node %unseen
        (fn [ctx]
          (letfn [(compile-node [ctx]
                    (ctx/compile-node ctx value-node))
@@ -197,7 +196,7 @@
    (assert (map? (get-in &env [:oben/blocks block-name])))
    (let [{:keys [block-id return-label]}
          (get-in &env [:oben/blocks block-name])]
-     (ast/make-node %unseen
+     (o/make-node %unseen
        (fn [ctx]
          (letfn [(compile-br [ctx]
                    (ctx/compile-instruction
@@ -236,7 +235,7 @@
         env (update &env :oben/blocks
                     assoc name {:block-id block-id
                                 :return-label return-label})
-        body-node (ast/parse `(do ~@body) env)
+        body-node (o/parse `(do ~@body) env)
         find-return-nodes (fn [node]
                             (->> (node-descendants node)
                                  (filter #(and (= (o/class-of-node %) :oben/return-from)
@@ -245,12 +244,12 @@
                          (map (comp :return-type meta))
                          (apply o/ubertype-of (o/type-of body-node)))
         env (assoc-in env [:oben/blocks name :return-type] return-type)
-        body-node (ast/parse `(do ~@body) env)
+        body-node (o/parse `(do ~@body) env)
         tangible-body? (o/tangible-type? (o/type-of body-node))
         body-node (if tangible-body?
                     (%cast return-type body-node)
                     body-node)]
-    (ast/make-node return-type
+    (o/make-node return-type
       (fn [ctx]
         (letfn [(compile-body [ctx]
                   (ctx/compile-node ctx body-node))
@@ -285,13 +284,13 @@
     `(let [~k ~v]
        (let [~@rest]
          ~@body))
-    (ast/parse
+    (o/parse
      `(do ~@body)
-     (assoc &env k (ast/parse v &env)))))
+     (assoc &env k (o/parse v &env)))))
 
 (defn function-parameter
   [name type]
-  (ast/make-node type
+  (o/make-node type
     (fn [ctx]
       (letfn [(compile-type [ctx]
                 (ctx/compile-type ctx type))
@@ -306,7 +305,7 @@
 (o/defmacro %fn
   [& decl]
   (let [[params body] (o/split-after vector? decl)
-        params (ast/parse (first (o/move-types-to-meta params)) &env)
+        params (o/parse (first (o/move-types-to-meta params)) &env)
         _ (assert (vector? params))
         return-type (o/resolve-type-from-meta params)
         param-types (mapv o/resolve-type-from-meta params)
@@ -316,11 +315,11 @@
       (let [void? (= return-type %void)
             local-types (into {} (filter #(o/type? (val %)) &env))
             env (into local-types (map vector param-names params))
-            body-node (ast/parse (list* 'block :oben/fn-block body) env)
+            body-node (o/parse (list* 'block :oben/fn-block body) env)
             body-node (if void?
                         body-node
                         (%cast return-type body-node))]
-        (ast/make-node (Fn/Fn return-type param-types)
+        (o/make-node (Fn/Fn return-type param-types)
           (fn [ctx]
             (let [saved ctx
                   fname (ctx/get-assigned-name ctx)
@@ -349,7 +348,7 @@
                     (merge (select-keys saved
                                         [:f :fdata :compiled-nodes]))))))
           {:class :oben/fn}))
-      (ast/make-node (Fn/Fn return-type param-types)
+      (o/make-node (Fn/Fn return-type param-types)
         (fn [ctx]
           (let [fname (-> ctx :compiling-node meta :name)
                 _ (assert fname)
@@ -368,7 +367,7 @@
   (assert (o/fnode? fnode))
   (let [{:keys [return-type param-types]} (meta (o/type-of fnode))
         args (mapv #(o/cast %1 %2 false) param-types args)]
-    (ast/make-node return-type
+    (o/make-node return-type
       (fn [ctx]
         (letfn [(compile-args [ctx]
                   (reduce ctx/compile-node ctx args))
@@ -386,7 +385,7 @@
   (let [cond-node (%cast Number/%u1 cond-node)
         then-label (make-label :then)
         end-label (make-label :end)]
-    (ast/make-node %void
+    (o/make-node %void
       (fn [ctx]
         (letfn [(add-br
                   ([ctx cond-node then-label else-label]
@@ -448,7 +447,7 @@
 (defn %not
   [node]
   (let [bool-node (%cast Number/%u1 node)]
-    (ast/make-node Number/%u1
+    (o/make-node Number/%u1
       (fn [ctx]
         (let [ctx (ctx/compile-node ctx bool-node)]
           (ctx/compile-instruction
@@ -504,7 +503,7 @@
       (assert (isa? (o/tid-of-type object-type) :oben/Aggregate)))
     (let [[leaf-type indices] (determine-gep-leaf-type+indices object-type (next keys))
           indices (map as-gep-index (cons (first keys) indices))]
-      (ast/make-node (Ptr/Ptr leaf-type)
+      (o/make-node (Ptr/Ptr leaf-type)
         (fn [ctx]
           (letfn [(compile-ptr [ctx]
                     (ctx/compile-node ctx ptr))

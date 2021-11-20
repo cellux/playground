@@ -1,6 +1,5 @@
 (ns oben.core.types.Ptr
   (:require [oben.core.api :as o])
-  (:require [oben.core.ast :as ast])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.protocols.Container :as Container])
   (:require [oben.core.protocols.Algebra :as Algebra])
@@ -32,7 +31,7 @@
 (defn %deref
   [ptr-node]
   (let [{:keys [object-type]} (meta (o/type-of ptr-node))]
-    (ast/make-node object-type
+    (o/make-node object-type
       (fn [ctx]
         (letfn [(compile-pointer [ctx]
                   (ctx/compile-node ctx ptr-node))

@@ -1,6 +1,5 @@
 (ns oben.core.types.Array
   (:require [oben.core.api :as o])
-  (:require [oben.core.ast :as ast])
   (:require [oben.core.types.Number :as Number])
   (:require [oben.core.types.Aggregate :as Aggregate])
   (:require [oben.core.protocols.Container :as Container])
@@ -32,23 +31,23 @@
     (assert (= (count elems) size))
     (let [casted-elems (mapv #(o/cast element-type % false) elems)]
       (assert (every? #(= element-type %) (map o/type-of-node casted-elems)))
-      (ast/make-constant-node
-          t elems
-          (fn [ctx]
-            (letfn [(compile-array-type [ctx]
-                      (ctx/compile-type ctx t))
-                    (compile-elems [ctx]
-                      (reduce ctx/compile-node ctx casted-elems))
-                    (save-ir [ctx]
-                      (ctx/save-ir
-                       ctx
-                       (ir/const (ctx/compiled-type ctx t)
-                                 (mapv #(ctx/compiled-node ctx %)
-                                       casted-elems))))]
-              (-> ctx
-                  compile-array-type
-                  compile-elems
-                  save-ir)))))))
+      (o/make-constant-node
+       t elems
+       (fn [ctx]
+         (letfn [(compile-array-type [ctx]
+                   (ctx/compile-type ctx t))
+                 (compile-elems [ctx]
+                   (reduce ctx/compile-node ctx casted-elems))
+                 (save-ir [ctx]
+                   (ctx/save-ir
+                    ctx
+                    (ir/const (ctx/compiled-type ctx t)
+                              (mapv #(ctx/compiled-node ctx %)
+                                    casted-elems))))]
+           (-> ctx
+               compile-array-type
+               compile-elems
+               save-ir)))))))
 
 (defmethod Aggregate/valid-key? ::Array
   [t key]

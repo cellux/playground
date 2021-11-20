@@ -1,6 +1,5 @@
 (ns oben.core.types.Number
   (:require [oben.core.api :as o])
-  (:require [oben.core.ast :as ast])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.protocols.Eq :as Eq])
   (:require [oben.core.protocols.Ord :as Ord])
@@ -175,7 +174,7 @@
 
 (defn make-constant-number-node
   [type host-value]
-  (ast/make-constant-node
+  (o/make-constant-node
    type host-value
    (fn [ctx]
      (letfn [(compile-type [ctx]
@@ -225,7 +224,7 @@
                                     (~(resize-constant-fns op)
                                      (o/constant->value ~'node)
                                      result-size#))
-         (ast/make-node result-type#
+         (o/make-node result-type#
            (fn [ctx#]
              (let [ctx# (ctx/compile-type ctx# result-type#)
                    ctx# (ctx/compile-node ctx# ~'node)
@@ -254,7 +253,7 @@
            result-type# (~result-typeclass result-size#)]
        (if (o/constant-node? ~'node)
          (make-constant-number-node result-type# (~const-op (o/constant->value ~'node)))
-         (ast/make-node result-type#
+         (o/make-node result-type#
            (fn [ctx#]
              (let [ctx# (ctx/compile-type ctx# result-type#)
                    ctx# (ctx/compile-node ctx# ~'node)
@@ -412,15 +411,15 @@
   `(letfn [(doit# [~'lhs ~'rhs]
              (let [result-type# (o/ubertype-of (o/type-of ~'lhs)
                                                (o/type-of ~'rhs))
-                   ~'lhs (ast/parse (list 'cast result-type# ~'lhs))
-                   ~'rhs (ast/parse (list 'cast result-type# ~'rhs))]
+                   ~'lhs (o/parse (list 'cast result-type# ~'lhs))
+                   ~'rhs (o/parse (list 'cast result-type# ~'rhs))]
                (if (isa? (o/tid-of-type result-type#) ~arg-typeclass)
                  (if (and (o/constant-node? ~'lhs)
                           (o/constant-node? ~'rhs))
                    (o/parse-host-value (~const-op
                                         (o/constant->value ~'lhs)
                                         (o/constant->value ~'rhs)))
-                   (ast/make-node result-type#
+                   (o/make-node result-type#
                      (fn [~'ctx]
                        (let [compile-op# (fn [~'ctx]
                                            (let [~'ins (~make-ir
@@ -475,7 +474,7 @@
         mask (if (< size 64)
                (- (bit-shift-left 1 size) 1)
                0xffffffffffffffffN)]
-    (ast/parse `(bit-xor ~x ~mask))))
+    (o/parse `(bit-xor ~x ~mask))))
 
 ;; comparison ops
 
@@ -484,10 +483,10 @@
   `(letfn [(doit# [~'lhs ~'rhs]
              (let [ubertype# (o/ubertype-of (o/type-of ~'lhs)
                                             (o/type-of ~'rhs))
-                   ~'lhs (ast/parse (list 'cast ubertype# ~'lhs))
-                   ~'rhs (ast/parse (list 'cast ubertype# ~'rhs))]
+                   ~'lhs (o/parse (list 'cast ubertype# ~'lhs))
+                   ~'rhs (o/parse (list 'cast ubertype# ~'rhs))]
                (if (isa? (o/tid-of-type ubertype#) ~arg-typeclass)
-                 (ast/make-node %u1
+                 (o/make-node %u1
                    (fn [~'ctx]
                      (let [compile-op# (fn [~'ctx]
                                          (let [~'ins (~make-ir ~pred
