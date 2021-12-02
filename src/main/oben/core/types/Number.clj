@@ -286,7 +286,7 @@
       node
       (> t-size node-size)
       (zext node t-size)
-      (or (<= real-size t-size) force?)
+      (or (>= t-size real-size) force?)
       (trunc node t-size)
       :else
       (throw (ex-info "rejected narrowing UInt->UInt conversion"
@@ -306,7 +306,7 @@
       unsigned-node
       (> t-size node-size)
       (zext unsigned-node t-size)
-      (or (<= real-size t-size) force?)
+      (or (>= t-size real-size) force?)
       (trunc unsigned-node t-size)
       :else
       (throw (ex-info "rejected narrowing SInt->UInt conversion"
@@ -320,7 +320,7 @@
                     (float-size (o/constant->value node))
                     node-size)]
     (cond
-      (or (>= t-size node-size) (<= real-size t-size) force?)
+      (or (>= t-size node-size) (>= t-size real-size) force?)
       (fptoui node t-size)
       :else
       (throw (ex-info "rejected narrowing FP->UInt conversion"
@@ -337,7 +337,7 @@
           node
           (> t-size node-size)
           (sext node t-size)
-          (or (<= real-size t-size) force?)
+          (or (>= t-size real-size) force?)
           (trunc node t-size)
           :else
           (throw (ex-info "rejected narrowing SInt->SInt conversion"
@@ -356,7 +356,7 @@
           signed-node
           (> t-size node-size)
           (sext signed-node t-size)
-          (or (<= real-size t-size) force?)
+          (or (>= t-size real-size) force?)
           (trunc signed-node t-size)
           :else
           (throw (ex-info "rejected narrowing SInt->UInt conversion"
@@ -369,7 +369,7 @@
         real-size (if (o/constant-node? node)
                     (float-size (o/constant->value node))
                     node-size)]
-    (cond (or (>= t-size node-size) (<= real-size t-size) force?)
+    (cond (or (>= t-size node-size) (>= t-size real-size) force?)
           (fptosi node t-size)
           :else
           (throw (ex-info "rejected narrowing FP->SInt conversion"
@@ -386,7 +386,7 @@
           node
           (> t-size node-size)
           (fpext node t-size)
-          (or (<= real-size t-size) force?)
+          (or (>= t-size real-size) force?)
           (fptrunc node t-size)
           :else
           (throw (ex-info "rejected narrowing FP->FP conversion"
