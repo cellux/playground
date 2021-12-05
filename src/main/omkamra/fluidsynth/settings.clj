@@ -4,8 +4,7 @@
    [omkamra.fluidsynth.api :refer [$fl]]
    [omkamra.jnr.util :refer [alloc-temp-int
                              alloc-temp-double
-                             alloc-temp-buffer]]
-   [omkamra.clojure.util :refer [deep-merge]]))
+                             alloc-temp-buffer]]))
 
 (defn setting-type
   [value]
@@ -164,6 +163,15 @@
    :audio
    {:driver "pulseaudio"
     :period-size 1024}})
+
+(defn deep-merge
+  "Recursively merges maps."
+  [& maps]
+  (letfn [(m [to from]
+            (if (and (map? from) (not (record? from)))
+              (merge-with m to from)
+              from))]
+    (reduce m maps)))
 
 (defn create
   [settings]

@@ -7,8 +7,7 @@
    [omkamra.sequencer.protocols.Target :as Target]
    [omkamra.fluidsynth.settings :as fluid-settings]
    [omkamra.fluidsynth.synth :as fluid-synth]
-   [omkamra.fluidsynth.audio.driver :as fluid-audio-driver]
-   [omkamra.clojure.util :refer [deep-merge]]))
+   [omkamra.fluidsynth.audio.driver :as fluid-audio-driver]))
 
 (defn load-soundfonts
   [synth soundfonts]
@@ -90,6 +89,15 @@
     :synth
     {:sample-rate 48000.0}}
    :soundfonts {}})
+
+(defn deep-merge
+  "Recursively merges maps."
+  [& maps]
+  (letfn [(m [to from]
+            (if (and (map? from) (not (record? from)))
+              (merge-with m to from)
+              from))]
+    (reduce m maps)))
 
 (defn create
   [config]
