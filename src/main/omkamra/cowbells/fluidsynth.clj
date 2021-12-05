@@ -7,7 +7,7 @@
    [omkamra.sequencer.protocols.Target :as Target]
    [omkamra.fluidsynth.settings :as fluid-settings]
    [omkamra.fluidsynth.synth :as fluid-synth]
-   [omkamra.fluidsynth.audio.driver :as fluid-audio-driver]))
+   [omkamra.fluidsynth.audio-driver :as fluid-audio-driver]))
 
 (defn load-soundfonts
   [synth soundfonts]

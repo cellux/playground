@@ -1,4 +1,4 @@
-(ns omkamra.fluidsynth.audio.driver
+(ns omkamra.fluidsynth.audio-driver
   (:require [omkamra.fluidsynth.api :refer [$fl]]
             [omkamra.fluidsynth.synth :as synth]))
 
