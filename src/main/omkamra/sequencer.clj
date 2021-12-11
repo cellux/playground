@@ -382,9 +382,9 @@
             default-bindings (get-default-bindings)
             update-bindings (bindings->updater bindings)]
         (pfn [pattern bindings]
-             (pf pattern (-> default-bindings
-                             (merge bindings)
-                             update-bindings)))))))
+          (pf pattern (-> default-bindings
+                          (merge bindings)
+                          update-bindings)))))))
 
 ;; sequencer
 
