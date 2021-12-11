@@ -1,24 +1,42 @@
 (ns omkamra.sequencer
   (:require [omkamra.sequencer.protocols.Sequencer :as Sequencer]
             [omkamra.sequencer.protocols.Target :as Target])
-  (:import (java.util.concurrent TimeUnit))
+  (:import (java.util.concurrent TimeUnit)
+           (java.util.concurrent.locks LockSupport))
   (:require [clojure.stacktrace :refer [print-cause-trace]]))
 
-(def nanosleep-default-precision
-  (.toNanos TimeUnit/MILLISECONDS 2))
+(def nanosleep-default-precision (.toNanos TimeUnit/MILLISECONDS 2))
+(def parknanos-default-precision 100)
+
+(def nanosleep-precision (atom nanosleep-default-precision))
+(def parknanos-precision (atom parknanos-default-precision))
 
 (defn nanosleep
-  ([ns precision]
-   (let [end (+ (System/nanoTime) ns)]
-     (loop [time-left ns]
-       (when (pos? time-left)
-         (if (> time-left precision)
-           (let [sleep-dur (- time-left precision)]
-             (.sleep TimeUnit/NANOSECONDS sleep-dur))
-           (Thread/yield))
-         (recur (- end (System/nanoTime)))))))
-  ([ns]
-   (nanosleep ns nanosleep-default-precision)))
+  [^long ns]
+  (let [end (+ (System/nanoTime) ns)]
+    (loop [time-left ns]
+      (when (pos? time-left)
+        (let [sleep-start (System/nanoTime)]
+          (let [^long precision @nanosleep-precision]
+            (if (> time-left precision)
+              (let [sleep-dur (- time-left precision)]
+                (.sleep TimeUnit/NANOSECONDS sleep-dur)
+                (let [elapsed (- (System/nanoTime) sleep-start)
+                      diff (Math/abs (- elapsed sleep-dur))]
+                  (when (or (>= diff (* precision 2))
+                            (<= diff (/ precision 2)))
+                    (reset! nanosleep-precision diff))))
+              (let [^long precision @parknanos-precision]
+                (if (> time-left precision)
+                  (let [sleep-dur (- time-left precision)]
+                    (LockSupport/parkNanos sleep-dur)
+                    (let [elapsed (- (System/nanoTime) sleep-start)
+                          diff (Math/abs (- elapsed sleep-dur))]
+                      (when (or (>= diff (* precision 2))
+                                (<= diff (/ precision 2)))
+                        (reset! parknanos-precision diff))))
+                  (Thread/yield))))))
+        (recur (- end (System/nanoTime)))))))
 
 (defn beats->ms
   [beats bpm]
