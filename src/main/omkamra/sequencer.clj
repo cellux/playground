@@ -325,11 +325,14 @@
   (fn [k expr]
     (first expr)))
 
-(defn compile-binding
-  [k form]
-  (if (bind-expr? form)
-    (compile-bind-expr k form)
-    (constantly (resolve-binding k form))))
+(defn compile-binding-spec
+  "Takes a key and a spec, returns a function which when given a map of
+  bindings, returns a value calculated from the bindings as described
+  by spec."
+  [k spec]
+  (if (bind-expr? spec)
+    (compile-bind-expr k spec)
+    (constantly (resolve-binding k spec))))
 
 (defmethod compile-bind-expr :default
   [k expr]
@@ -342,30 +345,26 @@
   `(defmethod compile-bind-expr ~name
      [~'k [~'_ ~'x ~'y]]
      (if ~'y
-       (let [~'x (compile-binding ~'k ~'x)
-             ~'y (compile-binding ~'k ~'y)]
+       (let [~'x (compile-binding-spec ~'k ~'x)
+             ~'y (compile-binding-spec ~'k ~'y)]
          (fn [~'bindings] (~op (~'x ~'bindings) (~'y ~'bindings))))
-       (compile-bind-expr ~'k [~name [:binding-of ~'k] ~'x]))))
+       (let [~'x (compile-binding-spec ~'k ~'x)]
+         (fn [~'bindings] (~op (~'x ~'bindings) (get ~'bindings ~'k)))))))
 
 (compile-binop-bind-expr :add +)
 (compile-binop-bind-expr :sub -)
 (compile-binop-bind-expr :mul *)
 (compile-binop-bind-expr :div /)
 
-(defmethod compile-bind-expr :binding-of
-  [k [_ arg]]
-  (let [arg (compile-binding k arg)]
-    (fn [bindings]
-      (let [arg (arg bindings)]
-        (get bindings arg)))))
-
-(defn bindings->updater
-  [bindings]
+(defn binding-specs->update-fn
+  "Takes a map of binding specifications and creates a function which
+  when given a map of bindings, updates them according to the specs."
+  [binding-specs]
   (reduce-kv
    (fn [f k v]
-     (let [calculate-bind-value (compile-binding k v)]
+     (let [calculate-bind-value (compile-binding-spec k v)]
        (comp #(assoc % k (calculate-bind-value %)) f)))
-   identity bindings))
+   identity binding-specs))
 
 (defn get-default-bindings
   []
@@ -373,14 +372,14 @@
       {}))
 
 (defmethod compile-pattern :bind
-  [[_ bindings & body]]
-  (if (empty? bindings)
+  [[_ binding-specs & body]]
+  (if (empty? binding-specs)
     (compile-pattern (cons :seq body))
-    (binding [*compile-target* (or (:target bindings)
+    (binding [*compile-target* (or (:target binding-specs)
                                    *compile-target*)]
       (let [pf (compile-pattern (cons :seq body))
             default-bindings (get-default-bindings)
-            update-bindings (bindings->updater bindings)]
+            update-bindings (binding-specs->update-fn binding-specs)]
         (pfn [pattern bindings]
           (pf pattern (-> default-bindings
                           (merge bindings)

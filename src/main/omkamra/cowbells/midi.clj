@@ -296,7 +296,7 @@
 
 (defmethod compile-bind-expr :degree->key
   [k [_ degree]]
-  (let [degree (sequencer/compile-binding k degree)]
+  (let [degree (sequencer/compile-binding-spec k degree)]
     (fn [bindings]
       (let [degree (degree bindings)]
         (degree->key bindings degree)))))
