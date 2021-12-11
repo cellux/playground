@@ -340,6 +340,11 @@
     (Target/compile-bind-expr *compile-target* k expr)
     (throw (ex-info "unable to compile bind expression" {:expr expr}))))
 
+(defmethod compile-bind-expr :binding-of
+  [k [_ arg]]
+  (fn [bindings]
+    (get bindings arg)))
+
 (defmacro compile-binop-bind-expr
   [name op]
   `(defmethod compile-bind-expr ~name
@@ -348,8 +353,7 @@
        (let [~'x (compile-binding-spec ~'k ~'x)
              ~'y (compile-binding-spec ~'k ~'y)]
          (fn [~'bindings] (~op (~'x ~'bindings) (~'y ~'bindings))))
-       (let [~'x (compile-binding-spec ~'k ~'x)]
-         (fn [~'bindings] (~op (~'x ~'bindings) (get ~'bindings ~'k)))))))
+       (compile-bind-expr ~'k [~name [:binding-of ~'k] ~'x]))))
 
 (compile-binop-bind-expr :add +)
 (compile-binop-bind-expr :sub -)
