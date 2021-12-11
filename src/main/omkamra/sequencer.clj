@@ -474,7 +474,7 @@
   ([config]
    (map->Sequencer {:config config
                     :bpm (atom (get config :bpm 120))
-                    :tpb (get config :tpb 64)
+                    :tpb (get config :tpb 96)
                     :playing (atom false)
                     :timeline (atom {})
                     :position (atom 0)
