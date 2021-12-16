@@ -1,23 +1,21 @@
 (ns omkamra.llvm.api
-  (:import (jnr.ffi LibraryLoader Pointer Struct)
-           (jnr.ffi.types size_t)
-           (jnr.ffi.annotations In Out LongLong)
-           (jnr.ffi.byref PointerByReference))
   (:require [clojure.string :as str]
-            [omkamra.jnr :as jnr]))
+            [omkamra.jnr.library :as library]
+            [omkamra.jnr.enum :as enum]
+            [omkamra.jnr.struct :as struct]))
 
-(jnr/define-enum LLVMVerifierFailureAction
+(enum/define LLVMVerifierFailureAction
   LLVMAbortProcessAction,
   LLVMPrintMessageAction,
   LLVMReturnStatusAction)
 
-(jnr/define-enum LLVMCodeGenOptLevel
+(enum/define LLVMCodeGenOptLevel
   LLVMCodeGenLevelNone,
   LLVMCodeGenLevelLess,
   LLVMCodeGenLevelDefault,
   LLVMCodeGenLevelAggressive)
 
-(jnr/define-enum LLVMCodeModel
+(enum/define LLVMCodeModel
   LLVMCodeModelDefault,
   LLVMCodeModelJITDefault,
   LLVMCodeModelTiny,
@@ -26,96 +24,96 @@
   LLVMCodeModelMedium,
   LLVMCodeModelLarge)
 
-(jnr/define-struct LLVMMCJITCompilerOptions
-  [^uint OptLevel]
-  [^LLVMCodeModel CodeModel]
-  [^int NoFramePointerElim]
-  [^int EnableFastISel]
-  [^Pointer MCJMM])
+(struct/define LLVMMCJITCompilerOptions
+  ^int OptLevel
+  ^LLVMCodeModel CodeModel
+  ^int NoFramePointerElim
+  ^int EnableFastISel
+  ^Pointer MCJMM)
 
-(jnr/define-library $llvm
+(library/define $llvm
   "LLVM"
   ;; Core.h
   (^void
-   LLVMDisposeMessage [^{:tag Pointer In true} Message])
+   LLVMDisposeMessage [^Pointer Message])
 
   (^Pointer
    LLVMContextCreate)
   (^void
-   LLVMContextDispose [^{:tag Pointer In true} C])
+   LLVMContextDispose [^Pointer C])
 
   (^Pointer
-   LLVMModuleCreateWithNameInContext [^{:tag String In true} ModuleID
-                                      ^{:tag Pointer In true} C])
+   LLVMModuleCreateWithNameInContext [^String ModuleID
+                                      ^Pointer C])
   (^void
    LLVMDisposeModule)
   (^void
-   LLVMDumpModule [^{:tag Pointer In true} M])
+   LLVMDumpModule [^Pointer M])
   (^int
-   LLVMPrintModuleToFile [^{:tag Pointer In true} M
-                          ^{:tag String In true} Filename
-                          ^{:tag PointerByReference Out true} ErrorMessage])
+   LLVMPrintModuleToFile [^Pointer M
+                          ^String Filename
+                          ^Pointer* ^:out ErrorMessage])
   (^String
-   LLVMPrintModuleToString [^{:tag Pointer In true} M])
+   LLVMPrintModuleToString [^Pointer M])
   (^Pointer
-   LLVMCreateModuleProviderForExistingModule [^{:tag Pointer In true} M])
+   LLVMCreateModuleProviderForExistingModule [^Pointer M])
   (^void
-   LLVMDisposeModuleProvider [^{:tag Pointer In true} M])
+   LLVMDisposeModuleProvider [^Pointer M])
   (^int
-   LLVMCreateMemoryBufferWithContentsOfFile [^{:tag String In true} Path
-                                             ^{:tag PointerByReference Out true} OutMemBuf
-                                             ^{:tag PointerByReference Out true} OutMessage])
+   LLVMCreateMemoryBufferWithContentsOfFile [^String Path
+                                             ^Pointer* ^:out OutMemBuf
+                                             ^Pointer* ^:out OutMessage])
   (^Pointer
-   LLVMCreateMemoryBufferWithMemoryRange [^{:tag String In true} InputData
-                                          ^{:tag long size_t true In true} InputDataLength
-                                          ^{:tag String In true} BufferName
-                                          ^{:tag int In true} RequiresNullTerminator])
+   LLVMCreateMemoryBufferWithMemoryRange [^String InputData
+                                          ^size_t InputDataLength
+                                          ^String BufferName
+                                          ^int RequiresNullTerminator])
   (^Pointer
-   LLVMCreateMemoryBufferWithMemoryRangeCopy [^{:tag String In true} InputData
-                                              ^{:tag long size_t true In true} InputDataLength
-                                              ^{:tag String In true} BufferName])
+   LLVMCreateMemoryBufferWithMemoryRangeCopy [^String InputData
+                                              ^size_t InputDataLength
+                                              ^String BufferName])
   (^Pointer
-   LLVMGetBufferStart [^{:tag Pointer In true} MemBuf])
-  (^{:tag long size_t true}
-   LLVMGetBufferSize [^{:tag Pointer In true} MemBuf])
+   LLVMGetBufferStart [^Pointer MemBuf])
+  (^size_t
+   LLVMGetBufferSize [^Pointer MemBuf])
   (^void
-   LLVMDisposeMemoryBuffer [^{:tag Pointer In true} MemBuf])
+   LLVMDisposeMemoryBuffer [^Pointer MemBuf])
 
   (^Pointer
    LLVMCreatePassManager [])
   (^Pointer
-   LLVMCreateFunctionPassManagerForModule [^{:tag Pointer In true} M])
+   LLVMCreateFunctionPassManagerForModule [^Pointer M])
   (^int
-   LLVMRunPassManager [^{:tag Pointer In true} PM
-                       ^{:tag Pointer In true} M])
+   LLVMRunPassManager [^Pointer PM
+                       ^Pointer M])
   (^int
-   LLVMInitializeFunctionPassManager [^{:tag Pointer In true} FPM])
+   LLVMInitializeFunctionPassManager [^Pointer FPM])
   (^int
-   LLVMRunFunctionPassManager [^{:tag Pointer In true} FPM
-                               ^{:tag Pointer In true} F])
+   LLVMRunFunctionPassManager [^Pointer FPM
+                               ^Pointer F])
   (^int
-   LLVMFinalizeFunctionPassManager [^{:tag Pointer In true} FPM])
+   LLVMFinalizeFunctionPassManager [^Pointer FPM])
   (^void
-   LLVMDisposePassManager [^{:tag Pointer In true} PM])
+   LLVMDisposePassManager [^Pointer PM])
 
   ;; Analysis.h
   (^int
-   LLVMVerifyModule [^{:tag Pointer In true} M
-                     ^{:tag LLVMVerifierFailureAction In true} Action
-                     ^{:tag PointerByReference Out true} OutMessage])
+   LLVMVerifyModule [^Pointer M
+                     ^LLVMVerifierFailureAction ^:in Action
+                     ^Pointer* ^:out OutMessage])
 
   ;; BitReader.h
   (^int
-   LLVMParseBitcodeInContext2 [^{:tag Pointer In true} ContextRef
-                               ^{:tag Pointer In true} MemBuf
-                               ^{:tag PointerByReference Out true} OutModule])
+   LLVMParseBitcodeInContext2 [^Pointer ContextRef
+                               ^Pointer MemBuf
+                               ^Pointer* ^:out OutModule])
 
   ;; BitWriter.h
   (^int
-   LLVMWriteBitcodeToFile [^{:tag Pointer In true} M
-                           ^{:tag String In true} Path])
+   LLVMWriteBitcodeToFile [^Pointer M
+                           ^String Path])
   (^Pointer
-   LLVMWriteBitcodeToMemoryBuffer [^{:tag Pointer In true} M])
+   LLVMWriteBitcodeToMemoryBuffer [^Pointer M])
 
   ;; ExecutionEngine.h
   (^void
@@ -123,60 +121,60 @@
   (^void
    LLVMLinkInInterpreter [])
   (^int
-   LLVMCreateExecutionEngineForModule [^{:tag PointerByReference Out true} OutEE
-                                       ^{:tag Pointer In true} M
-                                       ^{:tag PointerByReference Out true} OutError])
+   LLVMCreateExecutionEngineForModule [^Pointer* ^:out OutEE
+                                       ^Pointer M
+                                       ^Pointer* ^:out OutError])
   (^int
-   LLVMCreateInterpreterForModule [^{:tag PointerByReference Out true} OutInterp
-                                   ^{:tag Pointer In true} M
-                                   ^{:tag PointerByReference Out true} OutError])
+   LLVMCreateInterpreterForModule [^Pointer* ^:out OutInterp
+                                   ^Pointer M
+                                   ^Pointer* ^:out OutError])
   (^int
-   LLVMCreateJITCompilerForModule [^{:tag PointerByReference Out true} OutJIT
-                                   ^{:tag Pointer In true} M
-                                   ^{:tag int In true} OptLevel
-                                   ^{:tag PointerByReference Out true} OutError])
+   LLVMCreateJITCompilerForModule [^Pointer* ^:out OutJIT
+                                   ^Pointer M
+                                   ^int OptLevel
+                                   ^Pointer* ^:out OutError])
   (^void
-   LLVMInitializeMCJITCompilerOptions [^{:tag Pointer In true} Options
-                                       ^{:tag long size_t true In true} SizeOfOptions])
+   LLVMInitializeMCJITCompilerOptions [^LLVMMCJITCompilerOptions Options
+                                       ^size_t SizeOfOptions])
   (^int
-   LLVMCreateMCJITCompilerForModule [^{:tag PointerByReference Out true} OutJIT
-                                     ^{:tag Pointer In true} M
-                                     ^{:tag Pointer In true} Options
-                                     ^{:tag long size_t true In true} SizeOfOptions
-                                     ^{:tag PointerByReference Out true} OutError])
+   LLVMCreateMCJITCompilerForModule [^Pointer* ^:out OutJIT
+                                     ^Pointer M
+                                     ^LLVMMCJITCompilerOptions Options
+                                     ^size_t SizeOfOptions
+                                     ^Pointer* ^:out OutError])
   (^void
-   LLVMDisposeExecutionEngine [^{:tag Pointer In true} EE])
+   LLVMDisposeExecutionEngine [^Pointer EE])
 
   (^void
-   LLVMAddModule [^{:tag Pointer In true} EE
-                  ^{:tag Pointer In true} M])
+   LLVMAddModule [^Pointer EE
+                  ^Pointer M])
   (^int
-   LLVMRemoveModule [^{:tag Pointer In true} EE
-                     ^{:tag Pointer In true} M
-                     ^{:tag PointerByReference Out true} OutMod
-                     ^{:tag PointerByReference Out true} OutError])
+   LLVMRemoveModule [^Pointer EE
+                     ^Pointer M
+                     ^Pointer* ^:out OutMod
+                     ^Pointer* ^:out OutError])
   (^int
-   LLVMFindFunction [^{:tag Pointer In true} EE
-                     ^{:tag String In true} Name
-                     ^{:tag PointerByReference Out true} OutFn])
-  (^{:tag long LongLong true}
-   LLVMGetGlobalValueAddress [^{:tag Pointer In true} EE
-                              ^{:tag String In true} Name])
-  (^{:tag long LongLong true}
-   LLVMGetFunctionAddress [^{:tag Pointer In true} EE
-                           ^{:tag String In true} Name])
+   LLVMFindFunction [^Pointer EE
+                     ^String Name
+                     ^Pointer* ^:out OutFn])
+  (^uint64_t
+   LLVMGetGlobalValueAddress [^Pointer EE
+                              ^String Name])
+  (^uint64_t
+   LLVMGetFunctionAddress [^Pointer EE
+                           ^String Name])
 
   ;; IRReader.h
   (^int
-   LLVMParseIRInContext [^{:tag Pointer In true} ContextRef
-                         ^{:tag Pointer In true} MemBuf
-                         ^{:tag PointerByReference Out true} OutM
-                         ^{:tag PointerByReference Out true} OutMessage])
+   LLVMParseIRInContext [^Pointer ContextRef
+                         ^Pointer MemBuf
+                         ^Pointer* ^:out OutM
+                         ^Pointer* ^:out OutMessage])
 
   ;; Linker.h
   (^int
-   LLVMLinkModules2 [^{:tag Pointer In true} Dest
-                     ^{:tag Pointer In true} Src]))
+   LLVMLinkModules2 [^Pointer Dest
+                     ^Pointer Src]))
 
 (def all-targets
   [:AArch64 :AMDGPU :ARM
@@ -206,7 +204,7 @@
 (defmacro define-target-initializers
   [library-name]
   `(do
-     (omkamra.jnr/define-library ~library-name
+     (library/define ~library-name
        "LLVM"
        ~@(for [target all-targets
                subsystem all-subsystems]
@@ -235,10 +233,6 @@
 (define-target-initializers $llvm-init)
 
 (LLVMInitializeNativeTarget)
-
-(defmacro make-struct
-  [struct-name]
-  `(new ~struct-name (.getRuntime $llvm)))
 
 (defn ok?
   [return-value]

@@ -1,14 +1,14 @@
 (ns omkamra.llvm.engine
-  (:require [omkamra.llvm.api :as api :refer [$llvm ok? check]])
-  (:import (jnr.ffi.byref PointerByReference)
-           (omkamra.llvm.api LLVMMCJITCompilerOptions
+  (:require [omkamra.llvm.api :as api :refer [$llvm ok? check]]
+            [omkamra.jnr.library :as library])
+  (:import (omkamra.llvm.api LLVMMCJITCompilerOptions
                              LLVMCodeGenOptLevel
                              LLVMCodeModel)))
 
 (defn create
   [module]
-  (let [ee-ptr (PointerByReference.)
-        message-ptr (PointerByReference.)
+  (let [ee-ptr (jnr.ffi.byref.PointerByReference.)
+        message-ptr (jnr.ffi.byref.PointerByReference.)
         status (.LLVMCreateExecutionEngineForModule
                 $llvm ee-ptr module message-ptr)]
     (check status message-ptr)
@@ -16,18 +16,17 @@
 
 (defn create-interpreter
   [module]
-  (let [ee-ptr (PointerByReference.)
-        message-ptr (PointerByReference.)
+  (let [ee-ptr (jnr.ffi.byref.PointerByReference.)
+        message-ptr (jnr.ffi.byref.PointerByReference.)
         status (.LLVMCreateInterpreterForModule
                 $llvm ee-ptr module message-ptr)]
     (check status message-ptr)
-
     (.getValue ee-ptr)))
 
 (defn create-jit-compiler
   [module opt-level]
-  (let [ee-ptr (PointerByReference.)
-        message-ptr (PointerByReference.)
+  (let [ee-ptr (jnr.ffi.byref.PointerByReference.)
+        message-ptr (jnr.ffi.byref.PointerByReference.)
         status (.LLVMCreateJITCompilerForModule
                 $llvm ee-ptr module opt-level message-ptr)]
     (check status message-ptr)
@@ -35,10 +34,9 @@
 
 (defn build-mcjit-compiler-options
   [opts]
-  (let [options (api/make-struct LLVMMCJITCompilerOptions)
+  (let [options (LLVMMCJITCompilerOptions. (library/runtime $llvm))
         size (jnr.ffi.Struct/size options)]
-    (.LLVMInitializeMCJITCompilerOptions
-     $llvm (jnr.ffi.Struct/getMemory options) size)
+    (.LLVMInitializeMCJITCompilerOptions $llvm options size)
     (doseq [[k v] opts]
       (case k
         :opt-level (.set (.OptLevel options)
@@ -55,13 +53,13 @@
 
 (defn create-mcjit-compiler
   ([module opts]
-   (let [ee-ptr (PointerByReference.)
-         message-ptr (PointerByReference.)
+   (let [ee-ptr (jnr.ffi.byref.PointerByReference.)
+         message-ptr (jnr.ffi.byref.PointerByReference.)
          options (build-mcjit-compiler-options opts)
          size (jnr.ffi.Struct/size options)
          status (.LLVMCreateMCJITCompilerForModule
                  $llvm ee-ptr module
-                 (jnr.ffi.Struct/getMemory options) size
+                 options size
                  message-ptr)]
      (check status message-ptr)
      (.getValue ee-ptr)))

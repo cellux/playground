@@ -1,12 +1,11 @@
 (ns omkamra.llvm.buffer
   (:require [omkamra.llvm.api :refer [$llvm ok? check]])
-  (:import (jnr.ffi.byref PointerByReference)
-           (java.nio.charset Charset)))
+  (:import (java.nio.charset Charset)))
 
 (defn from-file
   [path]
-  (let [membuf-ptr (PointerByReference.)
-        message-ptr (PointerByReference.)
+  (let [membuf-ptr (jnr.ffi.byref.PointerByReference.)
+        message-ptr (jnr.ffi.byref.PointerByReference.)
         status (.LLVMCreateMemoryBufferWithContentsOfFile $llvm path membuf-ptr message-ptr)]
     (check status message-ptr)
     (.getValue membuf-ptr)))

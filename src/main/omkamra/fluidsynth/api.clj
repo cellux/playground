@@ -1,8 +1,7 @@
 (ns omkamra.fluidsynth.api
-  (:import (jnr.ffi Pointer))
-  (:require [omkamra.jnr :as jnr]))
+  (:require [omkamra.jnr.library :as library]))
 
-(jnr/define-library $fl
+(library/define $fl
   "fluidsynth"
   (^String fluid_version_str [])
 
@@ -11,13 +10,13 @@
 
   (^int fluid_settings_getnum [^Pointer settings
                                ^String name
-                               ^Pointer val])
+                               ^double* val])
   (^int fluid_settings_setnum [^Pointer settings
                                ^String name
                                ^double val])
   (^int fluid_settings_getint [^Pointer settings
                                ^String name
-                               ^Pointer val])
+                               ^int* val])
   (^int fluid_settings_setint [^Pointer settings
                                ^String name
                                ^int val])
@@ -88,5 +87,5 @@
   (^double fluid_synth_get_cpu_load (^Pointer synth))
 
   (^Pointer new_fluid_audio_driver (^Pointer settings
-                                            ^Pointer synth))
+                                    ^Pointer synth))
   (^void delete_fluid_audio_driver (^Pointer driver)))

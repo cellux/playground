@@ -1,7 +1,6 @@
 (ns omkamra.llvm.module
   (:require [omkamra.llvm.api :refer [$llvm ok? check]]
-            [omkamra.llvm.buffer :as buffer])
-  (:import (jnr.ffi.byref PointerByReference)))
+            [omkamra.llvm.buffer :as buffer]))
 
 (defn create
   [name context]
@@ -13,8 +12,8 @@
 
 (defn from-buffer
   [buffer context]
-  (let [module-ptr (PointerByReference.)
-        message-ptr (PointerByReference.)
+  (let [module-ptr (jnr.ffi.byref.PointerByReference.)
+        message-ptr (jnr.ffi.byref.PointerByReference.)
         status (.LLVMParseIRInContext $llvm context buffer module-ptr message-ptr)]
     (check status message-ptr)
     (.getValue module-ptr)))
@@ -31,7 +30,7 @@
 
 (defn print-to-file
   [module path]
-  (let [message-ptr (PointerByReference.)
+  (let [message-ptr (jnr.ffi.byref.PointerByReference.)
         status (.LLVMPrintModuleToFile $llvm module path message-ptr)]
     (check status message-ptr)))
 

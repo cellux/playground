@@ -2,9 +2,7 @@
   (:require
    [clojure.string :as str]
    [omkamra.fluidsynth.api :refer [$fl]]
-   [omkamra.jnr.util :refer [alloc-temp-int
-                             alloc-temp-double
-                             alloc-temp-buffer]]))
+   [omkamra.jnr.library :as library]))
 
 (defn setting-type
   [value]
@@ -19,7 +17,8 @@
                   {:value value}))))
 
 (defmulti apply-setting
-  (fn [&settings key value] (setting-type value)))
+  (fn [&settings key value]
+    (setting-type value)))
 
 (defmethod apply-setting :bool
   [&settings key value]
@@ -193,39 +192,40 @@
 
 (defmethod decode-setting :bool
   [&settings key _]
-  (let [&int (alloc-temp-int $fl)]
+  (let [&int (jnr.ffi.byref.IntByReference.)]
     (when (ok? (.fluid_settings_getint $fl &settings key &int))
-      (pos? (.getInt &int 0)))))
+      (pos? (.getValue &int)))))
 
 (defmethod decode-setting :int
   [&settings key _]
-  (let [&int (alloc-temp-int $fl)]
+  (let [&int (jnr.ffi.byref.IntByReference.)]
     (when (ok? (.fluid_settings_getint $fl &settings key &int))
-      (.getInt &int 0))))
+      (.getValue &int))))
 
 (defmethod decode-setting :num
   [&settings key _]
-  (let [&double (alloc-temp-double $fl)]
+  (let [&double (jnr.ffi.byref.DoubleByReference.)]
     (when (ok? (.fluid_settings_getnum $fl &settings key &double))
-      (.getDouble &double 0))))
+      (.getValue &double))))
 
 (defmethod decode-setting :str
   [&settings key _]
   (let [bufsize 1024
-        &str (alloc-temp-buffer $fl bufsize)]
+        &str (jnr.ffi.Pointer/wrap (library/runtime $fl)
+                                   (java.nio.ByteBuffer/allocate bufsize))]
     (when (ok? (.fluid_settings_copystr $fl &settings key &str bufsize))
       (.getString &str 0))))
 
-(defn decode-settings
+(defn decode
   ([&settings]
-   (decode-settings &settings known-settings []))
+   (decode &settings known-settings []))
   ([&settings known-settings parents]
    (reduce (fn [settings [k v]]
              (assoc settings k
                     (if (map? v)
-                      (decode-settings &settings
-                                             v
-                                             (conj parents k))
+                      (decode &settings
+                              v
+                              (conj parents k))
                       (decode-setting &settings
                                       (->> (conj parents k)
                                            (map name)
