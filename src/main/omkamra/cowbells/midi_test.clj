@@ -4,7 +4,7 @@
 
 (m/tabular
  (m/fact
-  (midi/compile-form ?input) => ?output)
+  (midi/compile-pattern-form ?input) => ?output)
  ?input ?output
  "p4" [:program 4]
  "m60" [:note 60]

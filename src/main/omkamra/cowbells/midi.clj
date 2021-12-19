@@ -79,13 +79,11 @@
   (case k
     :root (resolve-midi-note v)
     :scale (resolve-scale v)
-    v))
+    nil))
 
-(defmulti compile-pattern first)
+(defmulti compile-pattern-expr first)
 
-(defmethod compile-pattern :default
-  [pattern]
-  (throw (ex-info "cannot compile pattern" {:pattern pattern})))
+(defmethod compile-pattern-expr :default [_] nil)
 
 (def parse-string (insta/parser (jio/resource "omkamra/cowbells/midi.bnf")))
 
@@ -208,13 +206,12 @@
   [s]
   (postprocess (parse (str "(" s ")"))))
 
-(defn compile-form
+(defn compile-pattern-form
   [form]
-  (if (string? form)
-    (compile-string form)
-    (throw (ex-info "cannot compile form" {:form form}))))
+  (when (string? form)
+    (compile-string form)))
 
-(defmethod compile-pattern :program
+(defmethod compile-pattern-expr :program
   [[_ program]]
   (pfn [pattern {:keys [target channel] :as bindings}]
     (assert target "target is unbound")
@@ -235,9 +232,9 @@
 
 (defn advance
   [pattern beats tpb]
-  (update pattern :position + (beats->ticks beats tpb)))
+  (update pattern :offset + (beats->ticks beats tpb)))
 
-(defmethod compile-pattern :note
+(defmethod compile-pattern-expr :note
   [[_ note-desc & [note->key]]]
   (cond
     (vector? note-desc)
@@ -258,7 +255,7 @@
         (let [key (if note->key
                     (note->key bindings note)
                     note)
-              tpb (:tpb sequencer)]
+              {:keys [tpb]} sequencer]
           (assert (midi-note? key))
           (-> pattern
               (sequencer/add-callback
@@ -270,17 +267,17 @@
                #(MidiDevice/note-off target channel key))
               (advance step tpb)))))))
 
-(defmethod compile-pattern :degree
+(defmethod compile-pattern-expr :degree
   [[_ desc]]
   [:note desc degree->key])
 
-(defmethod compile-pattern :all-notes-off
+(defmethod compile-pattern-expr :all-notes-off
   [[_]]
   (pfn [pattern {:keys [target channel] :as bindings}]
     (assert target "target is unbound")
     (sequencer/add-callback pattern #(MidiDevice/all-notes-off target channel))))
 
-(defmethod compile-pattern :all-sounds-off
+(defmethod compile-pattern-expr :all-sounds-off
   [[_]]
   (pfn [pattern {:keys [target channel] :as bindings}]
     (assert target "target is unbound")
@@ -290,13 +287,11 @@
   (fn [k expr]
     (first expr)))
 
-(defmethod compile-bind-expr :default
-  [k expr]
-  (throw (ex-info "unable to compile bind expression" {:expr expr})))
+(defmethod compile-bind-expr :default [k expr] nil)
 
 (defmethod compile-bind-expr :degree->key
   [k [_ degree]]
-  (let [degree (sequencer/compile-binding-spec k degree)]
+  (let [degree (sequencer/compile-bind-spec k degree)]
     (fn [bindings]
       (let [degree (degree bindings)]
         (degree->key bindings degree)))))

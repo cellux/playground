@@ -5,6 +5,7 @@
    [omkamra.cowbells.protocols.MidiDevice :as MidiDevice]
    [omkamra.sequencer :as sequencer]
    [omkamra.sequencer.protocols.Target :as Target]
+   [omkamra.sequencer.protocols.TargetFactory :as TargetFactory]
    [omkamra.fluidsynth.settings :as fluid-settings]
    [omkamra.fluidsynth.synth :as fluid-synth]
    [omkamra.fluidsynth.audio-driver :as fluid-audio-driver]))
@@ -69,11 +70,11 @@
   (get-default-bindings [this]
     midi/default-bindings)
 
-  (compile-form [this form]
-    (midi/compile-form form))
+  (compile-pattern-form [this form]
+    (midi/compile-pattern-form form))
 
-  (compile-pattern [this pattern]
-    (midi/compile-pattern pattern))
+  (compile-pattern-expr [this pattern]
+    (midi/compile-pattern-expr pattern))
 
   (compile-bind-expr [this k expr]
     (midi/compile-bind-expr k expr))
@@ -110,17 +111,27 @@
       :soundfonts (atom [])
       :audio-driver (atom nil)})))
 
-(defn make-target
-  [descriptor]
-  (when (and (vector? descriptor)
-              (= :fluidsynth (first descriptor)))
-     (let [config (second descriptor)]
-       (cond (string? config)
-             (recur [:fluidsynth {:soundfonts {:default config}}])
-             (map? config)
-             (if (:soundfonts config)
-               (create config)
-               (recur [:fluidsynth {:soundfonts config}]))
-             :else (throw (ex-info "invalid descriptor" {:descriptor descriptor}))))))
+(defonce target-factory
+  (reify
+    TargetFactory/protocol
 
-(sequencer/register-target-factory make-target)
+    (understands-descriptor?
+        [this descriptor]
+        (and (vector? descriptor)
+             (= :fluidsynth (first descriptor))))
+
+    (sanitize-descriptor
+        [this [_ config :as descriptor]]
+        (cond (string? config)
+              [:fluidsynth {:soundfonts {:default config}}]
+              (map? config)
+              (if (:soundfonts config)
+                [:fluidsynth config]
+                [:fluidsynth {:soundfonts config}])
+              :else (throw (ex-info "invalid descriptor" {:descriptor descriptor}))))
+
+    (make-target
+        [this [_ config :as descriptor]]
+        (create config))))
+
+(sequencer/register-target-factory target-factory)

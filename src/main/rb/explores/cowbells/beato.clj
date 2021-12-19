@@ -130,10 +130,10 @@
           :dur 2}
    [:bind {:step 1/2}
     (for [distance (sort (random-distances 3))]
-      [#{[:degree 0] [:degree distance]} 1])]
+      [#{[:degree 0] [:degree distance]} [:wait 1]])]
    [:bind {:semi [:add (+ 12 (rand-int 12))]}
     (for [distance (reverse (sort (random-distances 2)))]
-      [#{[:degree 0] [:degree (- distance)]} 1])]])
+      [#{[:degree 0] [:degree (- distance)]} [:wait 1]])]])
 
 (def scale-degrees
   {:tonic 0

@@ -1,20 +1,18 @@
 (ns omkamra.cowbells
   (:require [omkamra.sequencer :as sequencer]
-            [omkamra.sequencer.protocols.Sequencer :as Sequencer]
-            [omkamra.sequencer.protocols.Target :as Target]))
+            [omkamra.sequencer.protocols.Target :as Target]
+            [omkamra.sequencer.protocols.TargetFactory :as TargetFactory]))
+
+(def default-sequencer (sequencer/create))
 
 (defmacro defproject
   [project-name project-options]
   (assert (and (map? project-options)
                (or (map? (:targets project-options))
                    (:target project-options))))
-  (letfn [(unregister-targets []
-            `(doseq [~'t (vals (:targets ~project-name))]
-               (Target/stop ~'t)
-               (sequencer/unregister-target ~'t)))
-          (define-project-config [silent?]
+  (letfn [(define-project-config [silent?]
             `(def ~project-name
-               {:sequencer ~(or (:sequencer project-options) `sequencer/*sequencer*)
+               {:sequencer ~(or (:sequencer project-options) `default-sequencer)
                 :targets ~(reduce-kv (fn [targets k v]
                                        (assoc targets k `(sequencer/make-target ~v)))
                                      {}
@@ -28,17 +26,17 @@
             `(doseq [~'t (vals (:targets ~project-name))]
                (sequencer/register-target ~'t)
                ~@(when start?
-                   (list `(when (:playing (Sequencer/status (:sequencer ~project-name)))
+                   (list `(when (:playing (sequencer/status (:sequencer ~project-name)))
                             (Target/start ~'t))))))
           (define-helpers []
             `(do
                (defn ~'clear!
                  []
-                 (Sequencer/clear! (:sequencer ~project-name)))
+                 (sequencer/clear! (:sequencer ~project-name)))
                (defn ~'play
                  [~'form]
                  (when-not @(:silent ~project-name)
-                   (Sequencer/play
+                   (sequencer/play
                     (:sequencer ~project-name)
                     [:bind (merge (:bindings ~project-name)
                                   {:target (-> ~project-name :targets :default)})
@@ -80,9 +78,9 @@
                    `(do
                       ;; pre-compile the pattern to avoid unnecessary
                       ;; recompilation at every loop iteration
-                      (def ~~'pattern-name (sequencer/compile-pattern
+                      (def ~~'pattern-name (sequencer/compile-pattern-expr
                                             [:bind {:target (-> ~'~project-name :targets :default)}
-                                             [:seq ~@~'body [:sched (var ~~'pattern-name)]]]))
+                                             [:seq ~@~'body [:play (var ~~'pattern-name)]]]))
                       (when-not @(:silent ~'~project-name)
                         (alter-meta! (var ~~'pattern-name) assoc ::looping? true))
                       ~@(when-not ~'looping?
@@ -100,7 +98,6 @@
     `(do
        ~@(if (resolve project-name)
            (list
-            (unregister-targets)
             (define-project-config false)
             (register-targets true)
             (define-helpers))
