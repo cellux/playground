@@ -1,11 +1,11 @@
 (ns omkamra.cowbells.fluidsynth
   (:require
    [clojure.java.io :as jio]
-   [omkamra.cowbells.midi :as midi]
-   [omkamra.cowbells.protocols.MidiDevice :as MidiDevice]
    [omkamra.sequencer :as sequencer]
+   [omkamra.sequencer.targets.midi :as midi]
    [omkamra.sequencer.protocols.Target :as Target]
    [omkamra.sequencer.protocols.TargetFactory :as TargetFactory]
+   [omkamra.sequencer.protocols.MidiDevice :as MidiDevice]
    [omkamra.fluidsynth.settings :as fluid-settings]
    [omkamra.fluidsynth.synth :as fluid-synth]
    [omkamra.fluidsynth.audio-driver :as fluid-audio-driver]))
