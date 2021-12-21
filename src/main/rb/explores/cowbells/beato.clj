@@ -1,6 +1,6 @@
 (ns rb.explores.cowbells.beato
   (:require [omkamra.cowbells :as cowbells])
-  (:require [omkamra.cowbells.fluidsynth]))
+  (:require [omkamra.sequencer.targets.fluidsynth]))
 
 (ns-unmap *ns* 'beato)
 

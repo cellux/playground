@@ -1,6 +1,6 @@
 (ns rb.explores.cowbells.fur-elise
   (:require [omkamra.cowbells :as cowbells])
-  (:require [omkamra.cowbells.fluidsynth]))
+  (:require [omkamra.sequencer.targets.fluidsynth]))
 
 (ns-unmap *ns* 'fur-elise)
 
