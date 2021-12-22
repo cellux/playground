@@ -31,10 +31,11 @@
   cljfx/cljfx {:mvn/version "1.7.14"}
 
   com.github.omkamra/jnr {:mvn/version "0.1.0"}
-  com.github.omkamra/fluidsynth {:mvn/version "0.1.0"}
-  com.github.omkamra/sequencer {:mvn/version "0.1.0"}
-  com.github.omkamra/sequencer-midi {:mvn/version "0.1.0"}
-  com.github.omkamra/sequencer-fluidsynth {:mvn/version "0.1.0"}}
+  com.github.omkamra/fluidsynth {:mvn/version "0.2.0"}
+  com.github.omkamra/sequencer {:mvn/version "0.2.0"}
+  com.github.omkamra/sequencer-midi {:mvn/version "0.2.0"}
+  com.github.omkamra/sequencer-fluidsynth {:mvn/version "0.2.1"}
+  com.github.omkamra/cowbells {:mvn/version "0.1.0"}}
 
  :aliases
  {:cljs
