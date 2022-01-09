@@ -2,13 +2,12 @@
   (:require [omkamra.cowbells :as cowbells])
   (:require [omkamra.sequencer.targets.fluidsynth]))
 
-(ns-unmap *ns* 'beato)
-
 (cowbells/defproject beato
   {:target [:fluidsynth "/usr/share/soundfonts/FluidR3_GM.sf2"]
-   :root :c-4
-   :scale :chroma
-   :bpm 120})
+   :bpm 120
+   :bindings
+   {:root :c-4
+    :scale :chroma}})
 
 (def intervals
   {:uni 0                               ; unison
