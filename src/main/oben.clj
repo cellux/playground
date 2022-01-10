@@ -110,4 +110,4 @@
   [& args]
   `(o/defmethod ~@args))
 
-(require 'oben.core)
+(require 'oben.core.keywords)

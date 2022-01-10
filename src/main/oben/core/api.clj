@@ -328,10 +328,10 @@
 
 (defn- find-oben-var
   [sym]
-  (let [oben-core-ns (the-ns 'oben.core)
+  (let [oben-keywords-ns (the-ns 'oben.core.keywords)
         unqualified-sym (symbol (name sym))
-        v (ns-resolve oben-core-ns unqualified-sym)]
-    (if (var-in-namespace? v oben-core-ns)
+        v (ns-resolve oben-keywords-ns unqualified-sym)]
+    (if (var-in-namespace? v oben-keywords-ns)
       v nil)))
 
 (defn- find-clojure-var
