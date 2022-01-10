@@ -1,4 +1,4 @@
-(ns oben
+(ns oben.core
   (:refer-clojure :exclude [fn fn? defn
                             struct defstruct
                             defmacro defmulti defmethod])

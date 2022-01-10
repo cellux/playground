@@ -1,5 +1,5 @@
 (ns oben.core.math
-  (:require [oben])
+  (:require [oben.core :as oben])
   (:require [oben.core.api :as o])
   (:require [oben.core.types.Number :as Number]))
 

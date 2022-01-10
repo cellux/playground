@@ -1,5 +1,5 @@
-(ns oben-test
-  (:require [oben])
+(ns oben.core-test
+  (:require [oben.core :as oben])
   (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.target :as target])
