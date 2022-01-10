@@ -417,36 +417,6 @@
             (vector? expr) result
             :else (seq result)))))
 
-(defn quote-all-except-locals
-  [form env]
-  (let [result (cond (symbol? form)
-                     (if (and (not (tagged? form))
-                              (contains? env form))
-                       form
-                       (list 'quote form))
-
-                     (vector? form)
-                     (apply list 'vector (map #(quote-all-except-locals % env) form))
-
-                     (map? form)
-                     (reduce-kv (fn [result k v]
-                                  (assoc result
-                                         (quote-all-except-locals k env)
-                                         (quote-all-except-locals v env)))
-                                {} form)
-
-                     (sequential? form)
-                     (apply list 'list (map #(quote-all-except-locals % env) form))
-
-                     :else form)]
-    (if (and (instance? clojure.lang.IMeta form) (meta form))
-      (if (tagged? form)
-        (list 'with-meta
-              result
-              (update (meta form) :tag quote-all-except-locals env))
-        result)
-      result)))
-
 (defn split-after
   [pred coll]
   (let [[beg end] (split-with (complement pred) coll)]

@@ -313,8 +313,7 @@
         params (mapv function-parameter param-names param-types)]
     (if (seq body)
       (let [void? (= return-type %void)
-            local-types (into {} (filter #(o/type? (val %)) &env))
-            env (into local-types (map vector param-names params))
+            env (into &env (map vector param-names params))
             body-node (o/parse (list* 'block :oben/fn-block body) env)
             body-node (if void?
                         body-node

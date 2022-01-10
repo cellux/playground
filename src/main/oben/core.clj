@@ -39,10 +39,11 @@
   (and (clj/fn? x) (o/has-kind? :oben/FN x)))
 
 (clj/defn make-fn
-  [name params body]
+  [name params body lexical-bindings]
   (let [parse-for-target (memoize
                           (clj/fn [target]
-                            (-> (o/parse (list* 'fn params body))
+                            (-> (o/parse (list* 'fn params body)
+                                         lexical-bindings)
                                 (vary-meta assoc :name name))))]
     (with-meta
       (clj/fn [& args]
@@ -53,27 +54,34 @@
       {:kind :oben/FN
        :parse-for-target parse-for-target})))
 
+(clj/defmacro with-lexical-bindings
+  [sym & body]
+  `(let [~sym ~(into {} (for [k (keys &env)]
+                          [`(quote ~k) k]))]
+     ~@body))
+
 (clj/defmacro fn
   [& decl]
   (let [[params body] (o/split-after vector? decl)
         params (first (o/move-types-to-meta params))
-        _ (assert (vector? params))
-        params (o/quote-all-except-locals params &env)]
-    `(make-fn nil ~params '~body)))
+        _ (assert (vector? params))]
+    `(with-lexical-bindings bindings#
+       (make-fn nil '~params '~body bindings#))))
 
 (clj/defmacro defn
   [name & decl]
   (let [[params body] (o/split-after vector? decl)
         params (first (o/move-types-to-meta params))
-        _ (assert (vector? params))
-        params (o/quote-all-except-locals params &env)]
-    `(def ~name (make-fn '~name ~params '~body))))
+        _ (assert (vector? params))]
+    `(with-lexical-bindings bindings#
+       (def ~name (make-fn '~name '~params '~body bindings#)))))
 
 (clj/defn make-struct
-  [name fields]
+  [name fields lexical-bindings]
   (let [parse-for-target (memoize
                           (clj/fn [target]
-                            (-> (o/parse (list 'oben.core.types.Struct/Struct fields))
+                            (-> (o/parse (list 'oben.core.types.Struct/Struct fields)
+                                         lexical-bindings)
                                 (vary-meta assoc :name name))))]
     (with-meta
       {}
@@ -83,16 +91,16 @@
 (clj/defmacro struct
   [fields]
   (let [fields (o/move-types-to-meta fields)
-        _ (assert (vector? fields))
-        fields (o/quote-all-except-locals fields &env)]
-    `(make-struct nil ~fields)))
+        _ (assert (vector? fields))]
+    `(with-lexical-bindings bindings#
+       (make-struct nil '~fields bindings#))))
 
 (clj/defmacro defstruct
   [name fields]
   (let [fields (o/move-types-to-meta fields)
-        _ (assert (vector? fields))
-        fields (o/quote-all-except-locals fields &env)]
-    `(def ~name (make-struct '~name ~fields))))
+        _ (assert (vector? fields))]
+    `(with-lexical-bindings bindings#
+       (def ~name (make-struct '~name '~fields bindings#)))))
 
 (clj/defmacro define-typeclass
   [& args]
