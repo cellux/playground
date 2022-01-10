@@ -205,3 +205,15 @@
       {:keys [keys a]} dict]
   (assert (= keys 1))
   (assert (= a 3)))
+
+(defmacro with-lexical-bindings
+  [sym & body]
+  `(let [~sym ~(into {} (for [k (keys &env)]
+                          [`(quote ~k) k]))]
+     ~@body))
+
+(let [x (+ 2 3)
+      y (- 10 2)]
+  (with-lexical-bindings
+    bindings
+    (assert (= bindings {'x 5 'y 8}))))
