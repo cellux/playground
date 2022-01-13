@@ -41,8 +41,7 @@
           (-> ctx
               compile-pointer
               load-object)))
-      {:class :oben/deref
-       :children #{ptr-node}})))
+      {:class :oben/deref})))
 
 (defmethod Container/get-in [::Ptr :oben/HostVector]
   [ptr ks]

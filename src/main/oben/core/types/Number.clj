@@ -233,8 +233,7 @@
                          (ctx/compiled-type ctx# result-type#)
                          {})]
                (ctx/compile-instruction ctx# ins#)))
-           {:class ~(keyword (str (ns-name *ns*)) (str op))
-            :children #{~'node}})))))
+           {:class ~(keyword (str (ns-name *ns*)) (str op))})))))
 
 (define-resize-op trunc)
 (define-resize-op zext)
@@ -262,8 +261,7 @@
                          (ctx/compiled-type ctx# result-type#)
                          {})]
                (ctx/compile-instruction ctx# ins#)))
-           {:class ~(keyword (str (ns-name *ns*)) (str op))
-            :children #{~'node}})))))
+           {:class ~(keyword (str (ns-name *ns*)) (str op))})))))
 
 (define-conversion-op fptoui UInt int)
 (define-conversion-op fptosi SInt int)
@@ -431,8 +429,7 @@
                              (ctx/compile-node ~'lhs)
                              (ctx/compile-node ~'rhs)
                              compile-op#)))
-                     {:class :oben/binop
-                      :children (set [~'lhs ~'rhs])}))
+                     {:class :oben/binop}))
                  (~op-multifn ~'lhs ~'rhs))))]
      (defmethod ~op-multifn [~arg-typeclass ::Number]
        [~'lhs ~'rhs]
@@ -498,8 +495,7 @@
                            (ctx/compile-node ~'lhs)
                            (ctx/compile-node ~'rhs)
                            compile-op#)))
-                   {:class :oben/binop
-                    :children (set [~'lhs ~'rhs])})
+                   {:class :oben/binop})
                  (~op-multifn ~'lhs ~'rhs))))]
      (defmethod ~op-multifn [~arg-typeclass ::Number]
        [~'lhs ~'rhs]

@@ -103,8 +103,7 @@
          merge
          {:kind :oben/NODE
           :class nil
-          :type type
-          :children #{}}
+          :type type}
          opts))
 
 (defn make-constant-node
