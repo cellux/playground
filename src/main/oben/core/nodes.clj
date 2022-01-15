@@ -460,13 +460,11 @@
       (go :while))
     :end))
 
-(defn gep-index-type
-  [target]
-  (Number/UInt (target/attr target :address-size)))
-
 (defn as-gep-index
   [index]
-  (o/cast (gep-index-type (target/current)) index false))
+  (let [address-size (target/attr :address-size)
+        gep-index-type (Number/UInt address-size)]
+    (o/cast gep-index-type index false)))
 
 (defn determine-gep-leaf-type+indices
   ([t keys indices]

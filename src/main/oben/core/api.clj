@@ -267,7 +267,7 @@
 
 (clj/defmacro defportable-by-attrs
   "Defines a multifn which returns a value that depends on selected
-  target attributes"
+  attributes of the passed target"
   [name dispatch-attrs & body]
   (letfn [(gen-defmulti []
             (let [v (clj/resolve name)]
@@ -275,7 +275,7 @@
                         (not (portable? (var-get v))))
                 (list `(clj/defmulti ~name
                          (fn [~'target]
-                           (let [~'attr-map (target/attrs ~'target)]
+                           (let [~'attr-map (target/attrs-of ~'target)]
                              (mapv ~'attr-map ~(ensure-vector dispatch-attrs)))))
                       `(.put all-portables ~name true)))))
           (gen-defmethod [dispatch-value method-body]
@@ -286,8 +286,8 @@
            (gen-defmethod dispatch-value method-body)))))
 
 (clj/defmacro defportable-by-target
-  "Defines a function which returns a value that depends on the
-  current target"
+  "Defines a function which returns a value that depends on the passed
+  target"
   [name params & body]
   (assert (and (vector? params)
                (= (count params) 1)

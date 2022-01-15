@@ -25,17 +25,24 @@
       (alter-var-root #'*current-target* (constantly default-target))))
   *current-target*)
 
-(defn ctx
-  [this]
-  (:ctx @this))
+(defmacro define-target-accessor
+  [name params & body]
+  (assert (and (vector? params)
+               (= (first params) 'this)))
+  (let [accessor-name (symbol (str name "-of"))]
+    `(do
+       (defn ~accessor-name ~params ~@body)
+       (defn ~name
+         [& ~'args]
+         (apply ~accessor-name (current) ~'args)))))
 
-(defn attrs
+(define-target-accessor attrs
   [this]
   (:attrs @this))
 
-(defn attr
+(define-target-accessor attr
   [this name]
-  (let [attr-map (attrs this)]
+  (let [attr-map (attrs-of this)]
     (if (contains? attr-map name)
       (get attr-map name)
       (throw (ex-info "missing target attribute" {:name name})))))
