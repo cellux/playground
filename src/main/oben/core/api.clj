@@ -279,7 +279,7 @@
                              (mapv ~'attr-map ~(ensure-vector dispatch-attrs)))))
                       `(.put all-portables ~name true)))))
           (gen-defmethod [dispatch-value method-body]
-            `(clj/defmethod ~name ~(ensure-vector dispatch-value) [~'_] ~@method-body))]
+            `(clj/defmethod ~name ~(ensure-vector dispatch-value) [~'_] ~method-body))]
     `(do
        ~@(gen-defmulti)
        ~@(for [[dispatch-value method-body] (partition 2 body)]

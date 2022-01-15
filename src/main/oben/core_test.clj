@@ -1062,13 +1062,13 @@
     (m/fact (sqrt 25.0) => 5.0)))
 
 (o/defportable c-long :arch
-  :x86_64 (Number/%s64)
-  :i386 (Number/%s32))
+  :x86_64 Number/%s64
+  :i386 Number/%s32)
 
 (m/fact (o/portable? c-long))
 
 (o/defportable c-long [:arch]
-  :aarch64 (Number/%s64))
+  :aarch64 Number/%s64)
 
 (m/fact (o/resolve `c-long) => o/portable?)
 
@@ -1115,6 +1115,28 @@
         (o/parse `timezone-delta))
       o/constant->value)
   => 1))
+
+(o/defportable add-or-mul :os
+  :adding-os
+  (fn [x y] (+ x y))
+  :multiplying-os
+  (fn [x y] (* x y)))
+
+(m/facts
+ (m/fact
+  (let [add-or-mul
+        (oben/with-target
+          {:type :inprocess
+           :attrs {:os :adding-os}}
+          (o/parse `add-or-mul))]
+    (add-or-mul 5 4)) => 9)
+ (m/fact
+  (let [add-or-mul
+        (oben/with-target
+          {:type :inprocess
+           :attrs {:os :multiplying-os}}
+          (o/parse `add-or-mul))]
+    (add-or-mul 5 4)) => 20))
 
 (oben/with-temp-target
   (let [vec2 (o/parse (oben/struct [^f32 x ^f32 y]))
