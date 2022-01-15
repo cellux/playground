@@ -462,7 +462,7 @@
 
 (defn gep-index-type
   [target]
-  (Number/UInt (target/getattr target :address-size)))
+  (Number/UInt (target/attr target :address-size)))
 
 (defn as-gep-index
   [index]

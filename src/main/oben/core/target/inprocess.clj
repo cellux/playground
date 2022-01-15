@@ -41,24 +41,22 @@
 
 (defn assemble-module
   [ctx]
-  (if (:m ctx)
-    (let [m (assoc (:m ctx)
-                   :data-layout platform/data-layout
-                   :target-triple platform/target-triple)
-          module-src (ir/render-module m)
-          buf (llvm-buffer/from-string module-src)
-          llvm-context (or (get-llvm-context ctx)
-                           (llvm-context/create))
-          mod (llvm-module/from-buffer buf llvm-context)
-          existing-ee (get-llvm-execution-engine ctx)
-          ee (or existing-ee
-                 (llvm-engine/create-mcjit-compiler mod))]
-      (when existing-ee
-        (llvm-engine/add-module existing-ee mod))
-      (-> ctx
-          (set-llvm-context llvm-context)
-          (set-llvm-execution-engine ee)))
-    ctx))
+  (let [m (assoc (:m ctx)
+                 :data-layout platform/data-layout
+                 :target-triple platform/target-triple)
+        module-src (ir/render-module m)
+        buf (llvm-buffer/from-string module-src)
+        llvm-context (or (get-llvm-context ctx)
+                         (llvm-context/create))
+        mod (llvm-module/from-buffer buf llvm-context)
+        existing-ee (get-llvm-execution-engine ctx)
+        ee (or existing-ee
+               (llvm-engine/create-mcjit-compiler mod))]
+    (when existing-ee
+      (llvm-engine/add-module existing-ee mod))
+    (-> ctx
+        (set-llvm-context llvm-context)
+        (set-llvm-execution-engine ee))))
 
 (defn get-function-address
   [ctx f]

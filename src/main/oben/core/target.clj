@@ -4,22 +4,23 @@
 
 (defn get-constructor-by-type
   [type]
-  (let [child-ns (symbol (str "oben.core.target." (name type)))]
-    (require child-ns)
-    (when-let [v (ns-resolve child-ns 'create)]
+  (let [target-ns (symbol (str "oben.core.target." (name type)))]
+    (require target-ns)
+    (when-let [v (ns-resolve target-ns 'create)]
       (var-get v))))
 
 (defn create
   [{:keys [type] :as opts}]
+  (assert type "missing target type")
   (if-let [constructor (get-constructor-by-type type)]
     (atom (constructor opts))
     (throw (ex-info "unknown target type" {:type type}))))
 
-(def ^:dynamic *current-target* nil)
+(def ^:dynamic *current-target*)
 
 (defn current
   []
-  (when (nil? *current-target*)
+  (when-not (bound? #'*current-target*)
     (let [default-target (create {:type :inprocess})]
       (alter-var-root #'*current-target* (constantly default-target))))
   *current-target*)
@@ -32,7 +33,7 @@
   [this]
   (:attrs @this))
 
-(defn getattr
+(defn attr
   [this name]
   (let [attr-map (attrs this)]
     (if (contains? attr-map name)
