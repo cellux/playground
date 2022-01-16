@@ -152,10 +152,12 @@
   Target/protocol
 
   (compile-function [this fnode]
-    (let [ctx (ctx/next-epoch ctx)
-          ctx (ctx/compile-node ctx fnode)
-          ctx (assemble-module ctx)]
-      (assoc this :ctx ctx)))
+    (if (ctx/compiled-node ctx fnode)
+      this
+      (let [ctx (ctx/next-epoch ctx)
+            ctx (ctx/compile-node ctx fnode)
+            ctx (assemble-module ctx)]
+        (assoc this :ctx ctx))))
 
   (invoke-function [this fnode args]
     (let [f (ctx/compiled-node ctx fnode)
