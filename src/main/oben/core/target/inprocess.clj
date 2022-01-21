@@ -169,9 +169,11 @@
           ctx (dispose-llvm-context ctx)]
       (assoc this :ctx ctx))))
 
+(def default-attrs
+  {:address-size platform/address-size})
+
 (defn create
   [{:keys [attrs] :as opts}]
   (map->InProcessTarget
    {:ctx (ctx/create)
-    :attrs (assoc attrs
-                  :address-size platform/address-size)}))
+    :attrs (merge default-attrs attrs)}))
