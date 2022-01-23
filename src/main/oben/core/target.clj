@@ -29,24 +29,24 @@
       (select default-target)))
   *current-target*)
 
-(defmacro define-target-accessor
+(defmacro define-target-method
   [name params & body]
   (assert (and (vector? params)
                (= (first params) 'this)))
-  (let [accessor-name (symbol (str name "-of"))]
+  (let [method-name (symbol (str name "*"))]
     `(do
-       (defn ~accessor-name ~params ~@body)
+       (defn ~method-name ~params ~@body)
        (defn ~name
          [& ~'args]
-         (apply ~accessor-name (current) ~'args)))))
+         (apply ~method-name (current) ~'args)))))
 
-(define-target-accessor attrs
+(define-target-method attrs
   [this]
   (:attrs @this))
 
-(define-target-accessor attr
+(define-target-method attr
   [this name]
-  (let [attr-map (attrs-of this)]
+  (let [attr-map (attrs* this)]
     (if (contains? attr-map name)
       (get attr-map name)
       (throw (ex-info "missing target attribute" {:name name})))))

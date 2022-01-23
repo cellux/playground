@@ -1094,7 +1094,7 @@
 
 (o/defportable timezone-delta
   [target]
-  (case (target/attr-of target :timezone)
+  (case (target/attr* target :timezone)
     :cest 2
     :cet 1))
 

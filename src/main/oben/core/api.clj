@@ -275,7 +275,7 @@
                         (not (portable? (var-get v))))
                 (list `(clj/defmulti ~name
                          (fn [~'target]
-                           (let [~'attr-map (target/attrs-of ~'target)]
+                           (let [~'attr-map (target/attrs* ~'target)]
                              (mapv ~'attr-map ~(ensure-vector dispatch-attrs)))))
                       `(.put all-portables ~name true)))))
           (gen-defmethod [dispatch-value method-body]
