@@ -18,11 +18,15 @@
 
 (def ^:dynamic *current-target*)
 
+(defn select
+  [target]
+  (alter-var-root #'*current-target* (constantly target)))
+
 (defn current
   []
   (when-not (bound? #'*current-target*)
     (let [default-target (create {:type :inprocess})]
-      (alter-var-root #'*current-target* (constantly default-target))))
+      (select default-target)))
   *current-target*)
 
 (defmacro define-target-accessor
