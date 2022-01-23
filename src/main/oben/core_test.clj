@@ -8,6 +8,8 @@
   (:require [oben.core.types.Number :as Number])
   (:require [oben.core.types.Ptr :as Ptr])
   (:require [oben.core.types.Aggregate :as Aggregate])
+  (:require [oben.core.types.Array :as Array])
+  (:require [oben.core.types.Struct :as Struct])
   (:require [oben.core.protocols.Container :as Container])
   (:require [clojure.walk :as walk])
   (:require [midje.sweet :as m])
@@ -1022,6 +1024,19 @@
   (list (with-meta 'f {:tag 'u32})
         (with-meta 'g {:tag 'f64})))
  (check-equal-value-and-tag
+  (o/move-types-to-meta '(u8 arg0 u8 arg1))
+  (list (with-meta 'arg0 {:tag 'u8})
+        (with-meta 'arg1 {:tag 'u8})))
+ (check-equal-value-and-tag
+  (o/move-types-to-meta '(u8 arg0 u32 arg1))
+  (list (with-meta 'arg0 {:tag 'u8})
+        (with-meta 'arg1 {:tag 'u32})))
+ (check-equal-value-and-tag
+  (o/move-types-to-meta '(u8 arg0 u32 arg1 f64 arg2))
+  (list (with-meta 'arg0 {:tag 'u8})
+        (with-meta 'arg1 {:tag 'u32})
+        (with-meta 'arg2 {:tag 'f64})))
+ (check-equal-value-and-tag
   (o/move-types-to-meta '(u32 [^u32 x f32 y]))
   (list (with-meta (vector (with-meta 'x {:tag 'u32})
                            (with-meta 'y {:tag 'f32})) {:tag 'u32})))
@@ -1141,6 +1156,7 @@
 (oben/with-temp-target
   (let [vec2 (o/parse (oben/struct [^f32 x ^f32 y]))
         m (meta vec2)]
+    (m/fact (o/type? vec2))
     (m/fact (isa? (o/tid-of-type vec2) :oben.core.types.Struct/Struct) => m/truthy)
     (m/fact (:field-names m) => [:x :y])
     (m/fact (:field-types m) => [Number/%f32 Number/%f32])
@@ -1150,7 +1166,93 @@
     (m/fact (Aggregate/get-element-type vec2 :x) => (m/exactly Number/%f32))
     (m/fact (Aggregate/get-element-type vec2 :y) => (m/exactly Number/%f32))
     (m/fact (o/constant->value (Aggregate/parse-key vec2 :x)) => 0)
-    (m/fact (o/constant->value (Aggregate/parse-key vec2 :y)) => 1)))
+    (m/fact (o/constant->value (Aggregate/parse-key vec2 :y)) => 1))
+  (let [s (o/parse (oben/struct [u8 x8 u16 x16 u32 x32 u64 x64
+                                 s8 y8 s16 y16 s32 y32 s64 y64
+                                 f32 z32 f64 z64]))
+        m (meta s)]
+    (m/fact (o/type? s))
+    (m/fact (isa? (o/tid-of-type s) :oben.core.types.Struct/Struct) => m/truthy)
+    (m/fact (:field-names m) => [:x8 :x16 :x32 :x64
+                                 :y8 :y16 :y32 :y64
+                                 :z32 :z64])
+    (m/fact (:field-types m) => [Number/%u8 Number/%u16 Number/%u32 Number/%u64
+                                 Number/%s8 Number/%s16 Number/%s32 Number/%s64
+                                 Number/%f32 Number/%f64])
+    (m/fact (Aggregate/get-element-type s :x8) => (m/exactly Number/%u8))
+    (m/fact (Aggregate/get-element-type s :x16) => (m/exactly Number/%u16))
+    (m/fact (Aggregate/get-element-type s :x32) => (m/exactly Number/%u32))
+    (m/fact (Aggregate/get-element-type s :x64) => (m/exactly Number/%u64))
+    (m/fact (Aggregate/get-element-type s :y8) => (m/exactly Number/%s8))
+    (m/fact (Aggregate/get-element-type s :y16) => (m/exactly Number/%s16))
+    (m/fact (Aggregate/get-element-type s :y32) => (m/exactly Number/%s32))
+    (m/fact (Aggregate/get-element-type s :y64) => (m/exactly Number/%s64))
+    (m/fact (Aggregate/get-element-type s :z32) => (m/exactly Number/%f32))
+    (m/fact (Aggregate/get-element-type s :z64) => (m/exactly Number/%f64))
+    (m/fact (o/constant->value (Aggregate/parse-key s :x8)) => 0)
+    (m/fact (o/constant->value (Aggregate/parse-key s :y8)) => 4)
+    (m/fact (o/constant->value (Aggregate/parse-key s :z32)) => 8)
+    (m/fact (o/constant->value (Aggregate/parse-key s :z64)) => 9)))
+
+(m/facts
+ (m/fact (o/sizeof Number/%u1) => 1)
+ (m/fact (o/sizeof Number/%u8) => 1)
+ (m/fact (o/sizeof Number/%u16) => 2)
+ (m/fact (o/sizeof Number/%u32) => 4)
+ (m/fact (o/sizeof Number/%u64) => 8)
+ (m/fact (o/sizeof Number/%f32) => 4)
+ (m/fact (o/sizeof Number/%f64) => 8))
+
+(m/facts
+ (m/fact (o/alignof Number/%u1) => 1)
+ (m/fact (o/alignof Number/%u8) => 1)
+ (m/fact (o/alignof Number/%u16) => 2)
+ (m/fact (o/alignof Number/%u32) => 4)
+ (m/fact (o/alignof Number/%u64) => 8)
+ (m/fact (o/alignof Number/%f32) => 4)
+ (m/fact (o/alignof Number/%f64) => 8))
+
+(defmacro make-struct-type*
+  [field-types]
+  `(oben/struct
+    ~(into [] (interleave field-types
+                          (map #(symbol (str "arg" %))
+                               (range (count field-types)))))))
+
+(defmacro make-struct-type
+  [field-types]
+  `(o/parse (make-struct-type* ~field-types)))
+
+(oben/with-temp-target
+  (let [s (make-struct-type [u8 u32])]
+    (m/fact (:field-types (meta s)) => [Number/%u8 Number/%u32]))
+  (let [s (make-struct-type [u8 u8])]
+    (m/fact (:field-types (meta s)) => [Number/%u8 Number/%u8])))
+
+(defmacro sizeof-struct
+  [field-types]
+  `(let [s# (make-struct-type ~field-types)]
+     (o/sizeof s#)))
+
+(oben/with-target
+  {:type :inprocess
+   :attrs {:address-size 64}}
+  (m/facts
+   (m/fact (sizeof-struct [u8]) => 1)
+   (m/fact (sizeof-struct [u8 u8]) => 2)
+   (m/fact (sizeof-struct [u8 f32]) => 8)
+   (m/fact (sizeof-struct [f32 u8]) => 8)
+   (m/fact (sizeof-struct [f32 (Ptr/Ptr f64) u8]) => 24)))
+
+(oben/with-target
+  {:type :inprocess
+   :attrs {:address-size 32}}
+  (m/facts
+   (m/fact (sizeof-struct [u8]) => 1)
+   (m/fact (sizeof-struct [u8 u8]) => 2)
+   (m/fact (sizeof-struct [u8 f32]) => 8)
+   (m/fact (sizeof-struct [f32 u8]) => 8)
+   (m/fact (sizeof-struct [f32 (Ptr/Ptr f64) u8]) => 12)))
 
 ;; (oben/with-dump-target
 ;;   (let [vec2 (oben/struct [^f32 x ^f32 y])

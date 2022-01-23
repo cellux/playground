@@ -170,7 +170,8 @@
       (assoc this :ctx ctx))))
 
 (def default-attrs
-  {:address-size platform/address-size})
+  {:address-size platform/address-size
+   :align-min 1})
 
 (defn create
   [{:keys [attrs] :as opts}]

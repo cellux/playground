@@ -8,10 +8,9 @@
   (:require [midje.sweet :as m]))
 
 (o/define-typeclass Struct [:oben/Aggregate]
-  [fields]
-  (let [field-types (mapv o/resolve-type-from-meta fields)
-        field-names (mapv (comp keyword o/drop-meta) fields)
-        packed? (:packed? (meta fields))]
+  [field-names field-opts struct-opts]
+  (let [field-types (mapv :tag field-opts)
+        {:keys [packed?]} struct-opts]
     (assert (= (count (set field-names)) (count field-names)))
     (o/make-type
      (fn [ctx]
@@ -30,6 +29,52 @@
       :field-types field-types
       :packed? packed?
       :name->index (zipmap field-names (range))})))
+
+(defn struct-type?
+  [t]
+  (isa? (o/tid-of-type t) ::Struct))
+
+(defn align
+  [n alignment]
+  (if (zero? alignment)
+    n
+    (let [m (mod n alignment)]
+      (if (zero? m)
+        n
+        (- (+ n alignment) m)))))
+
+(defn field-types->struct-alignment
+  [field-types]
+  (apply max (map o/alignof field-types)))
+
+(defmethod o/alignof ::Struct
+  [t]
+  (->> t meta :field-types field-types->struct-alignment))
+
+(defn field-types->struct-size
+  [field-types]
+  (let [struct-alignment (field-types->struct-alignment field-types)]
+    (-> (reduce (fn [size t]
+                  (+ (align size (o/alignof t))
+                     (o/sizeof t)))
+                0 field-types)
+        (align struct-alignment))))
+
+(defmethod o/sizeof ::Struct
+  [t]
+  (->> t meta :field-types field-types->struct-size))
+
+(defn field-types->offsets
+  [field-types]
+  (loop [offsets []
+         offset 0
+         ts field-types]
+    (if-let [t (first ts)]
+      (let [offset (align offset (o/alignof t))]
+        (recur (conj offsets offset)
+               (+ offset (o/sizeof t))
+               (next ts)))
+      offsets)))
 
 (defmethod o/cast [::Struct :oben/HostVector]
   [t elems force?]

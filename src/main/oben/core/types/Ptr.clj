@@ -1,5 +1,6 @@
 (ns oben.core.types.Ptr
   (:require [oben.core.api :as o])
+  (:require [oben.core.target :as target])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.protocols.Container :as Container])
   (:require [oben.core.protocols.Algebra :as Algebra])
@@ -27,6 +28,10 @@
 (defn pointer-node?
   [x]
   (and (o/node? x) (pointer-type? (o/type-of x))))
+
+(defmethod o/sizeof ::Ptr
+  [t]
+  (bit-shift-right (target/attr :address-size) 3))
 
 (defn %deref
   [ptr-node]

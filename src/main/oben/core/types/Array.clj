@@ -25,6 +25,19 @@
    {:element-type element-type
     :size size}))
 
+(defn array-type?
+  [t]
+  (isa? (o/tid-of-type t) ::Array))
+
+(defmethod o/sizeof ::Array
+  [t]
+  (let [{:keys [element-type size]} (meta t)]
+    (* (o/alignof element-type) size)))
+
+(defmethod o/alignof ::Array
+  [t]
+  (o/alignof (:element-type (meta t))))
+
 (defmethod o/cast [::Array :oben/HostVector]
   [t elems force?]
   (let [{:keys [element-type size]} (meta t)]

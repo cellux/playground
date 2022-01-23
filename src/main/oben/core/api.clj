@@ -169,6 +169,20 @@
   an error unless `force?` is true."
   (fn [t x force?] [(tid-of-type t) (tid-of-value x)]))
 
+(clj/defmulti sizeof
+  "Returns the number of bytes occupied by values of the given type in
+  memory as specified by the ABI of the current target."
+  tid-of-type)
+
+(clj/defmulti alignof
+  "Returns the alignment of the given type in bytes as specified by
+  the ABI of the current target."
+  tid-of-type)
+
+(clj/defmethod alignof :default
+  [t]
+  (max (sizeof t) (target/attr :align-min)))
+
 (derive :oben/Value :oben/Any)
 
 (defn tangible-type?
@@ -258,6 +272,8 @@
   (if (vector? x)
     x
     (vector x)))
+
+;; portables
 
 (def all-portables (new WeakHashMap))
 
