@@ -271,9 +271,10 @@
 (clj/defmacro defmethod
   [multifn dispatch-val & fn-tail]
   (assert (vector? dispatch-val))
-  `(clj/defmethod ~multifn
-     ~(mapv (comp tid-of-type-or-typeclass eval) dispatch-val)
-     ~@fn-tail))
+  `(let [dispatch-val# (mapv tid-of-type-or-typeclass ~dispatch-val)]
+     (clj/defmethod ~multifn
+       dispatch-val#
+       ~@fn-tail)))
 
 (defn multifn?
   [x]
