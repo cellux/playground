@@ -34,15 +34,6 @@
   [t]
   (isa? (o/tid-of-type t) ::Struct))
 
-(defn align
-  [n alignment]
-  (if (zero? alignment)
-    n
-    (let [m (mod n alignment)]
-      (if (zero? m)
-        n
-        (- (+ n alignment) m)))))
-
 (defn field-types->struct-alignment
   [field-types]
   (apply max (map o/alignof field-types)))
@@ -55,10 +46,10 @@
   [field-types]
   (let [struct-alignment (field-types->struct-alignment field-types)]
     (-> (reduce (fn [size t]
-                  (+ (align size (o/alignof t))
+                  (+ (o/align size (o/alignof t))
                      (o/sizeof t)))
                 0 field-types)
-        (align struct-alignment))))
+        (o/align struct-alignment))))
 
 (defmethod o/sizeof ::Struct
   [t]
@@ -70,7 +61,7 @@
          offset 0
          ts field-types]
     (if-let [t (first ts)]
-      (let [offset (align offset (o/alignof t))]
+      (let [offset (o/align offset (o/alignof t))]
         (recur (conj offsets offset)
                (+ offset (o/sizeof t))
                (next ts)))

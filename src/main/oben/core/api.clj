@@ -169,6 +169,18 @@
   an error unless `force?` is true."
   (fn [t x force?] [(tid-of-type t) (tid-of-value x)]))
 
+(defn align
+  "Aligns `n` to the next integer divisible by `alignment`. If `n` is
+  already divisible by `alignment` or `alignment` is zero, returns
+  `n`."
+  [n alignment]
+  (if (zero? alignment)
+    n
+    (let [m (mod n alignment)]
+      (if (zero? m)
+        n
+        (- (+ n alignment) m)))))
+
 (clj/defmulti sizeof
   "Returns the number of bytes occupied by values of the given type in
   memory as specified by the ABI of the current target."
