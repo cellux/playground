@@ -1,6 +1,6 @@
 (ns oben.core.keywords
   (:refer-clojure
-   :exclude [deref do set! let fn
+   :exclude [struct deref do set! let fn
              cast when if cond condp case
              not while
              + - * / %
@@ -15,6 +15,7 @@
   (:require [oben.core.types.Void])
   (:require [oben.core.types.Number])
   (:require [oben.core.types.Array])
+  (:require [oben.core.types.Struct])
   (:require [oben.core.types.Ptr])
   (:require [oben.core.types.Fn])
   (:require [oben.core.nodes :as nodes])
@@ -42,8 +43,11 @@
 (def f32 oben.core.types.Number/%f32)
 (def f64 oben.core.types.Number/%f64)
 
-(def Array oben.core.types.Array/Array)
+(def Array oben.core.types.Array/%Array)
 (def array oben.core.types.Array/%array)
+
+(def Struct oben.core.types.Struct/%Struct)
+(def struct oben.core.types.Struct/%struct)
 
 (def deref oben.core.types.Ptr/%deref)
 

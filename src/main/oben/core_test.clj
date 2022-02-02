@@ -9,7 +9,6 @@
   (:require [oben.core.types.Ptr :as Ptr])
   (:require [oben.core.types.Aggregate :as Aggregate])
   (:require [oben.core.types.Array :as Array])
-  (:require [oben.core.types.Struct :as Struct])
   (:require [oben.core.protocols.Container :as Container])
   (:require [clojure.walk :as walk])
   (:require [midje.sweet :as m])
@@ -1154,8 +1153,16 @@
     (add-or-mul 5 4)) => 20))
 
 (oben/with-temp-target
-  (let [vec2 (o/parse (oben/struct [^f32 x ^f32 y]))
+  (let [s1 (o/parse '(Struct [^f32 x ^u8 y]))
+        s2 (o/parse '(Struct [^f32 x ^u8 y]))]
+    (m/fact (= s1 s2))
+    (m/fact (= (meta s1) (meta s2)))))
+
+(oben/with-temp-target
+  (let [vec2 (o/parse '(Struct [^f32 x ^f32 y]))
         m (meta vec2)]
+    (m/fact (:name->index m) => {:x 0 :y 1
+                                 0 0 1 1})
     (m/fact (o/type? vec2))
     (m/fact (isa? (o/tid-of-type vec2) :oben.core.types.Struct/Struct) => m/truthy)
     (m/fact (:field-names m) => [:x :y])
@@ -1163,13 +1170,20 @@
     (m/fact (Aggregate/valid-key? vec2 :x) => m/truthy)
     (m/fact (Aggregate/valid-key? vec2 :y) => m/truthy)
     (m/fact (Aggregate/valid-key? vec2 :z) => m/falsey)
+    (m/fact (Aggregate/valid-key? vec2 0) => m/truthy)
+    (m/fact (Aggregate/valid-key? vec2 1) => m/truthy)
+    (m/fact (Aggregate/valid-key? vec2 2) => m/falsey)
     (m/fact (Aggregate/get-element-type vec2 :x) => (m/exactly Number/%f32))
     (m/fact (Aggregate/get-element-type vec2 :y) => (m/exactly Number/%f32))
+    (m/fact (Aggregate/get-element-type vec2 0) => (m/exactly Number/%f32))
+    (m/fact (Aggregate/get-element-type vec2 1) => (m/exactly Number/%f32))
     (m/fact (o/constant->value (Aggregate/parse-key vec2 :x)) => 0)
-    (m/fact (o/constant->value (Aggregate/parse-key vec2 :y)) => 1))
-  (let [s (o/parse (oben/struct [u8 x8 u16 x16 u32 x32 u64 x64
-                                 s8 y8 s16 y16 s32 y32 s64 y64
-                                 f32 z32 f64 z64]))
+    (m/fact (o/constant->value (Aggregate/parse-key vec2 :y)) => 1)
+    (m/fact (o/constant->value (Aggregate/parse-key vec2 0)) => 0)
+    (m/fact (o/constant->value (Aggregate/parse-key vec2 1)) => 1))
+  (let [s (o/parse '(Struct [u8 x8 u16 x16 u32 x32 u64 x64
+                             s8 y8 s16 y16 s32 y32 s64 y64
+                             f32 z32 f64 z64]))
         m (meta s)]
     (m/fact (o/type? s))
     (m/fact (isa? (o/tid-of-type s) :oben.core.types.Struct/Struct) => m/truthy)

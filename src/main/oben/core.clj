@@ -80,15 +80,8 @@
   [name fields lexical-bindings]
   (let [parse-for-target (memoize
                           (clj/fn [target]
-                            (let [parsed-fields (o/parse fields lexical-bindings)
-                                  field-names (mapv (comp keyword o/drop-meta) parsed-fields)
-                                  field-opts (map meta parsed-fields)
-                                  struct-opts (meta fields)]
-                              (-> (oben.core.types.Struct/Struct
-                                   field-names
-                                   field-opts
-                                   struct-opts)
-                                  (vary-meta assoc :name name)))))]
+                            (-> (o/parse (list 'Struct fields) lexical-bindings)
+                                (vary-meta assoc :name name))))]
     (with-meta
       {}
       {:kind :oben/STRUCT

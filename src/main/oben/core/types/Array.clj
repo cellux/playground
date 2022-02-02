@@ -25,6 +25,10 @@
    {:element-type element-type
     :size size}))
 
+(o/defmacro %Array
+  [element-type size]
+  (Array (o/parse element-type &env) size))
+
 (defn array-type?
   [t]
   (isa? (o/tid-of-type t) ::Array))

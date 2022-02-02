@@ -8,10 +8,12 @@
   (:require [midje.sweet :as m]))
 
 (o/define-typeclass Struct [:oben/Aggregate]
-  [field-names field-opts struct-opts]
-  (let [field-types (mapv :tag field-opts)
+  [field-specs struct-opts]
+  (let [field-names (mapv #(or (:name %1) %2) field-specs (range))
+        field-types (mapv :type field-specs)
         {:keys [packed?]} struct-opts]
-    (assert (= (count (set field-names)) (count field-names)))
+    (assert (= (count (set field-names)) (count field-names))
+            "duplicate field names")
     (o/make-type
      (fn [ctx]
        (letfn [(compile-field-types [ctx]
@@ -28,7 +30,25 @@
      {:field-names field-names
       :field-types field-types
       :packed? packed?
-      :name->index (zipmap field-names (range))})))
+      :name->index (merge
+                    (into {} (map #(vector % %) (range (count field-types))))
+                    (zipmap field-names (range)))})))
+
+(o/defmacro %Struct
+  [fields]
+  (let [fields (o/move-types-to-meta fields)
+        fields (o/parse fields &env)
+        _ (assert (vector? fields))
+        field-names (mapv (comp keyword o/drop-meta) fields)
+        field-meta (map meta fields)
+        field-specs (map (fn [name metadata]
+                           (-> metadata
+                               (assoc :name name)
+                               (assoc :type (:tag metadata))
+                               (dissoc :tag)))
+                         field-names field-meta)
+        struct-opts (meta fields)]
+    (Struct field-specs struct-opts)))
 
 (defn struct-type?
   [t]
@@ -69,8 +89,8 @@
 
 (defmethod o/cast [::Struct :oben/HostVector]
   [t elems force?]
-  (let [{:keys [field-names field-types name->index]} (meta t)]
-    (assert (= (count elems) (count field-names)))
+  (let [{:keys [field-types]} (meta t)]
+    (assert (= (count elems) (count field-types)))
     (let [casted-elems (mapv #(o/cast %1 %2 false) field-types elems)]
       (o/make-constant-node
        t elems
@@ -93,29 +113,30 @@
 (defmethod o/cast [::Struct :oben/HostMap]
   [t fields force?]
   (let [{:keys [field-names field-types name->index]} (meta t)]
-    (assert (= (count fields) (count field-names)))
+    (assert (= (count fields) (count field-types)))
     (assert (every? name->index (keys fields)))
     (o/cast t (mapv fields field-names) force?)))
 
 (defmethod Aggregate/valid-key? ::Struct
   [t key]
-  (and (keyword? key)
-       (let [{:keys [name->index]} (meta t)]
-         (name->index key))))
+  (let [{:keys [name->index]} (meta t)]
+    (name->index (o/constant->value key))))
+
+(defn get-field-index
+  [t key]
+  (let [{:keys [name->index]} (meta t)]
+    (or (name->index (o/constant->value key))
+        (throw (ex-info "struct field not found" {:t t :key key :metadata (meta t)})))))
 
 (defmethod Aggregate/parse-key ::Struct
   [t key]
-  (let [{:keys [field-types name->index]} (meta t)]
-    (if-let [field-index (name->index key)]
-      (Number/make-constant-number-node Number/%u64 field-index)
-      (throw (ex-info "struct field not found" {:t t :key key})))))
+  (let [field-index (get-field-index t key)]
+    (Number/make-constant-number-node Number/%u64 field-index)))
 
 (defmethod Aggregate/get-element-type ::Struct
   [t key]
-  (let [{:keys [field-types name->index]} (meta t)]
-    (if-let [field-index (name->index key)]
-      (get (:field-types (meta t)) field-index)
-      (throw (ex-info "struct field not found" {:t t :key key})))))
+  (let [field-index (get-field-index t key)]
+    (get (:field-types (meta t)) field-index)))
 
 (o/defmacro %struct
   [fields initializer]
