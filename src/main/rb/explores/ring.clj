@@ -13,7 +13,7 @@
   "Árvíztűrő tükörfúrógép")
 
 (defn handler [req]
-  {:status  200
+  {:status 200
    :headers {"Content-Type" "text/html; charset=utf-8"}
    :body (html5
           [:head {:title (page-title)}]
