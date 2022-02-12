@@ -2,8 +2,7 @@
  ["src/main"]
 
  :deps
- {org.clojure/clojurescript {:mvn/version "1.10.866"}
-  org.clojure/java.data {:mvn/version "1.0.86"}
+ {org.clojure/java.data {:mvn/version "1.0.86"}
   com.taoensso/encore {:mvn/version "3.19.0"}
   ring/ring-core {:mvn/version "1.8.1"}
   ring/ring-jetty-adapter {:mvn/version "1.8.1"}
@@ -35,21 +34,20 @@
   com.github.omkamra/sequencer {:mvn/version "0.4.1"}
   com.github.omkamra/sequencer-midi {:mvn/version "0.4.0"}
   com.github.omkamra/sequencer-fluidsynth {:mvn/version "0.4.0"}
-  com.github.omkamra/cowbells {:mvn/version "0.3.1"}}
+  com.github.omkamra/cowbells {:mvn/version "0.3.1"}
+
+  org.clojure/clojurescript {:mvn/version "1.10.914"}}
 
  :aliases
- {:cljs
-  {:extra-deps
-   {org.clojure/clojurescript {:mvn/version "1.10.844"}}}
-
-  :cljs.dev
+ {:cljs-dev
   {:main-opts ["--main" "cljs.main"
-               "--compile-opts" "cljs-opts.edn"
+               "--compile-opts" "cljs-compile-opts.edn"
                "--watch" "src/main"
+               "--optimizations" "none"
                "--compile" "rb.explores.clojurescript"]}
 
-  :cljs.release
+  :cljs-release
   {:main-opts ["--main" "cljs.main"
-               "--compile-opts" "cljs-opts.edn"
+               "--compile-opts" "cljs-compile-opts.edn"
                "--optimizations" "advanced"
                "--compile" "rb.explores.clojurescript"]}}}
