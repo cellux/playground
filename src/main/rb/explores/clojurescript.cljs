@@ -1,6 +1,6 @@
 (ns rb.explores.clojurescript)
 
 (defn hello []
-  (print "Hello, world!!!"))
+  (js/console.log "Hello, world!!!"))
 
 (hello)

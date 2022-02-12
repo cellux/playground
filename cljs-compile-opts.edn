@@ -1,4 +1,4 @@
 {:main "rb.explores.clojurescript"
- :output-to "resources/public/js/app.js"
- :output-dir "resources/public/js/out"
+ :output-to "resources/docroot/js/app.js"
+ :output-dir "resources/docroot/js/out"
  :asset-path "js/out"}
