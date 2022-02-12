@@ -1,5 +1,7 @@
 (ns rb.explores.ring
-  (:require [ring.adapter.jetty :as jetty]))
+  (:require [ring.adapter.jetty :as jetty])
+  (:require [hiccup.page :refer [html5]])
+  (:require [garden.core :refer [css]]))
 
 ;;  the following functions can be re-defined dynamically via the
 ;;  nREPL while the server is running
@@ -13,22 +15,13 @@
 (defn handler [req]
   {:status  200
    :headers {"Content-Type" "text/html; charset=utf-8"}
-   :body (str "<!doctype html>
-<html>
-<head>
-  <title>" (page-title) "</title>
-<style>
-body, h1 {
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-</style>
-</head>
-<body>
-  <h1>" (page-message) "</h1>
-</body>
-</html>")})
+   :body (html5
+          [:head {:title (page-title)}]
+          [:style (css [:body :h1 {:margin 0
+                                   :padding 0
+                                   :border 0}])]
+          [:body
+           [:h1 (page-message)]])})
 
 (defonce server (atom nil))
 
