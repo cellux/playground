@@ -10,14 +10,16 @@
 ;;  the following functions can be re-defined dynamically via the
 ;;  nREPL while the server is running
 
+(defmulti render-page (fn [name] name))
+
 (defn page-title []
   "Test page")
 
 (defn page-message []
   "Árvíztűrő tükörfúrógép")
 
-(defn page-main
-  []
+(defmethod render-page ::main
+  [_]
   (html5
    [:head {:title (page-title)}]
    [:style (css [:body :h1 {:margin 0
@@ -27,18 +29,29 @@
     [:h1 (page-message)]
     (include-js "js/app.js")]))
 
-(defn return-page [page-var]
-  (fn [req]
-    (let [page-fn (var-get page-var)]
-      (-> (r/response (page-fn))
-          (r/status 200)
-          (r/content-type "text/html")
-          (r/charset "utf-8")))))
+(defn process-render-result
+  [result]
+  (cond (string? result)
+        (-> (r/response result)
+            (r/status 200)
+            (r/content-type "text/html")
+            (r/charset "utf-8"))
+        :else
+        (throw (ex-info "cannot process render result"
+                        {:result result}))))
+
+(defn render-named-page
+  [req]
+  (-> req
+      reitit/get-match
+      :data :name
+      render-page
+      process-render-result))
 
 (def router
   (reitit/router
-   [["/" {:get (return-page #'page-main)}]
-    ["/js/*" (reitit/create-resource-handler {:root "docroot/js"})]]))
+   ["" {:handler render-named-page}
+    ["/" ::main]]))
 
 (defonce server (atom nil))
 
@@ -46,12 +59,17 @@
                      :port 8080
                      :join? false})
 
+(def default-handler
+  (reitit/routes
+   (reitit/create-resource-handler {:path "/" :root "docroot"})
+   (reitit/create-default-handler)))
+
 (defn start []
   ;; let's try to be idempotent
   (swap! server (fn [current-server]
                   (or current-server
                       (jetty/run-jetty
-                       (reitit/ring-handler router)
+                       (reitit/ring-handler router default-handler)
                        server-options)))))
 
 (defn stop []
