@@ -1,4 +1,6 @@
 (ns rb.explores.ring
+  (:require [integrant.core :as ig])
+  (:require [integrant.repl :refer [clear go halt prep init reset reset-all]])
   (:require [ring.adapter.jetty :as jetty])
   (:require [ring.middleware.resource :refer [wrap-resource]])
   (:require [ring.middleware.content-type :refer [wrap-content-type]])
@@ -48,37 +50,37 @@
       render-page
       process-render-result))
 
-(def router
-  (reitit/router
-   ["" {:handler render-named-page}
-    ["/" ::main]]))
-
-(defonce server (atom nil))
-
-(def server-options {:host "127.0.0.1"
-                     :port 8080
-                     :join? false})
-
 (def default-handler
   (reitit/routes
    (reitit/create-resource-handler {:path "/" :root "docroot"})
    (reitit/create-default-handler)))
 
-(defn start []
-  ;; let's try to be idempotent
-  (swap! server (fn [current-server]
-                  (or current-server
-                      (jetty/run-jetty
-                       (reitit/ring-handler router default-handler)
-                       server-options)))))
+(def config
+  {:reitit.ring/router
+   {:data ["" {:handler render-named-page}
+           ["/" ::main]]}
+   :reitit.ring/handler
+   {:router (ig/ref :reitit.ring/router)
+    :default-handler default-handler}
+   :ring.adapter/jetty
+   {:handler (ig/ref :reitit.ring/handler)
+    :options {:host "127.0.0.1"
+              :port 8080}}})
 
-(defn stop []
-  ;; let's try to be idempotent
-  (swap! server (fn [current-server]
-                  (when current-server
-                    (.stop current-server))
-                  nil)))
+(integrant.repl/set-prep! (constantly config))
 
-(defn restart []
-  (stop)
-  (start))
+(defmethod ig/init-key :reitit.ring/router
+  [_ {:keys [data]}]
+  (reitit/router data))
+
+(defmethod ig/init-key :reitit.ring/handler
+  [_ {:keys [router default-handler]}]
+  (reitit/ring-handler router default-handler))
+
+(defmethod ig/init-key :ring.adapter/jetty
+  [_ {:keys [handler options]}]
+  (jetty/run-jetty handler (assoc options :join? false)))
+
+(defmethod ig/halt-key! :ring.adapter/jetty
+  [_ server]
+  (.stop server))
