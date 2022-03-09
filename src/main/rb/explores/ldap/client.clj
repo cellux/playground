@@ -25,19 +25,37 @@
   ([ca-cert]
    (make-ssl-socket-factory-with-trusted-ca-cert ca-cert "ca-cert")))
 
+(defn format-uri
+  [scheme host port]
+  (if port
+    (format "%s://%s:%d" scheme host port)
+    (format "%s://%s" scheme host)))
+
+(defn format-ldap-url
+  [host port]
+  (format-uri "ldap" host port))
+
+(defn format-ldaps-url
+  [host port]
+  (format-uri "ldaps" host port))
+
 (defn connect
-  [{:keys [provider-url security-principal security-credentials ca-cert user-base-dn]}]
-  (let [ssl-socket-factory (when ca-cert
-                             (make-ssl-socket-factory-with-trusted-ca-cert ca-cert))
+  [{:keys [url host port bind-dn bind-password ca-cert user-base-dn]}]
+  (let [url (or url
+                (-> (if ca-cert
+                      (format-ldap-url host port)
+                      (format-ldaps-url host port))))
         env (doto (Hashtable.)
               (.put Context/INITIAL_CONTEXT_FACTORY "com.sun.jndi.ldap.LdapCtxFactory")
-              (.put Context/PROVIDER_URL provider-url))
+              (.put Context/PROVIDER_URL url))
         ctx (InitialLdapContext. env nil)
-        tls (doto (.extendedOperation ctx (StartTlsRequest.))
-              (.negotiate ssl-socket-factory))
+        tls (when ca-cert
+              (let [ssl-socket-factory (make-ssl-socket-factory-with-trusted-ca-cert ca-cert)]
+                (doto (.extendedOperation ctx (StartTlsRequest.))
+                  (.negotiate ssl-socket-factory))))
         ctx (doto ctx
-              (.addToEnvironment Context/SECURITY_PRINCIPAL security-principal)
-              (.addToEnvironment Context/SECURITY_CREDENTIALS security-credentials))]
+              (.addToEnvironment Context/SECURITY_PRINCIPAL bind-dn)
+              (.addToEnvironment Context/SECURITY_CREDENTIALS bind-password))]
     {:ctx ctx :tls tls :user-base-dn user-base-dn}))
 
 (defn naming-enumeration-seq
@@ -70,7 +88,8 @@
 
 (defn close
   [{:keys [ctx tls]}]
-  (.close tls)
+  (when tls
+    (.close tls))
   (.close ctx))
 
 (defmacro with-connection
