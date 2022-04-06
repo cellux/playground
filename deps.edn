@@ -32,7 +32,8 @@
   midje/midje {:mvn/version "1.9.10"}
   com.clojure-goes-fast/clj-java-decompiler {:mvn/version "0.3.0"}
   instaparse/instaparse {:mvn/version "1.4.10"}
-  cljfx/cljfx {:mvn/version "1.7.17"}
+  cljfx/cljfx {:mvn/version "1.7.19"}
+  org.clojure/core.cache {:mvn/version "1.0.225"}
 
   com.github.omkamra/jnr {:mvn/version "0.1.0"}
   com.github.omkamra/fluidsynth {:mvn/version "0.3.0"}
