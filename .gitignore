@@ -6,3 +6,4 @@
 *.class
 *.java
 /src/*/rb/private/
+.dir-locals.el
