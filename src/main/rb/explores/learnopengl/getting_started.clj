@@ -2,9 +2,10 @@
   (:import
    [org.lwjgl BufferUtils])
   (:require
+   [backtick :refer [template]]
    [rb.explores.lwjgl.glfw :as glfw]
-   [rb.explores.learnopengl.base :refer :all]
-   [rb.explores.learnopengl.glsl :as glsl]))
+   [rb.explores.learnopengl.lib.base :refer :all]
+   [rb.explores.learnopengl.lib.glsl :as glsl]))
 
 (defn hello-window
   []
@@ -25,12 +26,15 @@
             vbo (glGenBuffers)
             vao (glGenVertexArrays)
             loc 0
-            vs (glsl/get-vertex-shader
-                :identity
-                {:location loc})
-            fs (glsl/get-fragment-shader
-                :rgba
-                {:r 1.0 :g 0.5 :b 0.2 :a 1.0})
+            vs (glsl/vertex-shader
+                (template ((:version 330 core)
+                           (:in aPos vec3 :location ~loc)
+                           (set! gl_Position (vec4 aPos.x aPos.y aPos.z 1.0)))))
+            col [1.0 0.5 0.2 1.0]
+            fs (glsl/fragment-shader
+                (template ((:version 330 core)
+                           (:out FragColor vec4)
+                           (set! FragColor (vec4 ~@col)))))
             program (create-program
                      (create-shader GL_VERTEX_SHADER vs)
                      (create-shader GL_FRAGMENT_SHADER fs))]
@@ -66,12 +70,15 @@
             ebo (glGenBuffers)
             vao (glGenVertexArrays)
             loc 0
-            vs (glsl/get-vertex-shader
-                :identity
-                {:location loc})
-            fs (glsl/get-fragment-shader
-                :rgba
-                {:r 1.0 :g 0.5 :b 0.2 :a 1.0})
+            vs (glsl/vertex-shader
+                (template ((:version 330 core)
+                           (:in aPos vec3 :location ~loc)
+                           (set! gl_Position (vec4 aPos.x aPos.y aPos.z 1.0)))))
+            col [1.0 0.5 0.2 1.0]
+            fs (glsl/fragment-shader
+                (template ((:version 330 core)
+                           (:out FragColor vec4)
+                           (set! FragColor (vec4 ~@col)))))
             program (create-program
                      (create-shader GL_VERTEX_SHADER vs)
                      (create-shader GL_FRAGMENT_SHADER fs))]

@@ -1,4 +1,4 @@
-(ns rb.explores.learnopengl.glsl
+(ns rb.explores.learnopengl.lib.glsl
   (:require
    [clojure.string :as str]
    [backtick :refer [template]]))
@@ -15,15 +15,21 @@
       (let [sym (first form)]
         (case sym
           'set! (let [[target form] (next form)]
-                  (format "%s = %s"
-                          (transpile target)
-                          (transpile form)))
+                  (if (list? target)
+                    (let [[type name] target]
+                      (format "%s %s = %s"
+                              (transpile type)
+                              (transpile name)
+                              (transpile form)))
+                    (format "%s = %s"
+                            (transpile target)
+                            (transpile form))))
           (format "%s(%s)"
                   (transpile sym)
                   (str/join ", " (map transpile (next form)))))))))
 
 (defn transpile-shader
-  [{:keys [version inputs outputs main]}]
+  [{:keys [version inputs outputs uniforms main]}]
   (with-out-str
     (printf "#version %d" (:number version))
     (when (:core version)
@@ -35,6 +41,8 @@
       (printf "in %s %s;\n" (transpile (:type input)) (transpile id)))
     (doseq [[id output] outputs]
       (printf "out %s %s;\n" (transpile (:type output)) (transpile id)))
+    (doseq [[id uniform] uniforms]
+      (printf "uniform %s %s;\n" (transpile (:type uniform)) (transpile id)))
     (print "void main() {\n")
     (doseq [stmt main]
       (printf "%s;\n" (transpile stmt)))
@@ -52,11 +60,14 @@
                                                        :location location}))
               :out (let [[name type] (next item)]
                      (update result :outputs assoc name {:type type}))
+              :uniform (let [[name type] (next item)]
+                         (update result :uniforms assoc name {:type type}))
               (update result :main conj item)))
           {:type type
            :version {}
            :inputs {}
            :outputs {}
+           :uniforms {}
            :main []}
           body))
 
@@ -71,31 +82,3 @@
   (->> body
        (parse-shader :fragment)
        (transpile-shader)))
-
-(def vertex-shaders
-  {:identity
-   (fn [{:keys [location]}]
-     (vertex-shader
-      (template
-       ((:version 330 core)
-        (:in aPos vec3 :location ~(or location 0))
-        (set! gl_Position (vec4 aPos.x aPos.y aPos.z 1.0))))))})
-
-(defn get-vertex-shader
-  [name opts]
-  (let [shader (vertex-shaders name)]
-    (shader opts)))
-
-(def fragment-shaders
-  {:rgba
-   (fn [{:keys [r g b a]}]
-     (fragment-shader
-      (template
-       ((:version 330 core)
-        (:out FragColor vec4)
-        (set! FragColor (vec4 ~r ~g ~b ~a))))))})
-
-(defn get-fragment-shader
-  [name opts]
-  (let [shader (fragment-shaders name)]
-    (shader opts)))

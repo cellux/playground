@@ -1,4 +1,4 @@
-(ns rb.explores.learnopengl.base
+(ns rb.explores.learnopengl.lib.base
   (:import
    [org.lwjgl BufferUtils])
   (:require
