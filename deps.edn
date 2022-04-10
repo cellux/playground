@@ -34,6 +34,7 @@
   instaparse/instaparse {:mvn/version "1.4.10"}
   cljfx/cljfx {:mvn/version "1.7.19"}
   org.clojure/core.cache {:mvn/version "1.0.225"}
+  backtick/backtick {:mvn/version "0.3.4"}
 
   com.github.omkamra/jnr {:mvn/version "0.1.0"}
   com.github.omkamra/fluidsynth {:mvn/version "0.3.0"}
@@ -42,10 +43,23 @@
   com.github.omkamra/sequencer-fluidsynth {:mvn/version "0.4.0"}
   com.github.omkamra/cowbells {:mvn/version "0.3.1"}
 
+  org.lwjgl/lwjgl {:mvn/version "3.3.1"}
+  org.lwjgl/lwjgl-glfw {:mvn/version "3.3.1"}
+  org.lwjgl/lwjgl-opengl {:mvn/version "3.3.1"}
+  org.lwjgl/lwjgl-opengles {:mvn/version "3.3.1"}
+  org.lwjgl/lwjgl-stb {:mvn/version "3.3.1"}
+
   org.clojure/clojurescript {:mvn/version "1.10.914"}}
 
  :aliases
- {:cljs-dev
+ {:linux
+  {:extra-deps {org.lwjgl/lwjgl$natives-linux {:mvn/version "3.3.1"}
+                org.lwjgl/lwjgl-glfw$natives-linux {:mvn/version "3.3.1"}
+                org.lwjgl/lwjgl-opengl$natives-linux {:mvn/version "3.3.1"}
+                org.lwjgl/lwjgl-opengles$natives-linux {:mvn/version "3.3.1"}
+                org.lwjgl/lwjgl-stb$natives-linux {:mvn/version "3.3.1"}}}
+
+  :cljs-dev
   {:main-opts ["--main" "cljs.main"
                "--compile-opts" "cljs-compile-opts.edn"
                "--watch" "src/main"
