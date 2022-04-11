@@ -129,10 +129,12 @@
         (glBindVertexArray vao)
         (glBindBuffer GL_ARRAY_BUFFER vbo)
         (glBufferData GL_ARRAY_BUFFER vertices GL_STATIC_DRAW)
-        (glVertexAttribPointer (locations :aPos) 3 GL_FLOAT false (* 6 Float/BYTES) 0)
-        (glEnableVertexAttribArray 0)
-        (glVertexAttribPointer (locations :aColor) 3 GL_FLOAT false (* 6 Float/BYTES) (* 3 Float/BYTES))
-        (glEnableVertexAttribArray 1)
+        (let [loc (locations :aPos)]
+          (glVertexAttribPointer loc 3 GL_FLOAT false (* 6 Float/BYTES) 0)
+          (glEnableVertexAttribArray loc))
+        (let [loc (locations :aColor)]
+          (glVertexAttribPointer loc 3 GL_FLOAT false (* 6 Float/BYTES) (* 3 Float/BYTES))
+          (glEnableVertexAttribArray loc))
         (assoc state
                :vao vao
                :program program)))

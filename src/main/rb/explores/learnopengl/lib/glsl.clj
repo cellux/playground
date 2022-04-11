@@ -14,16 +14,24 @@
       clojure.lang.Symbol
       (let [sym (first form)]
         (case sym
-          'set! (let [[target form] (next form)]
-                  (if (list? target)
-                    (let [[type name] target]
-                      (format "%s %s = %s"
-                              (transpile type)
-                              (transpile name)
-                              (transpile form)))
-                    (format "%s = %s"
-                            (transpile target)
-                            (transpile form))))
+          (+ * /) (letfn [(rec [head & tail]
+                            (if tail
+                              (format "%s%s%s"
+                                      (transpile head)
+                                      (transpile sym)
+                                      (apply rec tail))
+                              (transpile head)))]
+                    (apply rec (next form)))
+          set! (let [[target form] (next form)]
+                 (if (list? target)
+                   (let [[type name] target]
+                     (format "%s %s = %s"
+                             (transpile type)
+                             (transpile name)
+                             (transpile form)))
+                   (format "%s = %s"
+                           (transpile target)
+                           (transpile form))))
           (format "%s(%s)"
                   (transpile sym)
                   (str/join ", " (map transpile (next form)))))))))
