@@ -49,6 +49,8 @@
   org.lwjgl/lwjgl-opengles {:mvn/version "3.3.1"}
   org.lwjgl/lwjgl-stb {:mvn/version "3.3.1"}
 
+  org.joml/joml {:mvn/version "1.10.4"}
+
   org.clojure/clojurescript {:mvn/version "1.10.914"}}
 
  :aliases

@@ -1,54 +1,8 @@
 (ns rb.explores.learnopengl.textures
-  (:import
-   [org.lwjgl BufferUtils]
-   [org.lwjgl.stb STBImage])
   (:require
-   [clojure.java.io :as jio]
    [backtick :refer [template]]
-   [rb.explores.lwjgl.glfw :as glfw]
    [rb.explores.learnopengl.lib.base :refer :all]
    [rb.explores.learnopengl.lib.glsl :as glsl]))
-
-(defn download-bytes
-  [url]
-  (with-open [in (jio/input-stream url)
-              out (java.io.ByteArrayOutputStream.)]
-    (jio/copy in out)
-    (let [ba (.toByteArray out)
-          size (.size out)
-          buf (BufferUtils/createByteBuffer size)]
-      (.put buf ba 0 size)
-      (.flip buf)
-      buf)))
-
-(defonce images
-  (->> {:wooden-container "https://learnopengl.com/img/textures/container.jpg"
-        :awesome-face "https://learnopengl.com/img/textures/awesomeface.png"}
-       (reduce-kv #(assoc %1 %2 (download-bytes %3)) {})))
-
-(defn decode-image
-  ([buf desired-channels]
-   (STBImage/stbi_set_flip_vertically_on_load true)
-   (let [width (BufferUtils/createIntBuffer 1)
-         height (BufferUtils/createIntBuffer 1)
-         channels (BufferUtils/createIntBuffer 1)
-         data (STBImage/stbi_load_from_memory buf width height channels desired-channels)]
-     (assert data "cannot decode image")
-     {:data data
-      :width (.get width)
-      :height (.get height)
-      :channels (.get channels)}))
-  ([buf]
-   (decode-image buf 0)))
-
-(defmacro with-decoded-image
-  [[bind-target img] & body]
-  `(let [img# ~img
-         ~bind-target img#]
-     (try
-       ~@body
-       (finally
-         (STBImage/stbi_image_free (:data img#))))))
 
 (defn textured-rectangle
   []
@@ -109,8 +63,8 @@
                            (glTexParameteri GL_TEXTURE_2D GL_TEXTURE_WRAP_T GL_REPEAT)
                            (glTexParameteri GL_TEXTURE_2D GL_TEXTURE_MIN_FILTER GL_LINEAR_MIPMAP_LINEAR)
                            (glTexParameteri GL_TEXTURE_2D GL_TEXTURE_MAG_FILTER GL_LINEAR)
-                           (with-decoded-image
-                             [{:keys [width height data channels]} (decode-image (get images image-key))]
+                           (with-image
+                             [{:keys [width height data channels]} (get images image-key)]
                              (let [target GL_TEXTURE_2D
                                    level 0
                                    internal-format GL_RGB
@@ -123,8 +77,8 @@
                                (glGenerateMipmap target))))]
         (glUseProgram program)
         (glUniform1i (glGetUniformLocation program "texture1") 0)
-        (glUniform1i (glGetUniformLocation program "texture2") 1)
         (load-texture tex1 :wooden-container)
+        (glUniform1i (glGetUniformLocation program "texture2") 1)
         (load-texture tex2 :awesome-face)
         (glBindVertexArray vao)
         (glBindBuffer GL_ARRAY_BUFFER vbo)
