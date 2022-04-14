@@ -34,38 +34,42 @@
 
 (defn render
   [{:keys [width height title hints
-           setup draw update on-key] :as state}]
-  (glfw/with-glfw
-    (glfw/with-gl-window w
-      {:width (or width 800)
-       :height (or height 600)
-       :title (or title "LearnOpenGL")
-       :hints (merge {:client-api :opengl
-                      :context-version-major 3
-                      :context-version-minor 3
-                      :opengl-profile :core}
-                     hints)}
-      (let [state* (atom (assoc state :window w))]
-        (glfw/swap-interval 1)
-        (glfw/set-key-callback
-         w (fn [window key scancode action mods]
-             (when on-key
-               (swap! state* on-key key scancode action mods))
-             (when (and (#{glfw/GLFW_KEY_ESCAPE glfw/GLFW_KEY_Q} key)
-                        (= action glfw/GLFW_RELEASE))
-               (glfw/set-window-should-close window true))))
-        (glfw/set-framebuffer-size-callback
-         w (fn [_ width height]
-             (glViewport 0 0 width height)))
-        (when setup
-          (swap! state* setup))
-        (while (not (glfw/window-should-close w))
-          (when draw
-            (draw @state*))
-          (when update
-            (swap! state* update))
-          (glfw/swap-buffers w)
-          (glfw/poll-events))))))
+           setup draw step on-key] :as state}]
+  (let [state (-> state
+                  (update :width #(or % 800))
+                  (update :height #(or % 600))
+                  (update :title #(or % "LearnOpenGL"))
+                  (update :hints #(merge {:client-api :opengl
+                                          :context-version-major 3
+                                          :context-version-minor 3
+                                          :opengl-profile :core}
+                                         %)))]
+    (glfw/with-glfw
+      (glfw/with-gl-window w state
+        (let [state* (atom (assoc state :window w))]
+          (glfw/swap-interval 1)
+          (glfw/set-key-callback
+           w (fn [window key scancode action mods]
+               (when on-key
+                 (swap! state* on-key key scancode action mods))
+               (when (and (#{glfw/GLFW_KEY_ESCAPE glfw/GLFW_KEY_Q} key)
+                          (= action glfw/GLFW_RELEASE))
+                 (glfw/set-window-should-close window true))))
+          (glfw/set-framebuffer-size-callback
+           w (fn [_ width height]
+               (glViewport 0 0 width height)
+               (swap! state* assoc
+                      :width width
+                      :height height)))
+          (when setup
+            (swap! state* setup))
+          (while (not (glfw/window-should-close w))
+            (when draw
+              (draw @state*))
+            (when step
+              (swap! state* step))
+            (glfw/swap-buffers w)
+            (glfw/poll-events)))))))
 
 (defn float-buffer
   [items]
