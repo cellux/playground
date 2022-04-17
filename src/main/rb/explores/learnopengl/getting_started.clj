@@ -1,6 +1,4 @@
 (ns rb.explores.learnopengl.getting-started
-  (:import
-   [org.lwjgl BufferUtils])
   (:require
    [backtick :refer [template]]
    [rb.explores.lwjgl.glfw :as glfw]

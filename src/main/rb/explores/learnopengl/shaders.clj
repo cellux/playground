@@ -1,6 +1,4 @@
 (ns rb.explores.learnopengl.shaders
-  (:import
-   [org.lwjgl BufferUtils])
   (:require
    [backtick :refer [template]]
    [rb.explores.lwjgl.glfw :as glfw]

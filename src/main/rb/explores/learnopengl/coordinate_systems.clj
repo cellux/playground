@@ -1,9 +1,7 @@
 (ns rb.explores.learnopengl.coordinate-systems
   (:import
    [org.joml Vector3f Vector4f Matrix4f]
-   [org.lwjgl BufferUtils]
-   [org.lwjgl.system MemoryStack]
-   [org.lwjgl.stb STBImage])
+   [org.lwjgl.system MemoryStack])
   (:require
    [clojure.test :refer [is deftest]]
    [backtick :refer [template]]

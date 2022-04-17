@@ -1,9 +1,6 @@
 (ns rb.explores.lwjgl.opengl
   (:require
-   [clojure.reflect :refer [reflect]])
-  (:import
-   [org.lwjgl Version BufferUtils PointerBuffer]
-   [org.lwjgl.opengl GL]))
+   [clojure.reflect :refer [reflect]]))
 
 (defn gen-gl-macros
   [gl-class]
