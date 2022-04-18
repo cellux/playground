@@ -250,7 +250,7 @@
         (let [mat (.mallocFloat stack 16)]
           (doto (Matrix4f.)
             (.rotate (* 50 (/ Math/PI 180) (glfw/get-time))
-                     0.5 1.0 0.0)
+                     (.normalize (Vector3f. 0.5 1.0 0.0)))
             (.get mat))
           (glUniformMatrix4fv (glGetUniformLocation program "model") false mat))
         (let [mat (.mallocFloat stack 16)]
@@ -429,7 +429,7 @@
                   (.translate cube-pos)
                   (.rotate (let [t (glfw/get-time)]
                              (+ angle (* 50 (/ Math/PI 180) (* 3 (Math/sin (+ t angle))))))
-                           1.0 0.3 0.5)
+                           (.normalize (Vector3f. 1.0 0.3 0.5)))
                   (.get mat))
                 (glUniformMatrix4fv (glGetUniformLocation program "model") false mat)))
             (glDrawArrays GL_TRIANGLES 0 36))))})))
