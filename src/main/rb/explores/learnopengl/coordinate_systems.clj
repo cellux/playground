@@ -3,7 +3,6 @@
    [org.joml Vector3f Vector4f Matrix4f]
    [org.lwjgl.system MemoryStack])
   (:require
-   [clojure.test :refer [is deftest]]
    [backtick :refer [template]]
    [rb.explores.lwjgl.glfw :as glfw]
    [rb.explores.learnopengl.lib.base :refer :all]

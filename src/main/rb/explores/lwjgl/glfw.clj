@@ -213,27 +213,28 @@
           (when-not k
             (throw (ex-info "invalid window hint" {:key k})))
           (recur k v))
-        
+
         (keyword? v)
         (let [allowed-values (window-hint-allowed-values k)
               v (get allowed-values v)]
           (when-not v
             (throw (ex-info "invalid window hint value" {:key k :value v})))
           (recur k v))
-  
+
         (boolean? v)
         (recur k (if v GLFW/GLFW_TRUE GLFW/GLFW_FALSE))
 
         (string? v)
         (GLFW/glfwWindowHintString k v)
-        
+
         :else
         (GLFW/glfwWindowHint k v)))
 
 (defn create-window
   [opts]
-  (let [{:keys [width height title monitor share hints]} opts]
-    (doseq [[k v] hints]
+  (let [{:keys [width height title
+                monitor share window-hints]} opts]
+    (doseq [[k v] window-hints]
       (window-hint k v))
     (fail-if-result=
      0
@@ -337,34 +338,32 @@
 
 (defmacro with-window
   [window opts & body]
-  (let [body (if (map? opts) body (cons opts body))
-        opts (if (map? opts) opts nil)]
-    `(let [~window (create-window ~opts)
-           result# (try
-                     ~@body
-                     (finally
-                       (free-callbacks ~window)
-                       (destroy-window ~window)))]
-       result#)))
+  `(let [win# (create-window ~opts)
+         ~window win#
+         result# (try
+                   ~@body
+                   (finally
+                     (free-callbacks win#)
+                     (destroy-window win#)))]
+     result#))
 
 (defmacro with-gl-window
   [window opts & body]
-  `(with-window ~window
+  `(with-window win#
      ~opts
-     (make-context-current ~window)
+     (make-context-current win#)
      (GL/createCapabilities)
-     ~@body))
+     (let [~window win#]
+       ~@body)))
 
 (defmacro with-glfw
   [opts & body]
-  (let [body (if (map? opts) body (cons opts body))
-        opts (if (map? opts) opts nil)]
-    `(do
-       ~@(for [[k v] (:hints opts)]
-           `(GLFW/glfwInitHint ~k ~v))
-       (fail-if-result= GLFW/GLFW_FALSE (GLFW/glfwInit))
-       (let [result# (try
-                       ~@body
-                       (finally
-                         (GLFW/glfwTerminate)))]
-         result#))))
+  `(do
+     (doseq [[~'k ~'v] (:init-hints ~opts)]
+       (GLFW/glfwInitHint ~'k ~'v))
+     (fail-if-result= GLFW/GLFW_FALSE (GLFW/glfwInit))
+     (let [result# (try
+                     ~@body
+                     (finally
+                       (GLFW/glfwTerminate)))]
+       result#)))

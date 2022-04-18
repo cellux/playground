@@ -32,19 +32,21 @@
       (glDeleteShader shader))
     program))
 
+(def default-window-hints
+  {:client-api :opengl
+   :context-version-major 3
+   :context-version-minor 3
+   :opengl-profile :core})
+
 (defn render
-  [{:keys [width height title hints
+  [{:keys [width height title window-hints
            setup draw step on-key] :as state}]
   (let [state (-> state
                   (update :width #(or % 800))
                   (update :height #(or % 600))
                   (update :title #(or % "LearnOpenGL"))
-                  (update :hints #(merge {:client-api :opengl
-                                          :context-version-major 3
-                                          :context-version-minor 3
-                                          :opengl-profile :core}
-                                         %)))]
-    (glfw/with-glfw
+                  (update :window-hints #(merge default-window-hints %)))]
+    (glfw/with-glfw {}
       (glfw/with-gl-window w state
         (let [state* (atom (assoc state :window w))]
           (glfw/swap-interval 1)
