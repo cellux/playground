@@ -8,10 +8,10 @@
 (defn hello-window
   []
   (render
-    {:draw
-     (fn [state]
-       (glClearColor 0.2 0.3 0.3 1.0)
-       (glClear GL_COLOR_BUFFER_BIT))}))
+   {:draw
+    (fn [state]
+      (glClearColor 0.2 0.3 0.3 1.0)
+      (glClear GL_COLOR_BUFFER_BIT))}))
 
 (defn hello-triangle
   []
