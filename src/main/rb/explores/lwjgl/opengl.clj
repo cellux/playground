@@ -15,9 +15,12 @@
                     (list* '~(symbol (name (:declaring-class m))
                                      (name (:name m)))
                            ~'args))
-                 `(def ~(:name m)
-                    ~(symbol (name (:declaring-class m))
-                             (name (:name m))))))
+                 (let [c (Class/forName (name (:declaring-class m)))
+                       value (.. c
+                                 (getField (name (:name m)))
+                                 (get c))
+                       tag (type value)]
+                   `(def ~(with-meta (:name m) {:tag tag}) ~value))))
              (->> bases
                   (map resolve)
                   (map gen-gl-macros))))))
