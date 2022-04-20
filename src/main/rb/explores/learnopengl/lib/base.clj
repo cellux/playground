@@ -65,13 +65,17 @@
                       :height height)))
           (when setup
             (swap! state* setup))
-          (while (not (glfw/window-should-close w))
-            (when draw
-              (draw @state*))
-            (when step
-              (swap! state* step))
-            (glfw/swap-buffers w)
-            (glfw/poll-events)))))))
+          (loop [t (glfw/get-time)
+                 tprev t]
+            (when-not (glfw/window-should-close w)
+              (when draw
+                (draw @state*))
+              (when step
+                (let [delta (- t tprev)]
+                  (swap! state* step delta)))
+              (glfw/swap-buffers w)
+              (glfw/poll-events)
+              (recur (glfw/get-time) t))))))))
 
 (defn float-buffer
   ^java.nio.FloatBuffer [items]
