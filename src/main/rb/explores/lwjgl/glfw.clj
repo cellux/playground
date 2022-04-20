@@ -72,25 +72,25 @@
   (GLFW/glfwGetPrimaryMonitor))
 
 (defn get-monitor-physical-size
-  [monitor]
+  [^long monitor]
   (let [width (BufferUtils/createIntBuffer 1)
         height (BufferUtils/createIntBuffer 1)]
     (GLFW/glfwGetMonitorPhysicalSize monitor width height)
     [(.get width) (.get height)]))
 
 (defn get-monitor-pos
-  [monitor]
+  [^long monitor]
   (let [width (BufferUtils/createIntBuffer 1)
         height (BufferUtils/createIntBuffer 1)]
     (GLFW/glfwGetMonitorPos monitor width height)
     [(.get width) (.get height)]))
 
 (defn get-monitor-name
-  [monitor]
+  [^long monitor]
   (GLFW/glfwGetMonitorName monitor))
 
 (defn- vidmode->map
-  [vidmode]
+  [^org.lwjgl.glfw.GLFWVidMode vidmode]
   {:mode vidmode
    :blue-bits (.blueBits vidmode)
    :green-bits (.greenBits vidmode)
@@ -225,7 +225,7 @@
         (recur k (if v GLFW/GLFW_TRUE GLFW/GLFW_FALSE))
 
         (string? v)
-        (GLFW/glfwWindowHintString k v)
+        (GLFW/glfwWindowHintString (int k) ^String v)
 
         :else
         (GLFW/glfwWindowHint k v)))
@@ -239,11 +239,11 @@
     (fail-if-result=
      0
      (GLFW/glfwCreateWindow
-      (or width 640)
-      (or height 480)
-      (or title "Window")
-      (or monitor 0)
-      (or share 0)))))
+      (int (or width 640))
+      (int (or height 480))
+      (str (or title "Window"))
+      (long (or monitor 0))
+      (long (or share 0))))))
 
 (defn focus-window
   [window]
@@ -254,7 +254,7 @@
   (GLFW/glfwShowWindow window))
 
 (defn get-framebuffer-size
-  [window]
+  [^long window]
   (let [width (BufferUtils/createIntBuffer 1)
         height (BufferUtils/createIntBuffer 2)]
     (GLFW/glfwGetFramebufferSize window width height)
@@ -361,7 +361,7 @@
   `(do
      (doseq [[~'k ~'v] (:init-hints ~opts)]
        (GLFW/glfwInitHint ~'k ~'v))
-     (fail-if-result= GLFW/GLFW_FALSE (GLFW/glfwInit))
+     (fail-if-result= false (GLFW/glfwInit))
      (let [result# (try
                      ~@body
                      (finally

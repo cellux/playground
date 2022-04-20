@@ -10,7 +10,7 @@
 (use-gl-version GL33C)
 
 (defn create-shader
-  [type source]
+  [type ^String source]
   (let [shader (glCreateShader type)]
     (glShaderSource shader source)
     (glCompileShader shader)
@@ -74,13 +74,13 @@
             (glfw/poll-events)))))))
 
 (defn float-buffer
-  [items]
+  ^java.nio.FloatBuffer [items]
   (doto (BufferUtils/createFloatBuffer (count items))
     (.put (float-array items))
     (.flip)))
 
 (defn int-buffer
-  [items]
+  ^java.nio.IntBuffer [items]
   (doto (BufferUtils/createIntBuffer (count items))
     (.put (int-array items))
     (.flip)))
@@ -110,7 +110,10 @@
        (let [width (BufferUtils/createIntBuffer 1)
              height (BufferUtils/createIntBuffer 1)
              channels (BufferUtils/createIntBuffer 1)
-             data (STBImage/stbi_load_from_memory buf width height channels desired-channels)]
+             data (STBImage/stbi_load_from_memory
+                   ^java.nio.ByteBuffer buf
+                   width height channels
+                   ^int desired-channels)]
          (assert (instance? java.nio.ByteBuffer data) "cannot decode image")
          {:data data
           :width (.get width)
@@ -129,7 +132,8 @@
        ~@body
        (finally
          (when-not decoded?#
-           (STBImage/stbi_image_free (:data img#)))))))
+           (let [^java.nio.ByteBuffer data# (:data img#)]
+             (STBImage/stbi_image_free data#)))))))
 
 (defonce images
   (->> {:wooden-container "https://learnopengl.com/img/textures/container.jpg"
