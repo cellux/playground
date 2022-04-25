@@ -20,10 +20,14 @@
 
 (clj/defmacro with-temp-target-of-type
   [type & body]
-  `(let [t# (target/create {:type ~type})
-         result# (target/with-target t# ~@body)]
-     (target/dispose t#)
-     result#))
+  (let [[opts body] (if (map? (first body))
+                      [(first body) (rest body)]
+                      [nil body])
+        opts (assoc opts :type type)]
+    `(let [t# (target/create ~opts)
+           result# (target/with-target t# ~@body)]
+       (target/dispose t#)
+       result#)))
 
 (clj/defmacro with-temp-target
   [& body]

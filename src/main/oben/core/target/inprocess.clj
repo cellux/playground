@@ -79,8 +79,11 @@
     :ptr Type/POINTER
     :array Type/POINTER))
 
-(defn make-function-invoker
-  [ctx f]
+(defmulti make-function-invoker
+  (fn [invoke-strategy ctx f] invoke-strategy))
+
+(defmethod make-function-invoker :jnr
+  [_ ctx f]
   (let [address (get-function-address ctx f)
         _ (when (zero? address)
             (throw (ex-info "cannot get function address" {:function f})))
@@ -148,7 +151,7 @@
           :float (.invokeFloat invoker cc address hib)
           :double (.invokeDouble invoker cc address hib))))))
 
-(defrecord InProcessTarget [ctx attrs]
+(defrecord InProcessTarget [ctx attrs invoke-strategy]
   Target/protocol
 
   (compile-function [this fnode]
@@ -161,7 +164,7 @@
 
   (invoke-function [this fnode args]
     (let [f (ctx/compiled-node ctx fnode)
-          invoker (make-function-invoker ctx f)]
+          invoker (make-function-invoker invoke-strategy ctx f)]
       (apply invoker args)))
 
   (dispose [this]
@@ -174,7 +177,8 @@
    :align-min 1})
 
 (defn create
-  [{:keys [attrs] :as opts}]
+  [{:keys [attrs invoke-strategy] :as opts}]
   (map->InProcessTarget
    {:ctx (ctx/create)
-    :attrs (merge default-attrs attrs)}))
+    :attrs (merge default-attrs attrs)
+    :invoke-strategy (or invoke-strategy :jnr)}))
