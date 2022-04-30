@@ -64,5 +64,8 @@
 (defmacro with-target
   [t & body]
   (cond (keyword? t) `(with-target {:type ~t} ~@body)
-        (map? t) `(with-target (create ~t) ~@body)
+        (map? t) `(let [t# (create ~t)]
+                    (try
+                      (with-target t# ~@body)
+                      (finally (dispose t#))))
         :else `(binding [*current-target* ~t] ~@body)))

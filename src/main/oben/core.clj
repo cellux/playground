@@ -18,25 +18,6 @@
   [t & body]
   `(target/with-target ~t ~@body))
 
-(clj/defmacro with-temp-target-of-type
-  [type & body]
-  (let [[opts body] (if (map? (first body))
-                      [(first body) (rest body)]
-                      [nil body])
-        opts (assoc opts :type type)]
-    `(let [t# (target/create ~opts)
-           result# (target/with-target t# ~@body)]
-       (target/dispose t#)
-       result#)))
-
-(clj/defmacro with-temp-target
-  [& body]
-  `(with-temp-target-of-type :inprocess ~@body))
-
-(clj/defmacro with-dump-target
-  [& body]
-  `(with-temp-target-of-type :dump ~@body))
-
 (clj/defn fn?
   "Returns true if the argument is a Clojure wrapper around an Oben function."
   [x]

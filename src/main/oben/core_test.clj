@@ -36,21 +36,21 @@
  "type constructors memoize the types they return"
  (m/fact (Number/UInt 32) => (m/exactly (Number/UInt 32))))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 []
             (+ 5 2))]
     (m/fact
      "a type tag on the param vector defines the return type of the function"
      (f) => 7)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 x ^u32 y] (+ x y))]
     (m/fact
      "type tags on params define their types"
      (f 1 2) => 3)
     (m/fact (f 5 3) => 8)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn (Number/UInt 32) []
             (+ 5 2))]
     (m/fact
@@ -58,13 +58,13 @@
      vector's type tag"
      (f) => 7)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [u32 x u32 y] (+ x y))]
     (m/fact
      "a symbol before a param is used as a type designator"
      (f 5 3) => 8)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [u32 a
                          ^u32 b
                          (Number/UInt 32) c
@@ -74,7 +74,7 @@
      "type designators"
      (f 5 3 1 6) => 15)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u8 x]
             (bit-not x))]
     (m/fact (f 0) => 255))
@@ -89,7 +89,7 @@
      "symbols inside type designators can be resolved via bindings in the local environment"
      (f 0) => 65535)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (+ x y)
             (+ 5 2))]
@@ -103,11 +103,11 @@
 (m/facts
  (m/fact (add (add 1 2) (add 7 -2)) => 8))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u16 x ^u8 y] (+ x y))]
     (m/fact (f 1 2) => 3)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (do)
             (do (+ x y))
@@ -116,7 +116,7 @@
               (+ 3 9)))]
     (m/fact (f 1 2) => 12)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u16 [^u32 x]
             (cast! u16 x))]
     (m/fact
@@ -125,7 +125,7 @@
      (f 65536) => 0
      (f 65537) => 1)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^f32 [^u32 x]
             (let [g (fn ^u32 [^f32 x] x)]
               (g x)))]
@@ -133,14 +133,14 @@
      "call to let-bound function"
      (f 60) => 60.0)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^f32 [^u32 x ^u32 y]
             (let [g (fn ^u32 [^u16 x ^u8 y] (+ x y))]
               (g (cast! u16 x) (cast! u8 y))))]
     (m/fact
      (f 6 3) => 9.0)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^f32 [^u32 x ^u32 y]
             (* x y))
         g (oben/fn ^f32 [^u32 x ^u32 y]
@@ -149,7 +149,7 @@
      "call to Oben function defined in Clojure lexical environment"
      (g 12 5) => 119.0)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^f32 [^u32 x ^u32 y]
             (* x y))
         g (oben/fn ^f32 [^s32 x ^s32 y]
@@ -160,7 +160,7 @@
      "Oben function defined in Clojure lexical environment shadowed by local binding"
      (g 5 9) => -3.5)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (+ x y))]
     (m/fact (f 6 3) => 9))
@@ -174,7 +174,7 @@
             (+ x y))]
     (m/fact (f -3 -6) => -9)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^f32 [^f32 x ^f32 y]
             (+ x y))]
     (m/fact (f 6.5 3.25) => 9.75))
@@ -188,7 +188,7 @@
             (+ x y))]
     (m/fact (f 3 6) => 9.0)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^f32 [^f32 x ^f32 y]
             (+ x y))]
     (m/fact (f 6.5 -1.25) => 5.25))
@@ -202,7 +202,7 @@
             (+ x y))]
     (m/fact (f -3 -6) => -9.0)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^f32 [^f32 x ^f32 y]
             (+ x y))]
     (m/fact (f 6.5 -1.25) => 5.25))
@@ -240,7 +240,7 @@
  "negating an UInt turns it into an SInt"
  (o/type-of (o/parse '(- 5))) => (m/exactly Number/%s8))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^s32 [^u32 x]
             (- x))]
     (m/fact (f 5) => -5))
@@ -252,7 +252,7 @@
     (m/fact (f 5.25) => -5.25)
     (m/fact (f -5.25) => 5.25)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (% x y))]
     (m/fact (f 67 7) => 4))
@@ -266,7 +266,7 @@
     (m/fact (f 17 -5) => 2.0)
     (m/fact (f 7.25 3.5) => 0.25)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (bit-and x y))]
     (m/fact (f 0x1234 0xff) => 0x34)
@@ -275,7 +275,7 @@
             (bit-and x y))]
     (m/fact (f -2 0xff) => 0xfe)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (bit-or x y))]
     (m/fact (f 0x1234 0xff) => 0x12ff)
@@ -284,13 +284,13 @@
             (bit-or x y))]
     (m/fact (f -2 0xff) => -1)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (bit-xor x y))]
     (m/fact (f 0x1234 0xff) => (+ 0x1200 (- 0xff 0x34)))
     (m/fact (f 0x1234 0xff00) => (+ 0x34 (- 0xff00 0x1200)))))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^bool [^u32 x ^u32 y]
             (= x y))]
     (m/fact (f 3 5) => 0)
@@ -304,7 +304,7 @@
     (m/fact (f 3 5) => 0)
     (m/fact (f 3 3) => 1)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^bool [^u32 x ^u32 y]
             (!= x y))]
     (m/fact (f 3 5) => 1)
@@ -318,7 +318,7 @@
     (m/fact (f 3 5) => 1)
     (m/fact (f 3 3) => 0)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^bool [^u32 x ^u32 y]
             (< x y))]
     (m/fact (f 3 5) => 1)
@@ -338,7 +338,7 @@
     (m/fact (f 3.2 3.3) => 1)
     (m/fact (f 3.3 3.2) => 0)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^bool [^u32 x ^u32 y]
             (<= x y))]
     (m/fact (f 3 5) => 1)
@@ -358,7 +358,7 @@
     (m/fact (f 3.2 3.3) => 1)
     (m/fact (f 3.3 3.2) => 0)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^bool [^u32 x ^u32 y]
             (>= x y))]
     (m/fact (f 3 5) => 0)
@@ -378,7 +378,7 @@
     (m/fact (f 3.2 3.3) => 0)
     (m/fact (f 3.3 3.2) => 1)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^bool [^u32 x ^u32 y]
             (> x y))]
     (m/fact (f 3 5) => 0)
@@ -398,7 +398,7 @@
     (m/fact (f 3.2 3.3) => 0)
     (m/fact (f 3.3 3.2) => 1)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [compare-s8 (oben/fn ^s8 [^u32 x ^u32 y]
                      (if (> x y) 1 -1))
         compare-s16 (oben/fn ^s16 [^u32 x ^u32 y]
@@ -412,7 +412,7 @@
     (m/fact (compare-s32 3 5) => -1)
     (m/fact (compare-s32 5 3) => 1)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [compare (oben/fn ^s8 [^u32 x ^u32 y]
                   (if (> x y) 1
                       (if (< x y) -1
@@ -421,74 +421,74 @@
     (m/fact (compare 5 3) => 1)
     (m/fact (compare 3 3) => 0)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 []
             1)]
     (m/fact (f) => 1)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u8 []
             1)]
     (m/fact (f) => 1)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 x]
             x)]
     (m/fact (f 5) => 5)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 []
             (let [v 5]
               3))]
     (m/fact (f) => 3)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 []
             (let [v 5]
               v))]
     (m/fact (f) => 5)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 []
             (let [v (var u8 (+ 5 3))]
               @v))]
     (m/fact (f) => 8)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 []
             (let [v (var u8)]
               (set! v 5)))]
     (m/fact (f) => 5)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 []
             (let [v (var u8)]
               (set! v 5)
               (set! v 3)))]
     (m/fact (f) => 3)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^s32 []
             (let [v (var u8)]
               (set! v 5)
               (set! v (- @v))))]
     (m/fact (f) => -5)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 []
             (let [v (var u8)]
               (set! v (+ 5 3))
               (return @v)))]
     (m/fact (f) => 8)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 []
             (let [v (var u8)]
               (set! v (+ 5 3))
               (return (* @v @v))))]
     (m/fact (f) => 64)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 []
             (let [v (var u8)]
               (set! v (+ 5 3))
@@ -496,7 +496,7 @@
               2))]
     (m/fact (f) => 8)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 []
             (let [v (var u8)]
               (set! v (+ 5 3))
@@ -507,7 +507,7 @@
               2))]
     (m/fact (f) => 12)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [count-to (oben/fn ^u32 [^u32 limit]
                    (let [i (var u32 0)]
                      (tagbody
@@ -519,7 +519,7 @@
                      7))]
     (m/fact (count-to 420) => 420)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u8 [^u32 x]
             (if (not (< x 5))
               8 3))]
@@ -527,7 +527,7 @@
     (m/fact (f 5) => 8)
     (m/fact (f 6) => 8)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [count-to (oben/fn ^u32 [^u32 limit]
                    (let [i (var u32 0)]
                      (while (< @i limit)
@@ -535,7 +535,7 @@
                      @i))]
     (m/fact (count-to 420) => 420)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [clamp (oben/fn ^u32 [^u32 x ^u32 lo ^u32 hi]
                 (if (< x lo)
                   lo
@@ -544,7 +544,7 @@
                     x)))]
     (m/fact (clamp 4 7 10) => 7)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [div-six (oben/fn ^bool [^u32 x]
                          (and (= (% x 2) 0)
                               (= (% x 3) 0)))]
@@ -562,7 +562,7 @@
     (m/fact (div-six 11) => 0)
     (m/fact (div-six 12) => 1)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [div-2or3 (oben/fn ^bool [^u32 x]
                    (or (= (% x 2) 0)
                        (= (% x 3) 0)))]
@@ -580,7 +580,7 @@
     (m/fact (div-2or3 11) => 0)
     (m/fact (div-2or3 12) => 1)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [neg (oben/fn ^u32 [^u32 x]
               (bit-not x))]
     (m/fact (neg 0) => -1)
@@ -590,7 +590,7 @@
     (m/fact (neg -32768) => 32767)
     (m/fact (neg -2147483648) => 2147483647)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [neg (oben/fn ^u64 [^u64 x]
               (bit-not x))]
     (m/fact (neg 0) => -1)
@@ -601,19 +601,19 @@
     (m/fact (neg -2147483648) => 2147483647)
     (m/fact (neg -9223372036854775808) => 9223372036854775807)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (bit-and-not x y))]
     (m/fact (f 0xff 0x40) => 0xbf)
     (m/fact (f 0xff 0x55) => 0xaa)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (bit-shift-left x y))]
     (m/fact (f 0xff 4) => 0xff0)
     (m/fact (f 0xff 1) => 0x1fe)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (bit-shift-right x y))]
     (m/fact (f 0xff 4) => 0x0f)
@@ -622,7 +622,7 @@
             (bit-shift-right x y))]
     (m/fact (f 0xff 4) => -1)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [clamp (oben/fn ^u32 [^u32 x ^u32 lo ^u32 hi]
                 (cond (< x lo) lo
                       (> x hi) hi
@@ -634,7 +634,7 @@
     (m/fact (clamp 10 7 10) => 10)
     (m/fact (clamp 11 7 10) => 10)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [select (oben/fn ^s32 [^u32 x]
                  (condp = x
                    1 -2
@@ -646,7 +646,7 @@
     (m/fact (select 3) => -6)
     (m/fact (select 4) => 10)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [select (oben/fn ^s32 [^u32 x]
                  (case x
                    1 -2
@@ -658,7 +658,7 @@
     (m/fact (select 3) => -6)
     (m/fact (select 4) => 10)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 increment]
             (let [v (var u32 (+ 5 3))]
               (+ @v increment)))]
@@ -666,7 +666,7 @@
      "vars with type and initializer"
      (f 7) => 15)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 increment]
             (let [v (var u32)]
               (set! v (+ 5 3))
@@ -675,7 +675,7 @@
      "vars with type only"
      (f 7) => 15)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^f32 [^u32 increment]
             (let [v (var (+ 5.0 3.75))]
               (+ @v increment)))]
@@ -683,7 +683,7 @@
      "vars with initializer only"
      (f 7) => 15.75)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^f32 []
             (let [v1 (var 5.0)
                   v2 (var 3.75)]
@@ -691,7 +691,7 @@
     (m/fact
      (f) => 8.75)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 []
             (let [a (array u32 [9 8 7 6 5 4 3 2 1 0])]
               (get a 3)))]
@@ -699,7 +699,7 @@
      "array literal supports get with constant index"
      (f) => 6)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 index]
             (let [a (var (array u32 [9 8 7 6 5 4 3 2 1 0]))]
               (get a (+ index 1))))]
@@ -709,7 +709,7 @@
 
 (def u32array-3 (oben/Array Number/%u32 5))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 index]
             (let [a (var (u32array-3 [9 8 7 6 5]))]
               (get a (+ index (u8 3)))))]
@@ -731,7 +731,7 @@
      "narrowing conversions can be forced via cast!"
      (f 1) => 7)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^void [] 5)]
     (m/fact
      "void functions return nil"
@@ -754,7 +754,7 @@
    (m/fact result => 'ret)
    (m/fact (:tag (meta result)) => (m/exactly expected-type))))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^void [(* (Array u64 10)) ret]
             (put ret 0 (cast u1 0))
             (put ret 1 (cast u1 1))
@@ -771,7 +771,7 @@
   (m/fact
    (f) => (throws clojure.lang.ExceptionInfo #"rejected narrowing UInt->UInt conversion")))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [atype (oben/Array Number/%u32 10)
         a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
         f (oben/fn ^u32 [(Ptr/Ptr (Number/UInt 32)) a
@@ -779,7 +779,7 @@
             @(+ a index))]
     (m/fact (f a 3) => 6)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [atype (oben/Array Number/%u32 10)
         a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
         f (oben/fn ^u32 [(* u32) a
@@ -789,7 +789,7 @@
      "(* type) is a shortcut for (Ptr/Ptr type)"
      (f a 3) => 6)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [atype (oben/Array Number/%u32 10)
         a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
         f (oben/fn ^u32 [(* u32) a]
@@ -797,7 +797,7 @@
     (m/fact
      (f a) => 9)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [atype (oben/Array Number/%u32 10)
         a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
         f (oben/fn ^u32 [(* u32) a
@@ -810,7 +810,7 @@
      (f a 3 21)
      (nth a 3) => 21)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 []
             (let [f* (fn ^u32 []
                        (+ 5 2))]
@@ -819,7 +819,7 @@
      "a type tag on the param vector defines the return type of the function"
      (f) => 7)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (let [f* (fn ^u32 [^u32 x ^u32 y]
                        (+ x y))]
@@ -829,7 +829,7 @@
      (f 1 2) => 3)
     (m/fact (f 5 3) => 8)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn (Number/UInt 32) []
             (let [f* (fn (Number/UInt 32) []
                        (+ 5 2))]
@@ -838,7 +838,7 @@
      "a list before the param vector is evaluated and moved to the type tag"
      (f) => 7)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [u32 x u32 y]
             (let [f* (fn ^u32 [u32 x u32 y]
                        (+ x y))]
@@ -847,7 +847,7 @@
      "a symbol before a param is used as a type designator"
      (f 5 3) => 8)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 [u32 a
                          ^u32 b
                          (Number/UInt 32) c
@@ -862,7 +862,7 @@
      "type designators"
      (f 5 3 1 6) => 15)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [f (oben/fn (Number/UInt 32) []
             (let [return-type (Number/UInt 32)
                   alias return-type
@@ -939,7 +939,7 @@
  (parses-to-constant-value (/ -9.0 4) -2.25)
  (parses-to-constant-value (/ -9 4.0) -2.25))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (m/fact (oben-expr s32 (/ -9 4)) => -2)
   (m/fact (oben-expr f32 (/ -9.0 4.0)) => -2.25)
   (m/fact (oben-expr f32 (/ -9.0 4)) => -2.25)
@@ -951,7 +951,7 @@
  (parses-to-constant-value (% 11.0 4) 3.0)
  (parses-to-constant-value (% 11 4.0) 3.0))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (m/fact (oben-expr u32 (% 11 4)) => 3)
   (m/fact (oben-expr f32 (% 11.0 4.0)) => 3.0)
   (m/fact (oben-expr f32 (% 11.0 4)) => 3.0)
@@ -963,7 +963,7 @@
  (parses-to-constant-value (% -11.0 4) -3.0)
  (parses-to-constant-value (% -11 4.0) -3.0))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (m/fact (oben-expr s32 (% -11 4)) => -3)
   (m/fact (oben-expr f32 (% -11.0 4.0)) => -3.0)
   (m/fact (oben-expr f32 (% -11.0 4)) => -3.0)
@@ -975,7 +975,7 @@
  (parses-to-constant-value (% 11.0 -4) 3.0)
  (parses-to-constant-value (% 11 -4.0) 3.0))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (m/fact (oben-expr s32 (% 11 -4)) => 3)
   (m/fact (oben-expr f32 (% 11.0 -4.0)) => 3.0)
   (m/fact (oben-expr f32 (% 11.0 -4)) => 3.0)
@@ -1064,13 +1064,13 @@
  (m/fact (determine-bit-size (o/parse Long/MAX_VALUE)) => 64)
  (m/fact (determine-bit-size (o/parse -5.0)) => :float))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (m/fact
    "cannot get address of LLVM intrinsics"
    (math/llvm.sqrt.f32 25.0)
    => (throws clojure.lang.ExceptionInfo #"cannot get function address")))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [sqrt (oben/fn ^f32 [^f32 x]
                (math/sqrt x))]
     (m/fact (sqrt 25.0) => 5.0)))
@@ -1152,13 +1152,13 @@
           (o/parse `add-or-mul))]
     (add-or-mul 5 4)) => 20))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [s1 (o/parse '(Struct [^f32 x ^u8 y]))
         s2 (o/parse '(Struct [^f32 x ^u8 y]))]
     (m/fact (= s1 s2))
     (m/fact (= (meta s1) (meta s2)))))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [vec2 (o/parse '(Struct [^f32 x ^f32 y]))
         m (meta vec2)]
     (m/fact (:name->index m) => {:x 0 :y 1
@@ -1237,7 +1237,7 @@
   [field-types]
   `(o/parse (make-struct-type* ~field-types)))
 
-(oben/with-temp-target
+(oben/with-target :inprocess
   (let [s (make-struct-type [u8 u32])]
     (m/fact (:field-types (meta s)) => [Number/%u8 Number/%u32]))
   (let [s (make-struct-type [u8 u8])]
@@ -1268,14 +1268,14 @@
    (m/fact (sizeof-struct [f32 u8]) => 8)
    (m/fact (sizeof-struct [f32 (Ptr/Ptr f64) u8]) => 12)))
 
-;; (oben/with-dump-target
+;; (oben/with-target :dump
 ;;   (let [vec2 (oben/struct [^f32 x ^f32 y])
 ;;         vec2-x (oben/fn ^f32 [vec2 v]
 ;;                  (:x v))]
 ;;     (m/fact
 ;;      (vec2-x {:x 3 :y 4}) => 3)))
 
-;; (oben/with-dump-target
+;; (oben/with-target :dump
 ;;   (let [vec2 (oben/struct [^f32 x ^f32 y])
 ;;         vec2-x (oben/fn ^f32 [vec2 v]
 ;;                  (:x v))
