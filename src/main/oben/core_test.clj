@@ -707,25 +707,25 @@
      "pointer to aggregate supports get with variable index"
      (f 3) => 5)))
 
-(def u32array-3 (oben/Array Number/%u32 5))
+(def u32array-5 (oben/Array Number/%u32 5))
 
 (oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 index]
-            (let [a (var (u32array-3 [9 8 7 6 5]))]
+            (let [a (var (u32array-5 [9 8 7 6 5]))]
               (get a (+ index (u8 3)))))]
     (m/fact
      "types can be used as value constructors"
      (f 1) => 5))
 
   (let [f (oben/fn ^u32 [^u32 index]
-            (let [a (var (u32array-3 [9 8 7 6 5]))]
+            (let [a (var (u32array-5 [9 8 7 6 5]))]
               (get a (+ index (u1 3)))))]
     (m/fact
      "narrowing conversions are rejected by default"
      (f 1) => (throws clojure.lang.ExceptionInfo #"rejected narrowing UInt->UInt conversion")))
 
   (let [f (oben/fn ^u32 [^u32 index]
-            (let [a (var (u32array-3 [9 8 7 6 5]))]
+            (let [a (var (u32array-5 [9 8 7 6 5]))]
               (get a (+ index (cast! u1 3)))))]
     (m/fact
      "narrowing conversions can be forced via cast!"
@@ -1001,45 +1001,41 @@
  (m/fact (o/replace-stars-with-ptr 'foo) => 'foo)
  (m/fact (o/replace-stars-with-ptr "foo") => "foo"))
 
-(defn replace-with-non-empty-tag
-  [x]
-  (or (:tag (meta x)) x))
-
-(defmacro check-equal-value-and-tag
+(defmacro same-values-and-tags?
   [actual expected]
   `(let [actual# ~actual
-         actual-meta# (walk/postwalk replace-with-non-empty-tag actual#)
+         actual-meta# (walk/postwalk (comp :tag meta) actual#)
          expected# ~expected
-         expected-meta# (walk/postwalk replace-with-non-empty-tag expected#)]
+         expected-meta# (walk/postwalk (comp :tag meta) expected#)]
      (m/fact actual# => expected#)
      (m/fact actual-meta# => expected-meta#)))
 
 (m/facts
- (check-equal-value-and-tag
+ (same-values-and-tags?
   (o/move-types-to-meta '(u32 f))
   (list (with-meta 'f {:tag 'u32})))
- (check-equal-value-and-tag
+ (same-values-and-tags?
   (o/move-types-to-meta '(u32 f f64 g))
   (list (with-meta 'f {:tag 'u32})
         (with-meta 'g {:tag 'f64})))
- (check-equal-value-and-tag
+ (same-values-and-tags?
   (o/move-types-to-meta '(u8 arg0 u8 arg1))
   (list (with-meta 'arg0 {:tag 'u8})
         (with-meta 'arg1 {:tag 'u8})))
- (check-equal-value-and-tag
+ (same-values-and-tags?
   (o/move-types-to-meta '(u8 arg0 u32 arg1))
   (list (with-meta 'arg0 {:tag 'u8})
         (with-meta 'arg1 {:tag 'u32})))
- (check-equal-value-and-tag
+ (same-values-and-tags?
   (o/move-types-to-meta '(u8 arg0 u32 arg1 f64 arg2))
   (list (with-meta 'arg0 {:tag 'u8})
         (with-meta 'arg1 {:tag 'u32})
         (with-meta 'arg2 {:tag 'f64})))
- (check-equal-value-and-tag
+ (same-values-and-tags?
   (o/move-types-to-meta '(u32 [^u32 x f32 y]))
   (list (with-meta (vector (with-meta 'x {:tag 'u32})
                            (with-meta 'y {:tag 'f32})) {:tag 'u32})))
- (check-equal-value-and-tag
+ (same-values-and-tags?
   (o/move-types-to-meta '((Struct [^f32 x u16 y]) x))
   (list (with-meta 'x {:tag (list 'Struct (vector (with-meta 'x {:tag 'f32})
                                                   'u16 'y))}))))
