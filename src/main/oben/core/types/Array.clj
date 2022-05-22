@@ -8,26 +8,30 @@
   (:require [midje.sweet :as m]))
 
 (o/define-typeclass Array [:oben/Aggregate]
-  [element-type size]
-  (o/make-type
-   (fn [ctx]
-     (letfn [(compile-element-type [ctx]
-               (ctx/compile-type ctx element-type))
-             (save-ir [ctx]
-               (ctx/save-ir
-                ctx
-                [:array
-                 (ctx/compiled-type ctx element-type)
-                 size]))]
-       (-> ctx
-           compile-element-type
-           save-ir)))
-   {:element-type element-type
-    :size size}))
+  [element-type size array-opts]
+  (let [{:keys [name]} array-opts]
+    (o/make-type
+     (fn [ctx]
+       (letfn [(compile-element-type [ctx]
+                 (ctx/compile-type ctx element-type))
+               (save-ir [ctx]
+                 (ctx/save-ir
+                  ctx
+                  [:array
+                   (ctx/compiled-type ctx element-type)
+                   size]))]
+         (-> ctx
+             compile-element-type
+             save-ir)))
+     {:name name
+      :element-type element-type
+      :size size})))
 
 (o/defmacro %Array
-  [element-type size]
-  (Array (o/parse element-type &env) size))
+  ([element-type size array-opts]
+   (Array (o/parse element-type &env) size array-opts))
+  ([element-type size]
+   (list 'Array element-type size nil)))
 
 (defn array-type?
   [t]
@@ -82,5 +86,5 @@
 (defn %array
   [element-type initializer]
   (let [size (count initializer)
-        array-type (Array element-type size)]
+        array-type (Array element-type size nil)]
     (o/cast array-type initializer false)))

@@ -11,12 +11,15 @@
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.engine :as llvm-engine]))
 
-(def Array oben.core.types.Array/Array)
-(def Struct oben.core.types.Struct/Struct)
-
 (clj/defmacro with-target
   [t & body]
   `(target/with-target ~t ~@body))
+
+(clj/defmacro with-lexical-bindings
+  [sym & body]
+  `(let [~sym ~(into {} (for [k (keys &env)]
+                          [`(quote ~k) k]))]
+     ~@body))
 
 (clj/defn fn?
   "Returns true if the argument is a Clojure wrapper around an Oben function."
@@ -39,12 +42,6 @@
       {:kind :oben/FN
        :parse-for-target parse-for-target})))
 
-(clj/defmacro with-lexical-bindings
-  [sym & body]
-  `(let [~sym ~(into {} (for [k (keys &env)]
-                          [`(quote ~k) k]))]
-     ~@body))
-
 (clj/defmacro fn
   [& decl]
   (let [[params body] (o/split-after vector? decl)
@@ -61,30 +58,50 @@
     `(with-lexical-bindings bindings#
        (def ~name (make-fn '~name '~params '~body bindings#)))))
 
-(clj/defn make-struct
+(clj/defn make-struct-type
   [name fields lexical-bindings]
-  (let [parse-for-target (memoize
+  (let [opts (if name {:name name} nil)
+        parse-for-target (memoize
                           (clj/fn [target]
-                            (-> (o/parse (list 'Struct fields) lexical-bindings)
-                                (vary-meta assoc :name name))))]
+                            (o/parse (list 'Struct fields opts) lexical-bindings)))]
     (with-meta
-      {}
+      #(parse-for-target (target/current))
       {:kind :oben/STRUCT
        :parse-for-target parse-for-target})))
 
-(clj/defmacro struct
+(clj/defmacro Struct
   [fields]
   (let [fields (o/move-types-to-meta fields)
         _ (assert (vector? fields))]
     `(with-lexical-bindings bindings#
-       (make-struct nil '~fields bindings#))))
+       (make-struct-type nil '~fields bindings#))))
 
 (clj/defmacro defstruct
   [name fields]
   (let [fields (o/move-types-to-meta fields)
         _ (assert (vector? fields))]
     `(with-lexical-bindings bindings#
-       (def ~name (make-struct '~name '~fields bindings#)))))
+       (def ~name (make-struct-type '~name '~fields bindings#)))))
+
+(clj/defn make-array-type
+  [name element-type size lexical-bindings]
+  (let [opts (if name {:name name} nil)
+        parse-for-target (memoize
+                          (clj/fn [target]
+                            (o/parse (list 'Array element-type size opts) lexical-bindings)))]
+    (with-meta
+      #(parse-for-target (target/current))
+      {:kind :oben/ARRAY
+       :parse-for-target parse-for-target})))
+
+(clj/defmacro Array
+  [element-type size]
+  `(with-lexical-bindings bindings#
+     (make-array-type nil '~element-type '~size bindings#)))
+
+;; defarray was here but it felt awful
+;;
+;; I wonder why defstruct doesn't evoke the same feelings
 
 (clj/defmacro define-typeclass
   [& args]

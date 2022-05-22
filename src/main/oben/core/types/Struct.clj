@@ -11,7 +11,7 @@
   [field-specs struct-opts]
   (let [field-names (mapv #(or (:name %1) %2) field-specs (range))
         field-types (mapv :type field-specs)
-        {:keys [packed?]} struct-opts]
+        {:keys [name packed?]} struct-opts]
     (assert (= (count (set field-names)) (count field-names))
             "duplicate field names")
     (o/make-type
@@ -27,7 +27,8 @@
          (-> ctx
              compile-field-types
              save-ir)))
-     {:field-names field-names
+     {:name name
+      :field-names field-names
       :field-types field-types
       :packed? packed?
       :name->index (merge
@@ -35,20 +36,22 @@
                     (zipmap field-names (range)))})))
 
 (o/defmacro %Struct
-  [fields]
-  (let [fields (o/move-types-to-meta fields)
-        fields (o/parse fields &env)
-        _ (assert (vector? fields))
-        field-names (mapv (comp keyword o/drop-meta) fields)
-        field-meta (map meta fields)
-        field-specs (map (fn [name metadata]
-                           (-> metadata
-                               (assoc :name name)
-                               (assoc :type (:tag metadata))
-                               (dissoc :tag)))
-                         field-names field-meta)
-        struct-opts (meta fields)]
-    (Struct field-specs struct-opts)))
+  ([fields opts]
+   (let [fields (o/move-types-to-meta fields)
+         fields (o/parse fields &env)
+         _ (assert (vector? fields))
+         field-names (mapv (comp keyword o/drop-meta) fields)
+         field-meta (map meta fields)
+         field-specs (map (fn [name metadata]
+                            (-> metadata
+                                (assoc :name name)
+                                (assoc :type (:tag metadata))
+                                (dissoc :tag)))
+                          field-names field-meta)
+         struct-opts (merge (meta fields) opts)]
+     (Struct field-specs struct-opts)))
+  ([fields]
+   (list 'Struct fields nil)))
 
 (defn struct-type?
   [t]

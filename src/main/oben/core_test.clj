@@ -707,25 +707,25 @@
      "pointer to aggregate supports get with variable index"
      (f 3) => 5)))
 
-(def u32array-5 (oben/Array Number/%u32 5))
+(def u32*5 (oben/Array Number/%u32 5))
 
 (oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 index]
-            (let [a (var (u32array-5 [9 8 7 6 5]))]
+            (let [a (var (u32*5 [9 8 7 6 5]))]
               (get a (+ index (u8 3)))))]
     (m/fact
      "types can be used as value constructors"
      (f 1) => 5))
 
   (let [f (oben/fn ^u32 [^u32 index]
-            (let [a (var (u32array-5 [9 8 7 6 5]))]
+            (let [a (var (u32*5 [9 8 7 6 5]))]
               (get a (+ index (u1 3)))))]
     (m/fact
      "narrowing conversions are rejected by default"
      (f 1) => (throws clojure.lang.ExceptionInfo #"rejected narrowing UInt->UInt conversion")))
 
   (let [f (oben/fn ^u32 [^u32 index]
-            (let [a (var (u32array-5 [9 8 7 6 5]))]
+            (let [a (var (u32*5 [9 8 7 6 5]))]
               (get a (+ index (cast! u1 3)))))]
     (m/fact
      "narrowing conversions can be forced via cast!"
@@ -737,20 +737,62 @@
      "void functions return nil"
      (f) => nil)))
 
+(defmacro make-array-type
+  [element-type size]
+  `(o/parse (oben/Array ~element-type ~size)))
+
 (m/facts
- (m/fact (Ptr/Ptr (oben/Array Number/%u64 10))
-         => (m/exactly (Ptr/Ptr (oben/Array Number/%u64 10))))
  (let [actual (o/parse '(Array u64 10))
-       expected (oben/Array Number/%u64 10)]
+       expected (o/parse '(Array u64 10))]
+   (m/fact actual => (m/exactly expected)))
+ (let [actual (o/parse '(Array u64 10))
+       expected (o/parse '(Array Number/%u64 10))]
+   (m/fact actual => (m/exactly expected)))
+ (let [actual (oben/make-array-type nil 'u64 10 nil)
+       expected (oben/make-array-type nil 'u64 10 nil)]
+   (m/fact actual =not=> (m/exactly expected)))
+ (let [*actual (oben/make-array-type nil 'u64 10 nil)
+       actual (*actual)
+       *expected (oben/make-array-type nil 'u64 10 nil)
+       expected (*expected)]
+   (m/fact (meta actual) => (m/exactly (meta expected)))
+   (m/fact actual => (m/exactly expected)))
+ (let [actual (oben/make-array-type nil 'u64 10 nil)
+       actual ((:parse-for-target (meta actual)) (target/current))
+       expected (oben/make-array-type nil 'u64 10 nil)
+       expected ((:parse-for-target (meta expected)) (target/current))]
+   (m/fact actual => (m/exactly expected)))
+ (let [actual (:parse-for-target (meta (oben/make-array-type nil 'u64 10 nil)))
+       expected (:parse-for-target (meta (oben/make-array-type nil 'u64 10 nil)))]
+   (m/fact actual =not=> (m/exactly expected)))
+ (let [actual (o/parse (oben/make-array-type nil 'u64 10 nil))
+       expected (o/parse (oben/make-array-type nil 'u64 10 nil))]
+   (m/fact actual => (m/exactly expected)))
+ (let [actual (o/parse (oben/Array u64 10))
+       expected (o/parse (oben/Array u64 10))]
+   (m/fact actual => (m/exactly expected)))
+ (let [actual (o/parse (oben/Array u64 10))
+       expected (o/parse (oben/Array Number/%u64 10))]
+   (m/fact actual => (m/exactly expected)))
+ (let [actual (o/parse (make-array-type Number/%u64 10))
+       expected (o/parse (make-array-type Number/%u64 10))]
+   (m/fact actual => (m/exactly expected)))
+ (let [actual (o/parse (make-array-type u64 10))
+       expected (o/parse (make-array-type Number/%u64 10))]
+   (m/fact actual => (m/exactly expected)))
+ (m/fact (Ptr/Ptr (make-array-type Number/%u64 10))
+         => (m/exactly (Ptr/Ptr (make-array-type Number/%u64 10))))
+ (let [actual (o/parse '(Array u64 10))
+       expected (make-array-type Number/%u64 10)]
    (m/fact actual => (m/exactly expected))))
 
 (m/facts
  (let [result (o/parse (with-meta 'x {:tag '(* (Array u64 10))}))
-       expected-type (Ptr/Ptr (oben/Array Number/%u64 10))]
+       expected-type (Ptr/Ptr (make-array-type Number/%u64 10))]
    (m/fact result => 'x)
    (m/fact (:tag (meta result)) => (m/exactly expected-type)))
  (let [result (o/parse (with-meta 'ret {:tag (list '* (list 'Array 'u64 10))}))
-       expected-type (Ptr/Ptr (oben/Array Number/%u64 10))]
+       expected-type (Ptr/Ptr (make-array-type Number/%u64 10))]
    (m/fact result => 'ret)
    (m/fact (:tag (meta result)) => (m/exactly expected-type))))
 
@@ -1224,7 +1266,7 @@
 
 (defmacro make-struct-type*
   [field-types]
-  `(oben/struct
+  `(oben/Struct
     ~(into [] (interleave field-types
                           (map #(symbol (str "arg" %))
                                (range (count field-types)))))))
@@ -1265,14 +1307,14 @@
    (m/fact (sizeof-struct [f32 (Ptr/Ptr f64) u8]) => 12)))
 
 ;; (oben/with-target :dump
-;;   (let [vec2 (oben/struct [^f32 x ^f32 y])
+;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])
 ;;         vec2-x (oben/fn ^f32 [vec2 v]
 ;;                  (:x v))]
 ;;     (m/fact
 ;;      (vec2-x {:x 3 :y 4}) => 3)))
 
 ;; (oben/with-target :dump
-;;   (let [vec2 (oben/struct [^f32 x ^f32 y])
+;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])
 ;;         vec2-x (oben/fn ^f32 [vec2 v]
 ;;                  (:x v))
 ;;         vec2-len (oben/fn ^f32 [vec2 v]
