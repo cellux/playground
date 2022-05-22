@@ -814,16 +814,14 @@
    (f) => (throws clojure.lang.ExceptionInfo #"rejected narrowing UInt->UInt conversion")))
 
 (oben/with-target :inprocess
-  (let [atype (oben/Array Number/%u32 10)
-        a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
+  (let [a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
         f (oben/fn ^u32 [(Ptr/Ptr (Number/UInt 32)) a
                          ^u32 index]
             @(+ a index))]
     (m/fact (f a 3) => 6)))
 
 (oben/with-target :inprocess
-  (let [atype (oben/Array Number/%u32 10)
-        a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
+  (let [a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
         f (oben/fn ^u32 [(* u32) a
                          ^u32 index]
             @(+ a index))]
@@ -832,16 +830,14 @@
      (f a 3) => 6)))
 
 (oben/with-target :inprocess
-  (let [atype (oben/Array Number/%u32 10)
-        a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
+  (let [a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
         f (oben/fn ^u32 [(* u32) a]
             @a)]
     (m/fact
      (f a) => 9)))
 
 (oben/with-target :inprocess
-  (let [atype (oben/Array Number/%u32 10)
-        a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
+  (let [a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
         f (oben/fn ^u32 [(* u32) a
                          ^u32 index
                          ^u32 value]
