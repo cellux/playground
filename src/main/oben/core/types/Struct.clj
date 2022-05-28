@@ -8,7 +8,7 @@
   (:require [midje.sweet :as m]))
 
 (o/define-typeclass Struct [:oben/Aggregate]
-  [field-specs struct-opts]
+  [field-specs & [struct-opts]]
   (let [field-names (mapv #(or (:name %1) %2) field-specs (range))
         field-types (mapv :type field-specs)
         {:keys [name packed?]} struct-opts]
@@ -36,22 +36,20 @@
                     (zipmap field-names (range)))})))
 
 (o/defmacro %Struct
-  ([fields opts]
-   (let [fields (o/move-types-to-meta fields)
-         fields (o/parse fields &env)
-         _ (assert (vector? fields))
-         field-names (mapv (comp keyword o/drop-meta) fields)
-         field-meta (map meta fields)
-         field-specs (map (fn [name metadata]
-                            (-> metadata
-                                (assoc :name name)
-                                (assoc :type (:tag metadata))
-                                (dissoc :tag)))
-                          field-names field-meta)
-         struct-opts (merge (meta fields) opts)]
-     (Struct field-specs struct-opts)))
-  ([fields]
-   (list 'Struct fields nil)))
+  [fields & [opts]]
+  (let [fields (o/move-types-to-meta fields)
+        fields (o/parse fields &env)
+        _ (assert (vector? fields))
+        field-names (mapv (comp keyword o/drop-meta) fields)
+        field-meta (map meta fields)
+        field-specs (map (fn [name metadata]
+                           (-> metadata
+                               (assoc :name name)
+                               (assoc :type (:tag metadata))
+                               (dissoc :tag)))
+                         field-names field-meta)
+        struct-opts (merge (meta fields) opts)]
+    (Struct field-specs struct-opts)))
 
 (defn struct-type?
   [t]
