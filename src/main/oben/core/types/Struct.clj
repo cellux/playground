@@ -16,14 +16,15 @@
             "duplicate field names")
     (o/make-type
      (fn [ctx]
-       (letfn [(compile-field-types [ctx]
-                 (reduce ctx/compile-type ctx field-types))
-               (save-ir [ctx]
-                 (ctx/save-ir
-                  ctx
-                  [(if packed? :packed-struct :struct)
-                   (ctx/get-assigned-name ctx)
-                   (mapv #(ctx/compiled-type ctx %) field-types)]))]
+       (let [assigned-name (ctx/get-assigned-name ctx)
+             compile-field-types (fn [ctx]
+                                   (reduce ctx/compile-type ctx field-types))
+             save-ir (fn [ctx]
+                       (ctx/save-ir
+                        ctx
+                        [(if packed? :packed-struct :struct)
+                         assigned-name
+                         (mapv #(ctx/compiled-type ctx %) field-types)]))]
          (-> ctx
              compile-field-types
              save-ir)))
