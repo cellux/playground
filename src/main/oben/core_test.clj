@@ -9,7 +9,8 @@
   (:require [oben.core.types.Ptr :as Ptr])
   (:require [oben.core.types.Aggregate :as Aggregate])
   (:require [oben.core.types.Array :as Array])
-  (:require [oben.core.protocols.Container :as Container])
+  (:require [oben.core.types.Struct :as Struct])
+  (:require [oben.core.types.Fn :as Fn])
   (:require [clojure.walk :as walk])
   (:require [midje.sweet :as m])
   (:use [midje.repl]))
@@ -22,23 +23,41 @@
         (ctx/compiled-type t))))
 
 (m/facts
- "type constructors and named types"
+ "type constructors"
  (m/fact (compile-type (Void/%Void)) => :void)
- (m/fact (compile-type Void/%void) => :void)
  (m/fact (compile-type (Number/UInt 32)) => [:integer 32])
- (m/fact (compile-type Number/%u32) => [:integer 32])
  (m/fact (compile-type (Number/UInt 8)) => [:integer 8])
- (m/fact (compile-type Number/%u8) => [:integer 8])
  (m/fact (compile-type (Number/SInt 16)) => [:integer 16])
- (m/fact (compile-type Number/%s16) => [:integer 16]))
+ (m/fact (compile-type (Number/FP 32)) => :float)
+ (m/fact (compile-type (Number/FP 64)) => :double)
+ (m/fact (compile-type (Ptr/Ptr (Number/SInt 16))) => [:ptr [:integer 16]])
+ (m/fact (compile-type (Array/Array (Number/SInt 16) 8)) => [:array [:integer 16] 8])
+ (m/fact (compile-type
+          (Struct/Struct [{:name 'x :type (Number/FP 32)}
+                          {:name 'y :type (Number/FP 32)}
+                          {:name 'z :type (Number/FP 32)}]
+                         {:name 'Vec3}))
+         => [:struct 'Vec3.0.0 [:float :float :float]])
+ (m/fact (compile-type
+          (Fn/Fn (Number/UInt 64)
+                 [(Number/FP 64) (Number/FP 32)]))
+         => [:fn [:integer 64] [:double :float]]))
+
+(m/facts
+ "primitive types"
+ (m/fact (compile-type Void/%void) => :void)
+ (m/fact (compile-type Number/%u32) => [:integer 32])
+ (m/fact (compile-type Number/%u8) => [:integer 8])
+ (m/fact (compile-type Number/%s16) => [:integer 16])
+ (m/fact (compile-type Number/%f32) => :float)
+ (m/fact (compile-type Number/%f64) => :double))
 
 (m/facts
  "type constructors memoize the types they return"
  (m/fact (Number/UInt 32) => (m/exactly (Number/UInt 32))))
 
 (oben/with-target :inprocess
-  (let [f (oben/fn ^u32 []
-            (+ 5 2))]
+  (let [f (oben/fn ^u32 [] (+ 5 2))]
     (m/fact
      "a type tag on the param vector defines the return type of the function"
      (f) => 7)))
@@ -46,33 +65,30 @@
 (oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 x ^u32 y] (+ x y))]
     (m/fact
-     "type tags on params define their types"
+     "a type tag on a parameter defines its type"
      (f 1 2) => 3)
     (m/fact (f 5 3) => 8)))
 
-(oben/with-target :inprocess
-  (let [f (oben/fn (Number/UInt 32) []
-            (+ 5 2))]
-    (m/fact
-     "a list before the param vector is evaluated and moved to the
-     vector's type tag"
-     (f) => 7)))
+;; instead of type tags (metadata) we can also use a symbol or list in
+;; front of the param vector or a single parameter. these are called
+;; *type designators*, they should resolve to a type at compile time.
 
 (oben/with-target :inprocess
-  (let [f (oben/fn ^u32 [u32 x u32 y] (+ x y))]
-    (m/fact
-     "a symbol before a param is used as a type designator"
-     (f 5 3) => 8)))
-
-(oben/with-target :inprocess
+  (let [f (oben/fn u32 [] (+ 5 2))]
+    (m/fact (f) => 7))
+  (let [f (oben/fn (Number/UInt 32) [] (+ 5 2))]
+    (m/fact (f) => 7))
+  (let [f (oben/fn u32 [u32 x u32 y] (+ x y))]
+    (m/fact (f 5 3) => 8))
+  (let [f (oben/fn u32 [f32 x f32 y] (+ x y))]
+    (m/fact (f 5.7 3.2) => 8)
+    (m/fact (f 5.7 3.5) => 9))
   (let [f (oben/fn ^u32 [u32 a
                          ^u32 b
                          (Number/UInt 32) c
                          Number/%u32 d]
             (+ a b c d))]
-    (m/fact
-     "type designators"
-     (f 5 3 1 6) => 15)))
+    (m/fact (f 5 3 1 6) => 15)))
 
 (oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u8 x]
@@ -111,10 +127,9 @@
   (let [f (oben/fn ^u32 [^u32 x ^u32 y]
             (do)
             (do (+ x y))
-            (do
-              (+ x y)
-              (+ 3 9)))]
-    (m/fact (f 1 2) => 12)))
+            (do (+ x y)
+                (+ 3 9 y)))]
+    (m/fact (f 1 2) => 14)))
 
 (oben/with-target :inprocess
   (let [f (oben/fn ^u16 [^u32 x]
