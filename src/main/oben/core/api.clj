@@ -183,12 +183,13 @@
 
 (clj/defmulti sizeof
   "Returns the number of bytes occupied by values of the given type in
-  memory as specified by the ABI of the current target."
+  memory. The size of a type depends on the ABI of the current
+  target."
   tid-of-type)
 
 (clj/defmulti alignof
-  "Returns the alignment of the given type in bytes as specified by
-  the ABI of the current target."
+  "Returns the alignment of the given type in bytes. The alignment of
+  a type depends on the ABI of the current target."
   tid-of-type)
 
 (clj/defmethod alignof :default
