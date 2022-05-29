@@ -15,11 +15,12 @@
                          (ctx/compile-node fnode))))
 
   (invoke-function [this fnode args]
-    (-> (:m ctx)
-        (assoc :data-layout platform/data-layout
-               :target-triple platform/target-triple)
-        ir/render-module
-        println))
+    (let [m (-> (:m ctx)
+                (assoc :data-layout platform/data-layout
+                       :target-triple platform/target-triple))]
+      (if (-> this :attrs :print-m)
+        (-> m clojure.pprint/pprint)
+        (-> m ir/render-module println))))
 
   (dispose [this]
     this))
