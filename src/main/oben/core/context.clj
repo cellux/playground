@@ -2,7 +2,7 @@
   (:require [oben.core.api :as o])
   (:require [omkamra.llvm.ir :as ir]))
 
-(def blockbin-ids [:entry :init :main :exit])
+(def blockbin-ids [:entry :main :exit])
 
 (def init-fdata
   {:blockbins (into {} (map #(vector % (list)) blockbin-ids))
