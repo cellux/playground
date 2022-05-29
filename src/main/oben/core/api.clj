@@ -313,7 +313,8 @@
     `(do
        ~@(gen-defmulti)
        ~@(for [[dispatch-value method-body] (partition 2 body)]
-           (gen-defmethod dispatch-value method-body)))))
+           (gen-defmethod dispatch-value method-body))
+       #'~name)))
 
 (clj/defmacro defportable-by-target
   "Defines a function which returns a value that depends on the passed
@@ -326,7 +327,8 @@
      (defn ~name
        ~params
        ~@body)
-     (.put all-portables ~name true)))
+     (.put all-portables ~name true)
+     #'~name))
 
 (clj/defmacro defportable
   [name params & body]
