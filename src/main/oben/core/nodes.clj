@@ -277,14 +277,14 @@
     (let [bound-thing (vary-meta (o/parse v &env)
                                  update :name #(or % k))
           body-node (o/parse (cons 'do body) (assoc &env k bound-thing))]
-      (if (o/type? bound-thing)
-        body-node
+      (if (o/node? bound-thing)
         (o/make-node (o/type-of body-node)
           (fn [ctx]
             (-> ctx
                 (ctx/compile-node bound-thing)
                 (ctx/compile-node body-node)))
-          {:class :oben/let})))))
+          {:class :oben/let})
+        body-node))))
 
 (defn function-parameter
   [name type]
