@@ -356,7 +356,7 @@
   [fnode & args]
   (assert (o/fnode? fnode))
   (let [{:keys [return-type param-types]} (meta (o/type-of fnode))
-        args (mapv #(o/cast %1 %2 false) param-types args)]
+        args (mapv %cast param-types args)]
     (o/make-node return-type
       (fn [ctx]
         (letfn [(compile-args [ctx]
