@@ -1,6 +1,7 @@
 (ns oben.core.types.Number
   (:require [oben.core.api :as o])
   (:require [oben.core.context :as ctx])
+  (:require [oben.core.target :as target])
   (:require [oben.core.protocols.Eq :as Eq])
   (:require [oben.core.protocols.Ord :as Ord])
   (:require [oben.core.protocols.Algebra :as Algebra])
@@ -99,6 +100,10 @@
 (def %u32 (UInt 32))
 (def %u64 (UInt 64))
 
+(o/defportable %usize
+  [target]
+  (UInt (target/attr :address-size)))
+
 (defmethod resize ::UInt
   [t newsize]
   (UInt newsize))
@@ -116,6 +121,10 @@
 (def %s16 (SInt 16))
 (def %s32 (SInt 32))
 (def %s64 (SInt 64))
+
+(o/defportable %ssize
+  [target]
+  (SInt (target/attr :address-size)))
 
 (defmethod resize ::SInt
   [t newsize]

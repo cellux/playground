@@ -1277,6 +1277,18 @@
  (m/fact (o/alignof Number/%f32) => 4)
  (m/fact (o/alignof Number/%f64) => 8))
 
+(oben/with-target
+  {:type :inprocess
+   :attrs {:address-size 32}}
+  (m/fact (o/sizeof (o/parse 'usize)) => 4)
+  (m/fact (o/sizeof (o/parse 'ssize)) => 4))
+
+(oben/with-target
+  {:type :inprocess
+   :attrs {:address-size 64}}
+  (m/fact (o/sizeof (o/parse 'usize)) => 8)
+  (m/fact (o/sizeof (o/parse 'ssize)) => 8))
+
 (defmacro make-struct-type*
   [field-types]
   `(oben/Struct

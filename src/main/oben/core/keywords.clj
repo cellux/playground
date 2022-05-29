@@ -26,19 +26,22 @@
 
 (def void oben.core.types.Void/%void)
 
+(def bool oben.core.types.Number/%u1)
+
 (def u1 oben.core.types.Number/%u1)
 (def u8 oben.core.types.Number/%u8)
 (def u16 oben.core.types.Number/%u16)
 (def u32 oben.core.types.Number/%u32)
 (def u64 oben.core.types.Number/%u64)
 
-(def bool oben.core.types.Number/%u1)
-
 (def s1 oben.core.types.Number/%s1)
 (def s8 oben.core.types.Number/%s8)
 (def s16 oben.core.types.Number/%s16)
 (def s32 oben.core.types.Number/%s32)
 (def s64 oben.core.types.Number/%s64)
+
+(def usize oben.core.types.Number/%usize)
+(def ssize oben.core.types.Number/%ssize)
 
 (def f32 oben.core.types.Number/%f32)
 (def f64 oben.core.types.Number/%f64)
