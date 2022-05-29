@@ -45,10 +45,11 @@
    (let [init-node (when init-node (o/parse `(cast ~type ~init-node)))]
      (o/make-node (Ptr/Ptr type)
        (fn [ctx]
-         (let [ctx (ctx/compile-type ctx type)
+         (let [assigned-name (ctx/get-assigned-name ctx)
+               ctx (ctx/compile-type ctx type)
                ins (ir/alloca
                     (ctx/compiled-type ctx type)
-                    {:name (keyword (ctx/get-assigned-name ctx))})
+                    {:name (keyword assigned-name)})
                compile-var (fn [ctx]
                              (ctx/compile-instruction ctx ins))
                compile-store (fn [ctx]
@@ -275,7 +276,8 @@
          ~@body))
     (o/parse
      `(do ~@body)
-     (assoc &env k (o/parse v &env)))))
+     (assoc &env k (vary-meta (o/parse v &env)
+                              update :name #(or % k))))))
 
 (defn function-parameter
   [name type]
