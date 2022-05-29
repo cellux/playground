@@ -254,9 +254,10 @@
                   (ctx/compile-instruction ctx (ir/phi return-values {})))
                 (compile-result [ctx]
                   (let [return-values (ctx/get-return-values ctx block-id)]
-                    (if (= (count return-values) 1)
-                      (let [[return-block return-value] (first return-values)]
-                        (ctx/save-ir ctx return-value))
+                    (case (count return-values)
+                      0 ctx
+                      1 (let [[return-block return-value] (first return-values)]
+                          (ctx/save-ir ctx return-value))
                       (compile-phi ctx return-values))))]
           (-> ctx
               (ctx/add-label-block return-label)
