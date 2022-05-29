@@ -174,7 +174,11 @@
   ;; Linker.h
   (^int
    LLVMLinkModules2 [^Pointer Dest
-                     ^Pointer Src]))
+                     ^Pointer Src])
+
+  ;; Support.h
+  (^int
+   LLVMLoadLibraryPermanently [^String Filename]))
 
 (def all-targets
   [:AArch64 :AMDGPU :ARM

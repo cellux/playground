@@ -84,6 +84,10 @@
   [engine name]
   (.LLVMGetFunctionAddress $llvm engine name))
 
+(defn load-library
+  [filename]
+  (.LLVMLoadLibraryPermanently $llvm filename))
+
 (defn dispose
   [engine]
   (.LLVMDisposeExecutionEngine $llvm engine))

@@ -11,6 +11,19 @@
   (:require [omkamra.llvm.context :as llvm-context])
   (:require [omkamra.llvm.engine :as llvm-engine]))
 
+(clj/defn candidate-library-filenames
+  [library-name]
+  (vector (str "lib" library-name ".so")))
+
+(clj/defn load-library
+  [library-name]
+  (loop [candidate-filenames (candidate-library-filenames library-name)]
+    (if-let [filename (first candidate-filenames)]
+      (let [result (llvm-engine/load-library filename)]
+        (when-not (zero? result)
+          (recur (next candidate-filenames))))
+      (throw (ex-info "failed to load dynamic library" {:library-name library-name})))))
+
 (clj/defmacro with-target
   [t & body]
   `(target/with-target ~t ~@body))
