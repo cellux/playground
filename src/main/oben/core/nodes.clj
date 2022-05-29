@@ -373,7 +373,7 @@
   [cond-node & then-nodes]
   (let [cond-node (%cast Number/%u1 cond-node)
         then-label (make-label :then)
-        end-label (make-label :end)]
+        else-label (make-label :else)]
     (o/make-node %void
       (fn [ctx]
         (letfn [(add-br
@@ -390,12 +390,12 @@
           (-> ctx
               (ctx/compile-node cond-node)
               (ctx/add-label-block then-label)
-              (ctx/add-label-block end-label)
-              (add-br cond-node then-label end-label)
+              (ctx/add-label-block else-label)
+              (add-br cond-node then-label else-label)
               (ctx/compile-node then-label)
               compile-then-nodes
-              (add-br end-label)
-              (ctx/compile-node end-label))))
+              (add-br else-label)
+              (ctx/compile-node else-label))))
       {:class :oben/when})))
 
 (defn %if
