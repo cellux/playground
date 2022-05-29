@@ -68,7 +68,7 @@
                          (ctx/save-ir ctx ins))]
            (-> ctx
                (ctx/with-blockbin :entry compile-var)
-               (ctx/with-blockbin :init compile-init)
+               compile-init
                save-ir)))
        {:class :oben/var})))
   ([type]
@@ -274,10 +274,17 @@
     `(let [~k ~v]
        (let [~@rest]
          ~@body))
-    (o/parse
-     `(do ~@body)
-     (assoc &env k (vary-meta (o/parse v &env)
-                              update :name #(or % k))))))
+    (let [bound-thing (vary-meta (o/parse v &env)
+                                 update :name #(or % k))
+          body-node (o/parse (cons 'do body) (assoc &env k bound-thing))]
+      (if (o/type? bound-thing)
+        body-node
+        (o/make-node (o/type-of body-node)
+          (fn [ctx]
+            (-> ctx
+                (ctx/compile-node bound-thing)
+                (ctx/compile-node body-node)))
+          {:class :oben/let})))))
 
 (defn function-parameter
   [name type]

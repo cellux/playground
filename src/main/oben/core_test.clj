@@ -747,10 +747,12 @@
      (f 1) => 7)))
 
 (oben/with-target :inprocess
-  (let [f (oben/fn ^void [] 5)]
-    (m/fact
+  (let [f (oben/fn ^void [] 5)
+        g (oben/fn ^void [] (do))]
+    (m/facts
      "void functions return nil"
-     (f) => nil)))
+     (m/fact (f) => nil)
+     (m/fact (g) => nil))))
 
 (defmacro make-array-type
   [element-type size]
@@ -1316,6 +1318,47 @@
    (m/fact (sizeof-struct [u8 f32]) => 8)
    (m/fact (sizeof-struct [f32 u8]) => 8)
    (m/fact (sizeof-struct [f32 (Ptr/Ptr f64) u8]) => 12)))
+
+(oben/with-target :inprocess
+  (let [f (oben/fn ^u32 [^u32 x]
+            (let [v1 (var x)]
+              (set! v1 (+ @v1 1))
+              (let [v2 (var @v1)]
+                @v2)))]
+    (m/fact
+     "vars are initialized at the point of their creation"
+     (f 7) => 8)))
+
+(oben/with-target :inprocess
+  (let [f (oben/fn ^u32 [^u32 x]
+            (let [v (var x)
+                  p (set! v (+ @v 1))
+                  sum (var u32 0)
+                  i (var u32 0)]
+              (while (< @i 10)
+                (set! sum (+ @sum p))
+                (set! i (+ @i 1)))
+              @sum))]
+    (m/fact
+     "let expressions are evaluated only once when they are bound"
+     (f 4) => 50)))
+
+(o/defportable size_t
+  [target]
+  (Number/UInt (target/attr :address-size)))
+
+(oben/defn malloc (* u8) [size_t size])
+(oben/defn free void [(* u8) ptr])
+
+(oben/with-target :inprocess
+  (let [f (oben/fn ^void []
+            (let [p (malloc 4096)
+                  i (var u32 0)]
+              (while (< @i 4096)
+                (set! (+ p @i) (cast! u8 @i))
+                (set! i (+ @i 1)))
+              (free p)))]
+    (m/fact (f) => nil)))
 
 ;; (oben/with-target :dump
 ;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])
