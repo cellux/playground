@@ -88,7 +88,7 @@
         :else
         (printf "\\%02X" b)))))
 
-(defn digit?
+(defn ascii-digit?
   [ch]
   (<= 0x30 (int ch) 0x39))
 
@@ -104,7 +104,7 @@
 
 (defn needs-quoting?
   [name]
-  (clj/or (digit? (first name))
+  (clj/or (ascii-digit? (first name))
           (not (every? identifier-part? name))))
 
 (defn render-quoted-string
@@ -196,13 +196,13 @@
   [t]
   "opaque")
 
-(def struct-type-tags
+(def struct-tags
   #{:struct :packed-struct :opaque-struct})
 
 (defn struct-type?
   [t]
   (clj/and (complex-type? t)
-           (struct-type-tags (first t))))
+           (struct-tags (first t))))
 
 (defn struct-name
   [t]
@@ -258,7 +258,8 @@
  (m/fact (extract-type-tag [:struct 'T [i32 [:ptr i8]]]) => :struct))
 
 (defmulti render-literal
-  (fn [type value] (extract-type-tag type)))
+  (fn [type value]
+    (extract-type-tag type)))
 
 (defmethod render-literal :void
   [_ value]
@@ -283,7 +284,7 @@
   (if (nil? value) "null"
       (throw (ex-info "invalid pointer literal" {:value value}))))
 
-(declare render-typed-value)
+(declare render-type-and-value)
 
 (defmethod render-literal :array
   [[_ elt size] value]
@@ -292,11 +293,11 @@
     (str \c (render-quoted-string value))
 
     (vector? value)
-    (format "[ %s ]" (str/join ", " (map render-typed-value value)))))
+    (format "[ %s ]" (str/join ", " (map render-type-and-value value)))))
 
 (defmethod render-literal :struct
-  [type fields]
-  (format "{ %s }" (str/join ", " (map render-typed-value fields))))
+  [_ fields]
+  (format "{ %s }" (str/join ", " (map render-type-and-value fields))))
 
 (def
   ^{:private true
@@ -305,13 +306,13 @@
      basic blocks or instructions."}
   *names-of-the-unnamed* {})
 
-(defn name-of-value
+(defn name-of-typed-value
   [x]
   (clj/or (:name x) (get *names-of-the-unnamed* x)))
 
-(defn render-typed-value
+(defn render-type-and-value
   [{:keys [type value] :as obj}]
-  (let [name (name-of-value obj)]
+  (let [name (name-of-typed-value obj)]
     (cond
       name
       (format "%s %s" (render-type type) (render-name name))
@@ -324,7 +325,7 @@
 
 (defn render-value
   [{:keys [type value] :as obj}]
-  (let [name (name-of-value obj)]
+  (let [name (name-of-typed-value obj)]
     (if name
       (render-name name)
       (render-literal type value))))
@@ -337,24 +338,24 @@
 
 (m/facts
  (m/fact
-  (render-typed-value (const i64 1234)) => "i64 1234")
+  (render-type-and-value (const i64 1234)) => "i64 1234")
  (m/fact
-  (render-typed-value (const [:ptr i32] nil)) => "i32* null")
+  (render-type-and-value (const [:ptr i32] nil)) => "i32* null")
  (m/fact
-  (render-typed-value (const [:array i16 3]
-                             (mapv #(const i16 %) [5 8 -3])))
+  (render-type-and-value (const [:array i16 3]
+                                (mapv #(const i16 %) [5 8 -3])))
   => "[3 x i16] [ i16 5, i16 8, i16 -3 ]")
  (m/fact
-  (render-typed-value (const [:struct nil [i32 [:ptr i32] [:array i8 2]]]
-                             [(const i32 5)
-                              (const [:ptr i32] nil)
-                              (const [:array i8 2] (mapv #(const i8 %) [3 4]))]))
+  (render-type-and-value (const [:struct nil [i32 [:ptr i32] [:array i8 2]]]
+                                [(const i32 5)
+                                 (const [:ptr i32] nil)
+                                 (const [:array i8 2] (mapv #(const i8 %) [3 4]))]))
   => "{i32, i32*, [2 x i8]} { i32 5, i32* null, [2 x i8] [ i8 3, i8 4 ] }")
  (m/fact
-  (render-typed-value (const [:struct :foo [i32 [:ptr i32] [:array i8 2]]]
-                             [(const i32 5)
-                              (const [:ptr i32] nil)
-                              (const [:array i8 2] (mapv #(const i8 %) [3 4]))]))
+  (render-type-and-value (const [:struct :foo [i32 [:ptr i32] [:array i8 2]]]
+                                [(const i32 5)
+                                 (const [:ptr i32] nil)
+                                 (const [:array i8 2] (mapv #(const i8 %) [3 4]))]))
   => "%foo { i32 5, i32* null, [2 x i8] [ i8 3, i8 4 ] }"))
 
 (m/facts
@@ -400,7 +401,7 @@
 (defmethod render-instruction :ret
   [{:keys [value]}]
   (if value
-    (format "ret %s" (render-typed-value value))
+    (format "ret %s" (render-type-and-value value))
     "ret void"))
 
 (m/facts
@@ -430,10 +431,10 @@
   [{:keys [cond dest else]}]
   (if cond
     (format "br %s, %s, %s"
-            (render-typed-value cond)
-            (render-typed-value dest)
-            (render-typed-value else))
-    (format "br %s" (render-typed-value dest))))
+            (render-type-and-value cond)
+            (render-type-and-value dest)
+            (render-type-and-value else))
+    (format "br %s" (render-type-and-value dest))))
 
 (m/facts
  (m/fact
@@ -458,13 +459,13 @@
 (defmethod render-instruction :switch
   [{:keys [value dest cases]}]
   (format "switch %s, %s [ %s ]"
-          (render-typed-value value)
-          (render-typed-value dest)
+          (render-type-and-value value)
+          (render-type-and-value dest)
           (->> cases
                (map (fn [[value dest]]
                       (format "%s, %s"
-                              (render-typed-value value)
-                              (render-typed-value dest))))
+                              (render-type-and-value value)
+                              (render-type-and-value dest))))
                (str/join " "))))
 
 (m/facts
@@ -492,13 +493,13 @@
               :type (:type ~'value)))
      (defmethod render-instruction ~(keyword op)
        [{:keys [~'value ~@opts] :as ~'i}]
-       (let [~'name (name-of-value ~'i)]
+       (let [~'name (name-of-typed-value ~'i)]
          (with-out-str
            (print (render-name ~'name))
            (print (str " = " ~(name op)))
            ~@(for [opt opts] `(when ~opt
                                 (print ~(str " " (name opt)))))
-           (print (str " " (render-typed-value ~'value))))))))
+           (print (str " " (render-type-and-value ~'value))))))))
 
 (define-unary-op fneg [])
 
@@ -515,13 +516,13 @@
               :type (:type ~'lhs)))
      (defmethod render-instruction ~(keyword op)
        [{:keys [~'lhs ~'rhs ~@opts] :as ~'i}]
-       (let [~'name (name-of-value ~'i)]
+       (let [~'name (name-of-typed-value ~'i)]
          (with-out-str
            (print (render-name ~'name))
            (print (str " = " ~(name op)))
            ~@(for [opt opts] `(when ~opt
                                 (print ~(str " " (name opt)))))
-           (print (str " " (render-typed-value ~'lhs)))
+           (print (str " " (render-type-and-value ~'lhs)))
            (print (str ", " (render-value ~'rhs))))))))
 
 (define-binary-op add [nsw nuw])
@@ -678,7 +679,7 @@
 
 (defmethod render-instruction :alloca
   [{:keys [object-type address-space array-size align] :as i}]
-  (let [name (name-of-value i)]
+  (let [name (name-of-typed-value i)]
     (format "%s = alloca %s%s"
             (render-name name)
             (render-type object-type)
@@ -727,11 +728,11 @@
 
 (defmethod render-instruction :load
   [{:keys [object-type ptr align] :as i}]
-  (let [name (name-of-value i)]
+  (let [name (name-of-typed-value i)]
     (format "%s = load %s, %s%s"
             (render-name name)
             (render-type object-type)
-            (render-typed-value ptr)
+            (render-type-and-value ptr)
             (if align (format ", align %d" align) ""))))
 
 (m/facts
@@ -761,8 +762,8 @@
 (defmethod render-instruction :store
   [{:keys [value ptr align]}]
   (format "store %s, %s%s"
-          (render-typed-value value)
-          (render-typed-value ptr)
+          (render-type-and-value value)
+          (render-type-and-value ptr)
           (if align (format ", align %d" align) "")))
 
 (m/facts
@@ -820,10 +821,10 @@
               :type ~'dest-type))
      (defmethod render-instruction ~(keyword op)
        [{:keys [~'value ~'dest-type] :as ~'i}]
-       (let [~'name (name-of-value ~'i)]
+       (let [~'name (name-of-typed-value ~'i)]
          (format ~(str "%s = " op " %s to %s")
                  (render-name ~'name)
-                 (render-typed-value ~'value)
+                 (render-type-and-value ~'value)
                  (render-type ~'dest-type))))))
 
 (define-conversion-op trunc)
@@ -899,11 +900,11 @@
 
 (defmethod render-instruction :icmp
   [{:keys [pred lhs rhs] :as i}]
-  (let [name (name-of-value i)]
+  (let [name (name-of-typed-value i)]
     (format "%s = icmp %s %s, %s"
             (render-name name)
             (render-predicate pred)
-            (render-typed-value lhs)
+            (render-type-and-value lhs)
             (render-value rhs))))
 
 (m/facts
@@ -932,11 +933,11 @@
 
 (defmethod render-instruction :fcmp
   [{:keys [pred lhs rhs] :as i}]
-  (let [name (name-of-value i)]
+  (let [name (name-of-typed-value i)]
     (format "%s = fcmp %s %s, %s"
             (render-name name)
             (render-predicate pred)
-            (render-typed-value lhs)
+            (render-type-and-value lhs)
             (render-value rhs))))
 
 (defn phi
@@ -950,7 +951,7 @@
 
 (defmethod render-instruction :phi
   [{:keys [type values] :as i}]
-  (let [name (name-of-value i)]
+  (let [name (name-of-typed-value i)]
     (format "%s = phi %s %s"
             (render-name name)
             (render-type type)
@@ -990,12 +991,12 @@
 
 (defmethod render-instruction :select
   [{:keys [cond then else] :as i}]
-  (let [name (name-of-value i)]
+  (let [name (name-of-typed-value i)]
     (format "%s = select %s, %s, %s"
             (render-name name)
-            (render-typed-value cond)
-            (render-typed-value then)
-            (render-typed-value else))))
+            (render-type-and-value cond)
+            (render-type-and-value then)
+            (render-type-and-value else))))
 
 (m/facts
  (m/fact
@@ -1029,21 +1030,21 @@
 
 (defmethod render-instruction :call
   [{:keys [callee args] :as i}]
-  (let [name (name-of-value i)
+  (let [name (name-of-typed-value i)
         type-str (render-type (if (vararg? callee)
                                 (:type callee)
                                 (result-type callee)))
-        callee-name (render-name (name-of-value callee))]
+        callee-name (render-name (name-of-typed-value callee))]
     (if name
       (format "%s = call %s %s(%s)"
               (render-name name)
               type-str
               callee-name
-              (str/join ", " (map render-typed-value args)))
+              (str/join ", " (map render-type-and-value args)))
       (format "call %s %s(%s)"
               type-str
               callee-name
-              (str/join ", " (map render-typed-value args))))))
+              (str/join ", " (map render-type-and-value args))))))
 
 (m/facts
  (m/fact
@@ -1114,13 +1115,13 @@
 
 (defmethod render-instruction :getelementptr
   [{:keys [base-type ptr indices inbounds] :as i}]
-  (let [name (name-of-value i)]
+  (let [name (name-of-typed-value i)]
     (format "%s = getelementptr%s %s, %s, %s"
             (render-name name)
             (if inbounds " inbounds" "")
             (render-type base-type)
-            (render-typed-value ptr)
-            (str/join ", " (map render-typed-value indices)))))
+            (render-type-and-value ptr)
+            (str/join ", " (map render-type-and-value indices)))))
 
 (m/facts
  (m/fact
@@ -1149,10 +1150,10 @@
 
 (defmethod render-instruction :extractvalue
   [{:keys [val indices] :as i}]
-  (let [name (name-of-value i)]
+  (let [name (name-of-typed-value i)]
     (format "%s = extractvalue %s, %s"
             (render-name name)
-            (render-typed-value val)
+            (render-type-and-value val)
             (str/join ", " (map render-value indices)))))
 
 (m/facts
@@ -1186,11 +1187,11 @@
 
 (defmethod render-instruction :insertvalue
   [{:keys [val elt indices] :as i}]
-  (let [name (name-of-value i)]
+  (let [name (name-of-typed-value i)]
     (format "%s = insertvalue %s, %s, %s"
             (render-name name)
-            (render-typed-value val)
-            (render-typed-value elt)
+            (render-type-and-value val)
+            (render-type-and-value elt)
             (str/join ", " (map render-value indices)))))
 
 (m/facts
@@ -1227,7 +1228,7 @@
 
 (defn render-basic-block
   [{:keys [instructions] :as block}]
-  (let [name (name-of-value block)]
+  (let [name (name-of-typed-value block)]
     (with-out-str
       (if (integer? name)
         (printf "%d:\n" name)
@@ -1339,7 +1340,7 @@ end:
 
 (defn render-function-parameter
   [{:keys [type attrs] :as param}]
-  (let [name (name-of-value param)]
+  (let [name (name-of-typed-value param)]
     (with-out-str
       (printf "%s" (render-type type))
       (when attrs
