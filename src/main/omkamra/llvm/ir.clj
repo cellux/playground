@@ -1223,12 +1223,12 @@
    (basic-block nil)))
 
 (defn add-i
-  [block instruction]
-  (update block :instructions conj instruction))
+  [bb instruction]
+  (update bb :instructions conj instruction))
 
 (defn render-basic-block
-  [{:keys [instructions] :as block}]
-  (let [name (name-of-typed-value block)]
+  [{:keys [instructions] :as bb}]
+  (let [name (name-of-typed-value bb)]
     (with-out-str
       (if (integer? name)
         (printf "%d:\n" name)
@@ -1237,16 +1237,16 @@
         (printf "  %s\n" (render-instruction i))))))
 
 (defn render-basic-blocks
-  [blocks]
+  [basic-blocks]
   (with-out-str
-    (doseq [[block next-block] (partition 2 1 blocks)]
-      (print (render-basic-block block))
-      (let [last-instruction (last (:instructions block))]
+    (doseq [[bb next-bb] (partition 2 1 basic-blocks)]
+      (print (render-basic-block bb))
+      (let [last-instruction (last (:instructions bb))]
         (when (clj/or (not last-instruction)
                       (not (terminator? last-instruction)))
-          (printf "  %s\n" (render-instruction (br next-block))))))
-    (when-let [last-block (last blocks)]
-      (print (render-basic-block last-block)))))
+          (printf "  %s\n" (render-instruction (br next-bb))))))
+    (when-let [last-bb (last basic-blocks)]
+      (print (render-basic-block last-bb)))))
 
 (m/facts
  (m/fact
@@ -1482,7 +1482,7 @@ end:
             :result-type result-type
             :type [:fn result-type (map :type params)]
             :params params
-            :blocks nil)))
+            :basic-blocks nil)))
   ([name result-type params]
    (function name result-type params nil)))
 
@@ -1494,9 +1494,9 @@ end:
 
 (defn add-bb
   [f bb]
-  (if (nil? (:blocks f))
-    (assoc f :blocks (vector bb))
-    (update f :blocks conj bb)))
+  (if (nil? (:basic-blocks f))
+    (assoc f :basic-blocks (vector bb))
+    (update f :basic-blocks conj bb)))
 
 (def
   ^{:private true}
@@ -1520,8 +1520,8 @@ end:
            cconv result-attrs result-type name params
            unnamed-addr address-space function-attrs
            section comdat align gc prefix prologue personality
-           metadata blocks] :as f}]
-  (let [definition? (if (nil? blocks) false true)
+           metadata basic-blocks] :as f}]
+  (let [definition? (if (nil? basic-blocks) false true)
         next-name (let [counter (atom 0)]
                     (fn []
                       (let [name @counter]
@@ -1537,7 +1537,7 @@ end:
                  (IdentityHashMap.)
                  (concat
                   params
-                  (mapcat #(cons % (:instructions %)) blocks)))
+                  (mapcat #(cons % (:instructions %)) basic-blocks)))
                 {})]
       (with-out-str
         (print (if definition? "define " "declare "))
@@ -1574,7 +1574,7 @@ end:
           (printf " align %d" align))
         (when definition?
           (print " {\n")
-          (print (render-basic-blocks blocks))
+          (print (render-basic-blocks basic-blocks))
           (print "}\n"))))))
 
 (m/facts

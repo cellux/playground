@@ -2,12 +2,12 @@
   (:require [oben.core.api :as o])
   (:require [omkamra.llvm.ir :as ir]))
 
-(def blockbin-ids [:entry :main :exit])
+(def basic-block-bin-ids [:entry :main :exit])
 
 (def init-fdata
-  {:blockbins (into {} (map #(vector % (list)) blockbin-ids))
-   :blockbin-id :main
-   :label-blocks {}
+  {:basic-block-bins (into {} (map #(vector % (list)) basic-block-bin-ids))
+   :current-bin-id :main
+   :label-basic-blocks {}
    :return-values {}})
 
 (defn reset
@@ -60,88 +60,88 @@
        (some-> (meta node) :class name)
        default-prefix))
 
-(defn add-label-block
+(defn add-label-bb
   [ctx label-node]
-  (letfn [(create-label-block
+  (letfn [(create-label-bb
             [ctx label-node]
             (let [block-name (keyword (get-assigned-name ctx))]
-              (update-in ctx [:fdata :label-blocks]
+              (update-in ctx [:fdata :label-basic-blocks]
                          assoc label-node
                          (ir/basic-block block-name))))]
     (-> ctx
         (assign-next-name (node-name-prefix label-node "label"))
-        (create-label-block label-node))))
+        (create-label-bb label-node))))
 
-(defn get-label-block
+(defn get-label-bb
   [ctx label-node]
-  (get-in ctx [:fdata :label-blocks label-node]))
+  (get-in ctx [:fdata :label-basic-blocks label-node]))
 
 (defn save-ir
   [ctx ir]
   (assoc ctx :ir ir))
 
 (defn current-bb
-  ([ctx blockbin-id]
-   (first (get-in ctx [:fdata :blockbins blockbin-id])))
+  ([ctx bin-id]
+   (first (get-in ctx [:fdata :basic-block-bins bin-id])))
   ([ctx]
-   (current-bb ctx (get-in ctx [:fdata :blockbin-id]))))
+   (current-bb ctx (get-in ctx [:fdata :current-bin-id]))))
 
 (defn ensure-bb
-  ([ctx blockbin-id]
-   (let [blockbin (get-in ctx [:fdata :blockbins blockbin-id])]
-     (if (seq blockbin)
+  ([ctx bin-id]
+   (let [bin (get-in ctx [:fdata :basic-block-bins bin-id])]
+     (if (seq bin)
        ctx
-       (update-in ctx [:fdata :blockbins blockbin-id]
+       (update-in ctx [:fdata :basic-block-bins bin-id]
                   conj (ir/basic-block)))))
   ([ctx]
-   (ensure-bb ctx (get-in ctx [:fdata :blockbin-id]))))
+   (ensure-bb ctx (get-in ctx [:fdata :current-bin-id]))))
 
 (defn flush-bb
-  ([ctx blockbin-id next-block]
-   (let [current-block (current-bb ctx blockbin-id)]
+  ([ctx bin-id next-block]
+   (let [current-block (current-bb ctx bin-id)]
      (if (or (seq (:instructions current-block)) next-block)
-       (update-in ctx [:fdata :blockbins blockbin-id]
+       (update-in ctx [:fdata :basic-block-bins bin-id]
                   conj (or next-block (ir/basic-block)))
        ctx)))
-  ([ctx blockbin-id]
-   (flush-bb ctx blockbin-id nil))
+  ([ctx bin-id]
+   (flush-bb ctx bin-id nil))
   ([ctx]
-   (flush-bb ctx (get-in ctx [:fdata :blockbin-id]))))
+   (flush-bb ctx (get-in ctx [:fdata :current-bin-id]))))
 
 (defn append-bb
-  ([ctx bb blockbin-id]
+  ([ctx bb bin-id]
    (-> ctx
-       (ensure-bb blockbin-id)
-       (flush-bb blockbin-id bb)))
+       (ensure-bb bin-id)
+       (flush-bb bin-id bb)))
   ([ctx bb]
-   (append-bb ctx bb (get-in ctx [:fdata :blockbin-id]))))
+   (append-bb ctx bb (get-in ctx [:fdata :current-bin-id]))))
 
-(defn update-current-bb
-  [ctx blockbin-id f & args]
-  (update-in ctx [:fdata :blockbins blockbin-id]
-             (fn [blockbin]
-               (cons (apply f (first blockbin) args)
-                     (next blockbin)))))
+(defn update-bb
+  [ctx bin-id f & args]
+  (update-in ctx [:fdata :basic-block-bins bin-id]
+             (fn [bin]
+               (cons (apply f (first bin) args)
+                     (next bin)))))
 
 (defn compile-instruction
-  ([ctx ins blockbin-id]
+  ([ctx ins bin-id]
    (letfn [(flush-if-terminator [ctx]
              (if (ir/terminator? ins)
-               (flush-bb ctx blockbin-id)
+               (flush-bb ctx bin-id)
                ctx))]
      (-> ctx
-         (ensure-bb blockbin-id)
-         (update-current-bb blockbin-id ir/add-i ins)
+         (ensure-bb bin-id)
+         (update-bb bin-id ir/add-i ins)
          flush-if-terminator
          (save-ir ins))))
   ([ctx ins]
-   (compile-instruction ctx ins (get-in ctx [:fdata :blockbin-id]))))
+   (compile-instruction ctx ins (get-in ctx [:fdata :current-bin-id]))))
 
 (defn register-return-value
-  [ctx block-id return-block return-value]
+  [ctx block-id return-bb return-value]
   (assoc-in
    ctx
-   [:fdata :return-values block-id return-block]
+   [:fdata :return-values block-id return-bb]
    return-value))
 
 (defn get-return-values
@@ -158,7 +158,7 @@
                 (if (isa? (o/tid-of-node node) :oben.core.types.Fn/Fn)
                   (if (contains? (:functions (:m ctx)) (:name ir))
                     ctx
-                    (update ctx :m ir/add-function (dissoc ir :blocks)))
+                    (update ctx :m ir/add-function (dissoc ir :basic-blocks)))
                   (if (contains? (:globals (:m ctx)) (:name ir))
                     ctx
                     (update ctx :m ir/add-global (dissoc ir :initializer))))
@@ -222,17 +222,17 @@
   [ctx type]
   (get (:compiled-types ctx) type))
 
-(defn with-blockbin
-  [ctx blockbin-id f]
-  (let [saved (get-in ctx [:fdata :blockbin-id])
-        ctx (assoc-in ctx [:fdata :blockbin-id] blockbin-id)]
-    (assoc-in (f ctx) [:fdata :blockbin-id] saved)))
+(defn with-basic-block-bin
+  [ctx bin-id f]
+  (let [saved (get-in ctx [:fdata :current-bin-id])
+        ctx (assoc-in ctx [:fdata :current-bin-id] bin-id)]
+    (assoc-in (f ctx) [:fdata :current-bin-id] saved)))
 
-(defn collect-blocks
+(defn collect-basic-blocks
   [ctx]
-  (let [label-blocks (vals (get-in ctx [:fdata :label-blocks]))
-        return-blocks (mapcat keys (vals (get-in ctx [:fdata :return-values])))
-        referenced-block? (set (concat label-blocks return-blocks))]
+  (let [label-bbs (vals (get-in ctx [:fdata :label-basic-blocks]))
+        return-bbs (mapcat keys (vals (get-in ctx [:fdata :return-values])))
+        referenced-block? (set (concat label-bbs return-bbs))]
     (letfn [(collect? [bb]
               (or (:name bb)
                   (seq (:instructions bb))
@@ -240,8 +240,8 @@
       (reduce (fn [ctx bb]
                 (update ctx :f ir/add-bb bb))
               ctx
-              (->> (mapcat (get-in ctx [:fdata :blockbins])
-                           (reverse blockbin-ids))
+              (->> (mapcat (get-in ctx [:fdata :basic-block-bins])
+                           (reverse basic-block-bin-ids))
                    (filter collect?)
                    reverse)))))
 

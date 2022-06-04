@@ -33,10 +33,10 @@
   (o/make-node %void
     (fn [ctx]
       (let [self (:compiling-node ctx)
-            label-block (ctx/get-label-block ctx self)]
+            label-bb (ctx/get-label-bb ctx self)]
         (-> ctx
-            (ctx/append-bb label-block)
-            (ctx/save-ir label-block))))
+            (ctx/append-bb label-bb)
+            (ctx/save-ir label-bb))))
     {:class :oben/label
      :name name}))
 
@@ -67,7 +67,7 @@
                save-ir (fn [ctx]
                          (ctx/save-ir ctx ins))]
            (-> ctx
-               (ctx/with-blockbin :entry compile-var)
+               (ctx/with-basic-block-bin :entry compile-var)
                compile-init
                save-ir)))
        {:class :oben/var})))
@@ -140,13 +140,13 @@
                   doall)]
     (o/make-node %void
       (fn [ctx]
-        (letfn [(register-tag-blocks [ctx]
-                  (reduce ctx/add-label-block
+        (letfn [(register-tag-label-basic-blocks [ctx]
+                  (reduce ctx/add-label-bb
                           ctx (vals tag-nodes)))
                 (compile-body [ctx]
                   (reduce ctx/compile-node ctx body))]
           (-> ctx
-              register-tag-blocks
+              register-tag-label-basic-blocks
               compile-body)))
       {:class :oben/tagbody})))
 
@@ -155,8 +155,8 @@
   (if-let [label-node (get-in &env [:oben/tags label-name])]
     (o/make-node %unseen
       (fn [ctx]
-        (if-let [label-block (ctx/get-label-block ctx label-node)]
-          (ctx/compile-instruction ctx (ir/br label-block))
+        (if-let [label-bb (ctx/get-label-bb ctx label-node)]
+          (ctx/compile-instruction ctx (ir/br label-bb))
           (throw (ex-info "cannot find target block of go label"
                           {:label-name label-name}))))
       {:class :oben/go
@@ -184,7 +184,7 @@
                     (ctx/compiled-node ctx value-node)))
                  (compile-br [ctx]
                    (ctx/compile-instruction
-                    ctx (ir/br (ctx/get-label-block ctx return-label))))]
+                    ctx (ir/br (ctx/get-label-bb ctx return-label))))]
            (-> ctx
                compile-node
                register-return-value
@@ -202,7 +202,7 @@
        (fn [ctx]
          (letfn [(compile-br [ctx]
                    (ctx/compile-instruction
-                    ctx (ir/br (ctx/get-label-block ctx return-label))))]
+                    ctx (ir/br (ctx/get-label-bb ctx return-label))))]
            (-> ctx compile-br)))
        {:class :oben/return-from
         :block-id block-id
@@ -257,11 +257,11 @@
                   (let [return-values (ctx/get-return-values ctx block-id)]
                     (case (count return-values)
                       0 ctx
-                      1 (let [[return-block return-value] (first return-values)]
+                      1 (let [[return-bb return-value] (first return-values)]
                           (ctx/save-ir ctx return-value))
                       (compile-phi ctx return-values))))]
           (-> ctx
-              (ctx/add-label-block return-label)
+              (ctx/add-label-bb return-label)
               compile-body
               register-body-value
               compile-return-label
@@ -339,7 +339,7 @@
                     (assoc :fdata ctx/init-fdata)
                     (ctx/compile-node body-node)
                     compile-return
-                    ctx/collect-blocks
+                    ctx/collect-basic-blocks
                     add-function-to-module
                     save-ir
                     (merge (select-keys saved
@@ -387,17 +387,17 @@
                   ([ctx cond-node then-label else-label]
                    (ctx/compile-instruction
                     ctx (ir/br (ctx/compiled-node ctx cond-node)
-                               (ctx/get-label-block ctx then-label)
-                               (ctx/get-label-block ctx else-label))))
+                               (ctx/get-label-bb ctx then-label)
+                               (ctx/get-label-bb ctx else-label))))
                   ([ctx dest-label]
                    (ctx/compile-instruction
-                    ctx (ir/br (ctx/get-label-block ctx dest-label)))))
+                    ctx (ir/br (ctx/get-label-bb ctx dest-label)))))
                 (compile-then-nodes [ctx]
                   (reduce ctx/compile-node ctx then-nodes))]
           (-> ctx
               (ctx/compile-node cond-node)
-              (ctx/add-label-block then-label)
-              (ctx/add-label-block else-label)
+              (ctx/add-label-bb then-label)
+              (ctx/add-label-bb else-label)
               (add-br cond-node then-label else-label)
               (ctx/compile-node then-label)
               compile-then-nodes
