@@ -26,8 +26,7 @@
   []
   (let [ctx {:epoch 0
              :compiled-nodes {}
-             :compiled-types {}
-             :mode :dev}]
+             :compiled-types {}}]
     (reset ctx)))
 
 (defn next-epoch
