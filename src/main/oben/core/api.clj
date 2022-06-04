@@ -438,7 +438,7 @@
             (nil? m)
             (recur result
                    (next forms)
-                   {:tag head})
+                   (if (map? head) head {:tag head}))
 
             :else
             (recur result
@@ -479,9 +479,11 @@
            (annotate [form]
              (remove nil? (list (meta form) form)))
            (parse-type-designator [td]
-             (-> td
-                 replace-stars-with-ptr
-                 (parse env)))]
+             (cond
+               (type? td) td
+               (map? td) (recur (:tag td))
+               (nil? td) (throw (ex-info "cannot parse type designator"))
+               :else (recur (-> td replace-stars-with-ptr (parse env)))))]
      (try
        (cond
          (provides-target-specific-parser? form)

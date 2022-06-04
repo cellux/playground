@@ -69,9 +69,17 @@
      (f 1 2) => 3)
     (m/fact (f 5 3) => 8)))
 
-;; instead of type tags (metadata) we can also use a symbol or list in
-;; front of the param vector or a single parameter. these are called
-;; *type designators*, they should resolve to a type at compile time.
+;; to denote the type of a parameter or return value we can use:
+;;
+;; 1. type tag => ^u32
+;; 2. type symbol => u32
+;; 3. type constructor => (Number/UInt 32)
+;; 4. type value => Number/%u32
+;; 5. metadata map => {:tag u32}
+
+;; if the name of a type or type constructor is not one of the
+;; builtins (u32, f64, Struct, Array, etc.), it should be either a
+;; symbol bound locally via Clojure let or the name of a Clojure var
 
 (oben/with-target :inprocess
   (let [f (oben/fn u32 [] (+ 5 2))]
@@ -83,12 +91,19 @@
   (let [f (oben/fn u32 [f32 x f32 y] (+ x y))]
     (m/fact (f 5.7 3.2) => 8)
     (m/fact (f 5.7 3.5) => 9))
-  (let [f (oben/fn ^u32 [u32 a
+  (let [u32-type-alias-1 'u32
+        u32-type-alias-2 {:tag (Number/UInt 32)}
+        f (oben/fn ^u32 [u32 a
                          ^u32 b
                          (Number/UInt 32) c
-                         Number/%u32 d]
-            (+ a b c d))]
-    (m/fact (f 5 3 1 6) => 15)))
+                         Number/%u32 d
+                         ^{:tag u32} e
+                         {:tag Number/%u32} f
+                         ^u32-type-alias-1 g
+                         u32-type-alias-2 h]
+            (+ a b c d e f g h))]
+    (m/fact (f 5 3 1 6 9 2 4 11)
+            => (+ 5 3 1 6 9 2 4 11))))
 
 (oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u8 x]
@@ -1363,14 +1378,18 @@
 (oben/defn free void [(* u8) ptr])
 
 (oben/with-target :inprocess
-  (let [f (oben/fn ^void []
+  (let [f (oben/fn ^u64 []
             (let [p (malloc 4096)
-                  i (var u32 0)]
+                  i (var u32 0)
+                  sum (var u64 0)]
               (while (< @i 4096)
-                (set! (+ p @i) (cast! u8 @i))
+                (let [v (cast! u8 @i)]
+                  (set! (+ p @i) v)
+                  (set! sum (+ @sum v)))
                 (set! i (+ @i 1)))
-              (free p)))]
-    (m/fact (f) => nil)))
+              (free p)
+              @sum))]
+    (m/fact (f) => (reduce + (map #(mod % 256) (range 4096))))))
 
 ;; (oben/with-target :dump
 ;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])
