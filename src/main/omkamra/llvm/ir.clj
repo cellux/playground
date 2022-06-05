@@ -1412,8 +1412,10 @@ end:
            section partition comdat align metadata attrs]}]
   (with-out-str
     (printf "%s = " (render-name name))
-    (when linkage
-      (printf "%s " (render-linkage linkage)))
+    (if linkage
+      (printf "%s " (render-linkage linkage))
+      (when-not initializer
+        (printf "%s " (render-linkage :external))))
     (when dso-local
       (printf "dso_local "))
     (when visibility
@@ -1463,7 +1465,11 @@ end:
             :constant true
             :initializer (const [:array i8] "Hello, world!\n\0")
             :align 1}))
-  => "@.str = private unnamed_addr constant [15 x i8] c\"Hello, world!\\0A\\00\", align 1"))
+  => "@.str = private unnamed_addr constant [15 x i8] c\"Hello, world!\\0A\\00\", align 1")
+ (m/fact
+  (render-global
+   (global 'count i32 {}))
+  => "@count = external global i32"))
 
 (defn sanitize-param
   [param]

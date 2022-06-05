@@ -59,6 +59,7 @@
 (def cast oben.core.nodes/%cast)
 (def cast! oben.core.nodes/%cast!)
 
+(def global oben.core.nodes/%global)
 (def var oben.core.nodes/%var)
 (def set! oben.core.nodes/%set!)
 

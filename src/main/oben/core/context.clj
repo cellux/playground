@@ -25,8 +25,9 @@
 (defn create
   []
   (let [ctx {:epoch 0
-             :compiled-nodes {}
-             :compiled-types {}}]
+             :compiled-types {}
+             :compiled-globals {}
+             :compiled-nodes {}}]
     (reset ctx)))
 
 (defn next-epoch
@@ -147,26 +148,37 @@
   [ctx block-id]
   (get-in ctx [:fdata :return-values block-id]))
 
+(def global-node-classes #{:oben/fn :oben/global})
+
+(defn global-node?
+  [node]
+  (contains? global-node-classes (o/class-of-node node)))
+
+(defn compiled-node
+  [ctx node]
+  (or (get (:compiled-nodes ctx) node)
+      (get (:compiled-globals ctx) node)))
+
 (defn compile-node
   [ctx node]
   (when-not (o/node? node)
     (throw (ex-info "expected node" {:actual node})))
-  (if-let [ir (get (:compiled-nodes ctx) node)]
-    (letfn [(declare-previously-compiled-globals [ctx]
-              (if (and (:global? (meta node)) (:name ir))
-                (if (isa? (o/tid-of-node node) :oben.core.types.Fn/Fn)
-                  (if (contains? (:functions (:m ctx)) (:name ir))
-                    ctx
-                    (update ctx :m ir/add-function (dissoc ir :basic-blocks)))
-                  (if (contains? (:globals (:m ctx)) (:name ir))
-                    ctx
-                    (update ctx :m ir/add-global (dissoc ir :initializer))))
+  (if-let [ir (compiled-node ctx node)]
+    (letfn [(declare-previously-compiled-global-or-function [ctx]
+              (case (:kind ir)
+                :global (if (contains? (:globals (:m ctx)) (:name ir))
+                          ctx
+                          (update ctx :m ir/add-global (dissoc ir :initializer)))
+                :function (if (contains? (:functions (:m ctx)) (:name ir))
+                            ctx
+                            (update ctx :m ir/add-function (dissoc ir :basic-blocks)))
                 ctx))]
       (-> ctx
-          declare-previously-compiled-globals
+          declare-previously-compiled-global-or-function
           (save-ir ir)))
     (letfn [(save-node-ir [ctx]
-              (update ctx :compiled-nodes
+              (update ctx
+                      (if (global-node? node) :compiled-globals :compiled-nodes)
                       assoc node (:ir ctx)))]
       (let [saved ctx
             compile-fn node]
@@ -177,10 +189,6 @@
             compile-fn
             save-node-ir
             (merge (select-keys saved [:compiling-node])))))))
-
-(defn compiled-node
-  [ctx node]
-  (get (:compiled-nodes ctx) node))
 
 (defn add-type-to-module-if-named
   ([ctx ir]
@@ -247,6 +255,7 @@
 (defn forget-node
   [ctx node]
   (-> ctx
+      (update :compiled-globals dissoc node)
       (update :compiled-nodes dissoc node)))
 
 (defn forget-type

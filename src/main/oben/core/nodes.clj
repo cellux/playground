@@ -40,6 +40,31 @@
     {:class :oben/label
      :name name}))
 
+(defn %global
+  [opts init-node]
+  (let [[type opts] (if (o/type? opts)
+                      [opts nil]
+                      [(:tag opts) (dissoc opts :tag)])
+        _ (assert (o/type? type))
+        init-node (when init-node (o/parse (list 'cast type init-node)))
+        _ (assert (o/constant-node? init-node))]
+    (o/make-node (Ptr/Ptr type)
+      (fn [ctx]
+        (let [gname (ctx/get-assigned-name ctx)
+              ctx (ctx/compile-type ctx type)
+              ctx (if init-node
+                    (ctx/compile-node ctx init-node)
+                    ctx)
+              opts (if init-node
+                     (assoc opts :initializer (ctx/compiled-node ctx init-node))
+                     opts)
+              g (ir/global gname (ctx/compiled-type ctx type) opts)]
+          (-> ctx
+              (update :m ir/add-global g)
+              (ctx/save-ir g))))
+      {:class :oben/global
+       :name (:name opts)})))
+
 (defn %var
   ([type init-node]
    (let [init-node (when init-node (o/parse `(cast ~type ~init-node)))]

@@ -116,6 +116,28 @@
 ;;
 ;; I wonder why defstruct doesn't evoke the same feelings
 
+(clj/defn make-global
+  [name opts initializer lexical-bindings]
+  (let [opts (if (map? opts) opts {:tag opts})
+        opts (if name (assoc opts :name name) opts)
+        parse-for-target (memoize
+                          (clj/fn [target]
+                            (o/parse (list 'global opts initializer) lexical-bindings)))]
+    (with-meta
+      #(parse-for-target (target/current))
+      {:kind :oben/GLOBAL
+       :parse-for-target parse-for-target})))
+
+(clj/defmacro global
+  [opts initializer]
+  `(with-lexical-bindings bindings#
+     (make-global nil '~opts '~initializer bindings#)))
+
+(clj/defmacro defglobal
+  [name opts initializer]
+  `(with-lexical-bindings bindings#
+     (def ~name (make-global '~name '~opts '~initializer bindings#))))
+
 (clj/defmacro define-typeclass
   [& args]
   `(o/define-typeclass ~@args))

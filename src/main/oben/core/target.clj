@@ -40,6 +40,10 @@
          [& ~'args]
          (apply ~method-name (current) ~'args)))))
 
+(define-target-method ctx
+  [this]
+  (:ctx @this))
+
 (define-target-method attrs
   [this]
   (:attrs @this))

@@ -1,19 +1,22 @@
 (ns oben.core-test
-  (:require [oben.core :as oben])
-  (:require [oben.core.api :as o])
-  (:require [oben.core.context :as ctx])
-  (:require [oben.core.target :as target])
-  (:require [oben.core.math :as math])
-  (:require [oben.core.types.Void :as Void])
-  (:require [oben.core.types.Number :as Number])
-  (:require [oben.core.types.Ptr :as Ptr])
-  (:require [oben.core.types.Aggregate :as Aggregate])
-  (:require [oben.core.types.Array :as Array])
-  (:require [oben.core.types.Struct :as Struct])
-  (:require [oben.core.types.Fn :as Fn])
-  (:require [clojure.walk :as walk])
-  (:require [midje.sweet :as m])
-  (:use [midje.repl]))
+  (:require
+   [clojure.pprint :refer [pprint]]
+   [clojure.walk :as walk]
+   [midje.sweet :as m]
+   [oben.core :as oben]
+   [oben.core.api :as o]
+   [oben.core.context :as ctx]
+   [oben.core.target :as target]
+   [oben.core.math :as math]
+   [oben.core.types.Void :as Void]
+   [oben.core.types.Number :as Number]
+   [oben.core.types.Ptr :as Ptr]
+   [oben.core.types.Aggregate :as Aggregate]
+   [oben.core.types.Array :as Array]
+   [oben.core.types.Struct :as Struct]
+   [oben.core.types.Fn :as Fn])
+  (:use
+   [midje.repl]))
 
 (defn compile-type
   [t]
@@ -1390,6 +1393,37 @@
               (free p)
               @sum))]
     (m/fact (f) => (reduce + (map #(mod % 256) (range 4096))))))
+
+(oben/with-target :inprocess
+  (let [ret-g (oben/fn ^u64 []
+                (let [g (global u64 1234)]
+                  @g))]
+    (m/fact (ret-g) => 1234)))
+
+(oben/with-target :inprocess
+  (let [g (oben/global u64 1234)
+        ret-g (oben/fn ^u64 []
+                @g)]
+    (m/fact (ret-g) => 1234)))
+
+(oben/with-target :inprocess
+  (let [sum (oben/global u64 0)
+        add (oben/fn ^void [^u64 x]
+              (set! sum (+ @sum x)))
+        ret-sum (oben/fn ^u64 []
+                  @sum)]
+    (add 17)
+    (add 51)
+    (m/fact (ret-sum) => (+ 51 17))))
+
+;; (oben/defglobal sum u64 0)
+
+;; (oben/with-target :inprocess
+;;   (let [add (oben/fn ^void [^u64 x]
+;;               (set! sum (+ @sum x)))]
+;;     (add 17)
+;;     (add 51)
+;;     (m/fact @sum => (+ 51 17))))
 
 ;; (oben/with-target :dump
 ;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])
