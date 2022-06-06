@@ -1440,7 +1440,7 @@
                    (let [x (:x v)
                          y (:y v)]
                      (math/sqrt (+ (* x x) (* y y)))))
-        f (oben/fn ^f32 []
-            (let [v {:x 3 :y 4}]
+        f (oben/fn ^f32 [^f32 x ^f32 y]
+            (let [v {:x x :y y}]
               (vec2-len v)))]
-    (m/fact (f) => 5.0)))
+    (m/fact (f 3 4) => 5.0)))

@@ -94,23 +94,40 @@
   (let [{:keys [field-types]} (meta t)]
     (assert (= (count elems) (count field-types)))
     (let [casted-elems (mapv #(o/cast %1 %2 false) field-types elems)]
-      (o/make-constant-node
-       t elems
-       (fn [ctx]
-         (letfn [(compile-struct-type [ctx]
-                   (ctx/compile-type ctx t))
-                 (compile-elems [ctx]
-                   (reduce ctx/compile-node ctx casted-elems))
-                 (save-ir [ctx]
-                   (ctx/save-ir
-                    ctx
-                    (ir/const (ctx/compiled-type ctx t)
-                              (mapv #(ctx/compiled-node ctx %)
-                                    casted-elems))))]
-           (-> ctx
-               compile-struct-type
-               compile-elems
-               save-ir)))))))
+      (if (every? o/constant-node? casted-elems)
+        (o/make-constant-node
+            t elems
+            (fn [ctx]
+              (letfn [(compile-struct-type [ctx]
+                        (ctx/compile-type ctx t))
+                      (compile-elems [ctx]
+                        (reduce ctx/compile-node ctx casted-elems))
+                      (save-ir [ctx]
+                        (ctx/save-ir
+                         ctx
+                         (ir/const (ctx/compiled-type ctx t)
+                                   (mapv #(ctx/compiled-node ctx %)
+                                         casted-elems))))]
+                (-> ctx
+                    compile-struct-type
+                    compile-elems
+                    save-ir))))
+        (let [{:keys [field-names]} (meta t)]
+          (reduce (fn [node [field-name field-value]]
+                    (Container/assoc node field-name field-value))
+                  (o/make-constant-node
+                      t nil
+                      (fn [ctx]
+                        (letfn [(compile-struct-type [ctx]
+                                  (ctx/compile-type ctx t))
+                                (save-ir [ctx]
+                                  (ctx/save-ir
+                                   ctx
+                                   (ir/const (ctx/compiled-type ctx t) :undef)))]
+                          (-> ctx
+                              compile-struct-type
+                              save-ir))))
+                  (map vector field-names casted-elems)))))))
 
 (defmethod o/cast [::Struct :oben/HostMap]
   [t fields force?]

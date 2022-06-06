@@ -320,6 +320,9 @@
       (= :void type)
       "void"
 
+      (= :undef value)
+      (format "%s undef" (render-type type))
+
       :else
       (format "%s %s" (render-type type) (render-literal type value)))))
 
@@ -356,7 +359,10 @@
                                 [(const i32 5)
                                  (const [:ptr i32] nil)
                                  (const [:array i8 2] (mapv #(const i8 %) [3 4]))]))
-  => "%foo { i32 5, i32* null, [2 x i8] [ i8 3, i8 4 ] }"))
+  => "%foo { i32 5, i32* null, [2 x i8] [ i8 3, i8 4 ] }")
+ (m/fact
+  (render-type-and-value (const [:struct nil [:float i8]] :undef))
+  => "{float, i8} undef"))
 
 (m/facts
  (m/fact
