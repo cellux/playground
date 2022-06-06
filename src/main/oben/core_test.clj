@@ -1407,41 +1407,40 @@
     (m/fact (ret-g) => 1234)))
 
 (oben/with-target :inprocess
-  (let [sum (oben/global u64 0)
+  (let [sum (oben/global u64 23)
         add (oben/fn ^void [^u64 x]
               (set! sum (+ @sum x)))
         ret-sum (oben/fn ^u64 []
                   @sum)]
     (add 17)
     (add 51)
-    (m/fact (ret-sum) => (+ 51 17))))
+    (m/fact (ret-sum) => (+ 23 51 17))))
 
-;; (oben/defglobal sum u64 0)
+(oben/defglobal sum u64 33)
 
-;; (oben/with-target :inprocess
-;;   (let [add (oben/fn ^void [^u64 x]
-;;               (set! sum (+ @sum x)))]
-;;     (add 17)
-;;     (add 51)
-;;     (m/fact @sum => (+ 51 17))))
+(oben/with-target :inprocess
+  (let [add (oben/fn ^void [^u64 x]
+              (set! sum (+ @sum x)))
+        ret-sum (oben/fn ^u64 [] @sum)]
+    (add 17)
+    (add 51)
+    (m/fact (ret-sum) => (+ 33 51 17))))
 
-;; (oben/with-target :dump
-;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])
-;;         vec2-x (oben/fn ^f32 [vec2 v]
-;;                  (:x v))]
-;;     (m/fact
-;;      (vec2-x {:x 3 :y 4}) => 3)))
+(oben/with-target :inprocess
+  (let [vec2 (oben/Struct [^f32 x ^f32 y])
+        vec2-x (oben/fn ^f32 [vec2 v]
+                 (:x v))
+        f (oben/fn ^f32 []
+            (vec2-x {:x 3 :y 4}))]
+    (m/fact (f) => 3.0)))
 
-;; (oben/with-target :dump
-;;   (let [vec2 (oben/Struct [^f32 x ^f32 y])
-;;         vec2-x (oben/fn ^f32 [vec2 v]
-;;                  (:x v))
-;;         vec2-len (oben/fn ^f32 [vec2 v]
-;;                    (let [x (:x v)
-;;                          y (:y v)]
-;;                      (math/sqrt (+ (* x x) (* y y)))))]
-;;     (m/fact
-;;      (vec2-x {:x 3 :y 4}) => 3)
-;;      (m/fact
-;;       (vec2-len {:x 3 :y 4}) => 5)
-;;     ))
+(oben/with-target :inprocess
+  (let [vec2 (oben/Struct [^f32 x ^f32 y])
+        vec2-len (oben/fn ^f32 [vec2 v]
+                   (let [x (:x v)
+                         y (:y v)]
+                     (math/sqrt (+ (* x x) (* y y)))))
+        f (oben/fn ^f32 []
+            (let [v {:x 3 :y 4}]
+              (vec2-len v)))]
+    (m/fact (f) => 5.0)))

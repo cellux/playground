@@ -40,13 +40,14 @@
     {:class :oben/label
      :name name}))
 
-(defn %global
+(o/defmacro %global
   [opts init-node]
-  (let [[type opts] (if (o/type? opts)
-                      [opts nil]
-                      [(:tag opts) (dissoc opts :tag)])
+  (let [[type opts] (if (map? opts)
+                      [(:tag opts) (dissoc opts :tag)]
+                      [opts nil])
+        type (o/parse type &env)
         _ (assert (o/type? type))
-        init-node (when init-node (o/parse (list 'cast type init-node)))
+        init-node (when init-node (o/parse (list 'cast type init-node) &env))
         _ (assert (o/constant-node? init-node))]
     (o/make-node (Ptr/Ptr type)
       (fn [ctx]
