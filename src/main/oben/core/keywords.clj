@@ -73,6 +73,8 @@
 (def return oben.core.nodes/%return)
 
 (def let oben.core.nodes/%let)
+
+(def Fn oben.core.types.Fn/%Fn)
 (def fn oben.core.nodes/%fn)
 (def funcall oben.core.nodes/%funcall)
 

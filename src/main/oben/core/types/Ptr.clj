@@ -21,6 +21,60 @@
            save-ir)))
    {:object-type object-type}))
 
+(defmethod o/cast [::Ptr ::Ptr]
+  [t node force?]
+  (cond (= t (o/type-of node)) node
+        :else (throw (ex-info "invalid ptr->ptr cast"
+                              {:to-type (meta t)
+                               :from-type (meta (o/type-of node))}))))
+
+(defmethod o/cast [::Ptr :oben/HostNil]
+  [t node force?]
+  (o/make-constant-node
+   t nil
+   (fn [ctx]
+     (letfn [(compile-type [ctx]
+               (ctx/compile-type ctx t))
+             (save-ir [ctx]
+               (ctx/save-ir ctx (ir/const (ctx/compiled-type ctx t) nil)))]
+       (-> ctx
+           compile-type
+           save-ir)))))
+
+(defn ptrtoint
+  ([node size]
+   (let [node-type (o/type-of node)
+         result-size (o/constant->value size)
+         result-type (Number/UInt result-size)]
+     (if (o/constant-node? node)
+       (let [value (o/constant->value node)]
+         (if (nil? value)
+           (Number/make-constant-number-node result-type 0)
+           (throw (ex-info "value of ptr constants must be nil" {:value value}))))
+       (o/make-node result-type
+         (fn [ctx]
+           (let [ctx (ctx/compile-type ctx result-type)
+                 ctx (ctx/compile-node ctx node)
+                 ins (ir/ptrtoint (ctx/compiled-node ctx node)
+                                  (ctx/compiled-type ctx result-type)
+                                  {})]
+             (ctx/compile-instruction ctx ins)))
+         {:class ::ptrtoint}))))
+  ([node]
+   (ptrtoint node (target/attr :address-size))))
+
+(defmethod o/cast [::Number/UInt ::Ptr]
+  [t node force?]
+  (let [t-size (:size (meta t))]
+    (if (= t-size 1)
+      ;; TODO we should create a dedicated Bool type and use that
+      ;; instead of special-casing the ptr->i1 conversion
+      (o/parse (list '!= (ptrtoint node) 0))
+      (ptrtoint node t-size))))
+
+;; inttoptr TODO
+;; bitcast TODO
+
 (defn pointer-type?
   [t]
   (isa? (o/tid-of-type t) ::Ptr))

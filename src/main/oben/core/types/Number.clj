@@ -281,10 +281,6 @@
 (define-conversion-op uitofp FP float)
 (define-conversion-op sitofp FP float)
 
-;; (define-conversion-op ptrtoint)
-;; (define-conversion-op inttoptr)
-;; (define-conversion-op bitcast)
-
 (defmethod o/cast [::UInt ::UInt]
   [t node force?]
   (let [t-size (:size (meta t))

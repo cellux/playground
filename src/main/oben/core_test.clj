@@ -1444,3 +1444,49 @@
             (let [v {:x x :y y}]
               (vec2-len v)))]
     (m/fact (f 3 4) => 5.0)))
+
+(oben/with-target :inprocess
+  (let [F (o/parse (oben/Fn u16 [u32 f32 (* (Array s8 7))]))]
+    (m/fact F => o/type?)
+    (let [{:keys [return-type param-types]} (meta F)]
+      (m/fact return-type => (m/exactly Number/%u16))
+      (m/fact param-types => (m/exactly (o/parse '[u32 f32 (* (Array s8 7))]))))))
+
+(oben/with-target :inprocess
+  (let [OpFn (o/parse (oben/Fn u32 [u32]))
+        op (o/parse (oben/fn u32 [u32 x] (+ x 1)))]
+    (m/fact op => o/fnode?)
+    (m/fact (o/type-of op) => (m/exactly (Ptr/Ptr OpFn)))
+    (m/fact (o/type-of op) => (m/exactly (o/parse (list '* OpFn))))))
+
+(oben/with-target :inprocess
+  (let [OpFn (oben/Fn u32 [u32])
+        op (oben/fn u32 [u32 x] (+ x 1))
+        f (oben/fn u32 [u32 x]
+            (op x))]
+    (m/fact (f 11) => 12)))
+
+(oben/with-target :inprocess
+  (let [OpFn (oben/Fn u32 [u32])
+        op (oben/fn u32 [u32 x] (+ x 1))
+        f (oben/fn u32 [u32 x]
+            (let [p (var (* OpFn) op)]
+              (@p x)))]
+    (m/fact (f 11) => 12)))
+
+(oben/with-target :inprocess
+  (let [OpFn (oben/Fn u32 [u32])
+        add-1 (oben/fn ^u32 [^u32 x] (+ x 1))
+        mul-3 (oben/fn ^u32 [^u32 x] (* x 3))
+        div-2 (oben/fn ^u32 [^u32 x] (/ x 2))
+        f (oben/fn ^u32 [^u32 x (** OpFn) ops]
+            (let [opfn-ptr (var (** OpFn) ops)
+                  result (var u32 x)]
+              (while @@opfn-ptr
+                (set! result (@@opfn-ptr @result))
+                (set! opfn-ptr (+ @opfn-ptr 1)))
+              @result))
+        g (oben/fn ^u32 [^u32 x]
+            (let [ops (var (array (* OpFn) [add-1 mul-3 div-2 nil]))]
+              (f x (gep ops [0 0]))))]
+    (m/fact (g 11) => (-> 11 (+ 1) (* 3) (/ 2)))))

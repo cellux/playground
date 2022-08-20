@@ -23,3 +23,8 @@
            save-ir)))
    {:return-type return-type
     :param-types param-types}))
+
+(o/defmacro %Fn
+  [return-type param-types]
+  (Fn (o/parse return-type &env)
+      (o/parse param-types &env)))

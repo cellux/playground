@@ -97,11 +97,12 @@
                compile-init
                save-ir)))
        {:class :oben/var})))
-  ([type]
-   (cond (o/type? type) (%var type nil)
-         (o/node? type) (let [init-node type
-                              type (o/type-of init-node)]
-                          (%var type init-node))
+  ([x]
+   (cond (o/type? x) (let [type x]
+                       (%var type nil))
+         (o/node? x) (let [init-node x
+                           type (o/type-of init-node)]
+                       (%var type init-node))
          :else (throw (ex-info "invalid var form" {:type type})))))
 
 (defn %set!
@@ -342,7 +343,7 @@
             body-node (if void?
                         body-node
                         (%cast return-type body-node))]
-        (o/make-node (Fn/Fn return-type param-types)
+        (o/make-node (Ptr/Ptr (Fn/Fn return-type param-types))
           (fn [ctx]
             (let [saved ctx
                   fname (ctx/get-assigned-name ctx)
@@ -371,7 +372,7 @@
                     (merge (select-keys saved
                                         [:f :fdata :compiled-nodes]))))))
           {:class :oben/fn}))
-      (o/make-node (Fn/Fn return-type param-types)
+      (o/make-node (Ptr/Ptr (Fn/Fn return-type param-types))
         (fn [ctx]
           (let [fname (-> ctx :compiling-node meta :name)
                 _ (assert fname)
@@ -388,7 +389,8 @@
 (defn %funcall
   [fnode & args]
   (assert (o/fnode? fnode))
-  (let [{:keys [return-type param-types]} (meta (o/type-of fnode))
+  (let [ftype (-> fnode o/type-of meta :object-type)
+        {:keys [return-type param-types]} (meta ftype)
         args (mapv %cast param-types args)]
     (o/make-node return-type
       (fn [ctx]

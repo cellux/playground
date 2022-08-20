@@ -1015,12 +1015,12 @@
 
 (defn result-type
   [f]
-  (let [[_ result-type param-types] (:type f)]
+  (let [[_ptr [_fn result-type param-types]] (:type f)]
     result-type))
 
 (defn vararg?
   [f]
-  (let [[_ result-type param-types] (:type f)]
+  (let [[_ptr [_fn result-type param-types]] (:type f)]
     (= :& (last param-types))))
 
 (defn call
@@ -1038,7 +1038,7 @@
   [{:keys [callee args] :as i}]
   (let [name (name-of-typed-value i)
         type-str (render-type (if (vararg? callee)
-                                (:type callee)
+                                (let [[_ptr ftype] (:type callee)] ftype)
                                 (result-type callee)))
         callee-name (render-name (name-of-typed-value callee))]
     (if name
@@ -1055,12 +1055,12 @@
 (m/facts
  (m/fact
   (render-instruction
-   (call {:type [:fn :void [i32]] :name 'add}
+   (call {:type [:ptr [:fn :void [i32]]] :name 'add}
          [{:type i32 :name 0}]))
   => "call void @add(i32 %0)")
  (m/fact
   (render-instruction
-   (call {:type [:fn i32 [i32]] :name 1}
+   (call {:type [:ptr [:fn i32 [i32]]] :name 1}
          [(const i32 0)]
          {:name :call}))
   => "%call = call i32 %1(i32 0)"))
@@ -1492,7 +1492,7 @@ end:
             :kind :function
             :name name
             :result-type result-type
-            :type [:fn result-type (map :type params)]
+            :type [:ptr [:fn result-type (map :type params)]]
             :params params
             :basic-blocks nil)))
   ([name result-type params]

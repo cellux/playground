@@ -34,6 +34,23 @@
                           [`(quote ~k) k]))]
      ~@body))
 
+;; Fn/fn/defn
+
+(clj/defn make-fn-type
+  [name return-type param-types lexical-bindings]
+  (let [parse-for-target (memoize
+                          (clj/fn [target]
+                            (o/parse (list 'Fn return-type param-types) lexical-bindings)))]
+    (with-meta
+      #(parse-for-target (target/current))
+      {:kind :oben/FN
+       :parse-for-target parse-for-target})))
+
+(clj/defmacro Fn
+  [return-type param-types]
+  `(with-lexical-bindings bindings#
+     (make-fn-type nil '~return-type '~param-types bindings#)))
+
 (clj/defn fn?
   "Returns true if the argument is a Clojure wrapper around an Oben function."
   [x]
@@ -71,6 +88,8 @@
     `(with-lexical-bindings bindings#
        (def ~name (make-fn '~name '~params '~body bindings#)))))
 
+;; Struct/defstruct
+
 (clj/defn make-struct-type
   [name fields lexical-bindings]
   (let [opts (if name {:name name} nil)
@@ -96,6 +115,8 @@
     `(with-lexical-bindings bindings#
        (def ~name (make-struct-type '~name '~fields bindings#)))))
 
+;; Array
+
 (clj/defn make-array-type
   [name element-type size lexical-bindings]
   (let [opts (if name {:name name} nil)
@@ -115,6 +136,8 @@
 ;; defarray was here but it felt awful
 ;;
 ;; I wonder why defstruct doesn't evoke the same feelings
+
+;; global/defglobal
 
 (clj/defn make-global
   [name opts initializer lexical-bindings]
@@ -137,6 +160,8 @@
   [name opts initializer]
   `(with-lexical-bindings bindings#
      (def ~name (make-global '~name '~opts '~initializer bindings#))))
+
+;; proxies
 
 (clj/defmacro define-typeclass
   [& args]

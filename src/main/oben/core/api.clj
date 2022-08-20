@@ -125,6 +125,8 @@
 
 (derive :oben/HostValue :oben/Any)
 
+(derive :oben/HostNil :oben/HostValue)
+
 (derive :oben/HostBoolean :oben/HostValue)
 
 (derive :oben/HostNumber :oben/HostValue)
@@ -138,6 +140,7 @@
 (defn host-value?
   [x]
   (or
+   (nil? x)
    (boolean? x)
    (number? x)
    (keyword? x)
@@ -147,6 +150,7 @@
 (defn tid-of-host-value
   [x]
   (cond
+    (nil? x) :oben/HostNil
     (boolean? x) :oben/HostBoolean
     (float? x) :oben/HostFloat
     (integer? x) :oben/HostInteger
@@ -247,10 +251,13 @@
     x))
 
 (defn fnode?
-  "Returns true if the argument is an AST node representing an Oben function."
+  "Returns true if the argument is an AST node representing an Oben
+  function pointer."
   [x]
   (and (node? x)
-       (= (class-of-node x) :oben/fn)))
+       (isa? (tid-of-type (type-of x)) :oben.core.types.Ptr/Ptr)
+       (let [{:keys [object-type]} (meta (type-of x))]
+         (isa? (tid-of-type object-type) :oben.core.types.Fn/Fn))))
 
 (clj/defmacro defmacro
   [& args]
@@ -407,13 +414,21 @@
   [form]
   (if (list? form)
     (let [[op & rest] form]
-      (if (and (symbol? op) (all-stars? (str op)))
+      (if (and (symbol? op) (all-stars? (name op)))
         (let [pointee (first rest)]
           (assert pointee)
           (assert (nil? (next rest)))
-          (wrap-in-ptr pointee (count (str op))))
+          (wrap-in-ptr pointee (count (name op))))
         form))
     form))
+
+(defn *-form?
+  [form]
+  (and (list? form)
+       (= 2 (count form))
+       (let [op (first form)]
+         (and (symbol? op)
+              (all-stars? (name op))))))
 
 (defn tagged?
   [x]
@@ -465,7 +480,8 @@
 
 (defn parses-to-itself?
   [form]
-  (or (keyword? form)
+  (or (nil? form)
+      (keyword? form)
       (fn? form)
       (node? form)
       (type? form)
@@ -518,6 +534,9 @@
                              (parse k env)
                              (parse v env)))
                     {} form)
+
+         (*-form? form)
+         (parse (replace-stars-with-ptr form) env)
 
          (sequential? form)
          (let [op (parse (first form) env)
