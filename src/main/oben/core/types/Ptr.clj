@@ -23,7 +23,15 @@
 
 (defmethod o/cast [::Ptr ::Ptr]
   [t node force?]
-  (cond (= t (o/type-of node)) node
+  (cond (= t (o/type-of node))
+        node
+
+        (let [node-object-type (:object-type (meta (o/type-of node)))]
+          (and (isa? (o/tid-of-type node-object-type) :oben.core.types.Array/Array)
+               (let [element-type (:element-type (meta node-object-type))]
+                 (= element-type (:object-type (meta t))))))
+        (o/parse `(gep ~node [0 0]))
+
         :else (throw (ex-info "invalid ptr->ptr cast"
                               {:to-type (meta t)
                                :from-type (meta (o/type-of node))}))))

@@ -1488,5 +1488,5 @@
               @result))
         g (oben/fn ^u32 [^u32 x]
             (let [ops (var (array (* OpFn) [add-1 mul-3 div-2 nil]))]
-              (f x (gep ops [0 0]))))]
+              (f x ops)))]
     (m/fact (g 11) => (-> 11 (+ 1) (* 3) (/ 2)))))
