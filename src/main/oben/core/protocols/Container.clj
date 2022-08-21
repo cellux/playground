@@ -6,8 +6,8 @@
 (o/defmulti get-in)
 (o/defmulti get)
 
-(o/defmulti put-in)
-(o/defmulti put)
+(o/defmulti put-in!)
+(o/defmulti put!)
 
 (o/defmulti assoc-in)
 (o/defmulti assoc)

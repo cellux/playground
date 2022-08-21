@@ -123,5 +123,5 @@
 (def assoc-in oben.core.protocols.Container/assoc-in)
 (def assoc oben.core.protocols.Container/assoc)
 
-(def put-in oben.core.protocols.Container/put-in)
-(def put oben.core.protocols.Container/put)
+(def put-in! oben.core.protocols.Container/put-in!)
+(def put! oben.core.protocols.Container/put!)

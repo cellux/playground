@@ -883,12 +883,12 @@
 
 (oben/with-target :inprocess
   (let [f (oben/fn ^void [(* (Array u64 10)) ret]
-            (put ret 0 (cast u1 0))
-            (put ret 1 (cast u1 1))
-            (put ret 2 (cast u8 0xff))
-            (put ret 3 (cast u16 0xffff))
-            (put ret 4 (cast u32 0xffffffff))
-            (put ret 5 (cast u64 0xffffffffffffffff)))]
+            (put! ret 0 (cast u1 0))
+            (put! ret 1 (cast u1 1))
+            (put! ret 2 (cast u8 0xff))
+            (put! ret 3 (cast u16 0xffff))
+            (put! ret 4 (cast u32 0xffffffff))
+            (put! ret 5 (cast u64 0xffffffffffffffff)))]
     (let [a (long-array 10 0)]
       (f a)
       (m/fact (vec a) => [0 1 0xff 0xffff 0xffffffff -1 0 0 0 0]))))

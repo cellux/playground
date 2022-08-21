@@ -122,17 +122,17 @@
   [ptr key]
   (Container/get-in ptr [key]))
 
-(defmethod Container/put-in [::Ptr :oben/HostVector :oben/Value]
+(defmethod Container/put-in! [::Ptr :oben/HostVector :oben/Value]
   [ptr ks val]
   (let [{:keys [object-type]} (meta (o/type-of ptr))
         tid (o/tid-of-type object-type)]
     (cond (isa? tid :oben/Aggregate)
           `(set! (gep ~ptr [0 ~@ks]) ~val)
-          :else `(put-in (deref ~ptr) ~ks ~val))))
+          :else `(put-in! (deref ~ptr) ~ks ~val))))
 
-(defmethod Container/put [::Ptr :oben/Value :oben/Value]
+(defmethod Container/put! [::Ptr :oben/Value :oben/Value]
   [ptr key val]
-  (Container/put-in ptr [key] val))
+  (Container/put-in! ptr [key] val))
 
 (defmethod Algebra/+ [::Ptr ::Number/Int]
   [ptr offset]
