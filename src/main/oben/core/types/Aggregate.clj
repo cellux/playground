@@ -7,12 +7,12 @@
 (derive :oben/Aggregate :oben/Value)
 
 (defmulti valid-key? (fn [t key] (o/tid-of-type t)))
-(defmulti parse-key (fn [t key] (o/tid-of-type t)))
+(defmulti get-element-index (fn [t key] (o/tid-of-type t)))
 (defmulti get-element-type (fn [t key] (o/tid-of-type t)))
 
 (defn aggregate-type?
   [t]
-  (isa? (o/tid-of-type t) ::Aggregate))
+  (isa? (o/tid-of-type t) :oben/Aggregate))
 
 (defn find-innermost-element-type
   [t keys]
@@ -23,20 +23,24 @@
       (recur element-type (next keys)))
     t))
 
-(defn parse-keys
+(defmethod get-element-index :default
+  [t key]
+  key)
+
+(defn get-element-indices
   [t keys]
   (when (seq keys)
     (let [first-key (first keys)
           _ (assert (valid-key? t first-key))
           element-type (get-element-type t first-key)]
-      (cons (parse-key t first-key)
-            (parse-keys element-type (next keys))))))
+      (cons (get-element-index t first-key)
+            (get-element-indices element-type (next keys))))))
 
 (defmethod Container/get-in [:oben/Aggregate :oben/HostVector]
   [self keys]
   (let [atype (o/type-of self)
         return-type (find-innermost-element-type atype keys)
-        indices (parse-keys atype keys)]
+        indices (get-element-indices atype keys)]
     (o/make-node return-type
       (fn [ctx]
         (letfn [(compile-indices [ctx]
@@ -59,7 +63,7 @@
 (defmethod Container/assoc-in [:oben/Aggregate :oben/HostVector :oben/Value]
   [self keys value]
   (let [atype (o/type-of self)
-        indices (parse-keys atype keys)]
+        indices (get-element-indices atype keys)]
     (o/make-node atype
       (fn [ctx]
         (letfn [(compile-indices [ctx]

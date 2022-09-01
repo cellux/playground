@@ -1296,10 +1296,10 @@
     (m/fact (Aggregate/get-element-type vec2 :y) => (m/exactly Number/%f32))
     (m/fact (Aggregate/get-element-type vec2 0) => (m/exactly Number/%f32))
     (m/fact (Aggregate/get-element-type vec2 1) => (m/exactly Number/%f32))
-    (m/fact (o/constant->value (Aggregate/parse-key vec2 :x)) => 0)
-    (m/fact (o/constant->value (Aggregate/parse-key vec2 :y)) => 1)
-    (m/fact (o/constant->value (Aggregate/parse-key vec2 0)) => 0)
-    (m/fact (o/constant->value (Aggregate/parse-key vec2 1)) => 1))
+    (m/fact (o/constant->value (Aggregate/get-element-index vec2 :x)) => 0)
+    (m/fact (o/constant->value (Aggregate/get-element-index vec2 :y)) => 1)
+    (m/fact (o/constant->value (Aggregate/get-element-index vec2 0)) => 0)
+    (m/fact (o/constant->value (Aggregate/get-element-index vec2 1)) => 1))
   (let [s (o/parse '(Struct [u8 x8 u16 x16 u32 x32 u64 x64
                              s8 y8 s16 y16 s32 y32 s64 y64
                              f32 z32 f64 z64]))
@@ -1322,10 +1322,10 @@
     (m/fact (Aggregate/get-element-type s :y64) => (m/exactly Number/%s64))
     (m/fact (Aggregate/get-element-type s :z32) => (m/exactly Number/%f32))
     (m/fact (Aggregate/get-element-type s :z64) => (m/exactly Number/%f64))
-    (m/fact (o/constant->value (Aggregate/parse-key s :x8)) => 0)
-    (m/fact (o/constant->value (Aggregate/parse-key s :y8)) => 4)
-    (m/fact (o/constant->value (Aggregate/parse-key s :z32)) => 8)
-    (m/fact (o/constant->value (Aggregate/parse-key s :z64)) => 9)))
+    (m/fact (o/constant->value (Aggregate/get-element-index s :x8)) => 0)
+    (m/fact (o/constant->value (Aggregate/get-element-index s :y8)) => 4)
+    (m/fact (o/constant->value (Aggregate/get-element-index s :z32)) => 8)
+    (m/fact (o/constant->value (Aggregate/get-element-index s :z64)) => 9)))
 
 (m/facts
  (m/fact (o/sizeof Number/%u1) => 1)

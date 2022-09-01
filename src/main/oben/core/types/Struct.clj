@@ -146,7 +146,7 @@
     (or (name->index (o/constant->value key))
         (throw (ex-info "struct field not found" {:t t :key key :metadata (meta t)})))))
 
-(defmethod Aggregate/parse-key ::Struct
+(defmethod Aggregate/get-element-index ::Struct
   [t key]
   (let [field-index (get-field-index t key)]
     (Number/make-constant-number-node Number/%u64 field-index)))
