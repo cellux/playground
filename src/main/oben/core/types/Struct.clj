@@ -52,10 +52,6 @@
         struct-opts (merge (meta fields) opts)]
     (Struct field-specs struct-opts)))
 
-(defn struct-type?
-  [t]
-  (isa? (o/tid-of-type t) ::Struct))
-
 (defn field-types->struct-alignment
   [field-types]
   (apply max (map o/alignof field-types)))

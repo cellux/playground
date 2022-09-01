@@ -83,13 +83,10 @@
 ;; inttoptr TODO
 ;; bitcast TODO
 
-(defn pointer-type?
-  [t]
-  (isa? (o/tid-of-type t) ::Ptr))
-
 (defn pointer-node?
   [x]
-  (and (o/node? x) (pointer-type? (o/type-of x))))
+  (and (o/node? x)
+       (isa? (o/tid-of-node x) ::Ptr)))
 
 (defmethod o/sizeof ::Ptr
   [t]

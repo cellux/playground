@@ -31,10 +31,6 @@
   [element-type size & [array-opts]]
   (Array (o/parse element-type &env) size array-opts))
 
-(defn array-type?
-  [t]
-  (isa? (o/tid-of-type t) ::Array))
-
 (defmethod o/sizeof ::Array
   [t]
   (let [{:keys [element-type size]} (meta t)]

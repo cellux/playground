@@ -10,10 +10,6 @@
 (defmulti get-element-index (fn [t key] (o/tid-of-type t)))
 (defmulti get-element-type (fn [t key] (o/tid-of-type t)))
 
-(defn aggregate-type?
-  [t]
-  (isa? (o/tid-of-type t) :oben/Aggregate))
-
 (defn find-innermost-element-type
   [t keys]
   (if (seq keys)
