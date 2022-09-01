@@ -19,10 +19,6 @@
       (recur element-type (next keys)))
     t))
 
-(defmethod get-element-index :default
-  [t key]
-  key)
-
 (defn get-element-indices
   [t keys]
   (when (seq keys)

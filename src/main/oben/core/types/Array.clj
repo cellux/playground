@@ -69,6 +69,10 @@
   (and (o/constant-node? key)
        (isa? (o/tid-of-node key) ::Number/UInt)))
 
+(defmethod Aggregate/get-element-index ::Array
+  [t key]
+  key)
+
 (defmethod Aggregate/get-element-type ::Array
   [t key]
   (:element-type (meta t)))
