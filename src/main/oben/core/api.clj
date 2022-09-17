@@ -296,11 +296,16 @@
 
 ;; portables
 
-(def all-portables (new WeakHashMap))
+(def registered-portables (new WeakHashMap))
+
+(defn register-portable
+  [x]
+  (.put registered-portables x true))
 
 (defn portable?
   [x]
-  (.containsKey all-portables x))
+  (or (.containsKey registered-portables x)
+      (and (fn? x) (has-kind? :oben/PORTABLE x))))
 
 (clj/defmacro defportable-by-attrs
   "Defines a multifn which returns a value that depends on selected
@@ -314,7 +319,7 @@
                          (fn [~'target]
                            (let [~'attr-map (target/attrs* ~'target)]
                              (mapv ~'attr-map ~(ensure-vector dispatch-attrs)))))
-                      `(.put all-portables ~name true)))))
+                      `(register-portable ~name)))))
           (gen-defmethod [dispatch-value method-body]
             `(clj/defmethod ~name ~(ensure-vector dispatch-value) [~'_] ~method-body))]
     `(do
@@ -334,7 +339,7 @@
      (defn ~name
        ~params
        ~@body)
-     (.put all-portables ~name true)
+     (register-portable ~name)
      #'~name))
 
 (clj/defmacro defportable
@@ -468,14 +473,11 @@
   (let [[beg end] (split-with (complement pred) coll)]
     (vector (concat beg (list (first end))) (next end))))
 
-(defn provides-target-specific-parser?
-  [form]
-  (and (instance? clojure.lang.IMeta form)
-       (:parse-for-target (meta form))))
-
 (defn parse-for-target
   [target form]
-  (let [parse (:parse-for-target (meta form))]
+  (let [parse (or (and (fn? form)
+                       (:parse-for-target (meta form)))
+                  form)]
     (parse target)))
 
 (defn parses-to-itself?
@@ -502,7 +504,7 @@
                :else (recur (-> td replace-stars-with-ptr (parse env)))))]
      (try
        (cond
-         (provides-target-specific-parser? form)
+         (portable? form)
          (parse-for-target (target/current) form)
 
          (parses-to-itself? form)
@@ -515,7 +517,7 @@
            ;; variable reference
            (let [result (resolve form env)]
              (if (portable? result)
-               (parse (result (target/current)) env)
+               (parse (parse-for-target (target/current) result) env)
                (parse result env))))
 
          (number? form)

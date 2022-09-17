@@ -24,11 +24,8 @@
           (recur (next candidate-filenames))))
       (throw (ex-info "failed to load dynamic library" {:library-name library-name})))))
 
-(clj/defmacro with-target
-  [t & body]
-  `(target/with-target ~t ~@body))
-
 (clj/defmacro with-lexical-bindings
+  "Evaluates body with sym bound to a map of current lexical bindings."
   [sym & body]
   `(let [~sym ~(into {} (for [k (keys &env)]
                           [`(quote ~k) k]))]
@@ -37,27 +34,22 @@
 ;; Fn/fn/defn
 
 (clj/defn make-fn-type
-  [name return-type param-types lexical-bindings]
-  (let [parse-for-target (memoize
-                          (clj/fn [target]
-                            (o/parse (list 'Fn return-type param-types) lexical-bindings)))]
-    (with-meta
-      #(parse-for-target (target/current))
-      {:kind :oben/FN
-       :parse-for-target parse-for-target})))
+  [return-type param-types lexical-bindings]
+  (with-meta
+    (memoize
+     (clj/fn [target]
+       (o/parse (list 'Fn return-type param-types) lexical-bindings)))
+    {:kind :oben/PORTABLE}))
 
 (clj/defmacro Fn
   [return-type param-types]
   `(with-lexical-bindings bindings#
-     (make-fn-type nil '~return-type '~param-types bindings#)))
-
-(clj/defn fn?
-  "Returns true if the argument is a Clojure wrapper around an Oben function."
-  [x]
-  (and (clj/fn? x) (o/has-kind? :oben/FN x)))
+     (make-fn-type '~return-type '~param-types bindings#)))
 
 (clj/defn make-fn
   [name params body lexical-bindings]
+  (assert (vector? params) "invalid fn")
+  (assert (:tag (meta params)) "fn without return type")
   (let [parse-for-target (memoize
                           (clj/fn [target]
                             (-> (o/parse (list* 'fn params body)
@@ -65,26 +57,26 @@
                                 (vary-meta assoc :name name))))]
     (with-meta
       (clj/fn [& args]
-        (assert (= (count args) (count params)))
+        (assert (= (count args) (count params))
+                (format "invalid number of arguments in function call: expected %d, got %d"
+                        (count params) (count args)))
         (let [target (target/current)
               fnode (parse-for-target target)]
           (target/invoke-function target fnode args)))
-      {:kind :oben/FN
+      {:kind :oben/PORTABLE
        :parse-for-target parse-for-target})))
 
 (clj/defmacro fn
   [& decl]
-  (let [[params body] (o/split-after vector? decl)
-        params (first (o/move-types-to-meta params))
-        _ (assert (vector? params))]
+  (let [[signature body] (o/split-after vector? decl)
+        params (first (o/move-types-to-meta signature))]
     `(with-lexical-bindings bindings#
        (make-fn nil '~params '~body bindings#))))
 
 (clj/defmacro defn
   [name & decl]
-  (let [[params body] (o/split-after vector? decl)
-        params (first (o/move-types-to-meta params))
-        _ (assert (vector? params))]
+  (let [[signature body] (o/split-after vector? decl)
+        params (first (o/move-types-to-meta signature))]
     `(with-lexical-bindings bindings#
        (def ~name (make-fn '~name '~params '~body bindings#)))))
 
@@ -92,26 +84,23 @@
 
 (clj/defn make-struct-type
   [name fields lexical-bindings]
-  (let [opts (if name {:name name} nil)
-        parse-for-target (memoize
-                          (clj/fn [target]
-                            (o/parse (list 'Struct fields opts) lexical-bindings)))]
+  (assert (vector? fields) "invalid struct")
+  (let [opts (if name {:name name} nil)]
     (with-meta
-      #(parse-for-target (target/current))
-      {:kind :oben/STRUCT
-       :parse-for-target parse-for-target})))
+      (memoize
+       (clj/fn [target]
+         (o/parse (list 'Struct fields opts) lexical-bindings)))
+      {:kind :oben/PORTABLE})))
 
 (clj/defmacro Struct
   [fields]
-  (let [fields (o/move-types-to-meta fields)
-        _ (assert (vector? fields))]
+  (let [fields (o/move-types-to-meta fields)]
     `(with-lexical-bindings bindings#
        (make-struct-type nil '~fields bindings#))))
 
 (clj/defmacro defstruct
   [name fields]
-  (let [fields (o/move-types-to-meta fields)
-        _ (assert (vector? fields))]
+  (let [fields (o/move-types-to-meta fields)]
     `(with-lexical-bindings bindings#
        (def ~name (make-struct-type '~name '~fields bindings#)))))
 
@@ -119,37 +108,29 @@
 
 (clj/defn make-array-type
   [name element-type size lexical-bindings]
-  (let [opts (if name {:name name} nil)
-        parse-for-target (memoize
-                          (clj/fn [target]
-                            (o/parse (list 'Array element-type size opts) lexical-bindings)))]
+  (let [opts (if name {:name name} nil)]
     (with-meta
-      #(parse-for-target (target/current))
-      {:kind :oben/ARRAY
-       :parse-for-target parse-for-target})))
+      (memoize
+       (clj/fn [target]
+         (o/parse (list 'Array element-type size opts) lexical-bindings)))
+      {:kind :oben/PORTABLE})))
 
 (clj/defmacro Array
   [element-type size]
   `(with-lexical-bindings bindings#
      (make-array-type nil '~element-type '~size bindings#)))
 
-;; defarray was here but it felt awful
-;;
-;; I wonder why defstruct doesn't evoke the same feelings
-
 ;; global/defglobal
 
 (clj/defn make-global
   [name opts initializer lexical-bindings]
   (let [opts (if (map? opts) opts {:tag opts})
-        opts (if name (assoc opts :name name) opts)
-        parse-for-target (memoize
-                          (clj/fn [target]
-                            (o/parse (list 'global opts initializer) lexical-bindings)))]
+        opts (if name (assoc opts :name name) opts)]
     (with-meta
-      #(parse-for-target (target/current))
-      {:kind :oben/GLOBAL
-       :parse-for-target parse-for-target})))
+      (memoize
+       (clj/fn [target]
+         (o/parse (list 'global opts initializer) lexical-bindings)))
+      {:kind :oben/PORTABLE})))
 
 (clj/defmacro global
   [opts initializer]
@@ -162,6 +143,10 @@
      (def ~name (make-global '~name '~opts '~initializer bindings#))))
 
 ;; proxies
+
+(clj/defmacro with-target
+  [t & body]
+  `(target/with-target ~t ~@body))
 
 (clj/defmacro define-typeclass
   [& args]

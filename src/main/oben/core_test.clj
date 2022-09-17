@@ -837,18 +837,13 @@
        expected (oben/make-array-type nil 'u64 10 nil)]
    (m/fact actual =not=> (m/exactly expected)))
  (let [*actual (oben/make-array-type nil 'u64 10 nil)
-       actual (*actual)
+       actual (o/parse-for-target (target/current) *actual)
        *expected (oben/make-array-type nil 'u64 10 nil)
-       expected (*expected)]
+       expected (o/parse-for-target (target/current) *expected)]
    (m/fact (meta actual) => (m/exactly (meta expected)))
    (m/fact actual => (m/exactly expected)))
  (let [actual (oben/make-array-type nil 'u64 10 nil)
-       actual ((:parse-for-target (meta actual)) (target/current))
-       expected (oben/make-array-type nil 'u64 10 nil)
-       expected ((:parse-for-target (meta expected)) (target/current))]
-   (m/fact actual => (m/exactly expected)))
- (let [actual (:parse-for-target (meta (oben/make-array-type nil 'u64 10 nil)))
-       expected (:parse-for-target (meta (oben/make-array-type nil 'u64 10 nil)))]
+       expected (oben/make-array-type nil 'u64 10 nil)]
    (m/fact actual =not=> (m/exactly expected)))
  (let [actual (o/parse (oben/make-array-type nil 'u64 10 nil))
        expected (o/parse (oben/make-array-type nil 'u64 10 nil))]

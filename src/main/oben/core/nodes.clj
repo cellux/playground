@@ -329,8 +329,8 @@
 
 (o/defmacro %fn
   [& decl]
-  (let [[params body] (o/split-after vector? decl)
-        params (o/parse (first (o/move-types-to-meta params)) &env)
+  (let [[signature body] (o/split-after vector? decl)
+        params (o/parse (first (o/move-types-to-meta signature)) &env)
         _ (assert (vector? params))
         return-type (o/resolve-type-from-meta params)
         param-types (mapv o/resolve-type-from-meta params)
