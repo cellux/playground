@@ -106,14 +106,6 @@
           :type type}
          opts))
 
-(defn make-constant-node
-  {:style/indent 1}
-  [type host-value compile-fn]
-  (make-node type
-             compile-fn
-             {:class :oben/constant
-              :host-value host-value}))
-
 (def class-of-node (comp :class meta))
 
 (def type-of-node (comp :type meta))
@@ -121,21 +113,42 @@
 
 (def tid-of-node (comp tid-of-type type-of-node))
 
+;; constant nodes
+
+(defn make-constant-node
+  {:style/indent 1}
+  [type host-value compile-fn]
+  (make-node type
+    compile-fn
+    {:class :oben/constant
+     :host-value host-value}))
+
+(defn constant-node?
+  [x]
+  (and (node? x)
+       (= (class-of-node x) :oben/constant)))
+
+(defn constant->value
+  "If the argument is a constant node, returns its value.
+  Otherwise returns the argument unchanged."
+  [x]
+  (if (constant-node? x)
+    (:host-value (meta x))
+    x))
+
 ;; host values
 
 (derive :oben/HostValue :oben/Any)
 
 (derive :oben/HostNil :oben/HostValue)
-
 (derive :oben/HostBoolean :oben/HostValue)
+(derive :oben/HostKeyword :oben/HostValue)
+(derive :oben/HostVector :oben/HostValue)
+(derive :oben/HostMap :oben/HostValue)
 
 (derive :oben/HostNumber :oben/HostValue)
 (derive :oben/HostInteger :oben/HostNumber)
 (derive :oben/HostFloat :oben/HostNumber)
-
-(derive :oben/HostKeyword :oben/HostValue)
-(derive :oben/HostVector :oben/HostValue)
-(derive :oben/HostMap :oben/HostValue)
 
 (defn host-value?
   [x]
@@ -237,25 +250,12 @@
   ([t1 t2 t3 & ts]
    (apply ubertype-of (ubertype-of t1 t2) t3 ts)))
 
-(defn constant-node?
-  [x]
-  (and (node? x)
-       (= (class-of-node x) :oben/constant)))
-
-(defn constant->value
-  "If the argument is a constant node, return its value.
-  Otherwise return the argument unchanged."
-  [x]
-  (if (constant-node? x)
-    (:host-value (meta x))
-    x))
-
 (defn fnode?
   "Returns true if the argument is an AST node representing an Oben
-  function pointer."
+  function (pointer)."
   [x]
   (and (node? x)
-       (isa? (tid-of-type (type-of x)) :oben.core.types.Ptr/Ptr)
+       (isa? (tid-of-node x) :oben.core.types.Ptr/Ptr)
        (let [{:keys [object-type]} (meta (type-of x))]
          (isa? (tid-of-type object-type) :oben.core.types.Fn/Fn))))
 
