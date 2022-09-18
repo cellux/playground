@@ -11,11 +11,11 @@
    [oben.core.types.Void :as Void]
    [oben.core.types.Unseen :as Unseen]
    [oben.core.types.Number :as Number]
-   [oben.core.types.Ptr :as Ptr]
+   [oben.core.types.Ptr :as Ptr :refer [Ptr]]
    [oben.core.types.Aggregate :as Aggregate]
-   [oben.core.types.Array :as Array]
-   [oben.core.types.Struct :as Struct]
-   [oben.core.types.Fn :as Fn])
+   [oben.core.types.Array :as Array :refer [Array]]
+   [oben.core.types.Struct :as Struct :refer [Struct]]
+   [oben.core.types.Fn :as Fn :refer [Fn]])
   (:use
    [midje.repl]))
 
@@ -35,15 +35,15 @@
  (m/fact (compile-type (Number/SInt 16)) => [:integer 16])
  (m/fact (compile-type (Number/FP 32)) => :float)
  (m/fact (compile-type (Number/FP 64)) => :double)
- (m/fact (compile-type (Ptr/Ptr (Number/SInt 16))) => [:ptr [:integer 16]])
- (m/fact (compile-type (Array/Array (Number/SInt 16) 8)) => [:array [:integer 16] 8])
- (m/fact (compile-type (Struct/Struct [{:name 'x :type (Number/FP 32)}
-                                       {:name 'y :type (Number/FP 32)}
-                                       {:name 'z :type (Number/FP 32)}]
-                                      {:name 'Vec3}))
+ (m/fact (compile-type (Ptr (Number/SInt 16))) => [:ptr [:integer 16]])
+ (m/fact (compile-type (Array (Number/SInt 16) 8)) => [:array [:integer 16] 8])
+ (m/fact (compile-type (Struct [{:name 'x :type (Number/FP 32)}
+                                {:name 'y :type (Number/FP 32)}
+                                {:name 'z :type (Number/FP 32)}]
+                               {:name 'Vec3}))
          => [:struct 'Vec3.0.0 [:float :float :float]])
- (m/fact (compile-type (Fn/Fn (Number/UInt 64)
-                              [(Number/FP 64) (Number/FP 32)]))
+ (m/fact (compile-type (Fn (Number/UInt 64)
+                           [(Number/FP 64) (Number/FP 32)]))
          => [:fn [:integer 64] [:double :float]]))
 
 (m/facts
@@ -66,9 +66,9 @@
 (m/facts
  "type constructors memoize the types they return"
  (m/fact (Number/UInt 32) => (m/exactly (Number/UInt 32)))
- (let [ft (Fn/Fn (Number/UInt 64) [(Number/FP 64) (Number/FP 32)])
-       t (Array/Array (Ptr/Ptr ft) 10)]
-   (m/fact (Array/Array (Ptr/Ptr ft) 10) => (m/exactly t))))
+ (let [ft (Fn (Number/UInt 64) [(Number/FP 64) (Number/FP 32)])
+       t (Array (Ptr ft) 10)]
+   (m/fact (Array (Ptr ft) 10) => (m/exactly t))))
 
 (oben/with-target :inprocess
   (let [f (oben/fn ^u32 [] (+ 5 2))]
@@ -860,19 +860,19 @@
  (let [actual (o/parse (make-array-type u64 10))
        expected (o/parse (make-array-type Number/%u64 10))]
    (m/fact actual => (m/exactly expected)))
- (m/fact (Ptr/Ptr (make-array-type Number/%u64 10))
-         => (m/exactly (Ptr/Ptr (make-array-type Number/%u64 10))))
+ (m/fact (Ptr (make-array-type Number/%u64 10))
+         => (m/exactly (Ptr (make-array-type Number/%u64 10))))
  (let [actual (o/parse '(Array u64 10))
        expected (make-array-type Number/%u64 10)]
    (m/fact actual => (m/exactly expected))))
 
 (m/facts
  (let [result (o/parse (with-meta 'x {:tag '(* (Array u64 10))}))
-       expected-type (Ptr/Ptr (make-array-type Number/%u64 10))]
+       expected-type (Ptr (make-array-type Number/%u64 10))]
    (m/fact result => 'x)
    (m/fact (:tag (meta result)) => (m/exactly expected-type)))
  (let [result (o/parse (with-meta 'ret {:tag (list '* (list 'Array 'u64 10))}))
-       expected-type (Ptr/Ptr (make-array-type Number/%u64 10))]
+       expected-type (Ptr (make-array-type Number/%u64 10))]
    (m/fact result => 'ret)
    (m/fact (:tag (meta result)) => (m/exactly expected-type))))
 
@@ -895,7 +895,7 @@
 
 (oben/with-target :inprocess
   (let [a (into-array Integer/TYPE [9 8 7 6 5 4 3 2 1 0])
-        f (oben/fn ^u32 [(Ptr/Ptr (Number/UInt 32)) a
+        f (oben/fn ^u32 [(Ptr (Number/UInt 32)) a
                          ^u32 index]
             @(+ a index))]
     (m/fact (f a 3) => 6)))
@@ -906,7 +906,7 @@
                          ^u32 index]
             @(+ a index))]
     (m/fact
-     "(* type) is a shortcut for (Ptr/Ptr type)"
+     "(* type) is a shortcut for (Ptr type)"
      (f a 3) => 6)))
 
 (oben/with-target :inprocess
@@ -1382,7 +1382,7 @@
    (m/fact (sizeof-struct [u8 u8]) => 2)
    (m/fact (sizeof-struct [u8 f32]) => 8)
    (m/fact (sizeof-struct [f32 u8]) => 8)
-   (m/fact (sizeof-struct [f32 (Ptr/Ptr f64) u8]) => 24)))
+   (m/fact (sizeof-struct [f32 (Ptr f64) u8]) => 24)))
 
 (oben/with-target
   {:type :inprocess
@@ -1392,7 +1392,7 @@
    (m/fact (sizeof-struct [u8 u8]) => 2)
    (m/fact (sizeof-struct [u8 f32]) => 8)
    (m/fact (sizeof-struct [f32 u8]) => 8)
-   (m/fact (sizeof-struct [f32 (Ptr/Ptr f64) u8]) => 12)))
+   (m/fact (sizeof-struct [f32 (Ptr f64) u8]) => 12)))
 
 (oben/with-target :inprocess
   (let [f (oben/fn ^u32 [^u32 x]
@@ -1501,7 +1501,7 @@
   (let [OpFn (o/parse (oben/Fn u32 [u32]))
         op (o/parse (oben/fn u32 [u32 x] (+ x 1)))]
     (m/fact op => o/fnode?)
-    (m/fact (o/type-of op) => (m/exactly (Ptr/Ptr OpFn)))
+    (m/fact (o/type-of op) => (m/exactly (Ptr OpFn)))
     (m/fact (o/type-of op) => (m/exactly (o/parse (list '* OpFn))))))
 
 (oben/with-target :inprocess
