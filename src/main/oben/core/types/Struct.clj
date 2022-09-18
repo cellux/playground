@@ -152,6 +152,12 @@
   (let [field-index (get-field-index t key)]
     (get (:field-types (meta t)) field-index)))
 
+(def get-element Aggregate/get-element)
+(def get-element-in Aggregate/get-element-in)
+
+(def assoc-element Aggregate/assoc-element)
+(def assoc-element-in Aggregate/assoc-element-in)
+
 (o/defmacro %struct
   [fields initializer]
   `(cast (Struct ~fields) ~initializer))

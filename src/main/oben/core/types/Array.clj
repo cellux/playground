@@ -77,6 +77,12 @@
   [t key]
   (:element-type (meta t)))
 
+(def get-element Aggregate/get-element)
+(def get-element-in Aggregate/get-element-in)
+
+(def assoc-element Aggregate/assoc-element)
+(def assoc-element-in Aggregate/assoc-element-in)
+
 (defn %array
   [element-type initializer]
   (let [size (count initializer)

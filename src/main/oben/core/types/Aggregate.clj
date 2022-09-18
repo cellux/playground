@@ -28,11 +28,11 @@
       (cons (get-element-index t first-key)
             (get-element-indices element-type (next keys))))))
 
-(defmethod Container/get-in [:oben/Aggregate :oben/HostVector]
+(defn get-element-in
   [self keys]
-  (let [atype (o/type-of self)
-        return-type (find-innermost-element-type atype keys)
-        indices (get-element-indices atype keys)]
+  (let [t (o/type-of self)
+        return-type (find-innermost-element-type t keys)
+        indices (get-element-indices t keys)]
     (o/make-node return-type
       (fn [ctx]
         (letfn [(compile-indices [ctx]
@@ -48,15 +48,23 @@
               compile-indices
               compile-extractvalue))))))
 
+(defn get-element
+  [self key]
+  (get-element-in self [key]))
+
+(defmethod Container/get-in [:oben/Aggregate :oben/HostVector]
+  [self keys]
+  (get-element-in self keys))
+
 (defmethod Container/get [:oben/Aggregate :oben/Any]
   [self key]
-  (Container/get-in self [key]))
+  (get-element self key))
 
-(defmethod Container/assoc-in [:oben/Aggregate :oben/HostVector :oben/Value]
+(defn assoc-element-in
   [self keys value]
-  (let [atype (o/type-of self)
-        indices (get-element-indices atype keys)]
-    (o/make-node atype
+  (let [t (o/type-of self)
+        indices (get-element-indices t keys)]
+    (o/make-node t
       (fn [ctx]
         (letfn [(compile-indices [ctx]
                   (reduce ctx/compile-node ctx indices))
@@ -75,6 +83,14 @@
               compile-indices
               compile-insertvalue))))))
 
+(defn assoc-element
+  [self key value]
+  (assoc-element-in self [key] value))
+
+(defmethod Container/assoc-in [:oben/Aggregate :oben/HostVector :oben/Value]
+  [self keys value]
+  (assoc-element-in self keys value))
+
 (defmethod Container/assoc [:oben/Aggregate :oben/Any :oben/Value]
   [self key value]
-  (Container/assoc-in self [key] value))
+  (assoc-element self key value))
