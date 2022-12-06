@@ -1,18 +1,22 @@
-(ns rb.explores.vice
+(ns omkamra.vice
   (:require
-   [rb.explores.vice.remote-monitor :as rm]))
+   [omkamra.vice.binary-monitor :as bm]))
 
 (defn connect
   [& args]
   (loop [args args
-         host rm/default-host
-         port rm/default-port
+         host bm/default-host
+         port bm/default-port
          handle-event prn]
     (if-let [arg (first args)]
       (cond (string? arg) (recur (rest args) arg port handle-event)
             (integer? arg) (recur (rest args) host arg handle-event)
             (fn? arg) (recur (rest args) host port arg))
-      (rm/connect host port handle-event))))
+      (bm/connect host port handle-event))))
+
+(defn close
+  [conn]
+  (bm/close conn))
 
 (defmacro with-conn
   [conn & body]
@@ -20,4 +24,4 @@
      (try
        ~@body
        (finally
-         (rm/close ~conn)))))
+         (bm/close ~conn)))))

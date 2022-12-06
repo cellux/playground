@@ -1,4 +1,4 @@
-(ns rb.explores.vice.remote-monitor
+(ns omkamra.vice.binary-monitor
   (:import
    [java.net Socket SocketException]
    [java.nio ByteBuffer]
