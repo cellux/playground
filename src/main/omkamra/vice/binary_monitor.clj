@@ -154,7 +154,7 @@
                                     error-code (read-byte in)
                                     _ (assert (zero? error-code) (format "error %d" error-code))
                                     request-id (read-int in)
-                                    _ (println (format "request_id: %x got response of type: %02x length: %d" request-id response-type len))
+                                    ;; _ (println (format "request_id: %x got response of type: %02x length: %d" request-id response-type len))
                                     response (read-response response-type in)]
                                 (if (= request-id 0xffffffff)
                                   (handle-event response-type response)
