@@ -13,12 +13,9 @@
 (def *context
   (atom
    (fx/create-context
-    {:vice {:options {:rm-host "127.0.0.1"
-                      :rm-port 6510
-                      :bm-host "127.0.0.1"
+    {:vice {:options {:bm-host "127.0.0.1"
                       :bm-port 6502}
             :process nil                ; vice emulator process
-            :rm-conn nil                ; remote monitor connection
             :bm-conn nil                ; binary monitor connection
             :paused? false
             }
@@ -70,9 +67,6 @@
 
 (defn vice-process [ctx]
   (lookup ctx [:vice :process]))
-
-(defn vice-rm-conn [ctx]
-  (lookup ctx [:vice :rm-conn]))
 
 (defn vice-bm-conn [ctx]
   (lookup ctx [:vice :bm-conn]))
