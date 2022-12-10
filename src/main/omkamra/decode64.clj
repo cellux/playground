@@ -1,4 +1,4 @@
-(ns omkamra.decoder64
+(ns omkamra.decode64
   (:require [cljfx.api :as fx]
             [cljfx.prop :as fx.prop]
             [cljfx.mutator :as fx.mutator]
@@ -16,7 +16,7 @@
                       :rm-port 6510
                       :bm-host "127.0.0.1"
                       :bm-port 6502}
-            :process nil
+            :process nil                ; vice emulator process
             :rm-conn nil                ; remote monitor connection
             :bm-conn nil                ; binary monitor connection
             }
@@ -82,7 +82,7 @@
   (some? (vice-bm-conn ctx)))
 
 (defmethod handle-event :default [e]
-  {:dispatch (log-debug (format "unhandled event: %s" e))})
+  {:dispatch (log-debug (format "unhandled event: %s" (dissoc e :fx/context)))})
 
 (defn process-start
   [{:keys [command on-start on-exit on-error] :as v} dispatch!]
@@ -109,29 +109,30 @@
   [{:keys [bm-host bm-port]} dispatch!]
   (future
     (let [event-handler (fn [response-type response]
-                          (dispatch! (log-debug (format "Got VICE event: response-type=%s response=%s"
-                                                        response-type response)))
                           (dispatch! {:event/type :vice/response
                                       :response-type response-type
                                       :response response}))
+          connect (fn []
+                    (try
+                      (dispatch! (log-info (format "Attempting to connect to VICE binary monitor at %s:%d"
+                                                   bm-host bm-port)))
+                      (vice/connect bm-host bm-port event-handler)
+                      (catch Throwable t
+                        (dispatch! (log-error (format "Connection to binary monitor failed: %s" t)))
+                        nil)))
           max-retries 10
-          bm-conn (loop [retries max-retries]
-                    (if (zero? retries)
-                      nil
-                      (if-let [conn (try
-                                      (dispatch! (log-info (format "Attempting to connect to VICE at %s:%d"
-                                                                   bm-host bm-port)))
-                                      (vice/connect bm-host bm-port event-handler)
-                                      (catch Throwable t
-                                        (dispatch! (log-error (format "connection failed: %s" t)))
-                                        nil))]
-                        conn
-                        (do
-                          (dispatch! (log-info (format "Retrying [%d/%d]"
-                                                       (inc (- max-retries retries))
-                                                       max-retries)))
-                          (Thread/sleep 1000)
-                          (recur (dec retries))))))]
+          bm-conn (loop [conn (connect)
+                         current-retry 1]
+                    (or conn
+                        (if (= current-retry max-retries)
+                          nil
+                          (do
+                            (dispatch! (log-info (format "Retrying [%d/%d]"
+                                                         current-retry
+                                                         max-retries)))
+                            (Thread/sleep 1000)
+                            (recur (connect)
+                                   (inc current-retry))))))]
       (if bm-conn
         (do
           (dispatch! (log-info "Successfully connected to VICE monitor."))
@@ -142,7 +143,18 @@
 (defn vice-disconnect
   [{:keys [bm-conn]} dispatch!]
   (dispatch! (log-info "Closing connection to VICE monitor."))
-  (vice/close bm-conn))
+  (vice/close bm-conn)
+  (dispatch! {:event/type :vice/bm-disconnected}))
+
+(defmulti vice-send-request
+  (fn [opts dispatch!]
+    (:command opts)))
+
+(defmethod vice-send-request :reset
+  [{:keys [bm-conn]} dispatch!]
+  (future
+    (dispatch! (log-debug "Sending RESET to VICE."))
+    (vice.bm/reset bm-conn)))
 
 (defmethod handle-event :vice/start-request [{:keys [fx/context]}]
   {:process/start {:command ["x64sc",
@@ -162,19 +174,20 @@
 (defmethod handle-event :vice/bm-connected [{:keys [fx/context bm-conn]}]
   {:context (fx/swap-context context assoc-in [:vice :bm-conn] bm-conn)})
 
+(defmethod handle-event :vice/bm-disconnected [{:keys [fx/context]}]
+  {:context (fx/swap-context context update :vice dissoc :bm-conn)})
+
 (defmethod handle-event :vice/exited [{:keys [fx/context exit-code]}]
-  {:context (fx/swap-context context #(-> %
-                                          (assoc-in [:vice :process] nil)
-                                          (assoc-in [:vice :rm-conn] nil)
-                                          (assoc-in [:vice :bm-conn] nil)))})
+  {:context (fx/swap-context context update :vice dissoc :process)})
 
 (defmethod handle-event :vice/stop-request [{:keys [fx/context]}]
   (when-let [process (vice-process context)]
     [[:vice/disconnect {:bm-conn (vice-bm-conn context)}]
      [:process/stop {:process process}]]))
 
-(defmethod handle-event :vice/restart [{:keys [fx/context]}]
-  {})
+(defmethod handle-event :vice/reset-request [{:keys [fx/context]}]
+  {:vice/send-request {:command :reset
+                       :bm-conn (vice-bm-conn context)}})
 
 (def log-viewer
   (fx/make-ext-with-props
@@ -194,7 +207,8 @@
    :effects {:process/start process-start
              :process/stop process-stop
              :vice/connect vice-connect
-             :vice/disconnect vice-disconnect}
+             :vice/disconnect vice-disconnect
+             :vice/send-request vice-send-request}
    :desc-fn (fn [ctx]
               {:fx/type :stage
                :showing true
@@ -219,9 +233,9 @@
                      :disable (not (fx/sub-ctx ctx vice-running?))
                      :on-action {:event/type :vice/stop-request}}
                     {:fx/type :button
-                     :text "Restart"
+                     :text "Reset"
                      :disable (not (fx/sub-ctx ctx vice-running?))
-                     :on-action {:event/type :vice/restart-request}}
+                     :on-action {:event/type :vice/reset-request}}
                     {:fx/type :check-box
                      :text "Connected"
                      :selected (fx/sub-ctx ctx vice-connected?)}
@@ -232,3 +246,5 @@
                    :props {:log-lines (fx/sub-ctx ctx app-log-lines)}
                    :desc {:fx/type :text-area
                           :editable false}}]}}})))
+
+;; ((:renderer app))

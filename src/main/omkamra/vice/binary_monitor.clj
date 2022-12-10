@@ -154,7 +154,7 @@
                                     error-code (read-byte in)
                                     _ (assert (zero? error-code) (format "error %d" error-code))
                                     request-id (read-int in)
-                                    ;; _ (println (format "request_id: %x got response of type: %02x length: %d" request-id response-type len))
+                                    _ (println (format "request_id: %x got response of type: %02x length: %d" request-id response-type len))
                                     response (read-response response-type in)]
                                 (if (= request-id 0xffffffff)
                                   (handle-event response-type response)
@@ -507,8 +507,10 @@
   (send-request conn MON_CMD_QUIT "" []))
 
 (defn reset
-  [conn {:keys [what]}]
-  (send-request conn MON_CMD_RESET "1" [(or what 1)]))
+  ([conn]
+   (reset conn {:what 1}))
+  ([conn {:keys [what]}]
+   (send-request conn MON_CMD_RESET "1" [what])))
 
 (defn autostart
   [conn {:keys [run-after-load? file-index filename]}]
