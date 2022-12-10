@@ -19,6 +19,7 @@
             :process nil                ; vice emulator process
             :rm-conn nil                ; remote monitor connection
             :bm-conn nil                ; binary monitor connection
+            :paused? false
             }
      :log-lines []}
     cache/lru-cache-factory)))
@@ -78,6 +79,9 @@
 (defn vice-running? [ctx]
   (some? (vice-process ctx)))
 
+(defn vice-paused? [ctx]
+  (lookup ctx [:vice :paused?]))
+
 (defn vice-connected? [ctx]
   (some? (vice-bm-conn ctx)))
 
@@ -104,6 +108,13 @@
   (when process
     (dispatch! (log-info (format "[%d] Killing process" (.pid process))))
     (.destroy process)))
+
+(defmethod handle-event :vice/response
+  [{:keys [fx/context response-type response]}]
+  (condp = response-type
+    vice.bm/MON_RESPONSE_STOPPED {:context (fx/swap-context context assoc-in [:vice :paused?] true)}
+    vice.bm/MON_RESPONSE_RESUMED {:context (fx/swap-context context assoc-in [:vice :paused?] false)}
+    {:dispatch (log-debug (format "unhandled VICE response: 0x%02x %s" response-type response))}))
 
 (defn vice-connect
   [{:keys [bm-host bm-port]} dispatch!]
@@ -156,6 +167,18 @@
     (dispatch! (log-debug "Sending RESET to VICE."))
     (vice.bm/reset bm-conn)))
 
+(defmethod vice-send-request :pause
+  [{:keys [bm-conn]} dispatch!]
+  (future
+    (dispatch! (log-debug "Pausing VICE."))
+    (vice.bm/ping bm-conn)))
+
+(defmethod vice-send-request :resume
+  [{:keys [bm-conn]} dispatch!]
+  (future
+    (dispatch! (log-debug "Resuming VICE."))
+    (vice.bm/exit bm-conn)))
+
 (defmethod handle-event :vice/start-request [{:keys [fx/context]}]
   {:process/start {:command ["x64sc",
                              "-pal",
@@ -187,6 +210,14 @@
 
 (defmethod handle-event :vice/reset-request [{:keys [fx/context]}]
   {:vice/send-request {:command :reset
+                       :bm-conn (vice-bm-conn context)}})
+
+(defmethod handle-event :vice/pause-request [{:keys [fx/context]}]
+  {:vice/send-request {:command :pause
+                       :bm-conn (vice-bm-conn context)}})
+
+(defmethod handle-event :vice/resume-request [{:keys [fx/context]}]
+  {:vice/send-request {:command :resume
                        :bm-conn (vice-bm-conn context)}})
 
 (def log-viewer
@@ -236,6 +267,14 @@
                      :text "Reset"
                      :disable (not (fx/sub-ctx ctx vice-running?))
                      :on-action {:event/type :vice/reset-request}}
+                    {:fx/type :button
+                     :text "Pause"
+                     :disable (fx/sub-ctx ctx vice-paused?)
+                     :on-action {:event/type :vice/pause-request}}
+                    {:fx/type :button
+                     :text "Resume"
+                     :disable (not (fx/sub-ctx ctx vice-paused?))
+                     :on-action {:event/type :vice/resume-request}}
                     {:fx/type :check-box
                      :text "Connected"
                      :selected (fx/sub-ctx ctx vice-connected?)}
