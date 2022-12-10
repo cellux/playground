@@ -514,7 +514,7 @@
 
 (defn autostart
   [conn {:keys [run-after-load? file-index filename]}]
-  (let [filename-bytes (-> bytes filename)]
+  (let [filename-bytes (->bytes filename)]
     (send-request conn MON_CMD_AUTOSTART "121b"
                   [run-after-load?
                    file-index

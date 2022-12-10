@@ -7,7 +7,8 @@
             [clojure.core.cache :as cache]
             [clojure.string :as str]
             [omkamra.vice :as vice]
-            [omkamra.vice.binary-monitor :as vice.bm]))
+            [omkamra.vice.binary-monitor :as vice.bm])
+  (:import [javafx.stage FileChooser]))
 
 (def *context
   (atom
@@ -116,6 +117,12 @@
     vice.bm/MON_RESPONSE_RESUMED {:context (fx/swap-context context assoc-in [:vice :paused?] false)}
     {:dispatch (log-debug (format "unhandled VICE response: 0x%02x %s" response-type response))}))
 
+(defmethod handle-event :vice/autostart
+  [{:keys [fx/context file]}]
+  {:vice/send-request {:command :autostart
+                       :bm-conn (vice-bm-conn context)
+                       :file file}})
+
 (defn vice-connect
   [{:keys [bm-host bm-port]} dispatch!]
   (future
@@ -179,6 +186,23 @@
     (dispatch! (log-debug "Resuming VICE."))
     (vice.bm/exit bm-conn)))
 
+(defmethod vice-send-request :autostart
+  [{:keys [bm-conn file]} dispatch!]
+  (future
+    (let [filename (.getPath file)]
+      (dispatch! (log-debug (format "Autostarting file: %s" filename)))
+      (vice.bm/autostart bm-conn {:run-after-load? true
+                                  :file-index 0
+                                  :filename filename}))))
+
+(defn file-chooser-show
+  [{:keys [window title on-file-selected]} dispatch!]
+  (fx/run-later
+   (let [chooser (doto (FileChooser.)
+                   (.setTitle title))]
+     (when-let [file (.showOpenDialog chooser window)]
+       (dispatch! (assoc on-file-selected :file file))))))
+
 (defmethod handle-event :vice/start-request [{:keys [fx/context]}]
   {:process/start {:command ["x64sc",
                              "-pal",
@@ -220,6 +244,11 @@
   {:vice/send-request {:command :resume
                        :bm-conn (vice-bm-conn context)}})
 
+(defmethod handle-event :vice/autostart-request [{:keys [fx/context fx/event]}]
+  {:file-chooser/show {:window (-> event .getTarget .getScene .getWindow)
+                       :title "Choose a file to autostart in VICE"
+                       :on-file-selected {:event/type :vice/autostart}}})
+
 (def log-viewer
   (fx/make-ext-with-props
    {:log-lines (fx.prop/make
@@ -239,7 +268,8 @@
              :process/stop process-stop
              :vice/connect vice-connect
              :vice/disconnect vice-disconnect
-             :vice/send-request vice-send-request}
+             :vice/send-request vice-send-request
+             :file-chooser/show file-chooser-show}
    :desc-fn (fn [ctx]
               {:fx/type :stage
                :showing true
@@ -275,6 +305,10 @@
                      :text "Resume"
                      :disable (not (fx/sub-ctx ctx vice-paused?))
                      :on-action {:event/type :vice/resume-request}}
+                    {:fx/type :button
+                     :text "Autostart"
+                     :disable (not (fx/sub-ctx ctx vice-running?))
+                     :on-action {:event/type :vice/autostart-request}}
                     {:fx/type :check-box
                      :text "Connected"
                      :selected (fx/sub-ctx ctx vice-connected?)}
