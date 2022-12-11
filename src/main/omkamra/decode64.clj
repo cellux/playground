@@ -23,6 +23,11 @@
             :process nil                ; vice emulator process
             :bm-conn nil                ; binary monitor connection
             :paused? false
+            :registers nil
+            :reg/name->id nil
+            :reg/id->name nil
+            :bank/name->id nil
+            :bank/id->name nil
             }
      :log-lines []}
     cache/lru-cache-factory)))
@@ -86,6 +91,9 @@
 (defn vice-connected? [ctx]
   (some? (vice-bm-conn ctx)))
 
+(defn vice-registers [ctx]
+  (lookup ctx [:vice :registers]))
+
 (defmethod handle-event :default [e]
   {:dispatch (log-debug (format "unhandled event: %s" (dissoc e :fx/context)))})
 
@@ -115,6 +123,7 @@
   (condp = response-type
     vice.bm/MON_RESPONSE_STOPPED {:context (fx/swap-context context assoc-in [:vice :paused?] true)}
     vice.bm/MON_RESPONSE_RESUMED {:context (fx/swap-context context assoc-in [:vice :paused?] false)}
+    vice.bm/MON_RESPONSE_REGISTER_INFO {:context (fx/swap-context context assoc-in [:vice :registers] response)}
     {:dispatch (log-debug (format "unhandled VICE response: 0x%02x %s" response-type response))}))
 
 (defmethod handle-event :vice/autostart
@@ -152,10 +161,31 @@
                             (recur (connect)
                                    (inc current-retry))))))]
       (if bm-conn
-        (do
-          (dispatch! (log-info "Successfully connected to VICE monitor."))
-          (dispatch! {:event/type :vice/bm-connected
-                      :bm-conn bm-conn}))
+        (loop [banks-available (vice.bm/banks-available bm-conn)
+               registers-available (vice.bm/registers-available bm-conn)
+               current-retry 1]
+          (if (and (map? banks-available)
+                   (map? registers-available))
+            (do (dispatch! (log-info "Successfully connected to VICE monitor."))
+                (vice.bm/exit bm-conn)
+                (dispatch! {:event/type :vice/bm-connected
+                            :bm-conn bm-conn
+                            :bank/name->id (into {} (map #(vector (:name %) (:id %))
+                                                         (vals banks-available)))
+                            :bank/id->name (into {} (map #(vector (:id %) (:name %))
+                                                         (vals banks-available)))
+                            :reg/name->id (into {} (map #(vector (:name %) (:id %))
+                                                        (vals registers-available)))
+                            :reg/id->name (into {} (map #(vector (:id %) (:name %))
+                                                        (vals registers-available)))}))
+            (if (= current-retry max-retries)
+              (dispatch! (log-error "Cannot bank and register info from VICE."))
+              (do
+                (dispatch! (log-info (format "Getting bank and register info [%d/%d]"
+                                             current-retry max-retries)))
+                (recur (vice.bm/banks-available bm-conn)
+                       (vice.bm/registers-available bm-conn)
+                       (inc current-retry))))))
         (dispatch! (log-error "Connection to VICE monitor failed."))))))
 
 (defn vice-disconnect
@@ -203,6 +233,10 @@
      (when-let [file (.showOpenDialog chooser window)]
        (dispatch! (assoc on-file-selected :file file))))))
 
+(defn decode64
+  [{:keys [bm-conn]} dispatch!]
+  (dispatch! (log-info "decode64")))
+
 (defmethod handle-event :vice/start-request [{:keys [fx/context]}]
   {:process/start {:command ["x64sc",
                              "-pal",
@@ -218,8 +252,13 @@
    :dispatch (log-info "VICE started")
    :vice/connect (lookup context [:vice :options])})
 
-(defmethod handle-event :vice/bm-connected [{:keys [fx/context bm-conn]}]
-  {:context (fx/swap-context context assoc-in [:vice :bm-conn] bm-conn)})
+(defmethod handle-event :vice/bm-connected [{:keys [fx/context bm-conn] :as v}]
+  {:context (fx/swap-context context #(-> %
+                                          (assoc-in [:vice :bm-conn] bm-conn)
+                                          (assoc-in [:vice :reg/name->id] (:reg/name->id v))
+                                          (assoc-in [:vice :reg/id->name] (:reg/id->name v))
+                                          (assoc-in [:vice :bank/name->id] (:bank/name->id v))
+                                          (assoc-in [:vice :bank/id->name] (:bank/id->name v))))})
 
 (defmethod handle-event :vice/bm-disconnected [{:keys [fx/context]}]
   {:context (fx/swap-context context update :vice dissoc :bm-conn)})
@@ -243,6 +282,10 @@
 (defmethod handle-event :vice/resume-request [{:keys [fx/context]}]
   {:vice/send-request {:command :resume
                        :bm-conn (vice-bm-conn context)}})
+
+(defmethod handle-event :decode64-request [{:keys [fx/context]}]
+  (let [bm-conn (vice-bm-conn context)]
+    {:decode64 {:bm-conn bm-conn}}))
 
 (defmethod handle-event :vice/autostart-request [{:keys [fx/context fx/event]}]
   {:file-chooser/show {:window (-> event .getTarget .getScene .getWindow)
@@ -287,6 +330,26 @@
        :disable (not running?)
        :on-action {:event/type :vice/pause-request}})))
 
+(defn vice-register-view
+  [{:keys [fx/context]}]
+  (let [registers (vice-registers context)
+        name->id (fx/sub-val context get-in [:vice :reg/name->id])]
+    (if (or (nil? registers) (nil? name->id))
+      {:fx/type :label
+       :text "-"}
+      {:fx/type :v-box
+       :children
+       (for [[name id] name->id]
+         {:fx/type :h-box
+          :alignment :baseline-left
+          :children
+          [{:fx/type :label
+            :text (str name ":")
+            :min-width 30}
+           {:fx/type :text-field
+            :text (format "%x" (-> registers (get id) :value))
+            :editable false}]})})))
+
 (def app
   (fx/create-app
    *context
@@ -296,7 +359,8 @@
              :vice/connect vice-connect
              :vice/disconnect vice-disconnect
              :vice/send-request vice-send-request
-             :file-chooser/show file-chooser-show}
+             :file-chooser/show file-chooser-show
+             :decode64 decode64}
    :desc-fn (fn [ctx]
               {:fx/type :stage
                :showing true
@@ -334,12 +398,22 @@
                      :disable (not (fx/sub-ctx ctx vice-running?))
                      :on-action {:event/type :vice/autostart-request}}
                     {:fx/type pause-resume-button}
+                    {:fx/type :button
+                     :text "Decode"
+                     :disable (not (fx/sub-ctx ctx vice-running?))
+                     :on-action {:event/type :decode64-request}}
                     {:fx/type :check-box
                      :text "Connected"
                      :selected (fx/sub-ctx ctx vice-connected?)}
                     {:fx/type :button
                      :text "Clear log"
                      :on-action {:event/type :log/clear}}]}
+                  {:fx/type :h-box
+                   :alignment :baseline-left
+                   :padding 8
+                   :spacing 8
+                   :children
+                   [{:fx/type vice-register-view}]}
                   {:fx/type log-viewer
                    :props {:log-lines (fx/sub-ctx ctx app-log-lines)}
                    :desc {:fx/type :text-area

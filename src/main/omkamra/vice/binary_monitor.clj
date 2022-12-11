@@ -219,7 +219,10 @@
         \4 (write-int out arg)
         \b (.write out arg 0 (count arg))))
     (.flush out)
-    @request-promise))
+    (let [rv (deref request-promise 1000 nil)]
+      (when (nil? rv)
+        (swap! pending-requests dissoc request-id))
+      rv)))
 
 (defn mem-get
   [conn {:keys [side-effects? start end memspace bank]}]
