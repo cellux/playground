@@ -26,6 +26,7 @@
             :registers nil
             :reg/name->id nil
             :reg/id->name nil
+            :reg/id->size nil
             :bank/name->id nil
             :bank/id->name nil
             }
@@ -177,6 +178,8 @@
                             :reg/name->id (into {} (map #(vector (:name %) (:id %))
                                                         (vals registers-available)))
                             :reg/id->name (into {} (map #(vector (:id %) (:name %))
+                                                        (vals registers-available)))
+                            :reg/id->size (into {} (map #(vector (:id %) (:size %))
                                                         (vals registers-available)))}))
             (if (= current-retry max-retries)
               (dispatch! (log-error "Cannot bank and register info from VICE."))
@@ -215,6 +218,11 @@
   (future
     (dispatch! (log-debug "Resuming VICE."))
     (vice.bm/exit bm-conn)))
+
+(defmethod vice-send-request :advance
+  [{:keys [bm-conn step-over? count]} dispatch!]
+  (vice.bm/advance-instructions bm-conn {:step-over? (or step-over? false)
+                                         :count (or count 1)}))
 
 (defmethod vice-send-request :autostart
   [{:keys [bm-conn file]} dispatch!]
@@ -257,6 +265,7 @@
                                           (assoc-in [:vice :bm-conn] bm-conn)
                                           (assoc-in [:vice :reg/name->id] (:reg/name->id v))
                                           (assoc-in [:vice :reg/id->name] (:reg/id->name v))
+                                          (assoc-in [:vice :reg/id->size] (:reg/id->size v))
                                           (assoc-in [:vice :bank/name->id] (:bank/name->id v))
                                           (assoc-in [:vice :bank/id->name] (:bank/id->name v))))})
 
@@ -281,6 +290,11 @@
 
 (defmethod handle-event :vice/resume-request [{:keys [fx/context]}]
   {:vice/send-request {:command :resume
+                       :bm-conn (vice-bm-conn context)}})
+
+(defmethod handle-event :vice/advance-request [{:keys [fx/context]}]
+  {:vice/send-request {:command :advance
+                       :count 1
                        :bm-conn (vice-bm-conn context)}})
 
 (defmethod handle-event :decode64-request [{:keys [fx/context]}]
@@ -333,7 +347,8 @@
 (defn vice-register-view
   [{:keys [fx/context]}]
   (let [registers (vice-registers context)
-        name->id (fx/sub-val context get-in [:vice :reg/name->id])]
+        name->id (fx/sub-val context get-in [:vice :reg/name->id])
+        id->size (fx/sub-val context get-in [:vice :reg/id->size])]
     (if (or (nil? registers) (nil? name->id))
       {:fx/type :label
        :text "-"}
@@ -347,7 +362,8 @@
             :text (str name ":")
             :min-width 30}
            {:fx/type :text-field
-            :text (format "%x" (-> registers (get id) :value))
+            :text (format (str "%0" (/ (id->size id) 4) "X")
+                          (-> registers (get id) :value))
             :editable false}]})})))
 
 (def app
@@ -398,6 +414,12 @@
                      :disable (not (fx/sub-ctx ctx vice-running?))
                      :on-action {:event/type :vice/autostart-request}}
                     {:fx/type pause-resume-button}
+                    {:fx/type svg-button
+                     :filename "1.svg"
+                     :tooltip "Advance"
+                     :disable (or (not (fx/sub-ctx ctx vice-running?))
+                                  (not (fx/sub-ctx ctx vice-paused?)))
+                     :on-action {:event/type :vice/advance-request}}
                     {:fx/type :button
                      :text "Decode"
                      :disable (not (fx/sub-ctx ctx vice-running?))
