@@ -3,12 +3,17 @@
             [cljfx.prop :as fx.prop]
             [cljfx.mutator :as fx.mutator]
             [cljfx.lifecycle :as fx.lifecycle]
+            [clojure.java.io :as jio]
             [clojure.java.shell :refer [sh]]
             [clojure.core.cache :as cache]
             [clojure.string :as str]
             [omkamra.vice :as vice]
             [omkamra.vice.binary-monitor :as vice.bm])
-  (:import [javafx.stage FileChooser]))
+  (:import [javafx.stage FileChooser]
+           [de.codecentric.centerdevice.javafxsvg SvgImageLoaderFactory]
+           [de.codecentric.centerdevice.javafxsvg.dimension PrimitiveDimensionProvider]))
+
+(SvgImageLoaderFactory/install (PrimitiveDimensionProvider.))
 
 (def *context
   (atom
@@ -75,7 +80,8 @@
   (some? (vice-process ctx)))
 
 (defn vice-paused? [ctx]
-  (lookup ctx [:vice :paused?]))
+  (and (vice-running? ctx)
+       (lookup ctx [:vice :paused?])))
 
 (defn vice-connected? [ctx]
   (some? (vice-bm-conn ctx)))
@@ -254,6 +260,33 @@
                 fx.lifecycle/scalar
                 :default [])}))
 
+(defn svg-button
+  [{:keys [filename tooltip disable on-action]}]
+  {:fx/type :button
+   :graphic {:fx/type :image-view
+             :image {:url (str (jio/resource (str "omkamra/decode64/" filename)))
+                     :requested-width 16
+                     :requested-height 16}}
+   :tooltip {:fx/type :tooltip :text tooltip}
+   :disable (or disable false)
+   :on-action on-action})
+
+(defn pause-resume-button
+  [{:keys [fx/context]}]
+  (let [running? (fx/sub-ctx context vice-running?)
+        paused? (fx/sub-ctx context vice-paused?)]
+    (if paused?
+      {:fx/type svg-button
+       :filename "angles-right.svg"
+       :text "Resume"
+       :disable (not running?)
+       :on-action {:event/type :vice/resume-request}}
+      {:fx/type svg-button
+       :filename "pause.svg"
+       :text "Pause"
+       :disable (not running?)
+       :on-action {:event/type :vice/pause-request}})))
+
 (def app
   (fx/create-app
    *context
@@ -269,6 +302,7 @@
                :showing true
                :scene
                {:fx/type :scene
+                :stylesheets #{(str (jio/resource "omkamra/decode64.css"))}
                 :root
                 {:fx/type :v-box
                  :children
@@ -279,30 +313,27 @@
                    :children
                    [{:fx/type :label
                      :text "VICE:"}
-                    {:fx/type :button
-                     :text "Start"
+                    {:fx/type svg-button
+                     :filename "play.svg"
+                     :tooltip "Start"
                      :disable (fx/sub-ctx ctx vice-running?)
                      :on-action {:event/type :vice/start-request}}
-                    {:fx/type :button
-                     :text "Stop"
+                    {:fx/type svg-button
+                     :filename "stop.svg"
+                     :tooltip "Stop"
                      :disable (not (fx/sub-ctx ctx vice-running?))
                      :on-action {:event/type :vice/stop-request}}
-                    {:fx/type :button
-                     :text "Reset"
+                    {:fx/type svg-button
+                     :filename "arrows-rotate.svg"
+                     :tooltip "Reset"
                      :disable (not (fx/sub-ctx ctx vice-running?))
                      :on-action {:event/type :vice/reset-request}}
-                    {:fx/type :button
-                     :text "Pause"
-                     :disable (fx/sub-ctx ctx vice-paused?)
-                     :on-action {:event/type :vice/pause-request}}
-                    {:fx/type :button
-                     :text "Resume"
-                     :disable (not (fx/sub-ctx ctx vice-paused?))
-                     :on-action {:event/type :vice/resume-request}}
-                    {:fx/type :button
-                     :text "Autostart"
+                    {:fx/type svg-button
+                     :filename "folder-open.svg"
+                     :tooltip "Autostart"
                      :disable (not (fx/sub-ctx ctx vice-running?))
                      :on-action {:event/type :vice/autostart-request}}
+                    {:fx/type pause-resume-button}
                     {:fx/type :check-box
                      :text "Connected"
                      :selected (fx/sub-ctx ctx vice-connected?)}

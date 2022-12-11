@@ -33,6 +33,7 @@
   com.clojure-goes-fast/clj-java-decompiler {:mvn/version "0.3.0"}
   instaparse/instaparse {:mvn/version "1.4.12"}
   cljfx/cljfx {:mvn/version "1.7.22"}
+  de.codecentric.centerdevice/javafxsvg {:mvn/version "1.3.0"}
   org.clojure/core.cache {:mvn/version "1.0.225"}
   backtick/backtick {:mvn/version "0.3.4"}
 
