@@ -147,51 +147,60 @@
                       (dispatch! (log-info "Attempting to connect to VICE binary monitor at %s:%d"
                                            bm-host bm-port))
                       (vice/connect bm-host bm-port event-handler)
-                      (catch Throwable t
-                        (dispatch! (log-error "Connection to binary monitor failed: %s" t))
-                        nil)))
-          max-retries 10
-          bm-conn (loop [conn (connect)
-                         current-retry 1]
-                    (or conn
-                        (if (= current-retry max-retries)
-                          nil
-                          (do
-                            (dispatch! (log-info "Retrying [%d/%d]"
-                                                 current-retry
-                                                 max-retries))
-                            (Thread/sleep 1000)
-                            (recur (connect)
-                                   (inc current-retry))))))]
-      (if bm-conn
-        (loop [banks-available (vice.bm/banks-available bm-conn)
-               registers-available (vice.bm/registers-available bm-conn)
-               current-retry 1]
-          (if (and (map? banks-available)
-                   (map? registers-available))
-            (do (dispatch! (log-info "Successfully connected to VICE monitor."))
-                (vice.bm/exit bm-conn)
-                (dispatch! {:event/type :vice/bm-connected
-                            :bm-conn bm-conn
-                            :bank/name->id (into {} (map #(vector (:name %) (:id %))
-                                                         (vals banks-available)))
-                            :bank/id->name (into {} (map #(vector (:id %) (:name %))
-                                                         (vals banks-available)))
-                            :reg/name->id (into {} (map #(vector (:name %) (:id %))
-                                                        (vals registers-available)))
-                            :reg/id->name (into {} (map #(vector (:id %) (:name %))
-                                                        (vals registers-available)))
-                            :reg/id->size (into {} (map #(vector (:id %) (:size %))
-                                                        (vals registers-available)))}))
-            (if (= current-retry max-retries)
-              (dispatch! (log-error "Cannot bank and register info from VICE."))
-              (do
-                (dispatch! (log-info "Getting bank and register info [%d/%d]"
-                                     current-retry max-retries))
-                (recur (vice.bm/banks-available bm-conn)
-                       (vice.bm/registers-available bm-conn)
-                       (inc current-retry))))))
-        (dispatch! (log-error "Connection to VICE monitor failed."))))))
+                      (catch Throwable t nil
+                        (do
+                          (dispatch! (log-error "Connection to binary monitor failed: %s" t))
+                          nil))))
+          with-max-retries (fn [max-retries f]
+                             (loop [result (f)
+                                    current-retry 1]
+                               (or result
+                                   (if (= current-retry max-retries)
+                                     nil
+                                     (do
+                                       (dispatch! (log-info "Retrying [%d/%d]"
+                                                            current-retry max-retries))
+                                       (Thread/sleep 1000)
+                                       (recur (f)
+                                              (inc current-retry)))))))
+          bm-conn (with-max-retries 10 connect)]
+      (if-not bm-conn
+        (dispatch! (log-error "Connection to VICE monitor failed."))
+        (do (dispatch! (log-info "Successfully connected to VICE monitor."))
+            (let [fetch-info (fn [what fetch]
+                               (dispatch! (log-debug "Fetching available %s." what))
+                               (if-let [result (with-max-retries 3 fetch)]
+                                 result
+                                 (do
+                                   (dispatch! (log-error "Cannot fetch available %s from VICE." what))
+                                   nil)))
+                  fetch-banks (fn []
+                                (when-let [banks (fetch-info "banks"
+                                                             #(vice.bm/banks-available bm-conn))]
+                                  {:bank/name->id (into {} (map #(vector (:name %) (:id %))
+                                                                (vals banks)))
+                                   :bank/id->name (into {} (map #(vector (:id %) (:name %))
+                                                                (vals banks)))}))
+                  fetch-regs (fn []
+                               (when-let [regs (fetch-info "registers"
+                                                           #(vice.bm/registers-available bm-conn))]
+                                 {:reg/name->id (into {} (map #(vector (:name %) (:id %))
+                                                              (vals regs)))
+                                  :reg/id->name (into {} (map #(vector (:id %) (:name %))
+                                                              (vals regs)))
+                                  :reg/id->size (into {} (map #(vector (:id %) (:size %))
+                                                              (vals regs)))}))
+                  connected-event (reduce (fn [e f]
+                                            (if-let [result (f)]
+                                              (merge e result)
+                                              (update e :failed conj f)))
+                                          {:event/type :vice/bm-connected
+                                           :bm-conn bm-conn
+                                           :failed #{}}
+                                          [fetch-banks fetch-regs])]
+              (when (empty? (:failed connected-event))
+                (vice.bm/exit bm-conn)  ; resume execution
+                (dispatch! (dissoc connected-event :failed)))))))))
 
 (defn vice-disconnect
   [{:keys [bm-conn]} dispatch!]
