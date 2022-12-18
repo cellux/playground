@@ -38,11 +38,8 @@
 (defn lookup [ctx ks]
   (fx/sub-val ctx get-in ks))
 
-(defn app-log-lines [ctx]
+(defn log-lines [ctx]
   (fx/sub-val ctx :log-lines))
-
-(defn app-log-size [ctx]
-  (count (fx/sub-val ctx :log-lines)))
 
 (defn trim-log
   [log-lines n]
@@ -61,17 +58,25 @@
 (defmethod handle-event :log/clear [{:keys [fx/context]}]
   {:context (fx/swap-context context assoc :log-lines [])})
 
-(defn log-message [level message]
-  {:event/type :log :level level :message message})
+(defn log-message
+  [level fmt & args]
+  {:event/type :log
+   :level level
+   :message (if (seq args)
+              (apply format fmt args)
+              fmt)})
 
-(defn log-info [message]
-  (log-message :info message))
+(defn log-info [fmt & args]
+  (apply log-message :info fmt args))
 
-(defn log-debug [message]
-  (log-message :debug message))
+(defn log-debug [fmt & args]
+  (apply log-message :debug fmt args))
 
-(defn log-error [message]
-  (log-message :error message))
+(defn log-error [fmt & args]
+  (apply log-message :error fmt args))
+
+(defmethod handle-event :default [e]
+  {:dispatch (log-debug "unhandled event: %s" (dissoc e :fx/context))})
 
 (defn vice-options [ctx]
   (lookup ctx [:vice :options]))
@@ -95,28 +100,25 @@
 (defn vice-registers [ctx]
   (lookup ctx [:vice :registers]))
 
-(defmethod handle-event :default [e]
-  {:dispatch (log-debug (format "unhandled event: %s" (dissoc e :fx/context)))})
-
 (defn process-start
   [{:keys [command on-start on-exit on-error] :as v} dispatch!]
   (let [runtime (Runtime/getRuntime)
         process (.exec runtime (into-array String command))]
     (future
       (try
-        (dispatch! (log-info (format "[%d] Starting process: %s" (.pid process) command)))
+        (dispatch! (log-info "[%d] Starting process: %s" (.pid process) command))
         (dispatch! (assoc on-start :process process))
         (let [exit-code (.waitFor process)]
-          (dispatch! (log-info (format "[%d] Process exited with code: %d" (.pid process) exit-code)))
+          (dispatch! (log-info "[%d] Process exited with code: %d" (.pid process) exit-code))
           (dispatch! (assoc on-exit :exit-code exit-code)))
         (catch Throwable t
-          (dispatch! (log-error (format "[%d] Process start failed: %s" t)))
+          (dispatch! (log-error "[%d] Process start failed: %s" t))
           (dispatch! (assoc on-error :error t)))))))
 
 (defn process-stop
   [{:keys [process]} dispatch!]
   (when process
-    (dispatch! (log-info (format "[%d] Killing process" (.pid process))))
+    (dispatch! (log-info "[%d] Killing process" (.pid process)))
     (.destroy process)))
 
 (defmethod handle-event :vice/response
@@ -125,7 +127,7 @@
     vice.bm/MON_RESPONSE_STOPPED {:context (fx/swap-context context assoc-in [:vice :paused?] true)}
     vice.bm/MON_RESPONSE_RESUMED {:context (fx/swap-context context assoc-in [:vice :paused?] false)}
     vice.bm/MON_RESPONSE_REGISTER_INFO {:context (fx/swap-context context assoc-in [:vice :registers] response)}
-    {:dispatch (log-debug (format "unhandled VICE response: 0x%02x %s" response-type response))}))
+    {:dispatch (log-debug "unhandled VICE response: 0x%02x %s" response-type response)}))
 
 (defmethod handle-event :vice/autostart
   [{:keys [fx/context file]}]
@@ -142,11 +144,11 @@
                                       :response response}))
           connect (fn []
                     (try
-                      (dispatch! (log-info (format "Attempting to connect to VICE binary monitor at %s:%d"
-                                                   bm-host bm-port)))
+                      (dispatch! (log-info "Attempting to connect to VICE binary monitor at %s:%d"
+                                           bm-host bm-port))
                       (vice/connect bm-host bm-port event-handler)
                       (catch Throwable t
-                        (dispatch! (log-error (format "Connection to binary monitor failed: %s" t)))
+                        (dispatch! (log-error "Connection to binary monitor failed: %s" t))
                         nil)))
           max-retries 10
           bm-conn (loop [conn (connect)
@@ -155,9 +157,9 @@
                         (if (= current-retry max-retries)
                           nil
                           (do
-                            (dispatch! (log-info (format "Retrying [%d/%d]"
-                                                         current-retry
-                                                         max-retries)))
+                            (dispatch! (log-info "Retrying [%d/%d]"
+                                                 current-retry
+                                                 max-retries))
                             (Thread/sleep 1000)
                             (recur (connect)
                                    (inc current-retry))))))]
@@ -184,8 +186,8 @@
             (if (= current-retry max-retries)
               (dispatch! (log-error "Cannot bank and register info from VICE."))
               (do
-                (dispatch! (log-info (format "Getting bank and register info [%d/%d]"
-                                             current-retry max-retries)))
+                (dispatch! (log-info "Getting bank and register info [%d/%d]"
+                                     current-retry max-retries))
                 (recur (vice.bm/banks-available bm-conn)
                        (vice.bm/registers-available bm-conn)
                        (inc current-retry))))))
@@ -228,7 +230,7 @@
   [{:keys [bm-conn file]} dispatch!]
   (future
     (let [filename (.getPath file)]
-      (dispatch! (log-debug (format "Autostarting file: %s" filename)))
+      (dispatch! (log-debug "Autostarting file: %s" filename))
       (vice.bm/autostart bm-conn {:run-after-load? true
                                   :file-index 0
                                   :filename filename}))))
@@ -330,8 +332,8 @@
 
 (defn pause-resume-button
   [{:keys [fx/context]}]
-  (let [running? (fx/sub-ctx context vice-running?)
-        paused? (fx/sub-ctx context vice-paused?)]
+  (let [running? (vice-running? context)
+        paused? (vice-paused? context)]
     (if paused?
       {:fx/type svg-button
        :filename "angles-right.svg"
@@ -396,37 +398,37 @@
                     {:fx/type svg-button
                      :filename "play.svg"
                      :tooltip "Start"
-                     :disable (fx/sub-ctx ctx vice-running?)
+                     :disable (vice-running? ctx)
                      :on-action {:event/type :vice/start-request}}
                     {:fx/type svg-button
                      :filename "stop.svg"
                      :tooltip "Stop"
-                     :disable (not (fx/sub-ctx ctx vice-running?))
+                     :disable (not (vice-running? ctx))
                      :on-action {:event/type :vice/stop-request}}
                     {:fx/type svg-button
                      :filename "arrows-rotate.svg"
                      :tooltip "Reset"
-                     :disable (not (fx/sub-ctx ctx vice-running?))
+                     :disable (not (vice-running? ctx))
                      :on-action {:event/type :vice/reset-request}}
                     {:fx/type svg-button
                      :filename "folder-open.svg"
                      :tooltip "Autostart"
-                     :disable (not (fx/sub-ctx ctx vice-running?))
+                     :disable (not (vice-running? ctx))
                      :on-action {:event/type :vice/autostart-request}}
                     {:fx/type pause-resume-button}
                     {:fx/type svg-button
                      :filename "1.svg"
                      :tooltip "Advance"
-                     :disable (or (not (fx/sub-ctx ctx vice-running?))
-                                  (not (fx/sub-ctx ctx vice-paused?)))
+                     :disable (or (not (vice-running? ctx))
+                                  (not (vice-paused? ctx)))
                      :on-action {:event/type :vice/advance-request}}
                     {:fx/type :button
                      :text "Decode"
-                     :disable (not (fx/sub-ctx ctx vice-running?))
+                     :disable (not (vice-running? ctx))
                      :on-action {:event/type :decode64-request}}
                     {:fx/type :check-box
                      :text "Connected"
-                     :selected (fx/sub-ctx ctx vice-connected?)}
+                     :selected (vice-connected? ctx)}
                     {:fx/type :button
                      :text "Clear log"
                      :on-action {:event/type :log/clear}}]}
@@ -437,7 +439,7 @@
                    :children
                    [{:fx/type vice-register-view}]}
                   {:fx/type log-viewer
-                   :props {:log-lines (fx/sub-ctx ctx app-log-lines)}
+                   :props {:log-lines (log-lines ctx)}
                    :desc {:fx/type :text-area
                           :editable false}}]}}})))
 
