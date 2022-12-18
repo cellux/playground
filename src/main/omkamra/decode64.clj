@@ -91,8 +91,7 @@
   (some? (vice-process ctx)))
 
 (defn vice-paused? [ctx]
-  (and (vice-running? ctx)
-       (lookup ctx [:vice :paused?])))
+  (lookup ctx [:vice :paused?]))
 
 (defn vice-connected? [ctx]
   (some? (vice-bm-conn ctx)))
@@ -190,23 +189,24 @@
                                                               (vals regs)))
                                   :reg/id->size (into {} (map #(vector (:id %) (:size %))
                                                               (vals regs)))}))
-                  connected-event (reduce (fn [e f]
-                                            (if-let [result (f)]
-                                              (merge e result)
-                                              (update e :failed conj f)))
-                                          {:event/type :vice/bm-connected
-                                           :bm-conn bm-conn
-                                           :failed #{}}
-                                          [fetch-banks fetch-regs])]
-              (when (empty? (:failed connected-event))
+                  vice-data (reduce (fn [data f]
+                                      (if-let [result (f)]
+                                        (merge data result)
+                                        (update data ::failed conj f)))
+                                    {::failed #{}}
+                                    [fetch-banks fetch-regs])]
+              (when (empty? (::failed vice-data))
                 (vice.bm/exit bm-conn)  ; resume execution
-                (dispatch! (dissoc connected-event :failed)))))))))
+                (dispatch! {:event/type :vice/connected
+                            :vice/data (-> vice-data
+                                           (assoc :bm-conn bm-conn)
+                                           (dissoc ::failed))}))))))))
 
 (defn vice-disconnect
   [{:keys [bm-conn]} dispatch!]
   (dispatch! (log-info "Closing connection to VICE monitor."))
   (vice/close bm-conn)
-  (dispatch! {:event/type :vice/bm-disconnected}))
+  (dispatch! {:event/type :vice/disconnected}))
 
 (defmulti vice-send-request
   (fn [opts dispatch!]
@@ -271,19 +271,13 @@
    :dispatch (log-info "VICE started")
    :vice/connect (lookup context [:vice :options])})
 
-(defmethod handle-event :vice/bm-connected [{:keys [fx/context bm-conn] :as v}]
-  {:context (fx/swap-context context #(-> %
-                                          (assoc-in [:vice :bm-conn] bm-conn)
-                                          (assoc-in [:vice :reg/name->id] (:reg/name->id v))
-                                          (assoc-in [:vice :reg/id->name] (:reg/id->name v))
-                                          (assoc-in [:vice :reg/id->size] (:reg/id->size v))
-                                          (assoc-in [:vice :bank/name->id] (:bank/name->id v))
-                                          (assoc-in [:vice :bank/id->name] (:bank/id->name v))))})
+(defmethod handle-event :vice/connected [{:keys [fx/context vice/data]}]
+  {:context (fx/swap-context context update :vice merge data)})
 
-(defmethod handle-event :vice/bm-disconnected [{:keys [fx/context]}]
+(defmethod handle-event :vice/disconnected [{:keys [fx/context]}]
   {:context (fx/swap-context context update :vice dissoc :bm-conn)})
 
-(defmethod handle-event :vice/exited [{:keys [fx/context exit-code]}]
+(defmethod handle-event :vice/exited [{:keys [fx/context]}]
   {:context (fx/swap-context context update :vice dissoc :process)})
 
 (defmethod handle-event :vice/stop-request [{:keys [fx/context]}]
