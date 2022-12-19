@@ -237,6 +237,7 @@
 (defmethod read-response MON_RESPONSE_MEM_GET
   [_ in]
   (let [length (read-short in)
+        length (if (zero? length) 65536 length)
         memory (read-bytes in length)]
     {:length length
      :memory memory}))
