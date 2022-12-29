@@ -36,6 +36,8 @@
   de.codecentric.centerdevice/javafxsvg {:mvn/version "1.3.0"}
   org.clojure/core.cache {:mvn/version "1.0.225"}
   backtick/backtick {:mvn/version "0.3.4"}
+  org.antlr/antlr4 {:mvn/version "4.11.1"}
+  clj-antlr/clj-antlr {:mvn/version "0.2.12"}
 
   com.github.omkamra/jnr {:mvn/version "0.1.0"}
   com.github.omkamra/fluidsynth {:mvn/version "0.3.0"}
