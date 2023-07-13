@@ -1,17 +1,20 @@
 (ns omkamra.decode64
-  (:require [cljfx.api :as fx]
-            [cljfx.prop :as fx.prop]
-            [cljfx.mutator :as fx.mutator]
-            [cljfx.lifecycle :as fx.lifecycle]
-            [clojure.java.io :as jio]
-            [clojure.java.shell :refer [sh]]
-            [clojure.core.cache :as cache]
-            [clojure.string :as str]
-            [omkamra.vice :as vice]
-            [omkamra.vice.binary-monitor :as vice.bm])
-  (:import [javafx.stage FileChooser]
-           [de.codecentric.centerdevice.javafxsvg SvgImageLoaderFactory]
-           [de.codecentric.centerdevice.javafxsvg.dimension PrimitiveDimensionProvider]))
+  (:require
+   [cljfx.api :as fx]
+   [cljfx.prop :as fx.prop]
+   [cljfx.mutator :as fx.mutator]
+   [cljfx.lifecycle :as fx.lifecycle]
+   [clojure.java.io :as jio]
+   [clojure.java.shell :refer [sh]]
+   [clojure.core.cache :as cache]
+   [clojure.string :as str]
+   [clojure.stacktrace]
+   [omkamra.vice :as vice]
+   [omkamra.vice.binary-monitor :as vice.bm])
+  (:import
+   [javafx.stage FileChooser]
+   [de.codecentric.centerdevice.javafxsvg SvgImageLoaderFactory]
+   [de.codecentric.centerdevice.javafxsvg.dimension PrimitiveDimensionProvider]))
 
 (SvgImageLoaderFactory/install (PrimitiveDimensionProvider.))
 
@@ -34,12 +37,6 @@
     cache/lru-cache-factory)))
 
 (defmulti handle-event :event/type)
-
-(defn lookup [ctx ks]
-  (fx/sub-val ctx get-in ks))
-
-(defn log-lines [ctx]
-  (fx/sub-val ctx :log-lines))
 
 (defn trim-log
   [log-lines n]
@@ -78,26 +75,14 @@
 (defmethod handle-event :default [e]
   {:dispatch (log-debug "unhandled event: %s" (dissoc e :fx/context))})
 
-(defn vice-options [ctx]
-  (lookup ctx [:vice :options]))
-
-(defn vice-process [ctx]
-  (lookup ctx [:vice :process]))
-
-(defn vice-bm-conn [ctx]
-  (lookup ctx [:vice :bm-conn]))
-
 (defn vice-running? [ctx]
-  (some? (vice-process ctx)))
+  (some? (fx/sub-val ctx get-in [:vice :process])))
 
 (defn vice-paused? [ctx]
-  (lookup ctx [:vice :paused?]))
+  (fx/sub-val ctx get-in [:vice :paused?]))
 
 (defn vice-connected? [ctx]
-  (some? (vice-bm-conn ctx)))
-
-(defn vice-registers [ctx]
-  (lookup ctx [:vice :registers]))
+  (some? (fx/sub-val ctx get-in [:vice :bm-conn])))
 
 (defn process-start
   [{:keys [command on-start on-exit on-error] :as v} dispatch!]
@@ -131,7 +116,7 @@
 (defmethod handle-event :vice/autostart
   [{:keys [fx/context file]}]
   {:vice/send-request {:command :autostart
-                       :bm-conn (vice-bm-conn context)
+                       :bm-conn (fx/sub-val context get-in [:vice :bm-conn])
                        :file file}})
 
 (defn vice-connect
@@ -269,7 +254,7 @@
 (defmethod handle-event :vice/started [{:keys [fx/context process]}]
   {:context (fx/swap-context context assoc-in [:vice :process] process)
    :dispatch (log-info "VICE started")
-   :vice/connect (lookup context [:vice :options])})
+   :vice/connect (fx/sub-val context get-in [:vice :options])})
 
 (defmethod handle-event :vice/connected [{:keys [fx/context vice/data]}]
   {:context (fx/swap-context context update :vice merge data)})
@@ -281,30 +266,29 @@
   {:context (fx/swap-context context update :vice dissoc :process)})
 
 (defmethod handle-event :vice/stop-request [{:keys [fx/context]}]
-  (when-let [process (vice-process context)]
-    [[:vice/disconnect {:bm-conn (vice-bm-conn context)}]
+  (when-let [process (fx/sub-val context get-in [:vice :process])]
+    [[:vice/disconnect {:bm-conn (fx/sub-val context get-in [:vice :bm-conn])}]
      [:process/stop {:process process}]]))
 
 (defmethod handle-event :vice/reset-request [{:keys [fx/context]}]
   {:vice/send-request {:command :reset
-                       :bm-conn (vice-bm-conn context)}})
+                       :bm-conn (fx/sub-val context get-in [:vice :bm-conn])}})
 
 (defmethod handle-event :vice/pause-request [{:keys [fx/context]}]
   {:vice/send-request {:command :pause
-                       :bm-conn (vice-bm-conn context)}})
+                       :bm-conn (fx/sub-val context get-in [:vice :bm-conn])}})
 
 (defmethod handle-event :vice/resume-request [{:keys [fx/context]}]
   {:vice/send-request {:command :resume
-                       :bm-conn (vice-bm-conn context)}})
+                       :bm-conn (fx/sub-val context get-in [:vice :bm-conn])}})
 
 (defmethod handle-event :vice/advance-request [{:keys [fx/context]}]
   {:vice/send-request {:command :advance
                        :count 1
-                       :bm-conn (vice-bm-conn context)}})
+                       :bm-conn (fx/sub-val context get-in [:vice :bm-conn])}})
 
 (defmethod handle-event :decode64-request [{:keys [fx/context]}]
-  (let [bm-conn (vice-bm-conn context)]
-    {:decode64 {:bm-conn bm-conn}}))
+  {:decode64 {:vice (fx/sub-val context :vice)}})
 
 (defmethod handle-event :vice/autostart-request [{:keys [fx/context fx/event]}]
   {:file-chooser/show {:window (-> event .getTarget .getScene .getWindow)
@@ -351,7 +335,7 @@
 
 (defn vice-register-view
   [{:keys [fx/context]}]
-  (let [registers (vice-registers context)
+  (let [registers (fx/sub-val context get-in [:vice :registers])
         name->id (fx/sub-val context get-in [:vice :reg/name->id])
         id->size (fx/sub-val context get-in [:vice :reg/id->size])]
     (if (or (nil? registers) (nil? name->id))
@@ -381,7 +365,7 @@
              :vice/disconnect vice-disconnect
              :vice/send-request vice-send-request
              :file-chooser/show file-chooser-show
-             :decode64 decode64}
+             :decode64 #'decode64}
    :desc-fn (fn [ctx]
               {:fx/type :stage
                :showing true
@@ -442,7 +426,8 @@
                    :children
                    [{:fx/type vice-register-view}]}
                   {:fx/type log-viewer
-                   :props {:log-lines (log-lines ctx)}
+                   :v-box/vgrow :always
+                   :props {:log-lines (fx/sub-val ctx :log-lines)}
                    :desc {:fx/type :text-area
                           :editable false}}]}}})))
 
