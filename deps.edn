@@ -43,11 +43,11 @@
   com.github.omkamra/sequencer-fluidsynth {:local/root "../omkamra/sequencer-fluidsynth"}
   com.github.omkamra/cowbells {:local/root "../omkamra/cowbells"}
 
-  org.lwjgl/lwjgl {:mvn/version "3.3.1"}
-  org.lwjgl/lwjgl-glfw {:mvn/version "3.3.1"}
-  org.lwjgl/lwjgl-opengl {:mvn/version "3.3.1"}
-  org.lwjgl/lwjgl-opengles {:mvn/version "3.3.1"}
-  org.lwjgl/lwjgl-stb {:mvn/version "3.3.1"}
+  org.lwjgl/lwjgl {:mvn/version "3.3.4"}
+  org.lwjgl/lwjgl-glfw {:mvn/version "3.3.4"}
+  org.lwjgl/lwjgl-opengl {:mvn/version "3.3.4"}
+  org.lwjgl/lwjgl-opengles {:mvn/version "3.3.4"}
+  org.lwjgl/lwjgl-stb {:mvn/version "3.3.4"}
 
   org.joml/joml {:mvn/version "1.10.4"}
   }
@@ -61,11 +61,11 @@
                 com.clojure-goes-fast/clj-async-profiler {:mvn/version "1.2.0"}}}
 
   :linux
-  {:extra-deps {org.lwjgl/lwjgl$natives-linux {:mvn/version "3.3.1"}
-                org.lwjgl/lwjgl-glfw$natives-linux {:mvn/version "3.3.1"}
-                org.lwjgl/lwjgl-opengl$natives-linux {:mvn/version "3.3.1"}
-                org.lwjgl/lwjgl-opengles$natives-linux {:mvn/version "3.3.1"}
-                org.lwjgl/lwjgl-stb$natives-linux {:mvn/version "3.3.1"}}}
+  {:extra-deps {org.lwjgl/lwjgl$natives-linux {:mvn/version "3.3.4"}
+                org.lwjgl/lwjgl-glfw$natives-linux {:mvn/version "3.3.4"}
+                org.lwjgl/lwjgl-opengl$natives-linux {:mvn/version "3.3.4"}
+                org.lwjgl/lwjgl-opengles$natives-linux {:mvn/version "3.3.4"}
+                org.lwjgl/lwjgl-stb$natives-linux {:mvn/version "3.3.4"}}}
 
   :cljs-dev
   {:extra-deps {org.clojure/clojurescript {:mvn/version "1.11.54"}}
