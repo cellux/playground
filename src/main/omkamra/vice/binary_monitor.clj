@@ -467,12 +467,30 @@
 
 (defn display-get
   [conn {:keys [use-vic-ii? format]}]
-  (throw (ex-info "not implemented" {:command MON_CMD_DISPLAY_GET})))
+  (send-request conn MON_CMD_DISPLAY_GET "11" [use-vic-ii? format]))
 
 (defmethod read-response MON_RESPONSE_DISPLAY_GET
   [_ in]
-  (throw (ex-info "unimplemented response type"
-                  {:response-type MON_RESPONSE_DISPLAY_GET})))
+  (let [header-length (read-int in)
+        debug-width (read-short in)
+        debug-height (read-short in)
+        x-offset (read-short in)
+        y-offset (read-short in)
+        inner-width (read-short in)
+        inner-height (read-short in)
+        bpp (read-byte in)
+        buffer-length (read-int in)
+        buffer (read-bytes in buffer-length)]
+    {:header-length header-length
+     :debug-width debug-width
+     :debug-height debug-height
+     :x-offset x-offset
+     :y-offset y-offset
+     :inner-width inner-width
+     :inner-height inner-height
+     :bpp bpp
+     :buffer-length buffer-length
+     :buffer buffer}))
 
 (defn vice-info
   [conn]
@@ -487,12 +505,22 @@
 
 (defn palette-get
   [conn {:keys [use-vic-ii?]}]
-  (throw (ex-info "not implemented" {:command MON_CMD_PALETTE_GET})))
+  (send-request conn MON_CMD_PALETTE_GET "1" [use-vic-ii?]))
 
 (defmethod read-response MON_RESPONSE_PALETTE_GET
   [_ in]
-  (throw (ex-info "unimplemented response type"
-                  {:response-type MON_RESPONSE_PALETTE_GET})))
+  (let [num-items (read-short in)]
+    (loop [remaining num-items
+           result (vector)]
+      (if (zero? remaining)
+        result
+        (recur (dec remaining)
+               (let [item-size (read-byte in)]
+                 (assert (= item-size 3))
+                 (let [r (read-byte in)
+                       g (read-byte in)
+                       b (read-byte in)]
+                   (conj result [r g b]))))))))
 
 (defn joyport-set
   [conn {:keys [port value]}]
