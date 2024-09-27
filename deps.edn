@@ -40,12 +40,12 @@
   org.antlr/antlr4 {:mvn/version "4.11.1"}
   clj-antlr/clj-antlr {:mvn/version "0.2.12"}
 
-  com.github.omkamra/jnr {:mvn/version "0.2.0"}
-  com.github.omkamra/fluidsynth {:mvn/version "0.3.0"}
-  com.github.omkamra/sequencer {:mvn/version "0.4.1"}
-  com.github.omkamra/sequencer-midi {:mvn/version "0.4.0"}
-  com.github.omkamra/sequencer-fluidsynth {:mvn/version "0.4.0"}
-  com.github.omkamra/cowbells {:mvn/version "0.3.1"}
+  com.github.omkamra/jnr {:local/root "../omkamra/jnr"}
+  com.github.omkamra/fluidsynth {:local/root "../omkamra/fluidsynth"}
+  com.github.omkamra/sequencer {:local/root "../omkamra/sequencer"}
+  com.github.omkamra/sequencer-midi {:local/root "../omkamra/sequencer-midi"}
+  com.github.omkamra/sequencer-fluidsynth {:local/root "../omkamra/sequencer-fluidsynth"}
+  com.github.omkamra/cowbells {:local/root "../omkamra/cowbells"}
 
   org.lwjgl/lwjgl {:mvn/version "3.3.1"}
   org.lwjgl/lwjgl-glfw {:mvn/version "3.3.1"}
