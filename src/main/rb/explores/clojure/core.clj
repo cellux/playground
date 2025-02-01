@@ -6,7 +6,8 @@
            (apply hash-set (keys *clojure-version*))))
 
 ;; command line arguments
-(assert (seq? *command-line-args*))
+(when *command-line-args*
+  (assert (seq? *command-line-args*)))
 
 ;; stdin / stdout / stderr
 (assert (instance? java.io.Reader *in*))
@@ -217,3 +218,20 @@
   (with-lexical-bindings
     bindings
     (assert (= bindings {'x 5 'y 8}))))
+
+;; symbols and keywords can be used in operator position to look
+;; themselves up in a map
+
+(let [m {'foo 5 :bar 8}]
+  (assert (= ('foo m) 5))
+  (assert (= (:bar m) 8))
+  (assert (nil? (:nope m)))
+  (assert (= ::default (:nope m ::default))))
+
+;; maps can be used in operator position to look up a key
+
+(let [m {'foo 5 :bar 8}]
+  (assert (= (m 'foo) 5))
+  (assert (= (m :bar) 8))
+  (assert (nil? (m :nope)))
+  (assert (= ::default (m :nope ::default))))
