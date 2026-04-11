@@ -36,6 +36,7 @@
   org.antlr/antlr4 {:mvn/version "4.13.2"}
   clj-antlr/clj-antlr {:mvn/version "0.2.14"}
   metasoarous/oz {:mvn/version "1.6.0-alpha36"}
+  org.replikativ/hasch {:mvn/version "0.4.98"}
 
   com.github.omkamra/jnr {:local/root "../omkamra/jnr"}
   com.github.omkamra/fluidsynth {:local/root "../omkamra/fluidsynth"}
