@@ -6,6 +6,47 @@
 (defn py-lines [& lines]
   (str (str/join "\n" lines) "\n"))
 
+(defn linked-ident [v]
+  (let [var-name (-> v meta :name name)
+        ns-name (str (-> v meta :ns ns-name))
+        digest (java.security.MessageDigest/getInstance "SHA-1")
+        bytes (.digest digest (.getBytes (str ns-name "/" var-name) "UTF-8"))
+        hex (apply str (map (fn [b] (format "%02x" (bit-and b 0xff)))
+                            bytes))
+        hash8 (subs hex 0 8)
+        base (str/replace var-name #"[.\-]" "_")]
+    (str base "__" hash8)))
+
+(def default-env
+  (py/value {"PATH" "/usr/bin"
+             "SHELL" "/bin/bash"}))
+
+(def exec-command
+  (py/function [cmd env]
+    (return (py-tuple cmd env))))
+
+(def run-command
+  (py/function [cmd]
+    (return (::exec-command
+             cmd
+             ::default-env))))
+
+(def main-linked
+  (py/function []
+    (return (::run-command "date"))))
+
+(def unused-helper
+  (py/function []
+    (return "unused")))
+
+(py/define define-v 5)
+
+(py/define (define-inc x)
+  (+ x 1))
+
+(py/define (define-main x)
+  (return (::define-inc (+ x ::define-v))))
+
 (deftest transpile
   (is (= (py/transpile '((def helper [x] (return (* x 2)))
                          (def main [] (print (helper 21)))))
@@ -852,3 +893,39 @@
           "            return bit"
           "        case _:"
           "            return None"))))
+
+(deftest transpile-links-reachable-dependencies-from-top-level-forms
+  (let [default-env-id (linked-ident #'default-env)
+        exec-command-id (linked-ident #'exec-command)
+        run-command-id (linked-ident #'run-command)]
+    (is (= (py/transpile '((def main-linked []
+                             (return (::run-command "date")))))
+           (py-lines
+            (str "def " exec-command-id "(cmd, env):")
+            "    return (cmd, env)"
+            ""
+            (str default-env-id " = {\"PATH\": \"/usr/bin\", \"SHELL\": \"/bin/bash\"}")
+            ""
+            (str "def " run-command-id "(cmd):")
+            (str "    return " exec-command-id "(cmd, " default-env-id ")")
+            ""
+            "def main_linked():"
+            (str "    return " run-command-id "(\"date\")"))))))
+
+(deftest define-macro-supports-values-and-functions
+  (let [define-v-id (linked-ident #'define-v)
+        define-inc-id (linked-ident #'define-inc)
+        define-main-id (linked-ident #'define-main)]
+    (is (= (py/transpile '((def entry [x]
+                             (return (::define-main x)))))
+           (py-lines
+            (str "def " define-inc-id "(x):")
+            "    x + 1"
+            ""
+            (str define-v-id " = 5")
+            ""
+            (str "def " define-main-id "(x):")
+            (str "    return " define-inc-id "(x + " define-v-id ")")
+            ""
+            "def entry(x):"
+            (str "    return " define-main-id "(x)"))))))
