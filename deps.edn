@@ -21,6 +21,7 @@
   com.jcraft/jsch.agentproxy.sshagent {:mvn/version "0.0.9"}
   com.jcraft/jsch.agentproxy.connector-factory {:mvn/version "0.0.9"}
   com.jcraft/jsch.agentproxy.usocket-jna {:mvn/version "0.0.9"}
+  org.apache.sshd/sshd-core {:mvn/version "2.17.1"}
   quil/quil {:mvn/version "4.3.1563"}
   clj-commons/clj-yaml {:mvn/version "1.0.29"}
   clj-http/clj-http {:mvn/version "3.13.1"}
@@ -37,6 +38,9 @@
   clj-antlr/clj-antlr {:mvn/version "0.2.14"}
   metasoarous/oz {:mvn/version "1.6.0-alpha36"}
   org.replikativ/hasch {:mvn/version "0.4.98"}
+  org.slf4j/slf4j-simple {:mvn/version "2.0.17"}
+  cheshire/cheshire {:mvn/version "6.2.0"}
+  metosin/malli {:mvn/version "0.20.1"}
 
   com.github.omkamra/jnr {:local/root "../omkamra/jnr"}
   com.github.omkamra/fluidsynth {:local/root "../omkamra/fluidsynth"}
