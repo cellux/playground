@@ -574,7 +574,7 @@
             "    return arr[i]")
            (emit/emit-module module)))))
 
-(deftest emit-get-slice
+(deftest emit-py-slice
   (let [module (-> (ast/module)
                    (ast/module-add
                     (ast/function-def 'slice-demo ['arr]

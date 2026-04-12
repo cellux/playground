@@ -261,8 +261,8 @@
 (deftest while-else
   (is (= (py/transpile '((def find-index [xs target]
                            (assign! i 0)
-                           (while (< i (len xs))
-                             (if (== (py-get xs i) target)
+                             (while (< i (len xs))
+                             (if (== (py-at xs i) target)
                                (return i))
                              (update! i + 1)
                              (else
@@ -395,7 +395,7 @@
 (deftest delete-statement
   (is (= (py/transpile '((def prune [obj arr i]
                            (del (. obj cache)
-                                (py-get arr i)
+                                (py-at arr i)
                                 (py-slice arr 1 3))
                            (return arr))))
          (py-lines
@@ -564,9 +564,9 @@
 
 (deftest subscript-read-write
   (is (= (py/transpile '((def touch-index [arr i]
-                           (assign! (py-get arr i) 1)
-                           (update! (py-get arr i) + 2)
-                           (return (py-get arr i)))))
+                           (assign! (py-at arr i) 1)
+                           (update! (py-at arr i) + 2)
+                           (return (py-at arr i)))))
          (py-lines
           "def touch_index(arr, i):"
           "    arr[i] = 1"

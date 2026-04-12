@@ -852,7 +852,7 @@
 
 (defn- parse-subscript-form [[_ value slice & extra :as form]]
   (when (or (nil? value) (nil? slice) (seq extra))
-    (throw (ex-info "py-get expects value and index/slice expression" {:form form})))
+    (throw (ex-info "py-at expects value and index/slice expression" {:form form})))
   (ast/subscript (parse-expr value) (parse-expr slice)))
 
 (defn- parse-py-slice-form [[_ value start stop step :as form]]
@@ -1017,16 +1017,10 @@
                      seen-keyword?
                      seen-kw-unpack?))))))))
 
-(defn- parse-renamed-op [form old-op new-op]
-  (throw (ex-info (str old-op " has been renamed to " new-op)
-                  {:form form :old-op old-op :new-op new-op})))
-
 (def ^:private direct-expr-op->parser
   {'. parse-attribute-form
-   'py-get parse-subscript-form
+   'py-at parse-subscript-form
    'py-slice parse-py-slice-form
-   'get-item #(parse-renamed-op % 'get-item 'py-get)
-   'get-slice #(parse-renamed-op % 'get-slice 'py-slice)
    'py-tuple parse-tuple-form
    'list-comp parse-list-comp-form
    'set-comp parse-set-comp-form
