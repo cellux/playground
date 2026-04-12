@@ -822,8 +822,30 @@
 (defn- emit-top-level-stmt [stmt]
   (str/join "\n" (emit-stmt-lines stmt 0)))
 
+(defn- import-top-level-stmt? [stmt]
+  (contains? #{:import-stmt :import-from-stmt} (:type stmt)))
+
 (defn emit-module [module]
   (let [body (:body module)]
     (if (seq body)
-      (str (str/join "\n\n" (map emit-top-level-stmt body)) "\n")
+      (let [rendered (mapv (fn [stmt]
+                             {:text (emit-top-level-stmt stmt)
+                              :import? (import-top-level-stmt? stmt)})
+                           body)
+            emitted (loop [remaining rendered
+                           prev-import? false
+                           first? true
+                           out ""]
+                      (if-let [{:keys [text import?]} (first remaining)]
+                        (let [sep (if first?
+                                    ""
+                                    (if (and prev-import? import?)
+                                      "\n"
+                                      "\n\n"))]
+                          (recur (rest remaining)
+                                 import?
+                                 false
+                                 (str out sep text)))
+                        out))]
+        (str emitted "\n"))
       "")))

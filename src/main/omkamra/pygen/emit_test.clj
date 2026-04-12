@@ -655,7 +655,6 @@
                       [(ast/return 0)])))]
     (is (= (py-lines
             "import math, numpy as np"
-            ""
             "from os.path import join, dirname as dn"
             ""
             "def main():"

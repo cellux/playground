@@ -69,6 +69,45 @@
     (mapv resolve-dependency-var
           (mapcat collect-dependency-keywords forms))))
 
+(defn- parse-import-spec [spec node]
+  (cond
+    (symbol? spec)
+    {:form (list 'import spec)
+     :key [:import spec]}
+
+    (and (vector? spec)
+         (= 2 (count spec))
+         (every? symbol? spec))
+    (let [[module asname] spec]
+      {:form (list 'import [module asname])
+       :key [:import-as module asname]})
+
+    :else
+    (throw (ex-info "py function metadata :imports entries must be symbols or [module asname]"
+                    {:node node :import spec}))))
+
+(defn- node-import-forms [node]
+  (let [kind (:pygen/kind node)]
+    (when-not (= :function kind)
+      [])
+    (let [meta-map (:meta node)]
+      (when (and (some? meta-map) (not (map? meta-map)))
+        (throw (ex-info "py function metadata must be a map"
+                        {:node node :meta meta-map})))
+      (let [imports (:imports meta-map)]
+        (when (and (some? imports) (not (sequential? imports)))
+          (throw (ex-info "py function metadata :imports must be sequential"
+                          {:node node :imports imports})))
+        (->> imports
+             (map #(parse-import-spec % node))
+             (reduce (fn [acc {:keys [key form]}]
+                       (if (contains? (:seen acc) key)
+                         acc
+                         {:seen (conj (:seen acc) key)
+                          :forms (conj (:forms acc) form)}))
+                     {:seen #{} :forms []})
+             :forms)))))
+
 (defn- sanitize-ident-fragment [s]
   (-> s
       (str/replace #"[.\-]" "_")))
@@ -142,6 +181,8 @@
                     {:forms forms})))
   (let [visited (atom #{})
         visiting (atom #{})
+        import-seen (atom #{})
+        imports-out (atom [])
         out (atom [])]
     (letfn [(emit-var! [v]
               (cond
@@ -153,6 +194,10 @@
                   (let [node (py-node-from-var v)]
                     (doseq [dep-var (node-dependency-vars node)]
                       (emit-var! dep-var))
+                    (doseq [import-form (node-import-forms node)]
+                      (when-not (contains? @import-seen import-form)
+                        (swap! import-seen conj import-form)
+                        (swap! imports-out conj import-form)))
                     (swap! out conj (linked-form v node)))
                   (swap! visiting disj v)
                   (swap! visited conj v))))]
@@ -160,4 +205,4 @@
         (doseq [kw (collect-dependency-keywords form)]
           (emit-var! (resolve-dependency-var kw)))
         (swap! out conj (rewrite-dependency-references form)))
-      @out)))
+      (into [] (concat @imports-out @out)))))

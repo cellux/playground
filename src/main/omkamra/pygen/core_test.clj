@@ -31,6 +31,21 @@
              cmd
              ::default-env))))
 
+(def floor-value
+  (py/function [x]
+    {:imports [math]}
+    (return (math.floor x))))
+
+(def floor-value-2
+  (py/function [x]
+    {:imports [math]}
+    (return (::floor-value x))))
+
+(def json-dumps
+  (py/function [x]
+    {:imports [json]}
+    (return (json.dumps x :sort-keys true))))
+
 (def main-linked
   (py/function []
     (return (::run-command "date"))))
@@ -617,7 +632,6 @@
                            (return 0))))
          (py-lines
           "import math, numpy as np"
-          ""
           "from os.path import join, dirname as dn"
           ""
           "def main():"
@@ -929,3 +943,39 @@
             ""
             "def entry(x):"
             (str "    return " define-main-id "(x)"))))))
+
+(deftest transpile-links-and-aggregates-imports-from-function-metadata
+  (let [floor-id (linked-ident #'floor-value)
+        json-id (linked-ident #'json-dumps)]
+    (is (= (py/transpile '((def entry [x]
+                             (return (py-tuple (::floor-value x)
+                                               (::json-dumps {"x" x}))))))
+           (py-lines
+            "import math"
+            "import json"
+            ""
+            (str "def " floor-id "(x):")
+            "    return math.floor(x)"
+            ""
+            (str "def " json-id "(x):")
+            "    return json.dumps(x, sort_keys=True)"
+            ""
+            "def entry(x):"
+            (str "    return (" floor-id "(x), " json-id "({\"x\": x})" ")"))))))
+
+(deftest transpile-deduplicates-imports-from-linked-functions
+  (let [floor-id (linked-ident #'floor-value)
+        floor2-id (linked-ident #'floor-value-2)]
+    (is (= (py/transpile '((def entry [x]
+                             (return (::floor-value-2 x)))))
+           (py-lines
+            "import math"
+            ""
+            (str "def " floor-id "(x):")
+            "    return math.floor(x)"
+            ""
+            (str "def " floor2-id "(x):")
+            (str "    return " floor-id "(x)")
+            ""
+            "def entry(x):"
+            (str "    return " floor2-id "(x)"))))))

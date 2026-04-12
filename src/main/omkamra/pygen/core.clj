@@ -3,10 +3,18 @@
             [omkamra.pygen.linker :as linker]
             [omkamra.pygen.parser :as parser]))
 
+(defn- split-meta-and-body
+  [body]
+  (if (and (seq body) (map? (first body)))
+    [(first body) (rest body)]
+    [nil body]))
+
 (defmacro function [params & body]
-  `{:pygen/kind :function
-    :params '~params
-    :body '~body})
+  (let [[meta-map function-body] (split-meta-and-body body)]
+    `{:pygen/kind :function
+      :params '~params
+      :meta '~meta-map
+      :body '~function-body}))
 
 (defmacro value [expr]
   `{:pygen/kind :value
