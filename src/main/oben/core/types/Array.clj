@@ -34,7 +34,9 @@
 (defmethod o/sizeof* ::Array
   [ctx t]
   (let [{:keys [element-type size]} (meta t)]
-    (* (o/alignof ctx element-type) size)))
+    ;; Array elements use their allocation size, not merely their alignment;
+    ;; this matters for packed structs and other types with distinct stride.
+    (* (o/sizeof ctx element-type) size)))
 
 (defmethod o/alignof* ::Array
   [ctx t]

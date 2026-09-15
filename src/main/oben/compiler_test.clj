@@ -2,7 +2,11 @@
   (:require [midje.sweet :as m]
             [oben.compiler :as compiler]
             [oben.core :as oben]
-            [oben.core.target :as target]))
+            [oben.core.api :as o]
+            [oben.core.target :as target]
+            [oben.core.types.Array :as Array]
+            [oben.core.types.Number :as Number]
+            [oben.core.types.Struct :as Struct]))
 
 (oben/with-target :dump
   (let [f (oben/fn ^u32 [^u32 x] (+ x 1))
@@ -30,3 +34,20 @@
       (m/fact (:target-attrs result) => {:address-size 32 :align-min 1}))
     (finally
       (target/dispose t))))
+
+(oben/with-target :dump
+  (let [normal (Struct/Struct [{:name :a :type Number/%u8}
+                               {:name :b :type Number/%f32}])
+        packed (Struct/Struct [{:name :a :type Number/%u8}
+                               {:name :b :type Number/%f32}]
+                              {:packed? true})
+        ctx (target/ctx)]
+    (m/fact (o/sizeof ctx normal) => 8)
+    (m/fact (o/alignof ctx normal) => 4)
+    (m/fact (Struct/field-types->offsets ctx (:field-types (meta normal)))
+            => [0 4])
+    (m/fact (o/sizeof ctx packed) => 5)
+    (m/fact (o/alignof ctx packed) => 1)
+    (m/fact (Struct/field-types->offsets ctx (:field-types (meta packed)) true)
+            => [0 1])
+    (m/fact (o/sizeof ctx (Array/Array packed 2)) => 10)))

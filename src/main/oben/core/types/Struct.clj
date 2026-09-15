@@ -56,36 +56,53 @@
   ([field-types]
    (field-types->struct-alignment (o/current-target-context) field-types))
   ([ctx field-types]
-   (apply max (map #(o/alignof ctx %) field-types))))
+   (if (seq field-types)
+     (apply max (map #(o/alignof ctx %) field-types))
+     1)))
 
 (defmethod o/alignof* ::Struct
   [ctx t]
-  (->> t meta :field-types (field-types->struct-alignment ctx)))
+  (if (:packed? (meta t))
+    1
+    (->> t meta :field-types (field-types->struct-alignment ctx))))
 
 (defn field-types->struct-size
   ([field-types]
    (field-types->struct-size (o/current-target-context) field-types))
   ([ctx field-types]
    (let [struct-alignment (field-types->struct-alignment ctx field-types)]
-     (-> (reduce (fn [size t]
-                   (+ (o/align size (o/alignof ctx t))
-                      (o/sizeof ctx t)))
-                 0 field-types)
-         (o/align struct-alignment)))))
+     (if (seq field-types)
+       (-> (reduce (fn [size t]
+                     (+ (o/align size (o/alignof ctx t))
+                        (o/sizeof ctx t)))
+                   0 field-types)
+           (o/align struct-alignment))
+       0))))
+
+(defn packed-field-types->struct-size
+  [ctx field-types]
+  (reduce + 0 (map #(o/sizeof ctx %) field-types)))
 
 (defmethod o/sizeof* ::Struct
   [ctx t]
-  (->> t meta :field-types (field-types->struct-size ctx)))
+  (let [{:keys [field-types packed?]} (meta t)]
+    (if packed?
+      (packed-field-types->struct-size ctx field-types)
+      (field-types->struct-size ctx field-types))))
 
 (defn field-types->offsets
   ([field-types]
-   (field-types->offsets (o/current-target-context) field-types))
+   (field-types->offsets (o/current-target-context) field-types false))
   ([ctx field-types]
+   (field-types->offsets ctx field-types false))
+  ([ctx field-types packed?]
    (loop [offsets []
           offset 0
           ts field-types]
      (if-let [t (first ts)]
-       (let [offset (o/align offset (o/alignof ctx t))]
+       (let [offset (if packed?
+                      offset
+                      (o/align offset (o/alignof ctx t)))]
          (recur (conj offsets offset)
                 (+ offset (o/sizeof ctx t))
                 (next ts)))
