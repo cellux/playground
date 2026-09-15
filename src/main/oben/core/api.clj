@@ -338,7 +338,11 @@
   `(do
      (defn ~name
        ~params
-       ~@body)
+       ;; Portable definitions must use the target supplied by the
+       ;; compiler, rather than whichever target happens to be globally
+       ;; selected while the definition is evaluated.
+       (binding [target/*current-target* ~(first params)]
+         ~@body))
      (register-portable ~name)
      #'~name))
 
@@ -505,7 +509,7 @@
      (try
        (cond
          (portable? form)
-         (parse-for-target (target/current) form)
+         (parse-for-target (or (:oben/target env) (target/current)) form)
 
          (parses-to-itself? form)
          form
@@ -517,7 +521,10 @@
            ;; variable reference
            (let [result (resolve form env)]
              (if (portable? result)
-               (parse (parse-for-target (target/current) result) env)
+               (parse (parse-for-target (or (:oben/target env)
+                                            (target/current))
+                                        result)
+                     env)
                (parse result env))))
 
          (number? form)

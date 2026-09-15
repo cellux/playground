@@ -11,7 +11,7 @@
   Target/protocol
 
   (compile-function [this fnode]
-    (let [{:keys [ctx source]} (compiler/compile-function ctx fnode)]
+    (let [{:keys [ctx source]} (compiler/compile-function this ctx fnode)]
       (assoc this :ctx ctx :module-source source)))
 
   (invoke-function [this fnode args]

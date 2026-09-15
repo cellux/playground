@@ -38,7 +38,8 @@
   (with-meta
     (memoize
      (clj/fn [target]
-       (o/parse (list 'Fn return-type param-types) lexical-bindings)))
+       (o/parse (list 'Fn return-type param-types)
+                (assoc lexical-bindings :oben/target target))))
     {:kind :oben/PORTABLE}))
 
 (clj/defmacro Fn
@@ -53,7 +54,7 @@
   (let [parse-for-target (memoize
                           (clj/fn [target]
                             (-> (o/parse (list* 'fn params body)
-                                         lexical-bindings)
+                                         (assoc lexical-bindings :oben/target target))
                                 (vary-meta assoc :name name))))]
     (with-meta
       (clj/fn [& args]
@@ -89,7 +90,8 @@
     (with-meta
       (memoize
        (clj/fn [target]
-         (o/parse (list 'Struct fields opts) lexical-bindings)))
+         (o/parse (list 'Struct fields opts)
+                  (assoc lexical-bindings :oben/target target))))
       {:kind :oben/PORTABLE})))
 
 (clj/defmacro Struct
@@ -112,7 +114,8 @@
     (with-meta
       (memoize
        (clj/fn [target]
-         (o/parse (list 'Array element-type size opts) lexical-bindings)))
+         (o/parse (list 'Array element-type size opts)
+                  (assoc lexical-bindings :oben/target target))))
       {:kind :oben/PORTABLE})))
 
 (clj/defmacro Array
@@ -129,7 +132,8 @@
     (with-meta
       (memoize
        (clj/fn [target]
-         (o/parse (list 'global opts initializer) lexical-bindings)))
+         (o/parse (list 'global opts initializer)
+                  (assoc lexical-bindings :oben/target target))))
       {:kind :oben/PORTABLE})))
 
 (clj/defmacro global

@@ -179,7 +179,7 @@
   (compile-function [this fnode]
     (if (contains? modules fnode)
       this
-      (let [{:keys [ctx source function]} (compiler/compile-function ctx fnode)
+      (let [{:keys [ctx source function]} (compiler/compile-function this ctx fnode)
             module-id (str "oben-" next-module-id)
             adapter-name (str "oben_entry_" next-module-id)
             param-layouts (mapv #(scalar-layout (:type %)) (:params function))

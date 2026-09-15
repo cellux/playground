@@ -154,7 +154,7 @@
   Target/protocol
 
   (compile-function [this fnode]
-    (let [{:keys [ctx source]} (compiler/compile-function ctx fnode)
+    (let [{:keys [ctx source]} (compiler/compile-function this ctx fnode)
           ctx (assemble-module ctx source)]
       (assoc this :ctx ctx)))
 
