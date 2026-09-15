@@ -3,6 +3,7 @@
   (:require [oben.core.protocols.Target :as Target])
   (:require [oben.core.context :as ctx])
   (:require [oben.compiler :as compiler])
+  (:require [oben.core.abi :as abi])
   (:require [omkamra.llvm.ir :as ir])
   (:require [omkamra.llvm.platform :as platform])
   (:require [omkamra.llvm.context :as llvm-context])
@@ -150,18 +151,34 @@
           :float (.invokeFloat invoker cc address hib)
           :double (.invokeDouble invoker cc address hib))))))
 
-(defrecord InProcessTarget [ctx attrs invoke-strategy]
+(defrecord InProcessTarget [ctx attrs invoke-strategy compiled-functions next-adapter-id]
   Target/protocol
 
   (compile-function [this fnode]
-    (let [{:keys [ctx source]} (compiler/compile-function this ctx fnode)
-          ctx (assemble-module ctx source)]
-      (assoc this :ctx ctx)))
+    (if (contains? compiled-functions fnode)
+      this
+      (let [{:keys [ctx source function]} (compiler/compile-function this ctx fnode)
+            adapter-name (str "oben_entry_" next-adapter-id)
+            [ctx compiled]
+            (if (abi/supported-function? fnode function)
+              (let [abi (abi/function-abi ctx fnode function adapter-name)
+                    source (compiler/verify-module-source!
+                            (str source "\n" (abi/adapter-source abi)))
+                    ctx (assemble-module ctx source)]
+                [ctx abi])
+              [(assemble-module ctx source)
+               {:function function :direct? true}])]
+        (assoc this
+               :ctx ctx
+               :compiled-functions (assoc compiled-functions fnode compiled)
+               :next-adapter-id (inc next-adapter-id)))))
 
   (invoke-function [this fnode args]
-    (let [f (ctx/compiled-node ctx fnode)
-          invoker (make-function-invoker invoke-strategy ctx f)]
-      (apply invoker args)))
+    (let [compiled (get compiled-functions fnode)]
+      (if (:direct? compiled)
+        (let [invoker (make-function-invoker invoke-strategy ctx (:function compiled))]
+          (apply invoker args))
+        (abi/invoke-inprocess ctx compiled args))))
 
   (dispose [this]
     (let [ctx (dispose-llvm-execution-engine ctx)
@@ -178,4 +195,6 @@
     (map->InProcessTarget
      {:ctx (ctx/create {:target-attrs attrs :target-layout target-layout})
       :attrs attrs
-      :invoke-strategy (or invoke-strategy :jnr)})))
+      :invoke-strategy (or invoke-strategy :jnr)
+      :compiled-functions {}
+      :next-adapter-id 1})))

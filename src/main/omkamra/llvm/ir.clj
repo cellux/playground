@@ -1145,7 +1145,7 @@
   [val indices opts]
   (let [val-type (:type val)]
     (assert (vector? val-type))
-    (assert (#{:struct :array} (first val-type)))
+    (assert (#{:struct :array :packed-struct} (first val-type)))
     (let [indices (map sanitize-gep-index indices)]
       (assoc opts
              :kind :instruction
@@ -1181,7 +1181,7 @@
   [val elt indices opts]
   (let [val-type (:type val)]
     (assert (vector? val-type))
-    (assert (#{:struct :array} (first val-type)))
+    (assert (#{:struct :array :packed-struct} (first val-type)))
     (let [indices (map sanitize-gep-index indices)]
       (assoc opts
              :kind :instruction
