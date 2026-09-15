@@ -88,9 +88,9 @@
   (and (o/node? x)
        (isa? (o/tid-of-node x) ::Ptr)))
 
-(defmethod o/sizeof ::Ptr
-  [t]
-  (bit-shift-right (target/attr :address-size) 3))
+(defmethod o/sizeof* ::Ptr
+  [ctx _t]
+  (bit-shift-right (ctx/target-attr ctx :address-size) 3))
 
 (defn %deref
   [ptr-node]

@@ -28,7 +28,8 @@
    :align-min 1})
 
 (defn create
-  [{:keys [attrs] :as opts}]
-  (map->DumpTarget
-   {:ctx (ctx/create)
-    :attrs (merge default-attrs attrs)}))
+  [{:keys [attrs target-layout] :as _opts}]
+  (let [attrs (merge default-attrs attrs)]
+    (map->DumpTarget
+     {:ctx (ctx/create {:target-attrs attrs :target-layout target-layout})
+      :attrs attrs})))

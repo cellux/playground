@@ -198,20 +198,40 @@
         n
         (- (+ n alignment) m)))))
 
-(clj/defmulti sizeof
-  "Returns the number of bytes occupied by values of the given type in
-  memory. The size of a type depends on the ABI of the current
-  target."
-  tid-of-type)
+(defn current-target-context
+  []
+  {:target-attrs (target/attrs)
+   :target-layout {:data-layout nil
+                   :target-triple nil}})
 
-(clj/defmulti alignof
-  "Returns the alignment of the given type in bytes. The alignment of
-  a type depends on the ABI of the current target."
-  tid-of-type)
+(clj/defmulti sizeof*
+  "Context-aware implementation of sizeof."
+  (fn [ctx t] (tid-of-type t)))
 
-(clj/defmethod alignof :default
-  [t]
-  (max (sizeof t) (target/attr :align-min)))
+(defn sizeof
+  "Returns the number of bytes occupied by values of the given type.
+   The one-argument form uses the current target for compatibility; the
+   two-argument form uses the explicit compilation context."
+  ([t]
+   (sizeof (current-target-context) t))
+  ([ctx t]
+   (sizeof* ctx t)))
+
+(clj/defmulti alignof*
+  "Context-aware implementation of alignof."
+  (fn [ctx t] (tid-of-type t)))
+
+(defn alignof
+  "Returns the alignment of a type. Prefer the two-argument form inside
+   compiler/lowering code."
+  ([t]
+   (alignof (current-target-context) t))
+  ([ctx t]
+   (alignof* ctx t)))
+
+(clj/defmethod alignof* :default
+  [ctx t]
+  (max (sizeof ctx t) (:align-min (:target-attrs ctx))))
 
 (derive :oben/Value :oben/Any)
 
@@ -482,7 +502,10 @@
   (let [parse (or (and (fn? form)
                        (:parse-for-target (meta form)))
                   form)]
-    (parse target)))
+    ;; Keep legacy target/attr calls in lowering helpers aligned with the
+    ;; explicit target used to parse this form.
+    (binding [target/*current-target* target]
+      (parse target))))
 
 (defn parses-to-itself?
   [form]

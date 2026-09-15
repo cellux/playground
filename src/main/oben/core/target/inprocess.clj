@@ -173,8 +173,9 @@
    :align-min 1})
 
 (defn create
-  [{:keys [attrs invoke-strategy] :as opts}]
-  (map->InProcessTarget
-   {:ctx (ctx/create)
-    :attrs (merge default-attrs attrs)
-    :invoke-strategy (or invoke-strategy :jnr)}))
+  [{:keys [attrs invoke-strategy target-layout] :as _opts}]
+  (let [attrs (merge default-attrs attrs)]
+    (map->InProcessTarget
+     {:ctx (ctx/create {:target-attrs attrs :target-layout target-layout})
+      :attrs attrs
+      :invoke-strategy (or invoke-strategy :jnr)})))

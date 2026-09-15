@@ -74,8 +74,8 @@
   "Returns a numeric type with the typeclass of `t` but with size `size`."
   (fn [t size] (o/tid-of-type t)))
 
-(defmethod o/sizeof ::Number
-  [t]
+(defmethod o/sizeof* ::Number
+  [_ctx t]
   (max (bit-shift-right (:size (meta t)) 3) 1))
 
 ;; UInt

@@ -213,11 +213,12 @@
     this))
 
 (defn create
-  [{:keys [attrs url namespace] :as _opts}]
-  (map->LLVMServerTarget
-   {:ctx (ctx/create)
-    :attrs (merge default-attrs attrs)
-    :url (or url default-url)
-    :namespace (or namespace (str "oben-" (UUID/randomUUID)))
-    :modules {}
-    :next-module-id 1}))
+  [{:keys [attrs url namespace target-layout] :as _opts}]
+  (let [attrs (merge default-attrs attrs)]
+    (map->LLVMServerTarget
+     {:ctx (ctx/create {:target-attrs attrs :target-layout target-layout})
+      :attrs attrs
+      :url (or url default-url)
+      :namespace (or namespace (str "oben-" (UUID/randomUUID)))
+      :modules {}
+      :next-module-id 1})))

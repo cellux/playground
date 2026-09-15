@@ -31,14 +31,14 @@
   [element-type size & [array-opts]]
   (Array (o/parse element-type &env) size array-opts))
 
-(defmethod o/sizeof ::Array
-  [t]
+(defmethod o/sizeof* ::Array
+  [ctx t]
   (let [{:keys [element-type size]} (meta t)]
-    (* (o/alignof element-type) size)))
+    (* (o/alignof ctx element-type) size)))
 
-(defmethod o/alignof ::Array
-  [t]
-  (o/alignof (:element-type (meta t))))
+(defmethod o/alignof* ::Array
+  [ctx t]
+  (o/alignof ctx (:element-type (meta t))))
 
 (defmethod o/cast [::Array :oben/HostVector]
   [t elems force?]

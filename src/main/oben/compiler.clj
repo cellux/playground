@@ -1,22 +1,20 @@
 (ns oben.compiler
   "The explicit Oben compilation boundary.
 
-   This namespace owns the target-independent part of compiling an Oben
-   function into a rendered, verified LLVM module. Targets decide what to do
-   with the resulting module and function IR."
+   This namespace orchestrates target-aware compilation of an Oben function
+   into a rendered, verified LLVM module. Targets decide the target-specific
+   context, lowering, and what to do with the resulting module and function IR."
   (:require [oben.core.context :as ctx]
             [oben.core.target :as target-api]
             [omkamra.llvm.buffer :as llvm-buffer]
             [omkamra.llvm.context :as llvm-context]
             [omkamra.llvm.ir :as ir]
-            [omkamra.llvm.module :as llvm-module]
-            [omkamra.llvm.platform :as platform]))
+            [omkamra.llvm.module :as llvm-module]))
 
 (defn module-data
   [compiler-ctx]
-  (assoc (:m compiler-ctx)
-         :data-layout platform/data-layout
-         :target-triple platform/target-triple))
+  (merge (:m compiler-ctx)
+         (:target-layout compiler-ctx)))
 
 (defn render-module
   [compiler-ctx]
@@ -51,16 +49,12 @@
 
    The target is allowed to provide target-specific parsing/lowering behavior;
    it is dynamically bound only while the compilation is running so existing
-   Oben nodes can access target attributes. The returned `:ctx` retains
-   Oben's compilation cache, `:module` contains rendered-module data,
+   Oben nodes can access target attributes. The target attributes and layout
+   are retained in the returned compilation context. The returned `:ctx`
+   retains Oben's compilation cache, `:module` contains rendered-module data,
    `:source` is verified textual LLVM IR, and `:function` is the compiled IR
-   function corresponding to `fnode`.
-
-   The two-argument form remains as a compatibility convenience and uses the
-   current target. New callers should use the three-argument form."
-  ([compiler-ctx fnode]
-   (compile-function (target-api/current) compiler-ctx fnode))
-  ([target compiler-ctx fnode]
+   function corresponding to `fnode`."
+  [target compiler-ctx fnode]
    (let [target (target-cell target)
          compiler-ctx (assoc compiler-ctx
                              :target-attrs (target-api/attrs* target))]
@@ -75,4 +69,4 @@
           :fnode fnode
           :function (ctx/compiled-node compiler-ctx fnode)
           :module (module-data compiler-ctx)
-          :source source})))))
+          :source source}))))

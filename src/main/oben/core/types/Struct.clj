@@ -53,37 +53,43 @@
     (Struct field-specs struct-opts)))
 
 (defn field-types->struct-alignment
-  [field-types]
-  (apply max (map o/alignof field-types)))
+  ([field-types]
+   (field-types->struct-alignment (o/current-target-context) field-types))
+  ([ctx field-types]
+   (apply max (map #(o/alignof ctx %) field-types))))
 
-(defmethod o/alignof ::Struct
-  [t]
-  (->> t meta :field-types field-types->struct-alignment))
+(defmethod o/alignof* ::Struct
+  [ctx t]
+  (->> t meta :field-types (field-types->struct-alignment ctx)))
 
 (defn field-types->struct-size
-  [field-types]
-  (let [struct-alignment (field-types->struct-alignment field-types)]
-    (-> (reduce (fn [size t]
-                  (+ (o/align size (o/alignof t))
-                     (o/sizeof t)))
-                0 field-types)
-        (o/align struct-alignment))))
+  ([field-types]
+   (field-types->struct-size (o/current-target-context) field-types))
+  ([ctx field-types]
+   (let [struct-alignment (field-types->struct-alignment ctx field-types)]
+     (-> (reduce (fn [size t]
+                   (+ (o/align size (o/alignof ctx t))
+                      (o/sizeof ctx t)))
+                 0 field-types)
+         (o/align struct-alignment)))))
 
-(defmethod o/sizeof ::Struct
-  [t]
-  (->> t meta :field-types field-types->struct-size))
+(defmethod o/sizeof* ::Struct
+  [ctx t]
+  (->> t meta :field-types (field-types->struct-size ctx)))
 
 (defn field-types->offsets
-  [field-types]
-  (loop [offsets []
-         offset 0
-         ts field-types]
-    (if-let [t (first ts)]
-      (let [offset (o/align offset (o/alignof t))]
-        (recur (conj offsets offset)
-               (+ offset (o/sizeof t))
-               (next ts)))
-      offsets)))
+  ([field-types]
+   (field-types->offsets (o/current-target-context) field-types))
+  ([ctx field-types]
+   (loop [offsets []
+          offset 0
+          ts field-types]
+     (if-let [t (first ts)]
+       (let [offset (o/align offset (o/alignof ctx t))]
+         (recur (conj offsets offset)
+                (+ offset (o/sizeof ctx t))
+                (next ts)))
+       offsets))))
 
 (defmethod o/cast [::Struct :oben/HostVector]
   [t elems force?]

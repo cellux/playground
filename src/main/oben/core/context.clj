@@ -1,6 +1,7 @@
 (ns oben.core.context
   (:require [oben.core.api :as o])
-  (:require [omkamra.llvm.ir :as ir]))
+  (:require [omkamra.llvm.ir :as ir])
+  (:require [omkamra.llvm.platform :as platform]))
 
 (def basic-block-bin-ids [:entry :main :exit])
 
@@ -23,12 +24,25 @@
          :compiling-type nil))
 
 (defn create
-  []
-  (let [ctx {:epoch 0
-             :compiled-types {}
-             :compiled-globals {}
-             :compiled-nodes {}}]
-    (reset ctx)))
+  ([]
+   (create {}))
+  ([{:keys [target-attrs target-layout]}]
+   (let [ctx {:epoch 0
+              :target-attrs target-attrs
+              :target-layout (or target-layout
+                                 {:data-layout platform/data-layout
+                                  :target-triple platform/target-triple})
+              :compiled-types {}
+              :compiled-globals {}
+              :compiled-nodes {}}]
+     (reset ctx))))
+
+(defn target-attr
+  [ctx name]
+  (if (contains? (:target-attrs ctx) name)
+    (get (:target-attrs ctx) name)
+    (throw (ex-info "missing target attribute"
+                    {:name name :target-attrs (:target-attrs ctx)}))))
 
 (defn next-epoch
   [ctx]
