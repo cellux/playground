@@ -4,25 +4,18 @@
    [oben.core.target :as target]
    [oben.core.protocols.Target :as Target]
    [oben.core.context :as ctx]
-   [omkamra.llvm.ir :as ir]
+   [oben.compiler :as compiler]
    [omkamra.llvm.platform :as platform]))
 
 (defrecord DumpTarget [ctx attrs]
   Target/protocol
 
   (compile-function [this fnode]
-    (let [ctx (ctx/next-epoch ctx)
-          ctx (ctx/compile-node ctx fnode)]
-      (assoc this :ctx ctx)))
+    (let [{:keys [ctx source]} (compiler/compile-function ctx fnode)]
+      (assoc this :ctx ctx :module-source source)))
 
   (invoke-function [this fnode args]
-    (let [m (assoc (:m ctx)
-                   :data-layout platform/data-layout
-                   :target-triple platform/target-triple)
-          module-src (try
-                       (ir/render-module m)
-                       (catch Throwable _
-                         m))]
+    (let [module-src (:module-source this)]
       (if (string? module-src)
         (println module-src)
         (pprint module-src))))

@@ -2,6 +2,7 @@
   (:require [oben.core.target :as target])
   (:require [oben.core.protocols.Target :as Target])
   (:require [oben.core.context :as ctx])
+  (:require [oben.compiler :as compiler])
   (:require [omkamra.llvm.ir :as ir])
   (:require [omkamra.llvm.platform :as platform])
   (:require [omkamra.llvm.context :as llvm-context])
@@ -40,23 +41,21 @@
   (update ctx :llvm dissoc :ee))
 
 (defn assemble-module
-  [ctx]
-  (let [m (assoc (:m ctx)
-                 :data-layout platform/data-layout
-                 :target-triple platform/target-triple)
-        module-src (ir/render-module m)
-        buf (llvm-buffer/from-string module-src)
-        llvm-context (or (get-llvm-context ctx)
-                         (llvm-context/create))
-        mod (llvm-module/from-buffer buf llvm-context)
-        existing-ee (get-llvm-execution-engine ctx)
-        ee (or existing-ee
-               (llvm-engine/create-mcjit-compiler mod))]
-    (when existing-ee
-      (llvm-engine/add-module existing-ee mod))
-    (-> ctx
-        (set-llvm-context llvm-context)
-        (set-llvm-execution-engine ee))))
+  ([ctx]
+   (assemble-module ctx (compiler/render-module ctx)))
+  ([ctx module-src]
+   (let [buf (llvm-buffer/from-string module-src)
+         llvm-context (or (get-llvm-context ctx)
+                          (llvm-context/create))
+         mod (llvm-module/from-buffer buf llvm-context)
+         existing-ee (get-llvm-execution-engine ctx)
+         ee (or existing-ee
+                (llvm-engine/create-mcjit-compiler mod))]
+     (when existing-ee
+       (llvm-engine/add-module existing-ee mod))
+     (-> ctx
+         (set-llvm-context llvm-context)
+         (set-llvm-execution-engine ee)))))
 
 (defn get-function-address
   [ctx f]
@@ -155,9 +154,8 @@
   Target/protocol
 
   (compile-function [this fnode]
-    (let [ctx (ctx/next-epoch ctx)
-          ctx (ctx/compile-node ctx fnode)
-          ctx (assemble-module ctx)]
+    (let [{:keys [ctx source]} (compiler/compile-function ctx fnode)
+          ctx (assemble-module ctx source)]
       (assoc this :ctx ctx)))
 
   (invoke-function [this fnode args]

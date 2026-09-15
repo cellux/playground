@@ -46,7 +46,7 @@
    LLVMModuleCreateWithNameInContext [^String ModuleID
                                       ^Pointer C])
   (^void
-   LLVMDisposeModule)
+   LLVMDisposeModule [^Pointer M])
   (^void
    LLVMDumpModule [^Pointer M])
   (^int

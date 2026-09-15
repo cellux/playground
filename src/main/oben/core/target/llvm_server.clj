@@ -7,6 +7,7 @@
    and encodes its result into the output buffer expected by llvm-http-server."
   (:require [clj-http.client :as http]
             [clojure.string :as str]
+            [oben.compiler :as compiler]
             [oben.core.context :as ctx]
             [oben.core.protocols.Target :as Target]
             [omkamra.llvm.ir :as ir]
@@ -141,11 +142,8 @@
                 ""]))))
 
 (defn- module-source
-  [ctx adapter]
-  (let [m (assoc (:m ctx)
-                 :data-layout platform/data-layout
-                 :target-triple platform/target-triple)]
-    (str (ir/render-module m) "\n" adapter)))
+  [source adapter]
+  (str source "\n" adapter))
 
 (defn- load-module!
   [url namespace module source]
@@ -181,14 +179,15 @@
   (compile-function [this fnode]
     (if (contains? modules fnode)
       this
-      (let [ctx (-> ctx ctx/next-epoch (ctx/compile-node fnode))
-            f (ctx/compiled-node ctx fnode)
+      (let [{:keys [ctx source function]} (compiler/compile-function ctx fnode)
             module-id (str "oben-" next-module-id)
             adapter-name (str "oben_entry_" next-module-id)
-            param-layouts (mapv #(scalar-layout (:type %)) (:params f))
-            return-layout (scalar-layout (:result-type f))
-            adapter (adapter-source adapter-name f)]
-        (load-module! url namespace module-id (module-source ctx adapter))
+            param-layouts (mapv #(scalar-layout (:type %)) (:params function))
+            return-layout (scalar-layout (:result-type function))
+            adapter (adapter-source adapter-name function)
+            source (compiler/verify-module-source!
+                    (module-source source adapter))]
+        (load-module! url namespace module-id source)
         (assoc this
                :ctx ctx
                :modules (assoc modules fnode {:module module-id
