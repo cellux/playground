@@ -127,6 +127,17 @@
     (keyword? x) (str \% (render-name-string (name x)))
     (symbol? x) (str \@ (render-name-string (name x)))))
 
+(defn render-type-name
+  "Renders an LLVM named-type identifier. Unlike global symbols, named types
+   always use the '%' sigil, including when their source name is a Clojure
+   symbol."
+  [x]
+  (cond
+    (integer? x) (str \% x)
+    (clj/or (keyword? x) (symbol? x))
+    (str \% (render-name-string (name x)))
+    :else (throw (ex-info "invalid type name" {:name x}))))
+
 (declare render-type)
 
 (def simple-type? keyword?)
@@ -215,7 +226,7 @@
     (simple-type? t) (render-simple-type t)
     (complex-type? t) (if-let [name (clj/and (struct-type? t)
                                              (struct-name t))]
-                        (render-name name)
+                        (render-type-name name)
                         (render-complex-type t))
     :else (throw (ex-info "invalid type" {:type t}))))
 
@@ -232,6 +243,9 @@
  (m/fact (render-type [:struct nil [[:integer 8] [:ptr [:integer 16]] [:integer 32]]])
          => "{i8, i16*, i32}")
  (m/fact (render-type [:struct :foo [[:integer 8] [:ptr [:integer 16]] [:integer 32]]])
+         => "%foo")
+ (m/fact "Clojure symbols name globals, but still name LLVM types with %."
+         (render-type [:struct 'foo [[:integer 8] [:ptr [:integer 16]] [:integer 32]]])
          => "%foo")
  (m/fact (render-type [:packed-struct nil [[:integer 8] [:ptr [:integer 16]] [:integer 32]]])
          => "<{i8, i16*, i32}>")
@@ -1638,7 +1652,7 @@ entry:
     (printf "target triple = \"%s\"\n" (render-target-triple target-triple))
     (doseq [[k v] types]
       (printf "%s = type %s\n"
-              (render-name k)
+              (render-type-name k)
               (render-complex-type v)))
     (doseq [[k v] globals]
       (println (render-global v)))

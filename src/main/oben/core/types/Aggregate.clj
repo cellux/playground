@@ -10,6 +10,15 @@
 (defmulti get-element-index (fn [t key] (o/tid-of-type t)))
 (defmulti get-element-type (fn [t key] (o/tid-of-type t)))
 
+(defmethod o/cast [:oben/Aggregate :oben/Value]
+  [t node force?]
+  (if (= t (o/type-of node))
+    node
+    (throw (ex-info "cannot cast between distinct aggregate types"
+                    {:from-type (o/type-of node)
+                     :to-type t
+                     :force? force?}))))
+
 (defn find-innermost-element-type
   [t keys]
   (if (seq keys)

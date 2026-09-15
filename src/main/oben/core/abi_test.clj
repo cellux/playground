@@ -59,6 +59,41 @@
     (m/fact (make 1 2) => {:a 1 :b 2})))
 
 (oben/with-target :inprocess
+  (let [Inner (Struct/Struct [{:name :a :type Number/%u8}
+                              {:name :b :type Number/%u32}]
+                             {:name 'Inner :packed? true})
+        Outer (Struct/Struct [{:name :inner :type Inner}
+                              {:name :c :type Number/%u16}]
+                             {:name 'Outer})
+        sum (oben/fn ^u32 [Outer value]
+              (+ (:b (:inner value)) (:c value)))
+        make (oben/fn ^Outer [^u8 a ^u32 b ^u16 c]
+               (cast Outer [(cast Inner [a b]) c]))]
+    (m/fact (sum {:inner {:a 1 :b 20} :c 3}) => 23)
+    (m/fact (make 1 20 3) => {:inner {:a 1 :b 20} :c 3})))
+
+(oben/with-target :inprocess
+  (let [Point (Struct/Struct [{:name :x :type Number/%u32}
+                              {:name :y :type Number/%u32}]
+                             {:name 'Point})
+        Points (Array/Array Point 2)
+        Shape (Struct/Struct [{:name :points :type Points}
+                              {:name :weight :type Number/%u32}]
+                             {:name 'Shape})
+        weighted-x (oben/fn ^u32 [Shape shape]
+                     (+ (:x (get (:points shape) 1)) (:weight shape)))
+        make-shape (oben/fn ^Shape [^u32 x0 ^u32 y0
+                                    ^u32 x1 ^u32 y1 ^u32 weight]
+                     (cast Shape [(cast Points [(cast Point [x0 y0])
+                                                 (cast Point [x1 y1])])
+                                  weight]))]
+    (m/fact (weighted-x {:points [{:x 1 :y 2} {:x 30 :y 4}]
+                         :weight 5}) => 35)
+    (m/fact (make-shape 1 2 30 4 5)
+            => {:points [{:x 1 :y 2} {:x 30 :y 4}]
+                :weight 5})))
+
+(oben/with-target :inprocess
   (let [U32x2 (oben/Array u32 2)
         sum (oben/fn ^u32 [U32x2 values]
               (+ (get values 0) (get values 1)))]
