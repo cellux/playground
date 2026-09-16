@@ -32,7 +32,9 @@
         mixed (oben/fn ^c/uint [^c/int lhs ^c/uint rhs]
                 (+ lhs rhs))
         promoted (oben/fn ^c/int [^c/short lhs ^c/short rhs]
-                   (+ lhs rhs))]
+                   (+ lhs rhs))
+        int-bool-add (oben/fn ^c/int [^c/int x]
+                       (+ x true))]
     (m/fact "plain + dispatches to the C integer implementation"
             (add 19 23) => 42)
     (m/fact "C type names act as constructors"
@@ -54,7 +56,9 @@
     (m/fact "mixed signedness uses C common-type rules"
             (mixed 1 2) => 3)
     (m/fact "small C integers undergo integer promotion"
-            (promoted 1 2) => 3)))
+            (promoted 1 2) => 3)
+    (m/fact "_Bool uses the same usual-arithmetic-conversion path"
+            (int-bool-add 4) => 5)))
 
 (oben/with-target :inprocess
   (let [left-shift (oben/fn ^c/int [^c/short value ^c/short count]
@@ -63,6 +67,8 @@
                              (bit-shift-right value count))
         unsigned-right-shift (oben/fn ^c/uint [^c/uint value ^c/short count]
                                (bit-shift-right value count))
+        bit-not-short (oben/fn ^c/int [^c/short value]
+                        (bit-not value))
         left-result (o/parse '(bit-shift-left (c/short 1) (c/long 2)))]
     (m/fact "C left shift promotes the operands and returns the promoted lhs type"
             (o/type-of left-result) => (m/exactly (c/int (target/current))))
@@ -71,7 +77,9 @@
     (m/fact "C signed right shift uses arithmetic shift"
             (signed-right-shift -16 2) => -4)
     (m/fact "C unsigned right shift uses logical shift"
-            (unsigned-right-shift 0x80000000 2) => 0x20000000)))
+            (unsigned-right-shift 0x80000000 2) => 0x20000000)
+    (m/fact "C unary bit-not promotes small integer operands before lowering"
+            (bit-not-short 0) => -1)))
 
 (oben/with-target :inprocess
   (let [float-add (oben/fn ^c/float [^c/float x ^c/int n]
@@ -99,6 +107,26 @@
             (float-double-less) => 1)
     (m/fact "C floating != treats NaN as unequal"
             (nan-not-equal Double/NaN) => 1)))
+
+(oben/with-target :inprocess
+  (let [t (target/current)
+        convert (fn [lhs-type lhs rhs-type rhs]
+                  (c/usual-arithmetic-conversions
+                   (o/cast lhs-type lhs false)
+                   (o/cast rhs-type rhs false)))]
+    (m/tabular
+     (m/facts "usual arithmetic conversions preserve C rank and boundaries"
+       (let [{result-type :type lhs-node :lhs rhs-node :rhs}
+             (convert ?lhs-type ?lhs ?rhs-type ?rhs)]
+         (m/fact result-type => (m/exactly ?result-type))
+         (m/fact (o/constant->value lhs-node) => ?converted-lhs)
+         (m/fact (o/constant->value rhs-node) => ?converted-rhs)))
+     ?lhs-type ?lhs ?rhs-type ?rhs ?result-type ?converted-lhs ?converted-rhs
+     (c/short t) -1 (c/ushort t) 65535 (c/int t) -1 65535
+     (c/int t) -1 (c/uint t) 1 (c/uint t) 4294967295 1
+     (c/int t) 1 (c/long t) 2 (c/long t) 1 2
+     (c/float t) 16777216.0 (c/double t) 16777217.0
+     (c/double t) 16777216.0 16777217.0)))
 
 (oben/with-target :dump
   (let [signed (oben/fn ^c/int [^c/double x]
@@ -186,6 +214,8 @@
                     (+ lhs rhs))
         int-type (o/parse 'c/int)
         long-type (o/parse 'c/long)
+        float-type (o/parse 'c/float)
+        double-type (o/parse 'c/double)
         int-pointer (Ptr/null int-type)
         void-pointer (Ptr/null Void/%void)
         void-conditional (c/conditional (o/cast int-type 1 false)
@@ -202,6 +232,12 @@
             int-type =not=> (m/exactly long-type))
     (m/fact "C integer conversions select the higher-rank long type"
             common-type => (m/exactly long-type))
+    (m/fact "same-width C float and double retain distinct identities and ranks"
+            float-type =not=> (m/exactly double-type)
+            (:rank (meta float-type)) => 1
+            (:rank (meta double-type)) => 2
+            (o/type-of (o/parse '(+ (c/float 1.0) (c/double 2.0))))
+            => (m/exactly double-type))
     (m/fact "C object pointers combine with void pointers"
             (o/type-of void-conditional)
             => (m/exactly (Ptr/Ptr Void/%void)))

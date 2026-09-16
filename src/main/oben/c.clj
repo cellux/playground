@@ -30,6 +30,8 @@
 (def ^:private rank-short 2)
 (def ^:private rank-int 3)
 (def ^:private rank-long 4)
+(def ^:private rank-float 1)
+(def ^:private rank-double 2)
 
 (o/define-typeclass CInt [:oben/Value]
   [c-type bits signed? rank]
@@ -41,7 +43,7 @@
     :rank rank}))
 
 (o/define-typeclass CFloat [:oben/Value]
-  [bits]
+  [c-type bits rank]
   (o/make-type
    (let [ir-type (case bits
                    32 :float
@@ -49,7 +51,9 @@
                    (throw (ex-info "unsupported C floating-point size"
                                    {:bits bits})))]
      #(ctx/save-ir % ir-type))
-   {:bits bits}))
+   {:c-type c-type
+    :bits bits
+    :rank rank}))
 
 (def i8 (CInt :i8 8 true rank-char))
 (def u8 (CInt :i8 8 false rank-char))
@@ -60,8 +64,8 @@
 (def i64 (CInt :i64 64 true rank-long))
 (def u64 (CInt :i64 64 false rank-long))
 
-(def f32 (CFloat 32))
-(def f64 (CFloat 64))
+(def f32 (CFloat :float 32 rank-float))
+(def f64 (CFloat :double 64 rank-double))
 
 (defn- attr
   [target name default]
@@ -100,11 +104,11 @@
 
 (o/defportable float
   [target]
-  (CFloat (attr target :c-float-size 32)))
+  (CFloat :float (attr target :c-float-size 32) rank-float))
 
 (o/defportable double
   [target]
-  (CFloat (attr target :c-double-size 64)))
+  (CFloat :double (attr target :c-double-size 64) rank-double))
 
 (defn- c-int-type
   []
@@ -175,18 +179,20 @@
         (clj/long result)
         result))))
 
-(defn- resize-c-node
-  [type node op]
+(defn- conversion-node
+  "Constructs a C conversion while preserving destination-specific constants.
+
+  `normalize` receives the destination type and a host constant; `op` is the
+  LLVM conversion used for non-constants.  Integers and floating point values
+  differ only in constant normalization, not in lowering shape."
+  [type node normalize op]
   (if (o/constant-node? node)
-    (o/make-constant-node type
-                          (normalize-constant type (o/constant->value node))
-                          (fn [ctx]
-                            (let [ctx (ctx/compile-type ctx type)]
-                              (ctx/save-ir
-                               ctx
-                               (ir/const (ctx/compiled-type ctx type)
-                                         (normalize-constant type
-                                                             (o/constant->value node)))))))
+    (let [value (normalize type (o/constant->value node))]
+      (o/make-constant-node
+       type value
+       (fn [ctx]
+         (let [ctx (ctx/compile-type ctx type)]
+           (ctx/save-ir ctx (ir/const (ctx/compiled-type ctx type) value))))))
     (o/make-node
      type
      (fn [ctx]
@@ -212,10 +218,11 @@
         (vary-meta node assoc :type type))
 
       (> to-bits from-bits)
-      (resize-c-node type node (if from-signed? ir/sext ir/zext))
+      (conversion-node type node normalize-constant
+                       (if from-signed? ir/sext ir/zext))
 
       :else
-      (resize-c-node type node ir/trunc))))
+      (conversion-node type node normalize-constant ir/trunc))))
 
 (defmethod o/cast [::CInt :oben/HostInteger]
   [type value _force?]
@@ -237,30 +244,6 @@
     (clj/float value)
     (clj/double value)))
 
-(defn- resize-c-float-node
-  [type node op]
-  (if (o/constant-node? node)
-    (o/make-constant-node type
-                          (normalize-float type (o/constant->value node))
-                          (fn [ctx]
-                            (let [ctx (ctx/compile-type ctx type)]
-                              (ctx/save-ir
-                               ctx
-                               (ir/const (ctx/compiled-type ctx type)
-                                         (normalize-float
-                                          type
-                                          (o/constant->value node)))))))
-    (o/make-node
-     type
-     (fn [ctx]
-       (let [ctx (ctx/compile-type ctx type)
-             ctx (ctx/compile-node ctx node)
-             instruction (op (ctx/compiled-node ctx node)
-                             (ctx/compiled-type ctx type)
-                             {})]
-         (ctx/compile-instruction ctx instruction)))
-     {:class ::conversion})))
-
 (defmethod o/cast [::CFloat ::CFloat]
   [type node _force?]
   (let [to-bits (:bits (meta type))
@@ -273,8 +256,8 @@
                                               (o/constant->value node))
                               node)
         (vary-meta node assoc :type type))
-      (> to-bits from-bits) (resize-c-float-node type node ir/fpext)
-      :else (resize-c-float-node type node ir/fptrunc))))
+      (> to-bits from-bits) (conversion-node type node normalize-float ir/fpext)
+      :else (conversion-node type node normalize-float ir/fptrunc))))
 
 (defmethod o/cast [::CFloat :oben/HostFloat]
   [type value _force?]
@@ -373,16 +356,16 @@
   (let [to-bits (:size (meta type))
         {from-bits :bits signed? :signed?} (meta (o/type-of node))]
     (if (o/constant-node? node)
-      ;; `resize-c-node` normalizes C metadata (`:bits`/`:signed?`), whereas
-      ;; core Number types use `:size`; construct their constant directly.
+      ;; C and core Number types carry different width metadata, so construct
+      ;; the core integer constant directly.
       (N/make-constant-number-node
        type
        (normalize-core-int-constant type (o/constant->value node)))
       (cond
         (= to-bits from-bits) (vary-meta node assoc :type type)
-        (> to-bits from-bits) (resize-c-node type node
-                                             (if signed? ir/sext ir/zext))
-        :else (resize-c-node type node ir/trunc)))))
+        (> to-bits from-bits) (conversion-node type node normalize-core-int-constant
+                                               (if signed? ir/sext ir/zext))
+        :else (conversion-node type node normalize-core-int-constant ir/trunc)))))
 
 (defmethod o/cast [::N/UInt ::CInt]
   [type node _force?]
@@ -466,6 +449,8 @@
   [type]
   (isa? (o/tid-of-type type) ::CInt))
 
+(declare bool-type?)
+
 (defn- rank-for-bits
   [bits]
   (cond
@@ -483,10 +468,16 @@
           (rank-for-bits bits))))
 
 (defn- as-c-node
+  "Gives an integer operand its C semantic type before integer promotions."
   [node]
-  (if (c-int-type? (o/type-of node))
-    node
-    (o/cast (number->c-type (o/type-of node)) node false)))
+  (let [type (o/type-of node)]
+    (cond
+      (c-int-type? type) node
+      (bool-type? type) (o/cast (c-int-type) node false)
+      (isa? (o/tid-of-type type) ::N/Int)
+      (o/cast (number->c-type type) node false)
+      :else
+      (throw (ex-info "not a C integer operand" {:type type :node node})))))
 
 (defn- max-integer-value
   [type]
@@ -552,15 +543,13 @@
   [t1 t2]
   (common-type t1 t2))
 
+(declare usual-arithmetic-conversions)
+
 (defn- c-binary-node
   [lhs rhs instruction-fn]
-  (let [lhs (as-c-node lhs)
-        rhs (as-c-node rhs)
-        result-type (common-type (o/type-of lhs) (o/type-of rhs))
-        lhs (o/cast result-type lhs false)
-        rhs (o/cast result-type rhs false)]
+  (let [{:keys [type lhs rhs]} (usual-arithmetic-conversions lhs rhs)]
     (o/make-node
-     result-type
+     type
      (fn [ctx]
        (let [ctx (ctx/compile-node ctx lhs)
              ctx (ctx/compile-node ctx rhs)
@@ -594,6 +583,12 @@
        (c-binary-node lhs# rhs# ~instruction-fn))
      (defmethod ~multifn [::N/Int ::CInt]
        [lhs# rhs#]
+       (c-binary-node lhs# rhs# ~instruction-fn))
+     (defmethod ~multifn [::CInt ::Bool/Bool]
+       [lhs# rhs#]
+       (c-binary-node lhs# rhs# ~instruction-fn))
+     (defmethod ~multifn [::Bool/Bool ::CInt]
+       [lhs# rhs#]
        (c-binary-node lhs# rhs# ~instruction-fn))))
 
 (define-c-binary-op Algebra/+ #(ir/add %1 %2 {}))
@@ -602,8 +597,7 @@
 
 (defmethod Algebra// [::CInt ::CInt]
   [lhs rhs]
-  (let [signed? (:signed? (meta (common-type (o/type-of lhs)
-                                            (o/type-of rhs))))]
+  (let [signed? (:signed? (meta (:type (usual-arithmetic-conversions lhs rhs))))]
     (c-binary-node lhs rhs
                    (if signed?
                      #(ir/sdiv %1 %2 {})
@@ -611,8 +605,7 @@
 
 (defmethod Algebra/% [::CInt ::CInt]
   [lhs rhs]
-  (let [signed? (:signed? (meta (common-type (o/type-of lhs)
-                                            (o/type-of rhs))))]
+  (let [signed? (:signed? (meta (:type (usual-arithmetic-conversions lhs rhs))))]
     (c-binary-node lhs rhs
                    (if signed?
                      #(ir/srem %1 %2 {})
@@ -626,11 +619,27 @@
   [lhs rhs]
   (Algebra// (as-c-node lhs) rhs))
 
+(defmethod Algebra// [::CInt ::Bool/Bool]
+  [lhs rhs]
+  (Algebra// lhs (as-c-node rhs)))
+
+(defmethod Algebra// [::Bool/Bool ::CInt]
+  [lhs rhs]
+  (Algebra// (as-c-node lhs) rhs))
+
 (defmethod Algebra/% [::CInt ::N/Int]
   [lhs rhs]
   (Algebra/% lhs (as-c-node rhs)))
 
 (defmethod Algebra/% [::N/Int ::CInt]
+  [lhs rhs]
+  (Algebra/% (as-c-node lhs) rhs))
+
+(defmethod Algebra/% [::CInt ::Bool/Bool]
+  [lhs rhs]
+  (Algebra/% lhs (as-c-node rhs)))
+
+(defmethod Algebra/% [::Bool/Bool ::CInt]
   [lhs rhs]
   (Algebra/% (as-c-node lhs) rhs))
 
@@ -641,19 +650,41 @@
         zero (o/cast type 0 false)]
     (c-binary-node zero node #(ir/sub %1 %2 {}))))
 
+(defn- c-comparison-node
+  "Builds an i1 comparison directly after the usual arithmetic conversions."
+  [lhs rhs instruction-fn]
+  (let [{:keys [type lhs rhs]} (usual-arithmetic-conversions lhs rhs)
+        bool-node
+        (o/make-node
+         Bool/%bool
+         (fn [ctx]
+           (let [ctx (ctx/compile-node ctx lhs)
+                 ctx (ctx/compile-node ctx rhs)
+                 instruction (instruction-fn type
+                                             (ctx/compiled-node ctx lhs)
+                                             (ctx/compiled-node ctx rhs))]
+             (ctx/compile-instruction ctx instruction)))
+         {:class ::comparison})]
+    (c-int-result bool-node)))
+
 (defmacro define-c-compare-op
   [multifn predicate]
   `(do
      (defmethod ~multifn [::CInt ::CInt]
        [lhs# rhs#]
-       (let [result# (c-binary-node lhs# rhs#
-                                    (fn [lhs# rhs#]
-                                      (ir/icmp ~predicate lhs# rhs# {})))]
-         (c-int-result (vary-meta result# assoc :type Bool/%bool))))
+       (c-comparison-node lhs# rhs#
+                          (fn [_type# lhs# rhs#]
+                            (ir/icmp ~predicate lhs# rhs# {}))))
      (defmethod ~multifn [::CInt ::N/Int]
        [lhs# rhs#]
        (~multifn lhs# (as-c-node rhs#)))
      (defmethod ~multifn [::N/Int ::CInt]
+       [lhs# rhs#]
+       (~multifn (as-c-node lhs#) rhs#))
+     (defmethod ~multifn [::CInt ::Bool/Bool]
+       [lhs# rhs#]
+       (~multifn lhs# (as-c-node rhs#)))
+     (defmethod ~multifn [::Bool/Bool ::CInt]
        [lhs# rhs#]
        (~multifn (as-c-node lhs#) rhs#))))
 
@@ -665,31 +696,23 @@
   `(do
      (defmethod ~multifn [::CInt ::CInt]
        [lhs# rhs#]
-       (let [lhs-type# (o/type-of lhs#)
-             rhs-type# (o/type-of rhs#)
-             result-type# (common-type lhs-type# rhs-type#)
-             predicate# (if (:signed? (meta result-type#))
-                          ~signed-predicate
-                          ~unsigned-predicate)]
-         (c-int-result
-          (o/make-node
-           Bool/%bool
-           (fn [ctx#]
-            (let [lhs# (o/cast result-type# lhs# false)
-                  rhs# (o/cast result-type# rhs# false)
-                  ctx# (ctx/compile-node ctx# lhs#)
-                  ctx# (ctx/compile-node ctx# rhs#)]
-              (ctx/compile-instruction
-               ctx#
-               (ir/icmp predicate#
-                        (ctx/compiled-node ctx# lhs#)
-                        (ctx/compiled-node ctx# rhs#)
-                        {}))))
-           {:class ::comparison}))))
+       (c-comparison-node
+        lhs# rhs#
+        (fn [type# lhs# rhs#]
+          (ir/icmp (if (:signed? (meta type#))
+                     ~signed-predicate
+                     ~unsigned-predicate)
+                   lhs# rhs# {}))))
      (defmethod ~multifn [::CInt ::N/Int]
        [lhs# rhs#]
        (~multifn lhs# (as-c-node rhs#)))
      (defmethod ~multifn [::N/Int ::CInt]
+       [lhs# rhs#]
+       (~multifn (as-c-node lhs#) rhs#))
+     (defmethod ~multifn [::CInt ::Bool/Bool]
+       [lhs# rhs#]
+       (~multifn lhs# (as-c-node rhs#)))
+     (defmethod ~multifn [::Bool/Bool ::CInt]
        [lhs# rhs#]
        (~multifn (as-c-node lhs#) rhs#))))
 
@@ -768,26 +791,75 @@
     (isa? (o/tid-of-type type) ::N/FP) (:size (meta type))
     :else nil))
 
+(defn- float-rank
+  [type]
+  (if-let [bits (float-bits type)]
+    (or (:rank (meta type))
+        (case bits
+          32 rank-float
+          64 rank-double
+          (throw (ex-info "unsupported floating-point type"
+                          {:type type}))))
+    0))
+
 (defn- common-float-type
   [lhs-type rhs-type]
-  (CFloat (max 32 (or (float-bits lhs-type) 0)
-             (or (float-bits rhs-type) 0))))
+  ;; `float` and `double` remain semantically distinct even when a target
+  ;; lowers both to the same LLVM width.  The higher C conversion rank wins;
+  ;; width breaks ties only for non-C numeric operands.
+  (let [lhs-rank (float-rank lhs-type)
+        rhs-rank (float-rank rhs-type)
+        winner (if (>= lhs-rank rhs-rank) lhs-type rhs-type)
+        bits (max (or (float-bits lhs-type) 0)
+                  (or (float-bits rhs-type) 0))
+        rank (max lhs-rank rhs-rank)
+        c-type (:c-type (meta winner))]
+    (CFloat (or c-type (if (= rank rank-double) :double :float))
+            bits
+            rank)))
+
+(defn- floating-type?
+  [type]
+  (or (c-float-type? type)
+      (isa? (o/tid-of-type type) ::N/FP)))
+
+(defn- arithmetic-type?
+  [type]
+  (or (floating-type? type)
+      (c-int-type? type)
+      (bool-type? type)
+      (isa? (o/tid-of-type type) ::N/Int)))
+
+(defn usual-arithmetic-conversions
+  "Applies C17's usual arithmetic conversions to two scalar operands.
+
+  Returns `{:type result-type :lhs converted-lhs :rhs converted-rhs}`.  This
+  is the sole conversion kernel for C arithmetic, comparisons, and arithmetic
+  conditional arms.  Integer promotions happen before signed/unsigned rank
+  selection; if either operand is floating point, both operands are converted
+  to the widest C floating type."
+  [lhs rhs]
+  (let [lhs-type (o/type-of lhs)
+        rhs-type (o/type-of rhs)]
+    (when-not (and (arithmetic-type? lhs-type)
+                   (arithmetic-type? rhs-type))
+      (throw (ex-info "usual arithmetic conversions require arithmetic operands"
+                      {:lhs-type lhs-type :rhs-type rhs-type})))
+    (if (or (floating-type? lhs-type) (floating-type? rhs-type))
+      (let [type (common-float-type lhs-type rhs-type)]
+        {:type type
+         :lhs (o/cast type lhs false)
+         :rhs (o/cast type rhs false)})
+      (let [lhs (as-c-node lhs)
+            rhs (as-c-node rhs)
+            type (common-type (o/type-of lhs) (o/type-of rhs))]
+        {:type type
+         :lhs (o/cast type lhs false)
+         :rhs (o/cast type rhs false)}))))
 
 (defn- bool-type?
   [type]
   (isa? (o/tid-of-type type) ::Bool/Bool))
-
-(defn- integer-conditional-type
-  "Returns the C integer type corresponding to a conditional arm, or nil.
-
-  Oben booleans are treated like C _Bool for this purpose: they undergo the
-  integer promotions when paired with a C integer arm."
-  [type]
-  (cond
-    (c-int-type? type) type
-    (bool-type? type) (c-int-type)
-    (isa? (o/tid-of-type type) ::N/Int) (number->c-type type)
-    :else nil))
 
 (defn- c-pointer-type?
   [type]
@@ -846,49 +918,41 @@
       (Ptr/Ptr object-type))))
 
 (defn- c-conditional-type
+  "Selects the result type for the non-arithmetic conditional cases.
+
+  Arithmetic arms are handled by `usual-arithmetic-conversions` before this
+  helper is called."
   [lhs-type rhs-type]
-  (let [lhs-float? (or (c-float-type? lhs-type)
-                       (isa? (o/tid-of-type lhs-type) ::N/FP))
-        rhs-float? (or (c-float-type? rhs-type)
-                       (isa? (o/tid-of-type rhs-type) ::N/FP))
-        lhs-int (integer-conditional-type lhs-type)
-        rhs-int (integer-conditional-type rhs-type)]
-    (cond
-      (or lhs-float? rhs-float?)
-      (common-float-type lhs-type rhs-type)
-
-      (and lhs-int rhs-int)
-      (common-type lhs-int rhs-int)
-
-      (and (c-pointer-type? lhs-type)
+  (if (and (c-pointer-type? lhs-type)
            (c-pointer-type? rhs-type))
-      (or (c-composite-pointer-type lhs-type rhs-type)
-          (throw (ex-info "conditional pointer types are incompatible"
-                          {:lhs-type lhs-type
-                           :rhs-type rhs-type})))
-
-      :else
-      (o/ubertype-of lhs-type rhs-type))))
+    (or (c-composite-pointer-type lhs-type rhs-type)
+        (throw (ex-info "conditional pointer types are incompatible"
+                        {:lhs-type lhs-type :rhs-type rhs-type})))
+    (o/ubertype-of lhs-type rhs-type)))
 
 (defn- c-conditional
   [condition then-node else-node]
   (let [then-type (o/type-of then-node)
-        else-type (o/type-of else-node)
-        result-type (cond
-                      (and (c-pointer-type? then-type)
-                           (null-pointer-constant? else-node))
-                      then-type
+        else-type (o/type-of else-node)]
+    (cond
+      (and (c-pointer-type? then-type)
+           (null-pointer-constant? else-node))
+      (nodes/make-conditional-node condition then-node else-node then-type)
 
-                      (and (null-pointer-constant? then-node)
-                           (c-pointer-type? else-type))
-                      else-type
+      (and (null-pointer-constant? then-node)
+           (c-pointer-type? else-type))
+      (nodes/make-conditional-node condition then-node else-node else-type)
 
-                      :else
-                      (c-conditional-type then-type else-type))]
-    (nodes/make-conditional-node condition
-                                  then-node
-                                  else-node
-                                  result-type)))
+      ;; C17 6.5.15 applies the usual arithmetic conversions to arithmetic
+      ;; conditional arms, exactly as binary arithmetic and comparisons do.
+      (and (arithmetic-type? then-type) (arithmetic-type? else-type))
+      (let [{:keys [type lhs rhs]}
+            (usual-arithmetic-conversions then-node else-node)]
+        (nodes/make-conditional-node condition lhs rhs type))
+
+      :else
+      (nodes/make-conditional-node condition then-node else-node
+                                   (c-conditional-type then-type else-type)))))
 
 (defmacro define-c-conditional
   [lhs-type rhs-type]
@@ -1034,45 +1098,19 @@
 (define-c-null-pointer-comparison Eq/=)
 (define-c-null-pointer-comparison Eq/!=)
 
-(defn- c-float-node
-  [lhs rhs instruction-fn]
-  (let [result-type (common-float-type (o/type-of lhs) (o/type-of rhs))
-        lhs (o/cast result-type lhs false)
-        rhs (o/cast result-type rhs false)]
-    (o/make-node
-     result-type
-     (fn [ctx]
-       (let [ctx (ctx/compile-node ctx lhs)
-             ctx (ctx/compile-node ctx rhs)
-             instruction (instruction-fn (ctx/compiled-node ctx lhs)
-                                         (ctx/compiled-node ctx rhs))]
-         (ctx/compile-instruction ctx instruction)))
-     {:class ::float-op})))
-
 (defmacro define-c-float-binary-op
   [multifn instruction-fn]
   `(do
-     (defmethod ~multifn [::CFloat ::CFloat]
-       [lhs# rhs#]
-       (c-float-node lhs# rhs# ~instruction-fn))
-     (defmethod ~multifn [::CFloat ::CInt]
-       [lhs# rhs#]
-       (c-float-node lhs# rhs# ~instruction-fn))
-     (defmethod ~multifn [::CInt ::CFloat]
-       [lhs# rhs#]
-       (c-float-node lhs# rhs# ~instruction-fn))
-     (defmethod ~multifn [::CFloat ::N/Number]
-       [lhs# rhs#]
-       (c-float-node lhs# rhs# ~instruction-fn))
-     (defmethod ~multifn [::N/Number ::CFloat]
-       [lhs# rhs#]
-       (c-float-node lhs# rhs# ~instruction-fn))
-     (defmethod ~multifn [::CFloat ::Bool/Bool]
-       [lhs# rhs#]
-       (c-float-node lhs# rhs# ~instruction-fn))
-     (defmethod ~multifn [::Bool/Bool ::CFloat]
-       [lhs# rhs#]
-       (c-float-node lhs# rhs# ~instruction-fn))))
+     ~@(for [dispatch# '([::CFloat ::CFloat]
+                          [::CFloat ::CInt]
+                          [::CInt ::CFloat]
+                          [::CFloat ::N/Number]
+                          [::N/Number ::CFloat]
+                          [::CFloat ::Bool/Bool]
+                          [::Bool/Bool ::CFloat])]
+         `(defmethod ~multifn ~dispatch#
+            [lhs# rhs#]
+            (c-binary-node lhs# rhs# ~instruction-fn)))))
 
 (define-c-float-binary-op Algebra/+ #(ir/fadd %1 %2 {}))
 (define-c-float-binary-op Algebra/- #(ir/fsub %1 %2 {}))
@@ -1083,53 +1121,23 @@
   [node]
   (let [type (o/type-of node)
         zero (o/cast type 0.0 false)]
-    (c-float-node zero node #(ir/fsub %1 %2 {}))))
+    (c-binary-node zero node #(ir/fsub %1 %2 {}))))
 
 (defmacro define-c-float-compare-op
   [multifn predicate]
   `(do
-     (defmethod ~multifn [::CFloat ::CFloat]
-       [lhs# rhs#]
-       (let [result# (c-float-node lhs# rhs#
-                                   (fn [lhs# rhs#]
-                                     (ir/fcmp ~predicate lhs# rhs# {})))]
-         (c-int-result (vary-meta result# assoc :type Bool/%bool))))
-     (defmethod ~multifn [::CFloat ::CInt]
-       [lhs# rhs#]
-       (let [type# (common-float-type (o/type-of lhs#)
-                                      (o/type-of rhs#))]
-         (~multifn (o/cast type# lhs# false)
-                   (o/cast type# rhs# false))))
-     (defmethod ~multifn [::CInt ::CFloat]
-       [lhs# rhs#]
-       (let [type# (common-float-type (o/type-of lhs#)
-                                      (o/type-of rhs#))]
-         (~multifn (o/cast type# lhs# false)
-                   (o/cast type# rhs# false))))
-     (defmethod ~multifn [::CFloat ::N/Number]
-       [lhs# rhs#]
-       (let [type# (common-float-type (o/type-of lhs#)
-                                      (o/type-of rhs#))]
-         (~multifn (o/cast type# lhs# false)
-                   (o/cast type# rhs# false))))
-     (defmethod ~multifn [::N/Number ::CFloat]
-       [lhs# rhs#]
-       (let [type# (common-float-type (o/type-of lhs#)
-                                      (o/type-of rhs#))]
-         (~multifn (o/cast type# lhs# false)
-                   (o/cast type# rhs# false))))
-     (defmethod ~multifn [::CFloat ::Bool/Bool]
-       [lhs# rhs#]
-       (let [type# (common-float-type (o/type-of lhs#)
-                                      (o/type-of rhs#))]
-         (~multifn (o/cast type# lhs# false)
-                   (o/cast type# rhs# false))))
-     (defmethod ~multifn [::Bool/Bool ::CFloat]
-       [lhs# rhs#]
-       (let [type# (common-float-type (o/type-of lhs#)
-                                      (o/type-of rhs#))]
-         (~multifn (o/cast type# lhs# false)
-                   (o/cast type# rhs# false))))))
+     ~@(for [dispatch# '([::CFloat ::CFloat]
+                          [::CFloat ::CInt]
+                          [::CInt ::CFloat]
+                          [::CFloat ::N/Number]
+                          [::N/Number ::CFloat]
+                          [::CFloat ::Bool/Bool]
+                          [::Bool/Bool ::CFloat])]
+         `(defmethod ~multifn ~dispatch#
+            [lhs# rhs#]
+            (c-comparison-node lhs# rhs#
+                               (fn [_type# lhs# rhs#]
+                                 (ir/fcmp ~predicate lhs# rhs# {})))))))
 
 (define-c-float-compare-op Eq/= :oeq)
 ;; C's != is true for NaN, so use LLVM's unordered-not-equal predicate.
