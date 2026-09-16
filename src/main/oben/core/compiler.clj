@@ -1,4 +1,4 @@
-(ns oben.compiler
+(ns oben.core.compiler
   "The explicit Oben compilation boundary.
 
    This namespace orchestrates target-aware compilation of an Oben function

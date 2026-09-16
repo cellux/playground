@@ -2,7 +2,7 @@
   "An Oben target backed by the local llvm-http-server byte-buffer ABI."
   (:require [clj-http.client :as http]
             [clojure.string :as str]
-            [oben.compiler :as compiler]
+            [oben.core.compiler :as compiler]
             [oben.core.abi :as abi]
             [oben.core.context :as ctx]
             [oben.core.protocols.Target :as Target]

@@ -2,7 +2,7 @@
   (:require [oben.core.target :as target])
   (:require [oben.core.protocols.Target :as Target])
   (:require [oben.core.context :as ctx])
-  (:require [oben.compiler :as compiler])
+  (:require [oben.core.compiler :as compiler])
   (:require [oben.core.abi :as abi])
   (:require [omkamra.llvm.ir :as ir])
   (:require [omkamra.llvm.platform :as platform])

@@ -1,6 +1,6 @@
 (ns oben.core.abi-test
   (:require [midje.sweet :as m]
-            [oben.compiler :as compiler]
+            [oben.core.compiler :as compiler]
             [oben.core :as oben]
             [oben.core.abi :as abi]
             [oben.core.api :as o]

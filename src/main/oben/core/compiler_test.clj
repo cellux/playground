@@ -1,6 +1,6 @@
-(ns oben.compiler-test
+(ns oben.core.compiler-test
   (:require [midje.sweet :as m]
-            [oben.compiler :as compiler]
+            [oben.core.compiler :as compiler]
             [oben.core :as oben]
             [oben.core.api :as o]
             [oben.core.target :as target]

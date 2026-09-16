@@ -4,7 +4,7 @@
    [oben.core.target :as target]
    [oben.core.protocols.Target :as Target]
    [oben.core.context :as ctx]
-   [oben.compiler :as compiler]
+   [oben.core.compiler :as compiler]
    [omkamra.llvm.platform :as platform]))
 
 (defrecord DumpTarget [ctx attrs]
