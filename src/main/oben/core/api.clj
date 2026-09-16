@@ -577,6 +577,13 @@
                         (fnode? op)
                         (list* 'funcall op (map #(parse % env) args))
 
+                        ;; Aggregate/container nodes can be used as generic
+                        ;; accessors: (value key) is equivalent to
+                        ;; (get value key). Function pointers retain priority
+                        ;; through the fnode? branch above.
+                        (node? op)
+                        (list* 'get op (map #(parse % env) args))
+
                         (type? op)
                         (cast op (parse (first args) env) false)
 

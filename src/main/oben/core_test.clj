@@ -13,6 +13,7 @@
    [oben.core.types.Number :as Number]
    [oben.core.types.Ptr :as Ptr :refer [Ptr]]
    [oben.core.types.Aggregate :as Aggregate]
+   [oben.core.protocols.Container :as Container]
    [oben.core.types.Array :as Array :refer [Array]]
    [oben.core.types.Struct :as Struct :refer [Struct]]
    [oben.core.types.Fn :as Fn :refer [Fn]])
@@ -1321,6 +1322,51 @@
     (m/fact (o/constant->value (Aggregate/get-element-index s :y8)) => 4)
     (m/fact (o/constant->value (Aggregate/get-element-index s :z32)) => 8)
     (m/fact (o/constant->value (Aggregate/get-element-index s :z64)) => 9)))
+
+(oben/with-target :inprocess
+  (let [point (Struct [{:name :x :type Number/%u32}
+                       {:name :y :type Number/%u32}])
+        read-point (oben/fn ^u32 []
+                     (let [p (var point [7 5])]
+                       (+ (:x p) (:y p))))
+        call-point (oben/fn ^u32 []
+                     (let [p (var point [7 5])]
+                       (+ (p :x) (p :y))))
+        write-point (oben/fn ^u32 []
+                      (let [p (var point [7 5])]
+                        (set! (at p :x) 9)
+                        (+ (:x p) (p :y))))
+        put-point (oben/fn ^u32 []
+                    (let [p (var point [7 5])]
+                      (assoc! p :x 9)
+                      (+ (:x p) (:y p))))
+        value (o/parse 7)]
+    (m/fact "keyword-first access reads aggregate members"
+            (read-point) => 12)
+    (m/fact "value-first access reads aggregate members"
+            (call-point) => 12)
+    (m/fact "at returns an addressable aggregate member"
+            (write-point) => 14)
+    (m/fact "assoc! is implemented through generic at/load/store semantics"
+            (put-point) => 14)
+    (m/fact "at rejects non-addressable aggregate values"
+            (try
+              (Container/at value :x)
+              (catch clojure.lang.ExceptionInfo e (.getMessage e)))
+            => "at requires an addressable value")))
+
+(oben/with-target :inprocess
+  (let [header (Struct [{:name :length :type Number/%u32}])
+        record (Struct [{:name :header :type header}
+                        {:name :payload :type (Array/Array Number/%u16 2)}])
+        nested-update (oben/fn ^u32 []
+                        (let [p (var record [[3] [4 5]])]
+                          (assoc-in! p [:header :length] 12)
+                          (assoc-in! p [:payload 1] 9)
+                          (+ (get-in p [:header :length])
+                             (get-in p [:payload 1]))))]
+    (m/fact "Place supports nested struct and array paths"
+            (nested-update) => 21)))
 
 (m/facts
  (m/fact (o/sizeof Number/%u1) => 1)

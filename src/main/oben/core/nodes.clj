@@ -504,6 +504,32 @@
         gep-index-type (Number/UInt address-size)]
     (o/cast gep-index-type index false)))
 
+(defn as-gep-struct-index
+  [index]
+  ;; LLVM requires indices selecting struct fields to be i32, regardless
+  ;; of the target address size. Array/pointer indices use the address size.
+  (o/cast (Number/UInt 32) index false))
+
+(defn determine-gep-indices
+  [object-type keys]
+  (loop [container-type object-type
+         keys keys
+         first-index? true
+         result []]
+    (if-let [key (first keys)]
+      (let [index (if first-index?
+                    (as-gep-index key)
+                    (let [index (Aggregate/get-element-index container-type key)]
+                      (if (isa? (o/tid-of-type container-type)
+                                :oben.core.types.Struct/Struct)
+                        (as-gep-struct-index index)
+                        (as-gep-index index))))
+            next-type (if first-index?
+                        container-type
+                        (Aggregate/get-element-type container-type key))]
+        (recur next-type (next keys) false (conj result index)))
+      result)))
+
 (defn determine-gep-leaf-type+indices
   ([t keys indices]
    (if-let [k (first keys)]
@@ -521,8 +547,8 @@
   (let [object-type (:object-type (meta (o/type-of ptr)))]
     (when (> (count keys) 1)
       (assert (isa? (o/tid-of-type object-type) :oben/Aggregate)))
-    (let [[leaf-type indices] (determine-gep-leaf-type+indices object-type (next keys))
-          indices (map as-gep-index (cons (first keys) indices))]
+    (let [[leaf-type _indices] (determine-gep-leaf-type+indices object-type (next keys))
+          indices (determine-gep-indices object-type keys)]
       (o/make-node (Ptr/Ptr leaf-type)
         (fn [ctx]
           (letfn [(compile-ptr [ctx]

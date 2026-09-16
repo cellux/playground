@@ -9,8 +9,8 @@
              bit-shift-left bit-shift-right
              and or
              = != < <= >= >
-             get-in get
-             assoc-in assoc])
+             get-in get at-in at load
+             assoc-in assoc assoc-in! assoc!])
   (:require [oben.core.api])
   (:require [oben.core.types.Void])
   (:require [oben.core.types.Number])
@@ -22,7 +22,8 @@
   (:require [oben.core.protocols.Eq])
   (:require [oben.core.protocols.Ord])
   (:require [oben.core.protocols.Algebra])
-  (:require [oben.core.protocols.Container]))
+  (:require [oben.core.protocols.Container])
+  (:require [oben.core.protocols.Place]))
 
 (def void oben.core.types.Void/%void)
 
@@ -119,9 +120,16 @@
 
 (def get-in oben.core.protocols.Container/get-in)
 (def get oben.core.protocols.Container/get)
+(def at-in oben.core.protocols.Container/at-in)
+(def at oben.core.protocols.Container/at)
+(def load oben.core.protocols.Place/load)
+(def store! oben.core.protocols.Place/store!)
 
 (def assoc-in oben.core.protocols.Container/assoc-in)
 (def assoc oben.core.protocols.Container/assoc)
+(def assoc-in! oben.core.protocols.Container/assoc-in!)
+(def assoc! oben.core.protocols.Container/assoc!)
 
+;; Compatibility aliases.
 (def put-in! oben.core.protocols.Container/put-in!)
 (def put! oben.core.protocols.Container/put!)

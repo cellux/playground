@@ -3,6 +3,7 @@
   (:require [oben.core.target :as target])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.protocols.Container :as Container])
+  (:require [oben.core.protocols.Place :as Place])
   (:require [oben.core.protocols.Algebra :as Algebra])
   (:require [oben.core.types.Number :as Number])
   (:require [omkamra.llvm.ir :as ir])
@@ -107,29 +108,61 @@
               load-object)))
       {:class :oben/deref})))
 
+(defmethod Place/load [::Ptr]
+  [ptr]
+  (%deref ptr))
+
+(defmethod Place/store! [::Ptr :oben/Value]
+  [ptr value]
+  `(set! ~ptr ~value))
+
 (defmethod Container/get-in [::Ptr :oben/HostVector]
   [ptr ks]
-  (let [{:keys [object-type]} (meta (o/type-of ptr))
-        tid (o/tid-of-type object-type)]
-    (cond (isa? tid :oben/Aggregate)
-          `(deref (gep ~ptr [0 ~@ks]))
-          :else `(get-in (deref ~ptr) ~ks))))
+  (Place/load (Container/at-in ptr ks)))
 
 (defmethod Container/get [::Ptr :oben/Value]
   [ptr key]
   (Container/get-in ptr [key]))
 
-(defmethod Container/put-in! [::Ptr :oben/HostVector :oben/Value]
-  [ptr ks val]
+(defmethod Container/get [::Ptr :oben/Any]
+  [ptr key]
+  (Container/get-in ptr [key]))
+
+(defmethod Container/at-in [::Ptr :oben/HostVector]
+  [ptr keys]
   (let [{:keys [object-type]} (meta (o/type-of ptr))
         tid (o/tid-of-type object-type)]
-    (cond (isa? tid :oben/Aggregate)
-          `(set! (gep ~ptr [0 ~@ks]) ~val)
-          :else `(put-in! (deref ~ptr) ~ks ~val))))
+    (cond
+      (isa? tid :oben/Aggregate)
+      (o/parse `(gep ~ptr [0 ~@keys]))
 
-(defmethod Container/put! [::Ptr :oben/Value :oben/Value]
+      (= 1 (count keys))
+      (o/parse `(gep ~ptr [~(first keys)]))
+
+      :else
+      (throw (ex-info "cannot address nested elements of a non-aggregate pointer"
+                      {:pointer-type (o/type-of ptr)
+                       :keys keys})))))
+
+(defmethod Container/at [::Ptr :oben/Value]
+  [ptr key]
+  (Container/at-in ptr [key]))
+
+(defmethod Container/at [::Ptr :oben/Any]
+  [ptr key]
+  (Container/at-in ptr [key]))
+
+(defmethod Container/assoc-in! [::Ptr :oben/HostVector :oben/Value]
+  [ptr ks val]
+  (Place/store! (Container/at-in ptr ks) val))
+
+(defmethod Container/assoc! [::Ptr :oben/Value :oben/Value]
   [ptr key val]
-  (Container/put-in! ptr [key] val))
+  (Container/assoc-in! ptr [key] val))
+
+(defmethod Container/assoc! [::Ptr :oben/Any :oben/Value]
+  [ptr key val]
+  (Container/assoc-in! ptr [key] val))
 
 (defmethod Algebra/+ [::Ptr ::Number/Int]
   [ptr offset]
