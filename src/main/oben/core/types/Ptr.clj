@@ -114,7 +114,25 @@
 
 (defmethod Place/store! [::Ptr :oben/Value]
   [ptr value]
-  `(set! ~ptr ~value))
+  (let [object-type (:object-type (meta (o/type-of ptr)))
+        value (o/cast object-type value false)]
+    (o/make-node
+     object-type
+     (fn [ctx]
+       (letfn [(compile-store [ctx]
+                 (ctx/compile-instruction
+                  ctx
+                  (ir/store (ctx/compiled-node ctx value)
+                            (ctx/compiled-node ctx ptr)
+                            {})))
+               (save-ir [ctx]
+                 (ctx/save-ir ctx (ctx/compiled-node ctx value)))]
+         (-> ctx
+             (ctx/compile-node value)
+             (ctx/compile-node ptr)
+             compile-store
+             save-ir)))
+     {:class :oben/store!})))
 
 (defmethod Container/get-in [::Ptr :oben/HostVector]
   [ptr ks]

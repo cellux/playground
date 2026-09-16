@@ -4,6 +4,7 @@
   (:require [oben.core.types.Unseen :refer [%unseen]])
   (:require [oben.core.types.Number :as Number])
   (:require [oben.core.types.Ptr :as Ptr])
+  (:require [oben.core.protocols.Place :as Place])
   (:require [oben.core.types.Fn :as Fn])
   (:require [oben.core.types.Aggregate :as Aggregate])
   (:require [oben.core.context :as ctx])
@@ -107,25 +108,7 @@
 
 (defn %set!
   [target-node value-node]
-  (assert (isa? (o/tid-of-node target-node) ::Ptr/Ptr))
-  (let [object-type (:object-type (meta (o/type-of target-node)))
-        value-node (%cast object-type value-node)]
-    (o/make-node object-type
-      (fn [ctx]
-        (letfn [(compile-store [ctx]
-                  (ctx/compile-instruction
-                   ctx
-                   (ir/store (ctx/compiled-node ctx value-node)
-                             (ctx/compiled-node ctx target-node)
-                             {})))
-                (save-ir [ctx]
-                  (ctx/save-ir ctx (ctx/compiled-node ctx value-node)))]
-          (-> ctx
-              (ctx/compile-node value-node)
-              (ctx/compile-node target-node)
-              compile-store
-              save-ir)))
-      {:class :oben/set!})))
+  (Place/store! target-node value-node))
 
 (defn- drop-all-after-first-return
   [nodes]
