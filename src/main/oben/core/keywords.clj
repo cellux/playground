@@ -124,6 +124,7 @@
 (def at oben.core.protocols.Container/at)
 (def load oben.core.protocols.Place/load)
 (def store! oben.core.protocols.Place/store!)
+(def qualify oben.core.api/qualify)
 
 (def assoc-in oben.core.protocols.Container/assoc-in)
 (def assoc oben.core.protocols.Container/assoc)

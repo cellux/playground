@@ -1,7 +1,8 @@
 (ns oben.c-test
   (:require [midje.sweet :as m]
             [oben.c :as c]
-            [oben.core :as oben]))
+            [oben.core :as oben]
+            [oben.core.api :as o]))
 
 (oben/with-target :inprocess
   (let [add (oben/fn ^c/int [^c/int lhs ^c/int rhs]
@@ -58,6 +59,16 @@
             (float-to-int 3.75) => 3)
     (m/fact "C floating != treats NaN as unequal"
             (nan-not-equal Double/NaN) => 1)))
+
+(oben/with-target {:type :inprocess
+                   :attrs {:c-int-size 64
+                           :c-long-size 64
+                           :c-float-size 64}}
+  (let [qualified-int (o/parse '(qualify c/int :const :volatile))]
+    (m/fact "qualify resolves portable C types before adding qualifiers"
+            (:bits (meta qualified-int)) => 64)
+    (m/fact "portable C qualifiers are preserved"
+            (:qualifiers (meta qualified-int)) => #{:const :volatile})))
 
 (oben/with-target {:type :inprocess
                    :attrs {:c-int-size 64

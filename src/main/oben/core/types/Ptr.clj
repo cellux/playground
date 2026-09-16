@@ -95,14 +95,16 @@
 
 (defn %deref
   [ptr-node]
-  (let [{:keys [object-type]} (meta (o/type-of ptr-node))]
+  (let [{:keys [object-type]} (meta (o/type-of ptr-node))
+        volatile? (o/qualified? object-type :volatile)]
     (o/make-node object-type
       (fn [ctx]
         (letfn [(compile-pointer [ctx]
                   (ctx/compile-node ctx ptr-node))
                 (load-object [ctx]
                   (ctx/compile-instruction
-                   ctx (ir/load (ctx/compiled-node ctx ptr-node) {})))]
+                   ctx (ir/load (ctx/compiled-node ctx ptr-node)
+                                {:volatile volatile?})))]
           (-> ctx
               compile-pointer
               load-object)))
@@ -115,7 +117,12 @@
 (defmethod Place/store! [::Ptr :oben/Value]
   [ptr value]
   (let [object-type (:object-type (meta (o/type-of ptr)))
-        value (o/cast object-type value false)]
+        _ (when (o/qualified? object-type :const)
+            (throw (ex-info "cannot store through a const-qualified place"
+                            {:place ptr
+                             :type object-type})))
+        value (o/cast object-type value false)
+        volatile? (o/qualified? object-type :volatile)]
     (o/make-node
      object-type
      (fn [ctx]
@@ -124,7 +131,7 @@
                   ctx
                   (ir/store (ctx/compiled-node ctx value)
                             (ctx/compiled-node ctx ptr)
-                            {})))
+                            {:volatile volatile?})))
                (save-ir [ctx]
                  (ctx/save-ir ctx (ctx/compiled-node ctx value)))]
          (-> ctx

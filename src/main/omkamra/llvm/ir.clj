@@ -747,10 +747,11 @@
            :type object-type)))
 
 (defmethod render-instruction :load
-  [{:keys [object-type ptr align] :as i}]
+  [{:keys [object-type ptr align volatile] :as i}]
   (let [name (name-of-typed-value i)]
-    (format "%s = load %s, %s%s"
+    (format "%s = load %s%s, %s%s"
             (render-name name)
+            (if volatile "volatile " "")
             (render-type object-type)
             (render-type-and-value ptr)
             (if align (format ", align %d" align) ""))))
@@ -769,7 +770,14 @@
           :type [:ptr i32]
           :name 'sum}
          {:align 4 :name 1}))
-  => "%1 = load i32, i32* @sum, align 4"))
+  => "%1 = load i32, i32* @sum, align 4")
+ (m/fact
+  (render-instruction
+   (load {:object-type i32
+          :type [:ptr i32]
+          :name :volatile-value}
+         {:align 4 :volatile true :name 2}))
+  => "%2 = load volatile i32, i32* %volatile-value, align 4"))
 
 (defn store
   [value target opts]
@@ -780,8 +788,9 @@
          :ptr target))
 
 (defmethod render-instruction :store
-  [{:keys [value ptr align]}]
-  (format "store %s, %s%s"
+  [{:keys [value ptr align volatile]}]
+  (format "store %s%s, %s%s"
+          (if volatile "volatile " "")
           (render-type-and-value value)
           (render-type-and-value ptr)
           (if align (format ", align %d" align) "")))
@@ -826,7 +835,15 @@
            :object-type [:ptr i8]
            :name :ptr}
           {:align 8}))
-  => "store i8* null, i8** %ptr, align 8"))
+  => "store i8* null, i8** %ptr, align 8")
+ (m/fact
+  (render-instruction
+   (store (const i32 0)
+          {:type [:ptr i32]
+           :object-type i32
+           :name :volatile-value}
+          {:align 4 :volatile true}))
+  => "store volatile i32 0, i32* %volatile-value, align 4"))
 
 (defmacro define-conversion-op
   [op]

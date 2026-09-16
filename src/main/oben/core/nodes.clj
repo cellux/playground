@@ -531,6 +531,10 @@
     (when (> (count keys) 1)
       (assert (isa? (o/tid-of-type object-type) :oben/Aggregate)))
     (let [[leaf-type _indices] (determine-gep-leaf-type+indices object-type (next keys))
+          qualifiers (seq (o/qualifiers object-type))
+          leaf-type (if qualifiers
+                      (apply o/qualify leaf-type qualifiers)
+                      leaf-type)
           indices (determine-gep-indices object-type keys)]
       (o/make-node (Ptr/Ptr leaf-type)
         (fn [ctx]

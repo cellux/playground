@@ -1368,6 +1368,30 @@
     (m/fact "Place supports nested struct and array paths"
             (nested-update) => 21)))
 
+(let [const-u32 (o/qualify Number/%u32 :const)
+      qualified-u32 (o/qualify const-u32 :volatile)]
+  (m/fact "qualify stores semantic qualifiers in type metadata"
+          (:qualifiers (meta const-u32)) => #{:const})
+  (m/fact "qualify preserves structural type metadata"
+          (:size (meta qualified-u32)) => 32)
+  (m/fact "qualify accumulates qualifiers"
+          (:qualifiers (meta qualified-u32)) => #{:const :volatile}))
+
+(oben/with-target :inprocess
+  (let [volatile-read (oben/fn ^u32 []
+                        (let [p (var (qualify u32 :volatile) 7)]
+                          @p))
+        const-write (oben/fn ^u32 []
+                      (let [p (var (qualify u32 :const) 7)]
+                        (set! p 9)))]
+    (m/fact "volatile-qualified places remain readable"
+            (volatile-read) => 7)
+    (m/fact "const-qualified places reject stores"
+            (try
+              (const-write)
+              (catch clojure.lang.ExceptionInfo e (.getMessage e)))
+            => "cannot store through a const-qualified place")))
+
 (m/facts
  (m/fact (o/sizeof Number/%u1) => 1)
  (m/fact (o/sizeof Number/%u8) => 1)

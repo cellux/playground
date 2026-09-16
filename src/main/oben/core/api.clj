@@ -327,6 +327,38 @@
   (or (.containsKey registered-portables x)
       (and (fn? x) (has-kind? :oben/PORTABLE x))))
 
+(defn qualifiers
+  [type]
+  (or (:qualifiers (meta type)) #{}))
+
+(defn qualified?
+  [type qualifier]
+  (contains? (qualifiers type) qualifier))
+
+(defn qualify
+  "Adds semantic qualifiers to a type or target-portable type.
+
+  Concrete types retain their identity and compiled representation. Portable
+  types are wrapped so the qualifier is applied after target resolution."
+  [type & qualifiers]
+  (let [qualifiers (set qualifiers)]
+    (assert (every? keyword? qualifiers)
+            "type qualifiers must be keywords")
+    (cond
+      (type? type)
+      (vary-meta type update :qualifiers (fnil into #{}) qualifiers)
+
+      (portable? type)
+      (with-meta
+        (fn [target]
+          (apply qualify (type target) qualifiers))
+        (assoc (meta type) :kind :oben/PORTABLE))
+
+      :else
+      (throw (ex-info "can only qualify a type or portable type"
+                      {:value type
+                       :qualifiers qualifiers})))))
+
 (clj/defmacro defportable-by-attrs
   "Defines a multifn which returns a value that depends on selected
   attributes of the passed target"
