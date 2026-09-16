@@ -7,6 +7,7 @@
   (:require [oben.core.types.Ptr :as Ptr])
   (:require [oben.core.protocols.Place :as Place])
   (:require [oben.core.protocols.Logical :as Logical])
+  (:require [oben.core.protocols.Conditional :as Conditional])
   (:require [oben.core.types.Fn :as Fn])
   (:require [oben.core.types.Aggregate :as Aggregate])
   (:require [oben.core.context :as ctx])
@@ -418,13 +419,34 @@
               (ctx/compile-node else-label))))
       {:class :oben/when})))
 
+(defn make-conditional-node
+  "Builds a value-producing conditional with an already selected result type.
+
+  Both arms are cast before the form is parsed.  The resulting CFG still
+  contains branches, so only the selected arm is evaluated at run time."
+  [cond-node then-node else-node result-type]
+  (let [cond-node (%cast Bool/%bool cond-node)
+        then-node (%cast result-type then-node)
+        else-node (%cast result-type else-node)]
+    (o/parse
+     `(block
+        :if
+        (when ~cond-node
+          (return-from :if ~then-node))
+        (return-from :if ~else-node)))))
+
+(defmethod Conditional/select [:oben/Any :oben/Any :oben/Any]
+  [cond-node then-node else-node]
+  ;; The generic Oben conditional retains the existing übertype behavior.
+  ;; Language-specific implementations can choose a more precise result
+  ;; type and call make-conditional-node.
+  (let [result-type (o/ubertype-of (o/type-of then-node)
+                                  (o/type-of else-node))]
+    (make-conditional-node cond-node then-node else-node result-type)))
+
 (defn %if
   [cond-node then-node else-node]
-  `(block
-    :if
-    (when ~cond-node
-      (return-from :if ~then-node))
-    (return-from :if ~else-node)))
+  (Conditional/select cond-node then-node else-node))
 
 (defn %cond
   [& clauses]

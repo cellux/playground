@@ -24,7 +24,8 @@
   (:require [oben.core.protocols.Ord])
   (:require [oben.core.protocols.Algebra])
   (:require [oben.core.protocols.Container])
-  (:require [oben.core.protocols.Place]))
+  (:require [oben.core.protocols.Place])
+  (:require [oben.core.protocols.Conditional]))
 
 (def void oben.core.types.Void/%void)
 

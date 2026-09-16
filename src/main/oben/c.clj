@@ -12,11 +12,13 @@
             [oben.core.protocols.Algebra :as Algebra]
             [oben.core.protocols.Bitwise :as Bitwise]
             [oben.core.protocols.Logical :as Logical]
+            [oben.core.protocols.Conditional :as Conditional]
             [oben.core.protocols.Eq :as Eq]
             [oben.core.protocols.Ord :as Ord]
             [oben.core.types.Number :as N]
             [oben.core.types.Bool :as Bool]
             [oben.core.types.Ptr :as Ptr]
+            [oben.core.nodes :as nodes]
             [omkamra.llvm.ir :as ir]))
 
 (o/define-typeclass CInt [:oben/Value]
@@ -135,11 +137,21 @@
 (defn- normalize-constant
   [type value]
   (let [{:keys [bits signed?]} (meta type)
-        modulus (bit-shift-left 1 bits)
+        ;; Build these as BigInts: primitive Clojure long shifts by 64 wrap
+        ;; the shift count, while C supports 64-bit integer types.
+        modulus (reduce *' 1N (repeat bits 2N))
         value (mod value modulus)]
-    (if (and signed? (>= value (bit-shift-left 1 (dec bits))))
-      (- value modulus)
-      value)))
+    (let [result (if (and signed?
+                           (>= value
+                               (reduce *' 1N
+                                       (repeat (dec bits) 2N))))
+                   (- value modulus)
+                   value)]
+      ;; Keep ordinary constants as JVM longs for the LLVM IR helpers; retain
+      ;; BigInt only when an unsigned 64-bit value needs it.
+      (if (<= Long/MIN_VALUE result Long/MAX_VALUE)
+        (clj/long result)
+        result))))
 
 (defn- resize-c-node
   [type node op]
@@ -239,8 +251,8 @@
                                               (o/constant->value node))
                               node)
         (vary-meta node assoc :type type))
-      (> to-bits from-bits) (resize-c-float-node type node N/fpext)
-      :else (resize-c-float-node type node N/fptrunc))))
+      (> to-bits from-bits) (resize-c-float-node type node ir/fpext)
+      :else (resize-c-float-node type node ir/fptrunc))))
 
 (defmethod o/cast [::CFloat :oben/HostFloat]
   [type value _force?]
@@ -316,6 +328,18 @@
                     (if (> bits from-bits)
                       (N/sext node bits)
                       (N/trunc node bits))))))
+
+(defmethod o/cast [::Ptr/Ptr ::CInt]
+  [type node _force?]
+  ;; An integer arm is a C null pointer constant only when it is the
+  ;; compile-time integer constant zero.  Do not silently turn arbitrary
+  ;; integers into pointers during an implicit conditional conversion.
+  (if (and (o/constant-node? node)
+           (zero? (o/constant->value node)))
+    (o/cast type nil false)
+    (throw (ex-info "only integer constant zero converts to a pointer in a C conditional"
+                    {:type type
+                     :node node}))))
 
 (defmethod o/cast [::CInt ::Bool/Bool]
   [type node _force?]
@@ -656,6 +680,145 @@
   [lhs-type rhs-type]
   (CFloat (max 32 (or (float-bits lhs-type) 0)
              (or (float-bits rhs-type) 0))))
+
+(defn- bool-type?
+  [type]
+  (isa? (o/tid-of-type type) ::Bool/Bool))
+
+(defn- integer-conditional-type
+  "Returns the C integer type corresponding to a conditional arm, or nil.
+
+  Oben booleans are treated like C _Bool for this purpose: they undergo the
+  integer promotions when paired with a C integer arm."
+  [type]
+  (cond
+    (c-int-type? type) type
+    (bool-type? type) (c-int-type)
+    (isa? (o/tid-of-type type) ::N/Int) (number->c-type type)
+    :else nil))
+
+(defn- c-pointer-type?
+  [type]
+  (isa? (o/tid-of-type type) ::Ptr/Ptr))
+
+(defn- null-pointer-constant?
+  [node]
+  (and (o/constant-node? node)
+       (or (c-int-type? (o/type-of node))
+           (isa? (o/tid-of-type (o/type-of node)) ::N/Int))
+       (zero? (o/constant->value node))))
+
+(defn- c-pointer-conditional-type
+  [lhs-type rhs-type]
+  (let [lhs-object-type (:object-type (meta lhs-type))
+        rhs-object-type (:object-type (meta rhs-type))
+        unqualified (fn [type] (vary-meta type dissoc :qualifiers))]
+    (when (= (unqualified lhs-object-type)
+             (unqualified rhs-object-type))
+      ;; The result points at a type qualified with the union of the arm
+      ;; qualifiers, as required by C's conditional operator rules.
+      (let [object-type (vary-meta
+                         (unqualified lhs-object-type)
+                         assoc
+                         :qualifiers
+                         (into (o/qualifiers lhs-object-type)
+                               (o/qualifiers rhs-object-type)))]
+        (Ptr/Ptr object-type)))))
+
+(defn- c-conditional-type
+  [lhs-type rhs-type]
+  (let [lhs-float? (or (c-float-type? lhs-type)
+                       (isa? (o/tid-of-type lhs-type) ::N/FP))
+        rhs-float? (or (c-float-type? rhs-type)
+                       (isa? (o/tid-of-type rhs-type) ::N/FP))
+        lhs-int (integer-conditional-type lhs-type)
+        rhs-int (integer-conditional-type rhs-type)]
+    (cond
+      (or lhs-float? rhs-float?)
+      (common-float-type lhs-type rhs-type)
+
+      (and lhs-int rhs-int)
+      (common-type lhs-int rhs-int)
+
+      (and (c-pointer-type? lhs-type)
+           (c-pointer-type? rhs-type))
+      (or (c-pointer-conditional-type lhs-type rhs-type)
+          (throw (ex-info "conditional pointer types are incompatible"
+                          {:lhs-type lhs-type
+                           :rhs-type rhs-type})))
+
+      :else
+      (o/ubertype-of lhs-type rhs-type))))
+
+(defn- c-conditional
+  [condition then-node else-node]
+  (let [then-type (o/type-of then-node)
+        else-type (o/type-of else-node)
+        result-type (cond
+                      (and (c-pointer-type? then-type)
+                           (null-pointer-constant? else-node))
+                      then-type
+
+                      (and (null-pointer-constant? then-node)
+                           (c-pointer-type? else-type))
+                      else-type
+
+                      :else
+                      (c-conditional-type then-type else-type))]
+    (nodes/make-conditional-node condition
+                                  then-node
+                                  else-node
+                                  result-type)))
+
+(defmacro define-c-conditional
+  [lhs-type rhs-type]
+  `(defmethod Conditional/select [:oben/Any ~lhs-type ~rhs-type]
+     [condition# then-node# else-node#]
+     (c-conditional condition# then-node# else-node#)))
+
+;; C arithmetic arms use the usual arithmetic conversions.  The conditional
+;; protocol dispatches on all three operands, allowing the C condition to give
+;; otherwise-untyped numeric arms their C interpretation.
+(define-c-conditional ::CInt ::CInt)
+(define-c-conditional ::CInt ::CFloat)
+(define-c-conditional ::CFloat ::CInt)
+(define-c-conditional ::CFloat ::CFloat)
+(define-c-conditional ::CInt ::N/Number)
+(define-c-conditional ::N/Number ::CInt)
+(define-c-conditional ::CFloat ::N/Number)
+(define-c-conditional ::N/Number ::CFloat)
+(define-c-conditional ::CInt ::Bool/Bool)
+(define-c-conditional ::Bool/Bool ::CInt)
+(define-c-conditional ::CFloat ::Bool/Bool)
+(define-c-conditional ::Bool/Bool ::CFloat)
+(define-c-conditional ::Ptr/Ptr ::Ptr/Ptr)
+(define-c-conditional ::Ptr/Ptr ::CInt)
+(define-c-conditional ::CInt ::Ptr/Ptr)
+(define-c-conditional ::Ptr/Ptr ::N/Int)
+(define-c-conditional ::N/Int ::Ptr/Ptr)
+
+;; An explicitly C-typed condition gives C semantics to otherwise-untyped
+;; numeric arms as well.  This is what makes `(if c-condition 1 2)` produce
+;; a C int rather than an Oben integer whose width was inferred from the
+;; literal alone.
+(defmacro define-c-conditioned-conditional
+  [condition-type]
+  `(defmethod Conditional/select [~condition-type ::N/Number ::N/Number]
+     [condition# then-node# else-node#]
+     (c-conditional condition# then-node# else-node#)))
+
+(define-c-conditioned-conditional ::CInt)
+(define-c-conditioned-conditional ::CFloat)
+(define-c-conditioned-conditional ::Ptr/Ptr)
+
+(defn conditional
+  "C's value-producing conditional expression.
+
+  The ordinary Oben `if` form uses the same dispatch after requiring this
+  namespace; this named entry point is useful when constructing an expression
+  programmatically."
+  [condition then-node else-node]
+  (Conditional/select condition then-node else-node))
 
 (defn- c-float-node
   [lhs rhs instruction-fn]

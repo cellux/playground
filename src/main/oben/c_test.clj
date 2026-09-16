@@ -136,3 +136,41 @@
             (long-add 19 23) => 42)
     (m/fact "C float follows the target data model"
             (float-add 1.5 2.0) => 3.5)))
+
+(oben/with-target :inprocess
+  (let [mixed-float (oben/fn ^c/double [^c/int condition]
+                       (if condition
+                         (c/float 1.5)
+                         2))
+        contextual-integer (oben/fn ^c/int [^c/int condition]
+                             (if condition 1 2))
+        promoted-integer (oben/fn ^c/long [^c/int condition]
+                           (if condition
+                             (c/short 4)
+                             (c/long 9)))
+        lazy (oben/fn ^c/int [^c/int condition ^c/int divisor]
+               (if condition
+                 1
+                 (/ divisor divisor)))
+        explicit (oben/fn ^c/int [^c/int condition]
+                   (c/conditional condition 7 (c/int 9)))
+        pointer-arm (oben/fn ^c/int [^c/int condition]
+                      (let [p (var c/int 7)]
+                        (deref (if condition p (c/int 0)))))]
+    (m/fact "C conditional expressions use the common floating type"
+            (mixed-float 1) => 1.5
+            (mixed-float 0) => 2.0)
+    (m/fact "C-typed conditions give literal arms C integer semantics"
+            (contextual-integer 1) => 1
+            (contextual-integer 0) => 2)
+    (m/fact "C conditional integer arms undergo integer promotion"
+            (promoted-integer 1) => 4
+            (promoted-integer 0) => 9)
+    (m/fact "C conditional expressions evaluate only the selected arm"
+            (lazy 1 0) => 1
+            (lazy 0 2) => 1)
+    (m/fact "C conditionals can also be constructed explicitly"
+            (explicit 1) => 7
+            (explicit 0) => 9)
+    (m/fact "C conditional pointers accept integer constant zero"
+            (pointer-arm 1) => 7)))
