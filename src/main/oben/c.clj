@@ -21,12 +21,23 @@
             [oben.core.nodes :as nodes]
             [omkamra.llvm.ir :as ir]))
 
+;; C's conversion rules are based on type rank, not merely representation
+;; width.  In particular, an LP64 target still has distinct `int` and `long`
+;; types even though both are i64.  Keep their semantic identity and rank in
+;; the type constructor, separately from the LLVM integer width.
+(def ^:private rank-char 1)
+(def ^:private rank-short 2)
+(def ^:private rank-int 3)
+(def ^:private rank-long 4)
+
 (o/define-typeclass CInt [:oben/Value]
-  [bits signed?]
+  [c-type bits signed? rank]
   (o/make-type
    #(ctx/save-ir % [:integer bits])
-   {:bits bits
-    :signed? signed?}))
+   {:c-type c-type
+    :bits bits
+    :signed? signed?
+    :rank rank}))
 
 (o/define-typeclass CFloat [:oben/Value]
   [bits]
@@ -39,14 +50,14 @@
      #(ctx/save-ir % ir-type))
    {:bits bits}))
 
-(def i8 (CInt 8 true))
-(def u8 (CInt 8 false))
-(def i16 (CInt 16 true))
-(def u16 (CInt 16 false))
-(def i32 (CInt 32 true))
-(def u32 (CInt 32 false))
-(def i64 (CInt 64 true))
-(def u64 (CInt 64 false))
+(def i8 (CInt :i8 8 true rank-char))
+(def u8 (CInt :i8 8 false rank-char))
+(def i16 (CInt :i16 16 true rank-short))
+(def u16 (CInt :i16 16 false rank-short))
+(def i32 (CInt :i32 32 true rank-int))
+(def u32 (CInt :i32 32 false rank-int))
+(def i64 (CInt :i64 64 true rank-long))
+(def u64 (CInt :i64 64 false rank-long))
 
 (def f32 (CFloat 32))
 (def f64 (CFloat 64))
@@ -57,32 +68,34 @@
 
 (o/defportable char
   [target]
-  (CInt (attr target :c-char-size 8)
-        (attr target :c-char-signed? true)))
+  (CInt :char
+        (attr target :c-char-size 8)
+        (attr target :c-char-signed? true)
+        rank-char))
 
 (o/defportable short
   [target]
-  (CInt (attr target :c-short-size 16) true))
+  (CInt :short (attr target :c-short-size 16) true rank-short))
 
 (o/defportable ushort
   [target]
-  (CInt (attr target :c-short-size 16) false))
+  (CInt :short (attr target :c-short-size 16) false rank-short))
 
 (o/defportable int
   [target]
-  (CInt (attr target :c-int-size 32) true))
+  (CInt :int (attr target :c-int-size 32) true rank-int))
 
 (o/defportable uint
   [target]
-  (CInt (attr target :c-int-size 32) false))
+  (CInt :int (attr target :c-int-size 32) false rank-int))
 
 (o/defportable long
   [target]
-  (CInt (attr target :c-long-size 64) true))
+  (CInt :long (attr target :c-long-size 64) true rank-long))
 
 (o/defportable ulong
   [target]
-  (CInt (attr target :c-long-size 64) false))
+  (CInt :long (attr target :c-long-size 64) false rank-long))
 
 (o/defportable float
   [target]
@@ -283,6 +296,10 @@
              N/uitofp)]
     (retag-number type (op node bits))))
 
+(defmethod o/cast [::CFloat ::Bool/Bool]
+  [type node _force?]
+  (o/cast type (o/cast (c-int-type) node false) false))
+
 (defmethod o/cast [::CFloat ::N/FP]
   [type node _force?]
   (let [to-bits (:bits (meta type))
@@ -296,15 +313,13 @@
 (defmethod o/cast [::CInt ::CFloat]
   [type node _force?]
   (let [bits (:bits (meta type))
-        op (if (:signed? (meta (o/type-of node))) N/fptosi N/fptoui)]
+        op (if (:signed? (meta type)) N/fptosi N/fptoui)]
     (retag-number type (op node bits))))
 
 (defmethod o/cast [::CInt ::N/FP]
   [type node _force?]
   (let [bits (:bits (meta type))
-        op (if (isa? (o/tid-of-type (o/type-of node)) ::N/SInt)
-             N/fptosi
-             N/fptoui)]
+        op (if (:signed? (meta type)) N/fptosi N/fptoui)]
     (retag-number type (op node bits))))
 
 (defmethod o/cast [::CInt ::N/UInt]
@@ -442,10 +457,21 @@
   [type]
   (isa? (o/tid-of-type type) ::CInt))
 
+(defn- rank-for-bits
+  [bits]
+  (cond
+    (<= bits 8) rank-char
+    (<= bits 16) rank-short
+    (<= bits 32) rank-int
+    :else rank-long))
+
 (defn- number->c-type
   [type]
-  (CInt (:size (meta type))
-        (isa? (o/tid-of-type type) ::N/SInt)))
+  (let [bits (:size (meta type))]
+    (CInt :core-integer
+          bits
+          (isa? (o/tid-of-type type) ::N/SInt)
+          (rank-for-bits bits))))
 
 (defn- as-c-node
   [node]
@@ -453,39 +479,65 @@
     node
     (o/cast (number->c-type (o/type-of node)) node false)))
 
+(defn- max-integer-value
+  [type]
+  (let [{:keys [bits signed?]} (meta type)
+        exponent (if signed? (dec bits) bits)]
+    (dec (reduce *' 1N (repeat exponent 2N)))))
+
+(defn- unsigned-variant
+  "Returns the corresponding unsigned C type without changing its identity or
+  rank.  LLVM's width is an implementation detail of that semantic type."
+  [type]
+  (let [{:keys [c-type bits rank]} (meta type)]
+    (CInt c-type bits false rank)))
+
 (defn- promoted-type
   [type]
-  (let [int-type (int (target/current))
-        bits (:bits (meta type))]
-    (if (< bits (:bits (meta int-type)))
-      int-type
+  (let [int-type (c-int-type)]
+    (if (< (:rank (meta type)) (:rank (meta int-type)))
+      ;; C promotes a lower-rank integer to int when int can represent every
+      ;; value; otherwise it promotes to unsigned int.
+      (if (<= (max-integer-value type) (max-integer-value int-type))
+        int-type
+        (unsigned-variant int-type))
       type)))
 
 (defn- common-type
   [lhs-type rhs-type]
   (let [lhs (promoted-type lhs-type)
         rhs (promoted-type rhs-type)
-        lhs-bits (:bits (meta lhs))
-        rhs-bits (:bits (meta rhs))
         lhs-signed? (:signed? (meta lhs))
-        rhs-signed? (:signed? (meta rhs))]
+        rhs-signed? (:signed? (meta rhs))
+        lhs-rank (:rank (meta lhs))
+        rhs-rank (:rank (meta rhs))]
     (cond
-      (and (= lhs-signed? rhs-signed?)
-           (>= lhs-bits rhs-bits))
+      ;; Same signedness: use the type with the greater conversion rank.
+      (= lhs-signed? rhs-signed?)
+      (if (>= lhs-rank rhs-rank) lhs rhs)
+
+      ;; An unsigned type whose rank is at least the signed type wins.
+      (and (not lhs-signed?) (>= lhs-rank rhs-rank))
       lhs
 
-      (and (= lhs-signed? rhs-signed?)
-           (< lhs-bits rhs-bits))
+      (and (not rhs-signed?) (>= rhs-rank lhs-rank))
       rhs
 
-      (and lhs-signed? (> lhs-bits rhs-bits))
+      ;; Otherwise the signed type wins only if it can represent all values
+      ;; of the unsigned type.  If not, use its corresponding unsigned type.
+      (and lhs-signed? (>= (max-integer-value lhs)
+                           (max-integer-value rhs)))
       lhs
 
-      (and rhs-signed? (> rhs-bits lhs-bits))
+      (and rhs-signed? (>= (max-integer-value rhs)
+                           (max-integer-value lhs)))
       rhs
+
+      lhs-signed?
+      (unsigned-variant lhs)
 
       :else
-      (CInt (max lhs-bits rhs-bits) false))))
+      (unsigned-variant rhs))))
 
 (defmethod o/get-ubertype [::CInt ::CInt]
   [t1 t2]
@@ -511,7 +563,8 @@
 (defn- c-unary-node
   [node instruction-fn]
   (let [node (as-c-node node)
-        type (promoted-type (o/type-of node))]
+        type (promoted-type (o/type-of node))
+        node (o/cast type node false)]
     (o/make-node
      type
      (fn [ctx]
@@ -691,18 +744,9 @@
 
 (defmethod Bitwise/bit-not [::CInt]
   [node]
-  (let [node (as-c-node node)
-        type (promoted-type (o/type-of node))]
-    (o/make-node
-     type
-     (fn [ctx]
-       (let [ctx (ctx/compile-node ctx node)
-             instruction (ir/xor (ctx/compiled-node ctx node)
-                                 (ir/const (ctx/compiled-type ctx type)
-                                           (normalize-constant type -1))
-                                 {})]
-         (ctx/compile-instruction ctx instruction)))
-     {:class ::unary-op})))
+  (c-unary-node node
+                (fn [node type]
+                  (ir/xor node (ir/const type -1) {}))))
 
 (defn- c-float-type?
   [type]
@@ -905,6 +949,12 @@
        (c-float-node lhs# rhs# ~instruction-fn))
      (defmethod ~multifn [::N/Number ::CFloat]
        [lhs# rhs#]
+       (c-float-node lhs# rhs# ~instruction-fn))
+     (defmethod ~multifn [::CFloat ::Bool/Bool]
+       [lhs# rhs#]
+       (c-float-node lhs# rhs# ~instruction-fn))
+     (defmethod ~multifn [::Bool/Bool ::CFloat]
+       [lhs# rhs#]
        (c-float-node lhs# rhs# ~instruction-fn))))
 
 (define-c-float-binary-op Algebra/+ #(ir/fadd %1 %2 {}))
@@ -929,16 +979,40 @@
          (c-int-result (vary-meta result# assoc :type Bool/%bool))))
      (defmethod ~multifn [::CFloat ::CInt]
        [lhs# rhs#]
-       (~multifn lhs# (o/cast (o/type-of lhs#) rhs# false)))
+       (let [type# (common-float-type (o/type-of lhs#)
+                                      (o/type-of rhs#))]
+         (~multifn (o/cast type# lhs# false)
+                   (o/cast type# rhs# false))))
      (defmethod ~multifn [::CInt ::CFloat]
        [lhs# rhs#]
-       (~multifn (o/cast (o/type-of rhs#) lhs# false) rhs#))
+       (let [type# (common-float-type (o/type-of lhs#)
+                                      (o/type-of rhs#))]
+         (~multifn (o/cast type# lhs# false)
+                   (o/cast type# rhs# false))))
      (defmethod ~multifn [::CFloat ::N/Number]
        [lhs# rhs#]
-       (~multifn lhs# (o/cast (o/type-of lhs#) rhs# false)))
+       (let [type# (common-float-type (o/type-of lhs#)
+                                      (o/type-of rhs#))]
+         (~multifn (o/cast type# lhs# false)
+                   (o/cast type# rhs# false))))
      (defmethod ~multifn [::N/Number ::CFloat]
        [lhs# rhs#]
-       (~multifn (o/cast (o/type-of rhs#) lhs# false) rhs#))))
+       (let [type# (common-float-type (o/type-of lhs#)
+                                      (o/type-of rhs#))]
+         (~multifn (o/cast type# lhs# false)
+                   (o/cast type# rhs# false))))
+     (defmethod ~multifn [::CFloat ::Bool/Bool]
+       [lhs# rhs#]
+       (let [type# (common-float-type (o/type-of lhs#)
+                                      (o/type-of rhs#))]
+         (~multifn (o/cast type# lhs# false)
+                   (o/cast type# rhs# false))))
+     (defmethod ~multifn [::Bool/Bool ::CFloat]
+       [lhs# rhs#]
+       (let [type# (common-float-type (o/type-of lhs#)
+                                      (o/type-of rhs#))]
+         (~multifn (o/cast type# lhs# false)
+                   (o/cast type# rhs# false))))))
 
 (define-c-float-compare-op Eq/= :oeq)
 ;; C's != is true for NaN, so use LLVM's unordered-not-equal predicate.

@@ -60,6 +60,24 @@
     :else (throw (ex-info "float constant too big"
                           {:value x}))))
 
+(defn- float->integer
+  "Converts a floating-point constant to an arbitrary-width integer.
+
+  BigDecimal avoids the JVM's fixed-width int/long conversions and DOWN
+  provides the truncation-toward-zero semantics of LLVM's fptosi/fptoui."
+  [value _size]
+  (-> (java.math.BigDecimal/valueOf (double value))
+      (.setScale 0 java.math.RoundingMode/DOWN)
+      (.toBigInteger)))
+
+(defn- integer->float
+  [value size]
+  (case size
+    32 (float value)
+    64 (double value)
+    (throw (ex-info "unsupported floating-point size"
+                    {:size size :value value}))))
+
 (m/facts
  (m/fact (float-size 0.0) => 32)
  (m/fact (float-size 1.0) => 32)
@@ -272,7 +290,8 @@
            result-size# (o/constant->value ~'size)
            result-type# (~result-typeclass result-size#)]
        (if (o/constant-node? ~'node)
-         (make-constant-number-node result-type# (~const-op (o/constant->value ~'node)))
+         (make-constant-number-node result-type# (~const-op (o/constant->value ~'node)
+                                                             result-size#))
          (o/make-node result-type#
            (fn [ctx#]
              (let [ctx# (ctx/compile-type ctx# result-type#)
@@ -284,10 +303,10 @@
                (ctx/compile-instruction ctx# ins#)))
            {:class ~(keyword (str (ns-name *ns*)) (str op))})))))
 
-(define-conversion-op fptoui UInt int)
-(define-conversion-op fptosi SInt int)
-(define-conversion-op uitofp FP float)
-(define-conversion-op sitofp FP float)
+(define-conversion-op fptoui UInt float->integer)
+(define-conversion-op fptosi SInt float->integer)
+(define-conversion-op uitofp FP integer->float)
+(define-conversion-op sitofp FP integer->float)
 
 (defmethod o/cast [::UInt ::UInt]
   [t node force?]
