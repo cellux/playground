@@ -62,6 +62,11 @@
         :else
         (conversion-node ir/bitcast t node ::bitcast)))
 
+(defn null
+  "Returns a typed null pointer to `object-type`."
+  [object-type]
+  (o/cast (Ptr object-type) nil false))
+
 (defmethod o/cast [::Ptr :oben/HostNil]
   [t node force?]
   (o/make-constant-node

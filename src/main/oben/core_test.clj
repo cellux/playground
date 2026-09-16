@@ -1415,7 +1415,8 @@
         as-signed (o/cast Number/%s64 place false)
         as-pointer (o/cast pointer-type as-unsigned false)
         as-byte-pointer (o/cast byte-pointer-type place false)
-        null-pointer (o/cast pointer-type (o/parse 0) false)]
+        null-pointer (o/cast pointer-type (o/parse 0) false)
+        canonical-null (Ptr/null Number/%u32)]
     (m/fact "pointer-to-integer casts use the requested integer type"
             [(o/type-of as-unsigned) (o/type-of as-signed)]
             => [Number/%u64 Number/%s64])
@@ -1424,7 +1425,11 @@
     (m/fact "pointer-to-pointer casts produce the target pointer type"
             (o/type-of as-byte-pointer) => (m/exactly byte-pointer-type))
     (m/fact "zero integer casts to a null pointer constant"
-            (o/constant->value null-pointer) => nil)))
+            (o/constant->value null-pointer) => nil)
+    (m/fact "Ptr/null creates a typed null pointer"
+            (o/type-of canonical-null) => (m/exactly pointer-type))
+    (m/fact "Ptr/null creates a null constant"
+            (o/constant->value canonical-null) => nil)))
 
 (oben/with-target :inprocess
   (let [null-pointer? (oben/fn ^bool []
