@@ -2,7 +2,8 @@
   (:require [midje.sweet :as m]
             [oben.c :as c]
             [oben.core :as oben]
-            [oben.core.api :as o]))
+            [oben.core.api :as o]
+            [oben.core.target :as target]))
 
 (oben/with-target :inprocess
   (let [add (oben/fn ^c/int [^c/int lhs ^c/int rhs]
@@ -41,6 +42,23 @@
             (mixed 1 2) => 3)
     (m/fact "small C integers undergo integer promotion"
             (promoted 1 2) => 3)))
+
+(oben/with-target :inprocess
+  (let [left-shift (oben/fn ^c/int [^c/short value ^c/short count]
+                    (bit-shift-left value count))
+        signed-right-shift (oben/fn ^c/int [^c/int value ^c/short count]
+                             (bit-shift-right value count))
+        unsigned-right-shift (oben/fn ^c/uint [^c/uint value ^c/short count]
+                               (bit-shift-right value count))
+        left-result (o/parse '(bit-shift-left (c/short 1) (c/long 2)))]
+    (m/fact "C left shift promotes the operands and returns the promoted lhs type"
+            (o/type-of left-result) => (m/exactly (c/int (target/current))))
+    (m/fact "C left shift uses the promoted lhs width"
+            (left-shift 3 4) => 48)
+    (m/fact "C signed right shift uses arithmetic shift"
+            (signed-right-shift -16 2) => -4)
+    (m/fact "C unsigned right shift uses logical shift"
+            (unsigned-right-shift 0x80000000 2) => 0x20000000)))
 
 (oben/with-target :inprocess
   (let [float-add (oben/fn ^c/float [^c/float x ^c/int n]

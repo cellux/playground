@@ -512,6 +512,55 @@
 (define-c-binary-op Bitwise/bit-or #(ir/or %1 %2 {}))
 (define-c-binary-op Bitwise/bit-xor #(ir/xor %1 %2 {}))
 
+(defn- c-shift-node
+  "Builds a C shift expression.
+
+  C promotes both operands independently, but the result type and the LLVM
+  operand width are determined by the promoted left operand. The right-hand
+  value is converted to that width only to satisfy LLVM's instruction shape;
+  shift counts outside the valid range already have undefined behavior in C.
+  "
+  [lhs rhs instruction-fn]
+  (let [lhs (as-c-node lhs)
+        rhs (as-c-node rhs)
+        result-type (promoted-type (o/type-of lhs))
+        promoted-rhs (promoted-type (o/type-of rhs))
+        lhs (o/cast result-type lhs false)
+        rhs (o/cast result-type (o/cast promoted-rhs rhs false) false)]
+    (o/make-node
+     result-type
+     (fn [ctx]
+       (let [ctx (ctx/compile-node ctx lhs)
+             ctx (ctx/compile-node ctx rhs)
+             instruction (instruction-fn
+                         result-type
+                         (ctx/compiled-node ctx lhs)
+                         (ctx/compiled-node ctx rhs))]
+         (ctx/compile-instruction ctx instruction)))
+     {:class ::shift-op})))
+
+(defmacro define-c-shift-op
+  [multifn instruction-fn]
+  `(do
+     (defmethod ~multifn [::CInt ::CInt]
+       [lhs# rhs#]
+       (c-shift-node lhs# rhs# ~instruction-fn))
+     (defmethod ~multifn [::CInt ::N/Int]
+       [lhs# rhs#]
+       (c-shift-node lhs# rhs# ~instruction-fn))
+     (defmethod ~multifn [::N/Int ::CInt]
+       [lhs# rhs#]
+       (c-shift-node lhs# rhs# ~instruction-fn))))
+
+(define-c-shift-op Bitwise/bit-shift-left
+  (fn [_type lhs rhs] (ir/shl lhs rhs {})))
+
+(define-c-shift-op Bitwise/bit-shift-right
+  (fn [type lhs rhs]
+    (if (:signed? (meta type))
+      (ir/ashr lhs rhs {})
+      (ir/lshr lhs rhs {}))))
+
 (defmethod Bitwise/bit-not [::CInt]
   [node]
   (let [node (as-c-node node)
