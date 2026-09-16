@@ -1426,6 +1426,17 @@
     (m/fact "zero integer casts to a null pointer constant"
             (o/constant->value null-pointer) => nil)))
 
+(oben/with-target :inprocess
+  (let [null-pointer? (oben/fn ^bool []
+                        (nil? (cast (* u32) nil)))
+        non-null-pointer? (oben/fn ^bool []
+                            (let [place (var u32 7)]
+                              (nil? place)))]
+    (m/fact "nil? recognizes null pointers"
+            (null-pointer?) => 1)
+    (m/fact "nil? rejects non-null pointers"
+            (non-null-pointer?) => 0)))
+
 (m/facts
  (m/fact (o/sizeof Number/%u1) => 1)
  (m/fact (o/sizeof Number/%u8) => 1)

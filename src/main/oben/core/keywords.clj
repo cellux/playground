@@ -9,7 +9,7 @@
              bit-shift-left bit-shift-right
              and or
              = != < <= >= >
-             get-in get at-in at load
+             get-in get at-in at load nil?
              assoc-in assoc assoc-in! assoc!])
   (:require [oben.core.api])
   (:require [oben.core.types.Void])
@@ -54,6 +54,7 @@
 (def struct oben.core.types.Struct/%struct)
 
 (def deref oben.core.types.Ptr/%deref)
+(def nil? oben.core.types.Ptr/nil?)
 
 (def nop oben.core.nodes/%nop)
 

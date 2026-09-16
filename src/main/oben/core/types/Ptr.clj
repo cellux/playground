@@ -1,4 +1,6 @@
 (ns oben.core.types.Ptr
+  (:refer-clojure :exclude [nil?])
+  (:require [clojure.core :as clj])
   (:require [oben.core.api :as o])
   (:require [oben.core.target :as target])
   (:require [oben.core.context :as ctx])
@@ -8,6 +10,10 @@
   (:require [oben.core.types.Number :as Number])
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m]))
+
+;; `nil?` is an Oben predicate in this namespace; do not resolve the host
+;; Clojure predicate when defining it.
+
 
 (o/define-typeclass Ptr [:oben/Value :oben/Place]
   [object-type]
@@ -48,7 +54,7 @@
         ;; Null pointers are representation-independent and remain constants
         ;; when cast between pointer types.
         (and (o/constant-node? node)
-             (nil? (o/constant->value node)))
+             (clj/nil? (o/constant->value node)))
         (o/cast t nil false)
 
         :else
@@ -71,7 +77,7 @@
   [node result-type]
   (if (o/constant-node? node)
     (let [value (o/constant->value node)]
-      (if (nil? value)
+      (if (clj/nil? value)
         (Number/make-constant-number-node result-type 0)
         (throw (ex-info "value of ptr constants must be nil" {:value value}))))
     (conversion-node ir/ptrtoint result-type node ::ptrtoint)))
@@ -101,6 +107,13 @@
            (zero? (o/constant->value node)))
     (o/cast t nil false)
     (conversion-node ir/inttoptr t node ::inttoptr)))
+
+(o/defmulti nil?)
+
+(defmethod nil? [::Ptr]
+  [ptr]
+  ;; Pointer nullness is represented by comparison with the null address.
+  (o/parse (list '= (ptrtoint ptr) 0)))
 
 (defn pointer-node?
   [x]
