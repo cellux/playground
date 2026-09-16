@@ -14,6 +14,7 @@
             [oben.core.protocols.Eq :as Eq]
             [oben.core.protocols.Ord :as Ord]
             [oben.core.types.Number :as N]
+            [oben.core.types.Bool :as Bool]
             [omkamra.llvm.ir :as ir]))
 
 (o/define-typeclass CInt [:oben/Value]
@@ -459,7 +460,7 @@
        (let [result# (c-binary-node lhs# rhs#
                                     (fn [lhs# rhs#]
                                       (ir/icmp ~predicate lhs# rhs# {})))]
-         (vary-meta result# assoc :type N/%u1)))
+         (vary-meta result# assoc :type Bool/%bool)))
      (defmethod ~multifn [::CInt ::N/Int]
        [lhs# rhs#]
        (~multifn lhs# (as-c-node rhs#)))
@@ -482,7 +483,7 @@
                           ~signed-predicate
                           ~unsigned-predicate)]
          (o/make-node
-          N/%u1
+          Bool/%bool
           (fn [ctx#]
             (let [lhs# (o/cast result-type# lhs# false)
                   rhs# (o/cast result-type# rhs# false)
@@ -595,7 +596,7 @@
        (let [result# (c-float-node lhs# rhs#
                                    (fn [lhs# rhs#]
                                      (ir/fcmp ~predicate lhs# rhs# {})))]
-         (vary-meta result# assoc :type N/%u1)))
+         (vary-meta result# assoc :type Bool/%bool)))
      (defmethod ~multifn [::CFloat ::CInt]
        [lhs# rhs#]
        (~multifn lhs# (o/cast (o/type-of lhs#) rhs# false)))

@@ -3,6 +3,7 @@
   (:require [oben.core.types.Void :refer [%void]])
   (:require [oben.core.types.Unseen :refer [%unseen]])
   (:require [oben.core.types.Number :as Number])
+  (:require [oben.core.types.Bool :as Bool])
   (:require [oben.core.types.Ptr :as Ptr])
   (:require [oben.core.protocols.Place :as Place])
   (:require [oben.core.types.Fn :as Fn])
@@ -389,7 +390,7 @@
 
 (defn %when
   [cond-node & then-nodes]
-  (let [cond-node (%cast Number/%u1 cond-node)
+  (let [cond-node (%cast Bool/%bool cond-node)
         then-label (make-label :then)
         else-label (make-label :else)]
     (o/make-node %void
@@ -452,8 +453,8 @@
 
 (defn %not
   [node]
-  (let [bool-node (%cast Number/%u1 node)]
-    (o/make-node Number/%u1
+  (let [bool-node (%cast Bool/%bool node)]
+    (o/make-node Bool/%bool
       (fn [ctx]
         (let [ctx (ctx/compile-node ctx bool-node)]
           (ctx/compile-instruction
@@ -464,11 +465,11 @@
 
 (defn %and
   ([lhs rhs]
-   `(bit-and (u1 ~lhs) (u1 ~rhs))))
+   `(bit-and (bool ~lhs) (bool ~rhs))))
 
 (defn %or
   ([lhs rhs]
-   `(bit-or (u1 ~lhs) (u1 ~rhs))))
+   `(bit-or (bool ~lhs) (bool ~rhs))))
 
 (defn %while
   [cond-node & then-nodes]

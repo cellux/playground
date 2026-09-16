@@ -1,5 +1,6 @@
 (ns oben.core.types.Number
   (:require [oben.core.api :as o])
+  (:require [oben.core.types.Bool :as Bool])
   (:require [oben.core.context :as ctx])
   (:require [oben.core.target :as target])
   (:require [oben.core.protocols.Eq :as Eq])
@@ -212,6 +213,13 @@
   [x]
   (let [type (FP (float-size x))]
     (make-constant-number-node type x)))
+
+(defmethod o/cast [::Bool/Bool ::Number]
+  [_type node _force?]
+  (if (o/constant-node? node)
+    (Bool/make-constant-bool-node
+     (not (zero? (o/constant->value node))))
+    (o/parse (list '!= node 0))))
 
 ;; resize ops
 
@@ -492,7 +500,7 @@
                    ~'lhs (o/parse (list 'cast ubertype# ~'lhs))
                    ~'rhs (o/parse (list 'cast ubertype# ~'rhs))]
                (if (isa? (o/tid-of-type ubertype#) ~arg-typeclass)
-                 (o/make-node %u1
+                 (o/make-node Bool/%bool
                    (fn [~'ctx]
                      (let [compile-op# (fn [~'ctx]
                                          (let [~'ins (~make-ir ~pred

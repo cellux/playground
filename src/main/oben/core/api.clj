@@ -582,7 +582,7 @@
                      env)
                (parse result env))))
 
-         (number? form)
+         (or (number? form) (boolean? form))
          (parse-host-value form)
 
          (vector? form)

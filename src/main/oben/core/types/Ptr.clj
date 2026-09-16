@@ -10,6 +10,7 @@
   (:require [oben.core.protocols.Eq :as Eq])
   (:require [oben.core.protocols.Ord :as Ord])
   (:require [oben.core.types.Number :as Number])
+  (:require [oben.core.types.Bool :as Bool])
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m]))
 
@@ -99,10 +100,12 @@
   [t node force?]
   (let [t-size (:size (meta t))]
     (if (= t-size 1)
-      ;; TODO we should create a dedicated Bool type and use that
-      ;; instead of special-casing the ptr->i1 conversion
       (o/parse (list '!= (ptrtoint node) 0))
       (ptrtoint-to node t))))
+
+(defmethod o/cast [::Bool/Bool ::Ptr]
+  [t node force?]
+  (o/parse (list '!= (ptrtoint node) 0)))
 
 (defmethod o/cast [::Number/SInt ::Ptr]
   [t node force?]
@@ -126,7 +129,7 @@
   [pred lhs rhs]
   (let [lhs-type (o/type-of lhs)
         rhs (o/cast lhs-type rhs false)]
-    (o/make-node Number/%u1
+    (o/make-node Bool/%bool
       (fn [ctx]
         (let [ctx (ctx/compile-node ctx lhs)
               ctx (ctx/compile-node ctx rhs)

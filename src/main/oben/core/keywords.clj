@@ -14,6 +14,7 @@
   (:require [oben.core.api])
   (:require [oben.core.types.Void])
   (:require [oben.core.types.Number])
+  (:require [oben.core.types.Bool])
   (:require [oben.core.types.Array])
   (:require [oben.core.types.Struct])
   (:require [oben.core.types.Ptr])
@@ -27,7 +28,7 @@
 
 (def void oben.core.types.Void/%void)
 
-(def bool oben.core.types.Number/%u1)
+(def bool oben.core.types.Bool/%bool)
 
 (def u1 oben.core.types.Number/%u1)
 (def u8 oben.core.types.Number/%u8)

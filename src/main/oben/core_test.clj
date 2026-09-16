@@ -11,6 +11,7 @@
    [oben.core.types.Void :as Void]
    [oben.core.types.Unseen :as Unseen]
    [oben.core.types.Number :as Number]
+   [oben.core.types.Bool :as Bool]
    [oben.core.types.Ptr :as Ptr :refer [Ptr]]
    [oben.core.types.Aggregate :as Aggregate]
    [oben.core.protocols.Container :as Container]
@@ -313,6 +314,16 @@
 
 (m/fact (o/type-of (o/parse '(s8 0))) => (m/exactly (Number/SInt 8)))
 (m/fact (o/type-of (o/parse '(s8 0))) => (m/exactly Number/%s8))
+
+(m/facts
+ (m/fact "true is a Bool constant"
+         (o/type-of (o/parse true)) => (m/exactly Bool/%bool))
+ (m/fact "false is a Bool constant"
+         (o/type-of (o/parse false)) => (m/exactly Bool/%bool))
+ (m/fact "Bool compiles to i1"
+         (compile-type Bool/%bool) => [:integer 1])
+ (m/fact "bool acts as a type-directed truthiness conversion"
+         (o/constant->value (o/parse '(bool 0))) => false))
 
 (m/fact (o/type-of (o/parse 0)) => (m/exactly Number/%u1))
 (m/fact (o/type-of (o/parse 1)) => (m/exactly Number/%u1))
