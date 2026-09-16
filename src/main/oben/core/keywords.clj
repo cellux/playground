@@ -25,7 +25,8 @@
   (:require [oben.core.protocols.Algebra])
   (:require [oben.core.protocols.Container])
   (:require [oben.core.protocols.Place])
-  (:require [oben.core.protocols.Conditional]))
+  (:require [oben.core.protocols.Conditional])
+  (:require [oben.core.protocols.Assignment]))
 
 (def void oben.core.types.Void/%void)
 
@@ -134,6 +135,29 @@
 (def assoc oben.core.protocols.Container/assoc)
 (def assoc-in! oben.core.protocols.Container/assoc-in!)
 (def assoc! oben.core.protocols.Container/assoc!)
+
+;; Canonical long-form compound assignment names.
+(def add= oben.core.protocols.Assignment/add-assign)
+(def sub= oben.core.protocols.Assignment/sub-assign)
+(def mul= oben.core.protocols.Assignment/mul-assign)
+(def div= oben.core.protocols.Assignment/div-assign)
+(def rem= oben.core.protocols.Assignment/rem-assign)
+(def shift-left= oben.core.protocols.Assignment/shift-left-assign)
+(def shift-right= oben.core.protocols.Assignment/shift-right-assign)
+(def bit-and= oben.core.protocols.Assignment/bit-and-assign)
+(def bit-xor= oben.core.protocols.Assignment/bit-xor-assign)
+(def bit-or= oben.core.protocols.Assignment/bit-or-assign)
+
+;; Readable shorthand aliases. `/=` and `^=` cannot be read as Clojure
+;; symbols, so division and xor use their long forms only.
+(def += add=)
+(def -= sub=)
+(def *= mul=)
+(def %= rem=)
+(def <<= shift-left=)
+(def >>= shift-right=)
+(def &= bit-and=)
+(def |= bit-or=)
 
 ;; Compatibility aliases.
 (def put-in! oben.core.protocols.Container/put-in!)

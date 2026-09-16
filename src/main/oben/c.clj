@@ -329,6 +329,45 @@
                       (N/sext node bits)
                       (N/trunc node bits))))))
 
+(defn- normalize-core-int-constant
+  [type value]
+  (let [bits (:size (meta type))
+        modulus (reduce *' 1N (repeat bits 2N))
+        value (mod value modulus)]
+    (if (and (isa? (o/tid-of-type type) ::N/SInt)
+             (>= value (quot modulus 2)))
+      (- value modulus)
+      value)))
+
+(defn- c-int->core-int
+  "Converts a C integer to an Oben core integer without changing its bits.
+
+  GEP indices are core integers.  This conversion is therefore needed for C
+  pointer arithmetic, while retaining the C signedness when an extension is
+  necessary."
+  [type node]
+  (let [to-bits (:size (meta type))
+        {from-bits :bits signed? :signed?} (meta (o/type-of node))]
+    (if (o/constant-node? node)
+      ;; `resize-c-node` normalizes C metadata (`:bits`/`:signed?`), whereas
+      ;; core Number types use `:size`; construct their constant directly.
+      (N/make-constant-number-node
+       type
+       (normalize-core-int-constant type (o/constant->value node)))
+      (cond
+        (= to-bits from-bits) (vary-meta node assoc :type type)
+        (> to-bits from-bits) (resize-c-node type node
+                                             (if signed? ir/sext ir/zext))
+        :else (resize-c-node type node ir/trunc)))))
+
+(defmethod o/cast [::N/UInt ::CInt]
+  [type node _force?]
+  (c-int->core-int type node))
+
+(defmethod o/cast [::N/SInt ::CInt]
+  [type node _force?]
+  (c-int->core-int type node))
+
 (defmethod o/cast [::Ptr/Ptr ::CInt]
   [type node _force?]
   ;; An integer arm is a C null pointer constant only when it is the
@@ -819,6 +858,20 @@
   programmatically."
   [condition then-node else-node]
   (Conditional/select condition then-node else-node))
+
+(defn- c-pointer-offset
+  [ptr offset]
+  ;; `nodes/%gep` uses core integer indices.  Preserve C signedness during the
+  ;; conversion so negative offsets remain negative at the pointer width.
+  (nodes/%gep ptr [(o/cast (N/UInt (target/attr :address-size)) offset false)]))
+
+(defmethod Algebra/+ [::Ptr/Ptr ::CInt]
+  [ptr offset]
+  (c-pointer-offset ptr offset))
+
+(defmethod Algebra/- [::Ptr/Ptr ::CInt]
+  [ptr offset]
+  (c-pointer-offset ptr (Algebra/- offset)))
 
 (defn- c-float-node
   [lhs rhs instruction-fn]

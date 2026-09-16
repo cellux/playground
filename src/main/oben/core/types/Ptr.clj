@@ -333,8 +333,8 @@
 
 (defmethod Algebra/+ [::Ptr ::Number/Int]
   [ptr offset]
-  `(gep ~ptr [~offset]))
+  (o/parse `(gep ~ptr [~offset])))
 
 (defmethod Algebra/- [::Ptr ::Number/Int]
   [ptr offset]
-  `(gep ~ptr [(- ~offset)]))
+  (o/parse `(gep ~ptr [(- ~offset)])))

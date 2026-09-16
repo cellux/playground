@@ -18,6 +18,14 @@
 (o/defmulti writable?)
 (o/defmulti volatile?)
 
+(defn update!
+  "Loads `place`, applies `update-fn`, stores the result, and returns it.
+
+  The same place node is used for the load and store, so an address-producing
+  expression is represented once in the generated Oben expression."
+  [place update-fn]
+  (store! place (update-fn (load place))))
+
 (defmethod address-of :default
   [value]
   (throw (ex-info "value is not an addressable place"

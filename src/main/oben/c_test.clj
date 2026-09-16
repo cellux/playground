@@ -174,3 +174,75 @@
             (explicit 0) => 9)
     (m/fact "C conditional pointers accept integer constant zero"
             (pointer-arm 1) => 7)))
+
+(oben/with-target :inprocess
+  (let [arithmetic (oben/fn ^c/int []
+                   (let [v (var c/int 10)]
+                     (add= v 5)
+                     (sub= v 3)
+                     (mul= v 2)
+                     (div= v 4)
+                     @v))
+        remainder (oben/fn ^c/int []
+                    (let [v (var c/int 17)]
+                      (rem= v 5)
+                      @v))
+        shifts (oben/fn ^c/uint []
+                (let [v (var c/uint 3)]
+                  (shift-left= v 4)
+                  (shift-right= v 2)
+                  @v))
+        bitwise (oben/fn ^c/uint []
+                 (let [v (var c/uint 13)]
+                   (bit-and= v 7)
+                   (bit-or= v 8)
+                   (bit-xor= v 3)
+                   @v))
+        narrowing (oben/fn ^c/uint []
+                   (let [v (var c/ushort 65530)]
+                     (add= v 10)
+                     @v))
+        floating (oben/fn ^c/float [^c/int n]
+                   (let [v (var c/float 1.5)]
+                     (add= v n)
+                     (mul= v (c/float 2.0))
+                     @v))
+        pointer-add (oben/fn ^c/int [^c/int offset]
+                      (let [values (var (array c/int [4 7 9]))
+                            pointer (var (* c/int) (gep values [0 0]))]
+                        (add= pointer offset)
+                        @@pointer))
+        pointer-sub (oben/fn ^c/int [^c/short offset]
+                      (let [values (var (array c/int [4 7 9]))
+                            pointer (var (* c/int) (gep values [0 2]))]
+                        (sub= pointer offset)
+                        @@pointer))
+        pointer-constant-add (oben/fn ^c/int []
+                               (let [values (var (array c/int [4 7 9]))
+                                     pointer (var (* c/int) (gep values [0 0]))]
+                                 (add= pointer (c/int 1))
+                                 @@pointer))
+        shorthand (oben/fn ^c/int []
+                    (let [v (var c/int 1)]
+                      (+= v 1)
+                      (-= v 1)
+                      (*= v 3)
+                      (%= v 2)
+                      @v))]
+    (m/fact "C compound arithmetic assignments update and return the place"
+            (arithmetic) => 6
+            (remainder) => 2)
+    (m/fact "C compound shift assignments use C shift semantics"
+            (shifts) => 12)
+    (m/fact "C compound bitwise assignments use C bitwise semantics"
+            (bitwise) => 14)
+    (m/fact "C compound assignment converts back to the place type"
+            (narrowing) => 4)
+    (m/fact "C floating compound assignments use the usual arithmetic conversions"
+            (floating 2) => 7.0)
+    (m/fact "C += and -= support C integer offsets on pointer places"
+            (pointer-add 1) => 7
+            (pointer-sub 1) => 7
+            (pointer-constant-add) => 7)
+    (m/fact "readable shorthand aliases remain available"
+            (shorthand) => 1)))

@@ -555,6 +555,30 @@
      (f) => 5)))
 
 (oben/with-target :inprocess
+  (let [compound (oben/fn ^u32 []
+                   (let [v (var u32 10)]
+                     (add= v 5)
+                     (sub= v 3)
+                     (mul= v 2)
+                     (div= v 4)
+                     (rem= v 4)
+                     (shift-left= v 2)
+                     (shift-right= v 1)
+                     (bit-or= v 1)
+                     (bit-and= v 7)
+                     (bit-xor= v 1)
+                     @v))
+        pointer (oben/fn ^u32 []
+                  (let [values (var (array u32 [4 7 9]))
+                        p (var (* u32) (gep values [0 0]))]
+                    (add= p 1)
+                    @@p))]
+    (m/fact "compound assignments work for ordinary Oben places"
+            (compound) => 4)
+    (m/fact "compound assignments can update Oben pointer places"
+            (pointer) => 7)))
+
+(oben/with-target :inprocess
   (let [f (oben/fn ^u32 []
             (let [v (var u8)]
               (set! v 5)
