@@ -65,6 +65,7 @@
                 cider/cider-nrepl {:mvn/version "0.62.2"}
                 integrant/repl {:mvn/version "0.4.0"}
                 midje/midje {:mvn/version "1.10.10"}
+                io.github.tonsky/clj-reload {:mvn/version "1.0.0"}
                 com.clojure-goes-fast/clj-java-decompiler {:mvn/version "0.3.7"}
                 com.clojure-goes-fast/clj-async-profiler {:mvn/version "1.6.2"}}}
 
