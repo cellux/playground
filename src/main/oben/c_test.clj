@@ -399,3 +399,49 @@
             (pointer-zero-ne) => 1)
     (m/fact "readable shorthand aliases remain available"
             (shorthand) => 1)))
+
+(oben/with-target :inprocess
+  (let [pre-inc (oben/fn ^c/int []
+                  (let [v (var c/int 3)]
+                    (c/pre-inc! v)))
+        post-inc (oben/fn ^c/int []
+                   (let [v (var c/int 3)]
+                     (c/post-inc! v)))
+        post-inc-state (oben/fn ^c/int []
+                         (let [v (var c/int 3)]
+                           (c/post-inc! v)
+                           @v))
+        pre-dec (oben/fn ^c/int []
+                  (let [v (var c/int 3)]
+                    (c/pre-dec! v)))
+        post-dec (oben/fn ^c/int []
+                   (let [v (var c/int 3)]
+                     (c/post-dec! v)))
+        float-inc (oben/fn ^c/float []
+                    (let [v (var c/float (c/float 1.5))]
+                      (c/pre-inc! v)))
+        pointer-inc (oben/fn ^c/int []
+                      (let [values (var (array c/int [4 7 9]))
+                            p (var (* c/int) (gep values [0 0]))]
+                        (deref (c/pre-inc! p))))
+        pointer-dec-state (oben/fn ^c/int []
+                           (let [values (var (array c/int [4 7 9]))
+                                 p (var (* c/int) (gep values [0 1]))]
+                             (c/post-dec! p)
+                             (deref @p)))]
+    (m/fact "C prefix increment returns the new value"
+            (pre-inc) => 4)
+    (m/fact "C postfix increment returns the old value"
+            (post-inc) => 3)
+    (m/fact "C postfix increment stores the new value"
+            (post-inc-state) => 4)
+    (m/fact "C prefix decrement returns the new value"
+            (pre-dec) => 2)
+    (m/fact "C postfix decrement returns the old value"
+            (post-dec) => 3)
+    (m/fact "C increment uses floating-point arithmetic"
+            (float-inc) => 2.5)
+    (m/fact "C prefix increment supports object pointers"
+            (pointer-inc) => 7)
+    (m/fact "C postfix decrement updates pointer places"
+            (pointer-dec-state) => 4)))

@@ -13,11 +13,13 @@
             [oben.core.protocols.Bitwise :as Bitwise]
             [oben.core.protocols.Logical :as Logical]
             [oben.core.protocols.Conditional :as Conditional]
+            [oben.core.protocols.Place :as Place]
             [oben.core.protocols.Eq :as Eq]
             [oben.core.protocols.Ord :as Ord]
             [oben.core.types.Number :as N]
             [oben.core.types.Bool :as Bool]
             [oben.core.types.Ptr :as Ptr]
+            [oben.core.types.Fn :as Fn]
             [oben.core.types.Void :as Void]
             [oben.core.nodes :as nodes]
             [omkamra.llvm.ir :as ir]))
@@ -1224,3 +1226,46 @@
 (defmethod Logical/not [::Ptr/Ptr]
   [node]
   (c-logical-not node))
+
+(defn- c-incrementable-type?
+  [type]
+  (or (c-int-type? type)
+      (c-float-type? type)
+      (bool-type? type)
+      (and (c-pointer-type? type)
+           (let [object-type (:object-type (meta type))]
+             (and (not (void-object-type? object-type))
+                  (not (isa? (o/tid-of-type object-type) ::Fn/Fn)))))))
+
+(defn- c-update-place
+  [place update-fn operation]
+  (when-not (Place/place? place)
+    (throw (ex-info "C increment/decrement requires a place"
+                    {:place place})))
+  (let [value-type (o/type-of (Place/load place))]
+    (when-not (c-incrementable-type? value-type)
+      (throw (ex-info "C increment/decrement requires a C scalar or object pointer place"
+                      {:place place
+                       :type value-type})))
+    (let [one (o/cast (c-int-type) 1 false)]
+      (update-fn place #(operation % one)))))
+
+(defn pre-inc!
+  "C prefix increment: updates `place` and returns its new value."
+  [place]
+  (c-update-place place Place/pre-update! Algebra/+))
+
+(defn post-inc!
+  "C postfix increment: updates `place` and returns its old value."
+  [place]
+  (c-update-place place Place/post-update! Algebra/+))
+
+(defn pre-dec!
+  "C prefix decrement: updates `place` and returns its new value."
+  [place]
+  (c-update-place place Place/pre-update! Algebra/-))
+
+(defn post-dec!
+  "C postfix decrement: updates `place` and returns its old value."
+  [place]
+  (c-update-place place Place/post-update! Algebra/-))
