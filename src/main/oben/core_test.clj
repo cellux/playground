@@ -14,6 +14,7 @@
    [oben.core.types.Ptr :as Ptr :refer [Ptr]]
    [oben.core.types.Aggregate :as Aggregate]
    [oben.core.protocols.Container :as Container]
+   [oben.core.protocols.Place :as Place]
    [oben.core.types.Array :as Array :refer [Array]]
    [oben.core.types.Struct :as Struct :refer [Struct]]
    [oben.core.types.Fn :as Fn :refer [Fn]])
@@ -1391,6 +1392,20 @@
               (const-write)
               (catch clojure.lang.ExceptionInfo e (.getMessage e)))
             => "cannot store through a const-qualified place")))
+
+(oben/with-target :inprocess
+  (let [place (o/parse '(var u32 7))
+        const-place (o/parse '(var (qualify u32 :const) 7))
+        volatile-place (o/parse '(var (qualify u32 :volatile) 7))]
+    (m/fact "var nodes are first-class places"
+            (Place/place? place) => true)
+    (m/fact "address-of preserves an existing place"
+            (Place/address-of place) => (m/exactly place))
+    (m/fact "plain places are writable and non-volatile"
+            [(Place/writable? place) (Place/volatile? place)] => [true false])
+    (m/fact "qualifiers determine place capabilities"
+            [(Place/writable? const-place)
+             (Place/volatile? volatile-place)] => [false true])))
 
 (m/facts
  (m/fact (o/sizeof Number/%u1) => 1)

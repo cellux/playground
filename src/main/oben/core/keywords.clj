@@ -122,6 +122,7 @@
 (def get oben.core.protocols.Container/get)
 (def at-in oben.core.protocols.Container/at-in)
 (def at oben.core.protocols.Container/at)
+(def address-of oben.core.protocols.Place/address-of)
 (def load oben.core.protocols.Place/load)
 (def store! oben.core.protocols.Place/store!)
 (def qualify oben.core.api/qualify)

@@ -9,7 +9,7 @@
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m]))
 
-(o/define-typeclass Ptr [:oben/Value]
+(o/define-typeclass Ptr [:oben/Value :oben/Place]
   [object-type]
   (o/make-type
    (fn [ctx]
@@ -96,7 +96,7 @@
 (defn %deref
   [ptr-node]
   (let [{:keys [object-type]} (meta (o/type-of ptr-node))
-        volatile? (o/qualified? object-type :volatile)]
+        volatile? (Place/volatile? ptr-node)]
     (o/make-node object-type
       (fn [ctx]
         (letfn [(compile-pointer [ctx]
@@ -110,6 +110,20 @@
               load-object)))
       {:class :oben/deref})))
 
+(defmethod Place/address-of [::Ptr]
+  [ptr]
+  ptr)
+
+(defmethod Place/writable? [::Ptr]
+  [ptr]
+  (let [object-type (:object-type (meta (o/type-of ptr)))]
+    (not (o/qualified? object-type :const))))
+
+(defmethod Place/volatile? [::Ptr]
+  [ptr]
+  (let [object-type (:object-type (meta (o/type-of ptr)))]
+    (o/qualified? object-type :volatile)))
+
 (defmethod Place/load [::Ptr]
   [ptr]
   (%deref ptr))
@@ -117,12 +131,12 @@
 (defmethod Place/store! [::Ptr :oben/Value]
   [ptr value]
   (let [object-type (:object-type (meta (o/type-of ptr)))
-        _ (when (o/qualified? object-type :const)
+        _ (when-not (Place/writable? ptr)
             (throw (ex-info "cannot store through a const-qualified place"
                             {:place ptr
                              :type object-type})))
         value (o/cast object-type value false)
-        volatile? (o/qualified? object-type :volatile)]
+        volatile? (Place/volatile? ptr)]
     (o/make-node
      object-type
      (fn [ctx]
