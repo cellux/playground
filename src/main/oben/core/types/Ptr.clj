@@ -8,6 +8,7 @@
   (:require [oben.core.protocols.Place :as Place])
   (:require [oben.core.protocols.Algebra :as Algebra])
   (:require [oben.core.protocols.Eq :as Eq])
+  (:require [oben.core.protocols.Ord :as Ord])
   (:require [oben.core.types.Number :as Number])
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m]))
@@ -154,6 +155,54 @@
 (defmethod Eq/!= [:oben/HostNil ::Ptr]
   [lhs rhs]
   (pointer-compare :ne rhs lhs))
+
+(defmethod Ord/< [::Ptr ::Ptr]
+  [lhs rhs]
+  (pointer-compare :ult lhs rhs))
+
+(defmethod Ord/< [::Ptr :oben/HostNil]
+  [lhs rhs]
+  (pointer-compare :ult lhs rhs))
+
+(defmethod Ord/< [:oben/HostNil ::Ptr]
+  [lhs rhs]
+  (pointer-compare :ult (o/cast (o/type-of rhs) lhs false) rhs))
+
+(defmethod Ord/<= [::Ptr ::Ptr]
+  [lhs rhs]
+  (pointer-compare :ule lhs rhs))
+
+(defmethod Ord/<= [::Ptr :oben/HostNil]
+  [lhs rhs]
+  (pointer-compare :ule lhs rhs))
+
+(defmethod Ord/<= [:oben/HostNil ::Ptr]
+  [lhs rhs]
+  (pointer-compare :ule (o/cast (o/type-of rhs) lhs false) rhs))
+
+(defmethod Ord/>= [::Ptr ::Ptr]
+  [lhs rhs]
+  (pointer-compare :uge lhs rhs))
+
+(defmethod Ord/>= [::Ptr :oben/HostNil]
+  [lhs rhs]
+  (pointer-compare :uge lhs rhs))
+
+(defmethod Ord/>= [:oben/HostNil ::Ptr]
+  [lhs rhs]
+  (pointer-compare :uge (o/cast (o/type-of rhs) lhs false) rhs))
+
+(defmethod Ord/> [::Ptr ::Ptr]
+  [lhs rhs]
+  (pointer-compare :ugt lhs rhs))
+
+(defmethod Ord/> [::Ptr :oben/HostNil]
+  [lhs rhs]
+  (pointer-compare :ugt lhs rhs))
+
+(defmethod Ord/> [:oben/HostNil ::Ptr]
+  [lhs rhs]
+  (pointer-compare :ugt (o/cast (o/type-of rhs) lhs false) rhs))
 
 (defn pointer-node?
   [x]

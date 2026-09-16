@@ -1437,7 +1437,19 @@
                            (= place place)))
         unequal-pointers (oben/fn ^bool []
                            (let [place (var u32 7)]
-                             (!= place nil)))]
+                             (!= place nil)))
+        less-same-pointer (oben/fn ^bool []
+                            (let [place (var u32 7)]
+                              (< place place)))
+        less-equal-same-pointer (oben/fn ^bool []
+                                  (let [place (var u32 7)]
+                                    (<= place place)))
+        greater-equal-same-pointer (oben/fn ^bool []
+                                     (let [place (var u32 7)]
+                                       (>= place place)))
+        greater-same-pointer (oben/fn ^bool []
+                               (let [place (var u32 7)]
+                                 (> place place)))]
     (m/fact "nil? recognizes null pointers"
             (null-pointer?) => 1)
     (m/fact "nil? rejects non-null pointers"
@@ -1445,7 +1457,13 @@
     (m/fact "pointer equality compares addresses"
             (equal-pointers) => 1)
     (m/fact "pointer inequality compares addresses"
-            (unequal-pointers) => 1)))
+            (unequal-pointers) => 1)
+    (m/fact "pointer ordering uses unsigned address comparisons"
+            [(less-same-pointer)
+             (less-equal-same-pointer)
+             (greater-equal-same-pointer)
+             (greater-same-pointer)]
+            => [0 1 1 0])))
 
 (m/facts
  (m/fact (o/sizeof Number/%u1) => 1)
