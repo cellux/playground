@@ -16,6 +16,7 @@
    [oben.core.types.Aggregate :as Aggregate]
    [oben.core.protocols.Container :as Container]
    [oben.core.protocols.Place :as Place]
+   [oben.core.protocols.Algebra :as Algebra]
    [oben.core.types.Array :as Array :refer [Array]]
    [oben.core.types.Struct :as Struct :refer [Struct]]
    [oben.core.types.Fn :as Fn :refer [Fn]])
@@ -577,6 +578,28 @@
             (compound) => 4)
     (m/fact "compound assignments can update Oben pointer places"
             (pointer) => 7)))
+
+(oben/with-target :inprocess
+  (let [three (Number/make-constant-number-node Number/%u32 3)
+        one (Number/make-constant-number-node Number/%u32 1)
+        add-one (fn [node]
+                  (Algebra/+ node one))
+        prefix (oben/fn ^u32 []
+                 (let [v (var u32 three)]
+                   (pre-update! v add-one)))
+        postfix (oben/fn ^u32 []
+                  (let [v (var u32 three)]
+                    (post-update! v add-one)))
+        postfix-state (oben/fn ^u32 []
+                        (let [v (var u32 three)]
+                          (post-update! v add-one)
+                          @v))]
+    (m/fact "pre-update! returns the updated value"
+            (prefix) => 4)
+    (m/fact "post-update! returns the value before updating"
+            (postfix) => 3)
+    (m/fact "post-update! still stores the updated value"
+            (postfix-state) => 4)))
 
 (oben/with-target :inprocess
   (let [f (oben/fn ^u32 []

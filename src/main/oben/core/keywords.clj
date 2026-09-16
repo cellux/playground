@@ -129,6 +129,8 @@
 (def address-of oben.core.protocols.Place/address-of)
 (def load oben.core.protocols.Place/load)
 (def store! oben.core.protocols.Place/store!)
+(def pre-update! oben.core.protocols.Place/pre-update!)
+(def post-update! oben.core.protocols.Place/post-update!)
 (def qualify oben.core.api/qualify)
 
 (def assoc-in oben.core.protocols.Container/assoc-in)
