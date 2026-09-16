@@ -25,7 +25,14 @@
      (letfn [(compile-object-type [ctx]
                (ctx/compile-type ctx object-type))
              (save-ir [ctx]
-               (ctx/save-ir ctx [:ptr (ctx/compiled-type ctx object-type)]))]
+               ;; LLVM does not permit pointers to void.  Keep `void*` as a
+               ;; semantic C pointer while using the conventional i8*
+               ;; representation for its lowered form.
+               (let [compiled-object-type (ctx/compiled-type ctx object-type)
+                     compiled-object-type (if (= :void compiled-object-type)
+                                            [:integer 8]
+                                            compiled-object-type)]
+                 (ctx/save-ir ctx [:ptr compiled-object-type])))]
        (-> ctx
            compile-object-type
            save-ir)))

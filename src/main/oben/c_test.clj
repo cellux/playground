@@ -6,7 +6,9 @@
             [oben.core.compiler :as compiler]
             [oben.core.target :as target]
             [oben.core.types.Bool :as Bool]
-            [oben.core.types.Number :as Number]))
+            [oben.core.types.Number :as Number]
+            [oben.core.types.Ptr :as Ptr]
+            [oben.core.types.Void :as Void]))
 
 (oben/with-target :inprocess
   (let [add (oben/fn ^c/int [^c/int lhs ^c/int rhs]
@@ -176,8 +178,13 @@
                    (+ lhs rhs))
         float-add (oben/fn ^c/float [^c/float lhs ^c/float rhs]
                     (+ lhs rhs))
-        int-type (c/int (target/current))
-        long-type (c/long (target/current))
+        int-type (o/parse 'c/int)
+        long-type (o/parse 'c/long)
+        int-pointer (Ptr/null int-type)
+        void-pointer (Ptr/null Void/%void)
+        void-conditional (c/conditional (o/cast int-type 1 false)
+                                        int-pointer
+                                        void-pointer)
         common-type (o/type-of (o/parse '(+ (c/int 1) (c/long 2))))]
     (m/fact "C int follows the target data model"
             (add 19 23) => 42)
@@ -189,11 +196,29 @@
             int-type =not=> (m/exactly long-type))
     (m/fact "C integer conversions select the higher-rank long type"
             common-type => (m/exactly long-type))
+    (m/fact "C object pointers combine with void pointers"
+            (o/type-of void-conditional)
+            => (m/exactly (Ptr/Ptr Void/%void)))
     (m/fact "C pointers to same-width but distinct integer types are incompatible"
             (o/parse '(c/conditional (c/int 1)
                                      (var c/int 0)
                                      (var c/long 0)))
             => (m/throws #"conditional pointer types are incompatible"))))
+
+(oben/with-target :dump
+  (let [void-ptr (Ptr/Ptr Void/%void)
+        f (oben/fn void-ptr [^c/int condition]
+            (let [values (var (array c/int [4 7 9]))
+                  pointer (gep values [0 0])]
+              (if condition
+                pointer
+                (cast void-ptr pointer))))
+        fnode ((:parse-for-target (meta f)) (target/current))
+        source (:source (compiler/compile-function (target/current)
+                                                   (target/ctx)
+                                                   fnode))]
+    (m/fact "C object-pointer and void-pointer conditionals lower via i8*"
+            source => (m/contains "i8*"))))
 
 (oben/with-target :inprocess
   (let [mixed-float (oben/fn ^c/double [^c/int condition]
@@ -277,6 +302,20 @@
                             pointer (var (* c/int) (gep values [0 0]))]
                         (add= pointer offset)
                         @@pointer))
+        pointer-left-add (oben/fn ^c/int []
+                           (let [values (var (array c/int [4 7 9]))
+                                 pointer (gep values [0 0])]
+                             (deref (+ 1 pointer))))
+        pointer-difference (oben/fn ^c/long []
+                             (let [values (var (array c/int [4 7 9]))]
+                               (- (gep values [0 2])
+                                  (gep values [0 0]))))
+        pointer-zero-eq (oben/fn ^bool []
+                         (let [values (var (array c/int [4 7 9]))]
+                           (= (gep values [0 0]) 0)))
+        pointer-zero-ne (oben/fn ^bool []
+                         (let [values (var (array c/int [4 7 9]))]
+                           (!= (gep values [0 0]) 0)))
         pointer-sub (oben/fn ^c/int [^c/short offset]
                       (let [values (var (array c/int [4 7 9]))
                             pointer (var (* c/int) (gep values [0 2]))]
@@ -309,5 +348,12 @@
             (pointer-add 1) => 7
             (pointer-sub 1) => 7
             (pointer-constant-add) => 7)
+    (m/fact "C supports integer plus pointer arithmetic"
+            (pointer-left-add) => 7)
+    (m/fact "C pointer subtraction returns an element distance"
+            (pointer-difference) => 2)
+    (m/fact "C pointers compare equal or unequal to null integer zero"
+            (pointer-zero-eq) => 0
+            (pointer-zero-ne) => 1)
     (m/fact "readable shorthand aliases remain available"
             (shorthand) => 1)))

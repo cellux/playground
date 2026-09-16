@@ -18,6 +18,7 @@
             [oben.core.types.Number :as N]
             [oben.core.types.Bool :as Bool]
             [oben.core.types.Ptr :as Ptr]
+            [oben.core.types.Void :as Void]
             [oben.core.nodes :as nodes]
             [omkamra.llvm.ir :as ir]))
 
@@ -791,22 +792,50 @@
            (isa? (o/tid-of-type (o/type-of node)) ::N/Int))
        (zero? (o/constant->value node))))
 
-(defn- c-pointer-conditional-type
+(defn- void-object-type?
+  [type]
+  (isa? (o/tid-of-type type) ::Void/%Void))
+
+(defn- unqualified-type
+  [type]
+  (vary-meta type dissoc :qualifiers))
+
+(defn- c-compatible-object-type
+  "Returns the C composite object type for two pointed-to types, or nil.
+
+  C permits an object pointer to combine with void*.  For ordinary objects,
+  retain the exact semantic identity; representation compatibility alone is
+  not sufficient."
   [lhs-type rhs-type]
-  (let [lhs-object-type (:object-type (meta lhs-type))
-        rhs-object-type (:object-type (meta rhs-type))
-        unqualified (fn [type] (vary-meta type dissoc :qualifiers))]
-    (when (= (unqualified lhs-object-type)
-             (unqualified rhs-object-type))
-      ;; The result points at a type qualified with the union of the arm
-      ;; qualifiers, as required by C's conditional operator rules.
-      (let [object-type (vary-meta
-                         (unqualified lhs-object-type)
-                         assoc
-                         :qualifiers
-                         (into (o/qualifiers lhs-object-type)
-                               (o/qualifiers rhs-object-type)))]
-        (Ptr/Ptr object-type)))))
+  (let [lhs (unqualified-type lhs-type)
+        rhs (unqualified-type rhs-type)]
+    (cond
+      (= lhs rhs)
+      lhs
+
+      (void-object-type? lhs)
+      lhs
+
+      (void-object-type? rhs)
+      rhs
+
+      :else
+      nil)))
+
+(defn- c-composite-pointer-type
+  [lhs-type rhs-type]
+  (when-let [object-type
+             (c-compatible-object-type
+              (:object-type (meta lhs-type))
+              (:object-type (meta rhs-type)))]
+    ;; The result points at a type qualified with the union of the arm
+    ;; qualifiers, as required by C's conditional operator rules.
+    (let [qualifiers (into (o/qualifiers (:object-type (meta lhs-type)))
+                           (o/qualifiers (:object-type (meta rhs-type))))
+          object-type (if (seq qualifiers)
+                        (vary-meta object-type assoc :qualifiers qualifiers)
+                        object-type)]
+      (Ptr/Ptr object-type))))
 
 (defn- c-conditional-type
   [lhs-type rhs-type]
@@ -825,7 +854,7 @@
 
       (and (c-pointer-type? lhs-type)
            (c-pointer-type? rhs-type))
-      (or (c-pointer-conditional-type lhs-type rhs-type)
+      (or (c-composite-pointer-type lhs-type rhs-type)
           (throw (ex-info "conditional pointer types are incompatible"
                           {:lhs-type lhs-type
                            :rhs-type rhs-type})))
@@ -913,9 +942,89 @@
   [ptr offset]
   (c-pointer-offset ptr offset))
 
+(defmethod Algebra/+ [::CInt ::Ptr/Ptr]
+  [offset ptr]
+  (c-pointer-offset ptr offset))
+
+(defmethod Algebra/+ [::N/Int ::Ptr/Ptr]
+  [offset ptr]
+  (c-pointer-offset ptr offset))
+
 (defmethod Algebra/- [::Ptr/Ptr ::CInt]
   [ptr offset]
   (c-pointer-offset ptr (Algebra/- offset)))
+
+(defn- c-pointer-difference
+  [lhs rhs]
+  (let [lhs-object-type (:object-type (meta (o/type-of lhs)))
+        rhs-object-type (:object-type (meta (o/type-of rhs)))
+        object-type (c-compatible-object-type lhs-object-type rhs-object-type)]
+    (when (or (nil? object-type)
+              (void-object-type? object-type))
+      (throw (ex-info "pointer subtraction requires compatible object pointers"
+                      {:lhs-type (o/type-of lhs)
+                       :rhs-type (o/type-of rhs)})))
+    (let [result-type (N/SInt (target/attr :address-size))
+          lhs (o/cast result-type (Ptr/ptrtoint lhs) false)
+          rhs (o/cast result-type (Ptr/ptrtoint rhs) false)
+          element-size (o/sizeof (target/ctx) object-type)
+          difference-node
+          (o/make-node
+           result-type
+           (fn [ctx]
+             (let [ctx (ctx/compile-type ctx result-type)
+                   ctx (ctx/compile-node ctx lhs)
+                   ctx (ctx/compile-node ctx rhs)
+                   instruction (ir/sub (ctx/compiled-node ctx lhs)
+                                       (ctx/compiled-node ctx rhs)
+                                       {})]
+               (ctx/compile-instruction ctx instruction)))
+           {:class ::pointer-difference})]
+      (if (= element-size 1)
+        difference-node
+        (o/make-node
+         result-type
+         (fn [ctx]
+           (let [ctx (ctx/compile-type ctx result-type)
+                 ctx (ctx/compile-node ctx difference-node)
+                 instruction (ir/sdiv
+                             (ctx/compiled-node ctx difference-node)
+                             (ir/const (ctx/compiled-type ctx result-type)
+                                       element-size)
+                             {})]
+             (ctx/compile-instruction ctx instruction)))
+         {:class ::pointer-difference})))))
+
+(defmethod Algebra/- [::Ptr/Ptr ::Ptr/Ptr]
+  [lhs rhs]
+  (c-pointer-difference lhs rhs))
+
+(defn- c-null-pointer
+  [ptr integer]
+  (if (null-pointer-constant? integer)
+    (o/cast (o/type-of ptr) integer false)
+    (throw (ex-info "pointer comparison requires integer constant zero"
+                    {:pointer-type (o/type-of ptr)
+                     :integer integer}))))
+
+(defmacro define-c-null-pointer-comparison
+  [multifn]
+  `(do
+     (defmethod ~multifn [::Ptr/Ptr ::CInt]
+       [ptr# integer#]
+       (~multifn ptr# (c-null-pointer ptr# integer#)))
+     (defmethod ~multifn [::CInt ::Ptr/Ptr]
+       [integer# ptr#]
+       (~multifn (c-null-pointer ptr# integer#) ptr#))
+     (defmethod ~multifn [::Ptr/Ptr ::N/Int]
+       [ptr# integer#]
+       (~multifn ptr# (c-null-pointer ptr# integer#)))
+     (defmethod ~multifn [::N/Int ::Ptr/Ptr]
+       [integer# ptr#]
+       (~multifn (c-null-pointer ptr# integer#) ptr#))))
+
+(define-c-null-pointer-comparison Eq/=)
+(define-c-null-pointer-comparison Eq/!=)
 
 (defn- c-float-node
   [lhs rhs instruction-fn]
