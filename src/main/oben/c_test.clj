@@ -169,6 +169,12 @@
             (:qualifiers (meta qualified-int)) => #{:const :volatile})))
 
 (oben/with-target {:type :inprocess
+                   :attrs {:c-char-size 16}}
+  (m/fact "non-8-bit C CHAR_BIT targets are rejected by sizeof"
+          (o/sizeof (o/parse 'c/char))
+          => (m/throws #"non-8-bit CHAR_BIT")))
+
+(oben/with-target {:type :inprocess
                    :attrs {:c-int-size 64
                            :c-long-size 64
                            :c-float-size 64}}

@@ -110,13 +110,21 @@
   []
   (int (target/current)))
 
+(defn- c-sizeof
+  [ctx type]
+  (let [char-size (ctx/target-attr ctx :c-char-size)]
+    (when-not (= char-size 8)
+      (throw (ex-info "C targets with non-8-bit CHAR_BIT are unsupported"
+                      {:c-char-size char-size})))
+    (quot (:bits (meta type)) 8)))
+
 (defmethod o/sizeof* ::CInt
-  [_ctx type]
-  (quot (:bits (meta type)) 8))
+  [ctx type]
+  (c-sizeof ctx type))
 
 (defmethod o/sizeof* ::CFloat
-  [_ctx type]
-  (quot (:bits (meta type)) 8))
+  [ctx type]
+  (c-sizeof ctx type))
 
 (defn int32
   "Creates a C-style signed 32-bit integer value."
