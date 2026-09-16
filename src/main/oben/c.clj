@@ -11,10 +11,12 @@
             [oben.core.target :as target]
             [oben.core.protocols.Algebra :as Algebra]
             [oben.core.protocols.Bitwise :as Bitwise]
+            [oben.core.protocols.Logical :as Logical]
             [oben.core.protocols.Eq :as Eq]
             [oben.core.protocols.Ord :as Ord]
             [oben.core.types.Number :as N]
             [oben.core.types.Bool :as Bool]
+            [oben.core.types.Ptr :as Ptr]
             [omkamra.llvm.ir :as ir]))
 
 (o/define-typeclass CInt [:oben/Value]
@@ -87,6 +89,10 @@
 (o/defportable double
   [target]
   (CFloat (attr target :c-double-size 64)))
+
+(defn- c-int-type
+  []
+  (int (target/current)))
 
 (defmethod o/sizeof* ::CInt
   [_ctx type]
@@ -311,6 +317,64 @@
                       (N/sext node bits)
                       (N/trunc node bits))))))
 
+(defmethod o/cast [::CInt ::Bool/Bool]
+  [type node _force?]
+  (if (o/constant-node? node)
+    (o/make-constant-node
+     type
+     (if (o/constant->value node) 1 0)
+     (fn [ctx]
+       (let [ctx (ctx/compile-type ctx type)]
+         (ctx/save-ir ctx
+                       (ir/const (ctx/compiled-type ctx type)
+                                 (if (o/constant->value node) 1 0))))))
+    (o/make-node
+     type
+     (fn [ctx]
+       (let [ctx (ctx/compile-type ctx type)
+             ctx (ctx/compile-node ctx node)
+             instruction (ir/zext (ctx/compiled-node ctx node)
+                                  (ctx/compiled-type ctx type)
+                                  {})]
+         (ctx/compile-instruction ctx instruction)))
+     {:class ::conversion})))
+
+(defn- c-scalar-to-bool-node
+  [node zero host-predicate ir-fn]
+  (if (o/constant-node? node)
+    (Bool/make-constant-bool-node
+     (host-predicate (o/constant->value node)
+                     (o/constant->value zero)))
+    (o/make-node
+     Bool/%bool
+     (fn [ctx]
+       (let [ctx (ctx/compile-node ctx node)
+             ctx (ctx/compile-node ctx zero)
+             instruction (ir-fn (ctx/compiled-node ctx node)
+                                (ctx/compiled-node ctx zero))]
+         (ctx/compile-instruction ctx instruction)))
+     {:class ::conversion})))
+
+(defmethod o/cast [::Bool/Bool ::CInt]
+  [_type node _force?]
+  (c-scalar-to-bool-node
+   node
+   (o/cast (o/type-of node) 0 false)
+   #(not= %1 %2)
+   #(ir/icmp :ne %1 %2 {})))
+
+(defmethod o/cast [::Bool/Bool ::CFloat]
+  [_type node _force?]
+  (c-scalar-to-bool-node
+   node
+   (o/cast (o/type-of node) 0.0 false)
+   #(not= %1 %2)
+   #(ir/fcmp :une %1 %2 {})))
+
+(defn- c-int-result
+  [bool-node]
+  (o/cast (c-int-type) bool-node false))
+
 (defn- c-int-type?
   [type]
   (isa? (o/tid-of-type type) ::CInt))
@@ -460,7 +524,7 @@
        (let [result# (c-binary-node lhs# rhs#
                                     (fn [lhs# rhs#]
                                       (ir/icmp ~predicate lhs# rhs# {})))]
-         (vary-meta result# assoc :type Bool/%bool)))
+         (c-int-result (vary-meta result# assoc :type Bool/%bool))))
      (defmethod ~multifn [::CInt ::N/Int]
        [lhs# rhs#]
        (~multifn lhs# (as-c-node rhs#)))
@@ -482,9 +546,10 @@
              predicate# (if (:signed? (meta result-type#))
                           ~signed-predicate
                           ~unsigned-predicate)]
-         (o/make-node
-          Bool/%bool
-          (fn [ctx#]
+         (c-int-result
+          (o/make-node
+           Bool/%bool
+           (fn [ctx#]
             (let [lhs# (o/cast result-type# lhs# false)
                   rhs# (o/cast result-type# rhs# false)
                   ctx# (ctx/compile-node ctx# lhs#)
@@ -495,7 +560,7 @@
                         (ctx/compiled-node ctx# lhs#)
                         (ctx/compiled-node ctx# rhs#)
                         {}))))
-          {:class ::comparison})))
+           {:class ::comparison}))))
      (defmethod ~multifn [::CInt ::N/Int]
        [lhs# rhs#]
        (~multifn lhs# (as-c-node rhs#)))
@@ -645,7 +710,7 @@
        (let [result# (c-float-node lhs# rhs#
                                    (fn [lhs# rhs#]
                                      (ir/fcmp ~predicate lhs# rhs# {})))]
-         (vary-meta result# assoc :type Bool/%bool)))
+         (c-int-result (vary-meta result# assoc :type Bool/%bool))))
      (defmethod ~multifn [::CFloat ::CInt]
        [lhs# rhs#]
        (~multifn lhs# (o/cast (o/type-of lhs#) rhs# false)))
@@ -666,3 +731,81 @@
 (define-c-float-compare-op Ord/<= :ole)
 (define-c-float-compare-op Ord/>= :oge)
 (define-c-float-compare-op Ord/> :ogt)
+
+(defn- c-logical-zero
+  []
+  (o/cast (c-int-type) 0 false))
+
+(defn- c-logical-one
+  []
+  (o/cast (c-int-type) 1 false))
+
+(defn- c-logical-and
+  [lhs rhs]
+  (let [lhs (o/cast Bool/%bool lhs false)
+        rhs (o/cast Bool/%bool rhs false)
+        zero (c-logical-zero)
+        one (c-logical-one)]
+    (list 'if lhs
+          (list 'if rhs one zero)
+          zero)))
+
+(defn- c-logical-or
+  [lhs rhs]
+  (let [lhs (o/cast Bool/%bool lhs false)
+        rhs (o/cast Bool/%bool rhs false)
+        zero (c-logical-zero)
+        one (c-logical-one)]
+    (list 'if lhs
+          one
+          (list 'if rhs one zero))))
+
+(defn- c-logical-not
+  [node]
+  (let [node (o/cast Bool/%bool node false)
+        zero (c-logical-zero)
+        one (c-logical-one)]
+    (list 'if node zero one)))
+
+(defmacro define-c-logical-binary-op
+  [multifn implementation]
+  `(do
+     ~@(for [dispatch# '([::CInt ::CInt]
+                         [::CInt ::CFloat]
+                         [::CFloat ::CInt]
+                         [::CFloat ::CFloat]
+                         [::CInt ::Bool/Bool]
+                         [::Bool/Bool ::CInt]
+                         [::CFloat ::Bool/Bool]
+                         [::Bool/Bool ::CFloat]
+                         [::CInt ::N/Number]
+                         [::N/Number ::CInt]
+                         [::CFloat ::N/Number]
+                         [::N/Number ::CFloat]
+                         [::Ptr/Ptr ::Ptr/Ptr]
+                         [::Ptr/Ptr ::CInt]
+                         [::CInt ::Ptr/Ptr]
+                         [::Ptr/Ptr ::CFloat]
+                         [::CFloat ::Ptr/Ptr]
+                         [::Ptr/Ptr ::Bool/Bool]
+                         [::Bool/Bool ::Ptr/Ptr]
+                         [::Ptr/Ptr ::N/Number]
+                         [::N/Number ::Ptr/Ptr])]
+       `(defmethod ~multifn ~dispatch#
+          [lhs# rhs#]
+          (~implementation lhs# rhs#)))))
+
+(define-c-logical-binary-op Logical/and c-logical-and)
+(define-c-logical-binary-op Logical/or c-logical-or)
+
+(defmethod Logical/not [::CInt]
+  [node]
+  (c-logical-not node))
+
+(defmethod Logical/not [::CFloat]
+  [node]
+  (c-logical-not node))
+
+(defmethod Logical/not [::Ptr/Ptr]
+  [node]
+  (c-logical-not node))

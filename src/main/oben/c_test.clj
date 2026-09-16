@@ -3,7 +3,8 @@
             [oben.c :as c]
             [oben.core :as oben]
             [oben.core.api :as o]
-            [oben.core.target :as target]))
+            [oben.core.target :as target]
+            [oben.core.types.Bool :as Bool]))
 
 (oben/with-target :inprocess
   (let [add (oben/fn ^c/int [^c/int lhs ^c/int rhs]
@@ -77,6 +78,37 @@
             (float-to-int 3.75) => 3)
     (m/fact "C floating != treats NaN as unequal"
             (nan-not-equal Double/NaN) => 1)))
+
+(oben/with-target :inprocess
+  (let [logical-and (oben/fn ^c/int [^c/int lhs ^c/int rhs]
+                       (and lhs rhs))
+        logical-or (oben/fn ^c/int [^c/int lhs ^c/int rhs]
+                      (or lhs rhs))
+        logical-not (oben/fn ^c/int [^c/int value]
+                       (not value))
+        float-and (oben/fn ^c/int [^c/double lhs ^c/double rhs]
+                    (and lhs rhs))
+        bool-result (o/parse '(and true false))
+        short-circuit (oben/fn ^c/int [^c/int divisor]
+                        (and (!= divisor 0)
+                             (/ divisor divisor)))]
+    (m/fact "Oben bool logical operations return bool"
+            (o/type-of bool-result) => (m/exactly Bool/%bool))
+    (m/fact "C logical and returns integer zero or one"
+            (logical-and 2 3) => 1
+            (logical-and 2 0) => 0)
+    (m/fact "C logical or returns integer zero or one"
+            (logical-or 0 0) => 0
+            (logical-or 0 2) => 1)
+    (m/fact "C logical not returns integer zero or one"
+            (logical-not 0) => 1
+            (logical-not 2) => 0)
+    (m/fact "C floating-point logical operands use nonzero truth"
+            (float-and 2.0 Double/NaN) => 1
+            (float-and 0.0 Double/NaN) => 0)
+    (m/fact "C logical and short-circuits its right operand"
+            (short-circuit 0) => 0
+            (short-circuit 2) => 1)))
 
 (oben/with-target {:type :inprocess
                    :attrs {:c-int-size 64

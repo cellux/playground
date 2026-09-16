@@ -6,6 +6,7 @@
   (:require [oben.core.types.Bool :as Bool])
   (:require [oben.core.types.Ptr :as Ptr])
   (:require [oben.core.protocols.Place :as Place])
+  (:require [oben.core.protocols.Logical :as Logical])
   (:require [oben.core.types.Fn :as Fn])
   (:require [oben.core.types.Aggregate :as Aggregate])
   (:require [oben.core.context :as ctx])
@@ -453,23 +454,48 @@
 
 (defn %not
   [node]
-  (let [bool-node (%cast Bool/%bool node)]
-    (o/make-node Bool/%bool
-      (fn [ctx]
-        (let [ctx (ctx/compile-node ctx bool-node)]
-          (ctx/compile-instruction
-           ctx (ir/xor (ctx/compiled-node ctx bool-node)
-                       (ir/const [:integer 1] 1)
-                       {}))))
-      {:class :oben/not})))
+  (Logical/not node))
 
 (defn %and
   ([lhs rhs]
-   `(bit-and (bool ~lhs) (bool ~rhs))))
+   (Logical/and lhs rhs)))
 
 (defn %or
   ([lhs rhs]
-   `(bit-or (bool ~lhs) (bool ~rhs))))
+   (Logical/or lhs rhs)))
+
+(defn- short-circuit-and
+  [lhs rhs]
+  (list 'if (%cast Bool/%bool lhs)
+        (%cast Bool/%bool rhs)
+        false))
+
+(defn- short-circuit-or
+  [lhs rhs]
+  (list 'if (%cast Bool/%bool lhs)
+        true
+        (%cast Bool/%bool rhs)))
+
+(defn- short-circuit-not
+  [node]
+  (list 'if (%cast Bool/%bool node)
+        false
+        true))
+
+;; The generic Oben logical operations operate on truth values and return an
+;; Oben bool. C supplies more specific methods for C scalar values and returns
+;; C int values instead.
+(defmethod Logical/and [:oben/Value :oben/Value]
+  [lhs rhs]
+  (short-circuit-and lhs rhs))
+
+(defmethod Logical/or [:oben/Value :oben/Value]
+  [lhs rhs]
+  (short-circuit-or lhs rhs))
+
+(defmethod Logical/not [:oben/Value]
+  [node]
+  (short-circuit-not node))
 
 (defn %while
   [cond-node & then-nodes]
