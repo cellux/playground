@@ -7,6 +7,7 @@
   (:require [oben.core.protocols.Container :as Container])
   (:require [oben.core.protocols.Place :as Place])
   (:require [oben.core.protocols.Algebra :as Algebra])
+  (:require [oben.core.protocols.Eq :as Eq])
   (:require [oben.core.types.Number :as Number])
   (:require [omkamra.llvm.ir :as ir])
   (:require [midje.sweet :as m]))
@@ -114,6 +115,45 @@
   [ptr]
   ;; Pointer nullness is represented by comparison with the null address.
   (o/parse (list '= (ptrtoint ptr) 0)))
+
+(defn- pointer-compare
+  [pred lhs rhs]
+  (let [lhs-type (o/type-of lhs)
+        rhs (o/cast lhs-type rhs false)]
+    (o/make-node Number/%u1
+      (fn [ctx]
+        (let [ctx (ctx/compile-node ctx lhs)
+              ctx (ctx/compile-node ctx rhs)
+              ins (ir/icmp pred
+                           (ctx/compiled-node ctx lhs)
+                           (ctx/compiled-node ctx rhs)
+                           {})]
+          (ctx/compile-instruction ctx ins)))
+      {:class :oben/pointer-compare})))
+
+(defmethod Eq/= [::Ptr ::Ptr]
+  [lhs rhs]
+  (pointer-compare :eq lhs rhs))
+
+(defmethod Eq/= [::Ptr :oben/HostNil]
+  [lhs rhs]
+  (pointer-compare :eq lhs rhs))
+
+(defmethod Eq/= [:oben/HostNil ::Ptr]
+  [lhs rhs]
+  (pointer-compare :eq rhs lhs))
+
+(defmethod Eq/!= [::Ptr ::Ptr]
+  [lhs rhs]
+  (pointer-compare :ne lhs rhs))
+
+(defmethod Eq/!= [::Ptr :oben/HostNil]
+  [lhs rhs]
+  (pointer-compare :ne lhs rhs))
+
+(defmethod Eq/!= [:oben/HostNil ::Ptr]
+  [lhs rhs]
+  (pointer-compare :ne rhs lhs))
 
 (defn pointer-node?
   [x]

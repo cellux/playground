@@ -1431,11 +1431,21 @@
                         (nil? (cast (* u32) nil)))
         non-null-pointer? (oben/fn ^bool []
                             (let [place (var u32 7)]
-                              (nil? place)))]
+                              (nil? place)))
+        equal-pointers (oben/fn ^bool []
+                         (let [place (var u32 7)]
+                           (= place place)))
+        unequal-pointers (oben/fn ^bool []
+                           (let [place (var u32 7)]
+                             (!= place nil)))]
     (m/fact "nil? recognizes null pointers"
             (null-pointer?) => 1)
     (m/fact "nil? rejects non-null pointers"
-            (non-null-pointer?) => 0)))
+            (non-null-pointer?) => 0)
+    (m/fact "pointer equality compares addresses"
+            (equal-pointers) => 1)
+    (m/fact "pointer inequality compares addresses"
+            (unequal-pointers) => 1)))
 
 (m/facts
  (m/fact (o/sizeof Number/%u1) => 1)
