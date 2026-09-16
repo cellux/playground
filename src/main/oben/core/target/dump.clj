@@ -25,7 +25,15 @@
 
 (def default-attrs
   {:address-size platform/address-size
-   :align-min 1})
+   :align-min 1
+   ;; Defaults for the common LP64 C data model.
+   :c-char-size 8
+   :c-char-signed? true
+   :c-short-size 16
+   :c-int-size 32
+   :c-long-size 64
+   :c-float-size 32
+   :c-double-size 64})
 
 (defn create
   [{:keys [attrs target-layout] :as _opts}]

@@ -31,7 +31,16 @@
     (let [fnode ((:parse-for-target (meta f)) t)
           result (compiler/compile-function @t (:ctx @t) fnode)]
       (m/fact (:result-type (:function result)) => [:integer 32])
-      (m/fact (:target-attrs result) => {:address-size 32 :align-min 1}))
+      (m/fact (:target-attrs result)
+              => {:address-size 32
+                  :align-min 1
+                  :c-char-size 8
+                  :c-char-signed? true
+                  :c-short-size 16
+                  :c-int-size 32
+                  :c-long-size 64
+                  :c-float-size 32
+                  :c-double-size 64}))
     (finally
       (target/dispose t))))
 
