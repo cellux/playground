@@ -1407,6 +1407,25 @@
             [(Place/writable? const-place)
              (Place/volatile? volatile-place)] => [false true])))
 
+(oben/with-target :inprocess
+  (let [place (o/parse '(var u32 7))
+        pointer-type (Ptr Number/%u32)
+        byte-pointer-type (Ptr Number/%u8)
+        as-unsigned (o/cast Number/%u64 place false)
+        as-signed (o/cast Number/%s64 place false)
+        as-pointer (o/cast pointer-type as-unsigned false)
+        as-byte-pointer (o/cast byte-pointer-type place false)
+        null-pointer (o/cast pointer-type (o/parse 0) false)]
+    (m/fact "pointer-to-integer casts use the requested integer type"
+            [(o/type-of as-unsigned) (o/type-of as-signed)]
+            => [Number/%u64 Number/%s64])
+    (m/fact "integer-to-pointer casts produce the target pointer type"
+            (o/type-of as-pointer) => (m/exactly pointer-type))
+    (m/fact "pointer-to-pointer casts produce the target pointer type"
+            (o/type-of as-byte-pointer) => (m/exactly byte-pointer-type))
+    (m/fact "zero integer casts to a null pointer constant"
+            (o/constant->value null-pointer) => nil)))
+
 (m/facts
  (m/fact (o/sizeof Number/%u1) => 1)
  (m/fact (o/sizeof Number/%u8) => 1)
