@@ -61,6 +61,13 @@
             (int-bool-add 4) => 5)))
 
 (oben/with-target :inprocess
+  (let [sizeof-int (o/parse '(sizeof c/int))
+        alignof-int (o/parse '(alignof c/int))]
+    (m/fact "value-producing layout forms use C type layout"
+            (o/constant->value sizeof-int) => 4
+            (o/constant->value alignof-int) => 4)))
+
+(oben/with-target :inprocess
   (let [left-shift (oben/fn ^c/int [^c/short value ^c/short count]
                     (bit-shift-left value count))
         signed-right-shift (oben/fn ^c/int [^c/int value ^c/short count]

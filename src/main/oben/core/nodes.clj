@@ -32,6 +32,41 @@
     node
     (o/cast target-type node true)))
 
+(defn- layout-type
+  [operand env]
+  (let [value (o/parse operand env)]
+    (cond
+      (o/type? value)
+      value
+
+      (o/node? value)
+      (o/type-of value)
+
+      :else
+      (throw (ex-info "layout operand must be a type or Oben expression"
+                      {:operand operand
+                       :value value})))))
+
+(defn- layout-constant
+  [operation operand env]
+  (let [target (or (:oben/target env) (target/current))
+        type (layout-type operand env)
+        value (operation (target/ctx* target) type)]
+    (Number/make-constant-number-node (Number/%usize target) value)))
+
+(o/defmacro %sizeof
+  [operand]
+  (layout-constant o/sizeof operand &env))
+
+(o/defmacro %alignof
+  [operand]
+  (let [type (o/parse operand &env)]
+    (when-not (o/type? type)
+      (throw (ex-info "alignof requires a type designator"
+                      {:operand operand
+                       :value type})))
+    (layout-constant o/alignof type &env)))
+
 (defn make-label
   [name]
   (o/make-node %void

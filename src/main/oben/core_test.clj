@@ -1546,6 +1546,22 @@
  (m/fact (o/alignof Number/%f32) => 4)
  (m/fact (o/alignof Number/%f64) => 8))
 
+(oben/with-target :inprocess
+  (let [sizeof-u32 (o/parse '(sizeof u32))
+        sizeof-array (o/parse '(sizeof (Array u8 4)))
+        sizeof-expression (o/parse '(sizeof (+ 1 2)))
+        alignof-u32 (o/parse '(alignof u32))
+        usize-type (o/parse 'usize)]
+    (m/fact "sizeof is a value-producing Oben form"
+            (o/constant->value sizeof-u32) => 4
+            (o/type-of sizeof-u32) => (m/exactly usize-type))
+    (m/fact "sizeof accepts type designators and expressions"
+            (o/constant->value sizeof-array) => 4
+            (o/constant->value sizeof-expression) => 1)
+    (m/fact "alignof is a value-producing Oben form"
+            (o/constant->value alignof-u32) => 4
+            (o/type-of alignof-u32) => (m/exactly usize-type))))
+
 (oben/with-target
   {:type :inprocess
    :attrs {:address-size 32}}

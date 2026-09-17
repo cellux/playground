@@ -10,6 +10,7 @@
              and or
              = != < <= >= >
              get-in get at-in at load nil?
+             sizeof alignof
              assoc-in assoc assoc-in! assoc!])
   (:require [oben.core.api])
   (:require [oben.core.types.Void])
@@ -63,6 +64,8 @@
 
 (def cast oben.core.nodes/%cast)
 (def cast! oben.core.nodes/%cast!)
+(def sizeof oben.core.nodes/%sizeof)
+(def alignof oben.core.nodes/%alignof)
 
 (def global oben.core.nodes/%global)
 (def var oben.core.nodes/%var)
