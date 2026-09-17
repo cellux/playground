@@ -1057,6 +1057,11 @@
   [condition then-node else-node]
   (Conditional/select condition then-node else-node))
 
+(defn comma
+  "C's comma expression: evaluate `lhs`, then return `rhs`."
+  [lhs rhs]
+  (nodes/%do lhs rhs))
+
 (defn- c-pointer-offset
   [ptr offset]
   ;; `nodes/%gep` uses core integer indices.  Preserve C signedness during the

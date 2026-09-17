@@ -360,6 +360,18 @@
             (pointer-arm 1) => 7)))
 
 (oben/with-target :inprocess
+  (let [t (target/current)
+        comma-value (oben/fn ^c/int []
+                      (let [v (var c/int 0)]
+                        (c/comma (set! v 7)
+                                 (+ @v 1))))
+        comma-type (o/parse '(c/comma (c/int 1) (c/long 2)))]
+    (m/fact "C comma expressions evaluate the lhs and return the rhs"
+            (comma-value) => 8)
+    (m/fact "C comma expressions have the rhs type"
+            (o/type-of comma-type) => (m/exactly (c/long t)))))
+
+(oben/with-target :inprocess
   (let [arithmetic (oben/fn ^c/int []
                    (let [v (var c/int 10)]
                      (add= v 5)
