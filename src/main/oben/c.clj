@@ -32,6 +32,7 @@
 (def ^:private rank-short 2)
 (def ^:private rank-int 3)
 (def ^:private rank-long 4)
+(def ^:private rank-long-long 5)
 (def ^:private rank-float 1)
 (def ^:private rank-double 2)
 
@@ -73,6 +74,33 @@
   [target name default]
   (get (target/attrs* target) name default))
 
+(defn- rank-for-target-bits
+  [target bits]
+  (cond
+    (<= bits (attr target :c-char-size 8)) rank-char
+    (<= bits (attr target :c-short-size 16)) rank-short
+    (<= bits (attr target :c-int-size 32)) rank-int
+    (<= bits (attr target :c-long-size 64)) rank-long
+    :else rank-long-long))
+
+;; `_Bool` has boolean semantics in Oben and the required one-byte C object
+;; size.  The C conversion methods below already promote it through c/int.
+(def _Bool Bool/%bool)
+
+(o/defportable signed-char
+  [target]
+  (CInt :signed-char
+        (attr target :c-char-size 8)
+        true
+        rank-char))
+
+(o/defportable unsigned-char
+  [target]
+  (CInt :unsigned-char
+        (attr target :c-char-size 8)
+        false
+        rank-char))
+
 (o/defportable char
   [target]
   (CInt :char
@@ -103,6 +131,38 @@
 (o/defportable ulong
   [target]
   (CInt :long (attr target :c-long-size 64) false rank-long))
+
+(o/defportable long-long
+  [target]
+  (CInt :long-long
+        (attr target :c-long-long-size 64)
+        true
+        rank-long-long))
+
+(o/defportable ulong-long
+  [target]
+  (CInt :long-long
+        (attr target :c-long-long-size 64)
+        false
+        rank-long-long))
+
+(o/defportable size_t
+  [target]
+  (let [bits (attr target :c-size-t-size (attr target :address-size 64))]
+    (CInt :size_t
+          bits
+          false
+          (attr target :c-size-t-rank
+                 (rank-for-target-bits target bits)))))
+
+(o/defportable ptrdiff_t
+  [target]
+  (let [bits (attr target :c-ptrdiff-t-size (attr target :address-size 64))]
+    (CInt :ptrdiff_t
+          bits
+          true
+          (attr target :c-ptrdiff-t-rank
+                 (rank-for-target-bits target bits)))))
 
 (o/defportable float
   [target]

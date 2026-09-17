@@ -61,6 +61,37 @@
             (int-bool-add 4) => 5)))
 
 (oben/with-target :inprocess
+  (let [t (target/current)
+        signed-char (c/signed-char t)
+        unsigned-char (c/unsigned-char t)
+        char-type (c/char t)
+        long-long (c/long-long t)
+        ulong-long (c/ulong-long t)
+        size-t (c/size_t t)
+        ptrdiff-t (c/ptrdiff_t t)
+        bool-type (o/parse 'c/_Bool)]
+    (m/fact "C _Bool is represented by Oben Bool"
+            bool-type => (m/exactly Bool/%bool)
+            (o/sizeof bool-type) => 1)
+    (m/fact "signed and unsigned char are distinct C integer types"
+            (:c-type (meta signed-char)) => :signed-char
+            (:c-type (meta unsigned-char)) => :unsigned-char
+            (:bits (meta signed-char)) => 8
+            (:signed? (meta signed-char)) => true
+            (:signed? (meta unsigned-char)) => false
+            signed-char =not=> (m/exactly char-type))
+    (m/fact "C long long has a rank above long"
+            (:c-type (meta long-long)) => :long-long
+            (:c-type (meta ulong-long)) => :long-long
+            (:rank (meta long-long)) => 5
+            (:rank (meta ulong-long)) => 5)
+    (m/fact "size_t and ptrdiff_t follow the target address size"
+            (:bits (meta size-t)) => (target/attr :address-size)
+            (:signed? (meta size-t)) => false
+            (:bits (meta ptrdiff-t)) => (target/attr :address-size)
+            (:signed? (meta ptrdiff-t)) => true)))
+
+(oben/with-target :inprocess
   (let [sizeof-int (o/parse '(sizeof c/int))
         alignof-int (o/parse '(alignof c/int))]
     (m/fact "value-producing layout forms use C type layout"
