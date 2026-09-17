@@ -1129,6 +1129,86 @@
 
 (def do-while %do-while)
 
+(o/defmacro %switch
+  [control & clauses]
+  (when-not (seq clauses)
+    (throw (ex-info "C switch requires at least one clause" {})))
+  (let [switch-value (gensym "switch-value")
+        break-label (c-loop-label "switch-break")
+        outer-loop (get &env :oben/c-loop {})
+        switch-env (assoc &env
+                           :oben/c-loop
+                           (assoc outer-loop :break break-label))
+        control-node (as-c-node (o/parse control &env))
+        control-type (promoted-type (o/type-of control-node))
+        control-node (o/cast control-type control-node false)
+        clauses (mapv (fn [clause]
+                        (when-not (sequential? clause)
+                          (throw (ex-info "invalid C switch clause"
+                                          {:clause clause})))
+                        (let [kind (first clause)]
+                          (cond
+                            (= kind :case)
+                            (when (< (count clause) 2)
+                              (throw (ex-info "C case requires a value"
+                                              {:clause clause})))
+
+                            (= kind :default)
+                            clause
+
+                            :else
+                            (throw (ex-info "C switch clauses must start with :case or :default"
+                                            {:clause clause})))
+                          {:kind kind
+                           :value (second clause)
+                           :body (if (= kind :case)
+                                   (nnext clause)
+                                   (next clause))}))
+                      clauses)
+        default-clauses (filterv #(= :default (:kind %)) clauses)
+        _ (when (> (count default-clauses) 1)
+            (throw (ex-info "C switch may contain only one :default clause" {})))
+        seen-values (atom #{})
+        clauses (mapv (fn [clause]
+                        (let [label (c-loop-label "switch-case")]
+                          (if (= :case (:kind clause))
+                            (let [value-node (o/cast control-type
+                                                     (as-c-node
+                                                      (o/parse (:value clause) &env))
+                                                     false)]
+                              (when-not (o/constant-node? value-node)
+                                (throw (ex-info "C case value must be an integer constant expression"
+                                                {:value (:value clause)})))
+                              (let [value (o/constant->value value-node)]
+                                (when (contains? @seen-values value)
+                                  (throw (ex-info "duplicate C switch case value"
+                                                  {:value value})))
+                                (swap! seen-values conj value)
+                                (assoc clause :label label :value-node value-node)))
+                            (assoc clause :label label))))
+                      clauses)
+        default-label (:label (first (filter #(= :default (:kind %)) clauses)))
+        dispatch (concat
+                  (map (fn [{:keys [label value-node]}]
+                         `(when (= ~switch-value ~value-node)
+                            (go ~label)))
+                       (filter #(= :case (:kind %)) clauses))
+                  [`(go ~(or default-label break-label))])
+        arms (mapcat (fn [{:keys [label body]}]
+                       [label (if (seq body)
+                                `(do ~@body)
+                                '(nop))])
+                     clauses)]
+    (o/parse
+     `(let [~switch-value ~control-node]
+        (tagbody
+          ~@dispatch
+          ~@arms
+          ~break-label))
+     switch-env)))
+
+(def switch %switch)
+
 (defn- c-pointer-offset
   [ptr offset]
   ;; `nodes/%gep` uses core integer indices.  Preserve C signedness during the

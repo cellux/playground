@@ -413,6 +413,31 @@
             (do-while-control) => 4)))
 
 (oben/with-target :inprocess
+  (let [switch-value (oben/fn ^c/int [^c/int value]
+                       (let [result (var c/int 0)]
+                         (c/switch value
+                           (:case 1
+                             (+= result 10)
+                             (c/break))
+                           (:case 2
+                             (+= result 20))
+                           (:case 3
+                             (+= result 30)
+                             (c/break))
+                           (:default
+                             (+= result 100)))
+                         @result))]
+    (m/fact "C switch dispatches, falls through, and handles default"
+            (switch-value 1) => 10
+            (switch-value 2) => 50
+            (switch-value 4) => 100)
+    (m/fact "C switch rejects duplicate converted case values"
+            (o/parse '(c/switch (c/int 1)
+                       (:case 1 (nop))
+                       (:case (c/int 1) (nop))))
+            => (m/throws #"duplicate C switch case value"))))
+
+(oben/with-target :inprocess
   (let [arithmetic (oben/fn ^c/int []
                    (let [v (var c/int 10)]
                      (add= v 5)
