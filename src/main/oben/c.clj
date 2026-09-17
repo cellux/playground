@@ -1088,6 +1088,10 @@
   [ptr offset]
   (c-pointer-offset ptr (Algebra/- offset)))
 
+;; C defines pointer ordering and subtraction only for pointers into the same
+;; array object (including its one-past position).  We intentionally do not
+;; track provenance here: raw LLVM address operations produce the required
+;; result for defined cases, while cross-object uses have undefined behavior.
 (defn- c-pointer-difference
   [lhs rhs]
   (let [lhs-object-type (:object-type (meta (o/type-of lhs)))
@@ -1098,7 +1102,7 @@
       (throw (ex-info "pointer subtraction requires compatible object pointers"
                       {:lhs-type (o/type-of lhs)
                        :rhs-type (o/type-of rhs)})))
-    (let [result-type (N/SInt (target/attr :address-size))
+    (let [result-type (ptrdiff_t (target/current))
           lhs (o/cast result-type (Ptr/ptrtoint lhs) false)
           rhs (o/cast result-type (Ptr/ptrtoint rhs) false)
           element-size (o/sizeof (target/ctx) object-type)

@@ -386,10 +386,18 @@
                            (let [values (var (array c/int [4 7 9]))
                                  pointer (gep values [0 0])]
                              (deref (+ 1 pointer))))
-        pointer-difference (oben/fn ^c/long []
+        pointer-difference (oben/fn ^c/ptrdiff_t []
                              (let [values (var (array c/int [4 7 9]))]
                                (- (gep values [0 2])
                                   (gep values [0 0]))))
+        pointer-one-past-difference (oben/fn ^c/ptrdiff_t []
+                                     (let [values (var (array c/int [4 7 9]))]
+                                       (- (gep values [0 3])
+                                          (gep values [0 0]))))
+        pointer-order (oben/fn ^bool []
+                        (let [values (var (array c/int [4 7 9]))]
+                          (< (gep values [0 0])
+                             (gep values [0 2]))))
         pointer-zero-eq (oben/fn ^bool []
                          (let [values (var (array c/int [4 7 9]))]
                            (= (gep values [0 0]) 0)))
@@ -431,7 +439,10 @@
     (m/fact "C supports integer plus pointer arithmetic"
             (pointer-left-add) => 7)
     (m/fact "C pointer subtraction returns an element distance"
-            (pointer-difference) => 2)
+            (pointer-difference) => 2
+            (pointer-one-past-difference) => 3)
+    (m/fact "C pointer ordering works within one array object"
+            (pointer-order) => 1)
     (m/fact "C pointers compare equal or unequal to null integer zero"
             (pointer-zero-eq) => 0
             (pointer-zero-ne) => 1)
