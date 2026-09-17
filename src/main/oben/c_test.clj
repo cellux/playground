@@ -391,6 +391,28 @@
             (o/parse '(c/continue)) => (m/throws #"continue used outside"))))
 
 (oben/with-target :inprocess
+  (let [do-while-once (oben/fn ^c/int [^c/int limit]
+                        (let [i (var c/int 0)]
+                          (c/do-while (< @i limit)
+                            (c/pre-inc! i))
+                          @i))
+        do-while-control (oben/fn ^c/int []
+                           (let [i (var c/int 0)
+                                 sum (var c/int 0)]
+                             (c/do-while true
+                               (c/pre-inc! i)
+                               (when (= @i 2)
+                                 (c/continue))
+                               (when (= @i 4)
+                                 (c/break))
+                               (+= sum @i))
+                             @sum))]
+    (m/fact "C do-while executes its body before testing"
+            (do-while-once 0) => 1)
+    (m/fact "C do-while gives continue the condition-check target"
+            (do-while-control) => 4)))
+
+(oben/with-target :inprocess
   (let [arithmetic (oben/fn ^c/int []
                    (let [v (var c/int 10)]
                      (add= v 5)

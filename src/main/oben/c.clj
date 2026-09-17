@@ -1108,6 +1108,27 @@
         (nop))
      loop-env)))
 
+(o/defmacro %do-while
+  [test & body]
+  (let [body-label (c-loop-label "do-while-body")
+        continue-label (c-loop-label "do-while-continue")
+        break-label (c-loop-label "do-while-break")
+        loop-env (assoc &env
+                        :oben/c-loop {:break break-label
+                                      :continue continue-label})
+        body (if (seq body) body ['(nop)])]
+    (o/parse
+     `(tagbody
+        ~body-label
+        (do ~@body)
+        ~continue-label
+        (when ~test
+          (go ~body-label))
+        ~break-label)
+     loop-env)))
+
+(def do-while %do-while)
+
 (defn- c-pointer-offset
   [ptr offset]
   ;; `nodes/%gep` uses core integer indices.  Preserve C signedness during the
