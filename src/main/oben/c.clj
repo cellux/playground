@@ -74,14 +74,23 @@
   [target name default]
   (get (target/attrs* target) name default))
 
+(defn- rank-for-bits*
+  [bits char-size short-size int-size long-size fallback]
+  (cond
+    (<= bits char-size) rank-char
+    (<= bits short-size) rank-short
+    (<= bits int-size) rank-int
+    (<= bits long-size) rank-long
+    :else fallback))
+
 (defn- rank-for-target-bits
   [target bits]
-  (cond
-    (<= bits (attr target :c-char-size 8)) rank-char
-    (<= bits (attr target :c-short-size 16)) rank-short
-    (<= bits (attr target :c-int-size 32)) rank-int
-    (<= bits (attr target :c-long-size 64)) rank-long
-    :else rank-long-long))
+  (rank-for-bits* bits
+                  (attr target :c-char-size 8)
+                  (attr target :c-short-size 16)
+                  (attr target :c-int-size 32)
+                  (attr target :c-long-size 64)
+                  rank-long-long))
 
 ;; `_Bool` has boolean semantics in Oben and the required one-byte C object
 ;; size.  The C conversion methods below already promote it through c/int.
@@ -515,11 +524,7 @@
 
 (defn- rank-for-bits
   [bits]
-  (cond
-    (<= bits 8) rank-char
-    (<= bits 16) rank-short
-    (<= bits 32) rank-int
-    :else rank-long))
+  (rank-for-bits* bits 8 16 32 64 rank-long))
 
 (defn- number->c-type
   [type]
@@ -729,54 +734,40 @@
          {:class ::comparison})]
     (c-int-result bool-node)))
 
-(defmacro define-c-compare-op
-  [multifn predicate]
-  `(do
-     (defmethod ~multifn [::CInt ::CInt]
-       [lhs# rhs#]
-       (c-comparison-node lhs# rhs#
-                          (fn [_type# lhs# rhs#]
-                            (ir/icmp ~predicate lhs# rhs# {}))))
-     (defmethod ~multifn [::CInt ::N/Int]
-       [lhs# rhs#]
-       (~multifn lhs# (as-c-node rhs#)))
-     (defmethod ~multifn [::N/Int ::CInt]
-       [lhs# rhs#]
-       (~multifn (as-c-node lhs#) rhs#))
-     (defmethod ~multifn [::CInt ::Bool/Bool]
-       [lhs# rhs#]
-       (~multifn lhs# (as-c-node rhs#)))
-     (defmethod ~multifn [::Bool/Bool ::CInt]
-       [lhs# rhs#]
-       (~multifn (as-c-node lhs#) rhs#))))
+(defmacro define-c-comparison-op
+  [multifn instruction-fn]
+  (let [lhs (gensym "lhs")
+        rhs (gensym "rhs")
+        dispatches [[::CInt ::N/Int]
+                    [::N/Int ::CInt]
+                    [::CInt ::Bool/Bool]
+                    [::Bool/Bool ::CInt]]]
+    `(do
+       (defmethod ~multifn [::CInt ::CInt]
+         [~lhs ~rhs]
+         (c-comparison-node ~lhs ~rhs ~instruction-fn))
+       ~@(for [[lhs-type rhs-type] dispatches]
+           `(defmethod ~multifn [~lhs-type ~rhs-type]
+              [~lhs ~rhs]
+              (~multifn
+               ~(if (= lhs-type ::CInt) lhs `(as-c-node ~lhs))
+               ~(if (= rhs-type ::CInt) rhs `(as-c-node ~rhs))))))))
 
-(define-c-compare-op Eq/= :eq)
-(define-c-compare-op Eq/!= :ne)
+(define-c-comparison-op
+  Eq/=
+  (fn [_type lhs rhs] (ir/icmp :eq lhs rhs {})))
+(define-c-comparison-op
+  Eq/!=
+  (fn [_type lhs rhs] (ir/icmp :ne lhs rhs {})))
 
 (defmacro define-c-ordered-op
   [multifn signed-predicate unsigned-predicate]
-  `(do
-     (defmethod ~multifn [::CInt ::CInt]
-       [lhs# rhs#]
-       (c-comparison-node
-        lhs# rhs#
-        (fn [type# lhs# rhs#]
-          (ir/icmp (if (:signed? (meta type#))
-                     ~signed-predicate
-                     ~unsigned-predicate)
-                   lhs# rhs# {}))))
-     (defmethod ~multifn [::CInt ::N/Int]
-       [lhs# rhs#]
-       (~multifn lhs# (as-c-node rhs#)))
-     (defmethod ~multifn [::N/Int ::CInt]
-       [lhs# rhs#]
-       (~multifn (as-c-node lhs#) rhs#))
-     (defmethod ~multifn [::CInt ::Bool/Bool]
-       [lhs# rhs#]
-       (~multifn lhs# (as-c-node rhs#)))
-     (defmethod ~multifn [::Bool/Bool ::CInt]
-       [lhs# rhs#]
-       (~multifn (as-c-node lhs#) rhs#))))
+  `(define-c-comparison-op ~multifn
+     (fn [type# lhs# rhs#]
+       (ir/icmp (if (:signed? (meta type#))
+                  ~signed-predicate
+                  ~unsigned-predicate)
+                lhs# rhs# {}))))
 
 (define-c-ordered-op Ord/< :slt :ult)
 (define-c-ordered-op Ord/<= :sle :ule)

@@ -27,6 +27,14 @@
                          (/ lhs 4))
         less (oben/fn ^bool [^c/int lhs ^c/int rhs]
                (< lhs rhs))
+        equal (oben/fn ^bool [^c/int lhs ^c/int rhs]
+                (= lhs rhs))
+        not-equal (oben/fn ^bool [^c/int lhs ^c/int rhs]
+                    (!= lhs rhs))
+        unsigned-greater-equal (oben/fn ^bool [^c/uint lhs ^c/uint rhs]
+                                (>= lhs rhs))
+        mixed-greater-equal (oben/fn ^bool [^c/int lhs]
+                             (>= lhs 0))
         mask (oben/fn ^c/uint [^c/uint lhs ^c/uint rhs]
                (bit-and lhs rhs))
         mixed (oben/fn ^c/uint [^c/int lhs ^c/uint rhs]
@@ -50,7 +58,13 @@
     (m/fact "C operators accept ordinary integer literals"
             (divide-literal 21) => 5)
     (m/fact "comparisons dispatch from C integer types"
-            (less 3 4) => 1)
+            (less 3 4) => 1
+            (equal 3 3) => 1
+            (not-equal 3 4) => 1)
+    (m/fact "comparison dispatch preserves unsigned and mixed operands"
+            (unsigned-greater-equal 0xffffffff 0) => 1
+            (unsigned-greater-equal 0 0xffffffff) => 0
+            (mixed-greater-equal -1) => 0)
     (m/fact "unsigned bitwise operations dispatch from C integer types"
             (mask 13 7) => 5)
     (m/fact "mixed signedness uses C common-type rules"
