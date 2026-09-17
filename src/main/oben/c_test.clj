@@ -372,6 +372,25 @@
             (o/type-of comma-type) => (m/exactly (c/long t)))))
 
 (oben/with-target :inprocess
+  (let [for-sum (oben/fn ^c/int [^c/int limit]
+                  (let [i (var c/int 0)
+                        sum (var c/int 0)]
+                    (c/for nil
+                           (< @i limit)
+                           (c/pre-inc! i)
+                           (when (= @i 1)
+                             (c/continue))
+                           (when (= @i 4)
+                             (c/break))
+                           (+= sum @i))
+                    @sum))]
+    (m/fact "C for supports break, continue, and update sequencing"
+            (for-sum 10) => 5)
+    (m/fact "C break and continue require a loop context"
+            (o/parse '(c/break)) => (m/throws #"break used outside")
+            (o/parse '(c/continue)) => (m/throws #"continue used outside"))))
+
+(oben/with-target :inprocess
   (let [arithmetic (oben/fn ^c/int []
                    (let [v (var c/int 10)]
                      (add= v 5)

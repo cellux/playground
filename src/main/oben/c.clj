@@ -4,7 +4,7 @@
    Requiring this namespace registers type-directed implementations for C
    values. Core operators remain unchanged for non-C values; plain operators
    acquire C semantics when their operands have C integer types."
-  (:refer-clojure :exclude [char double float int long short])
+  (:refer-clojure :exclude [char double float for int long short])
   (:require [clojure.core :as clj]
             [oben.core.api :as o]
             [oben.core.context :as ctx]
@@ -746,7 +746,7 @@
        (defmethod ~multifn [::CInt ::CInt]
          [~lhs ~rhs]
          (c-comparison-node ~lhs ~rhs ~instruction-fn))
-       ~@(for [[lhs-type rhs-type] dispatches]
+       ~@(clj/for [[lhs-type rhs-type] dispatches]
            `(defmethod ~multifn [~lhs-type ~rhs-type]
               [~lhs ~rhs]
               (~multifn
@@ -1062,6 +1062,52 @@
   [lhs rhs]
   (nodes/%do lhs rhs))
 
+(defn- c-loop-label
+  [prefix]
+  (keyword (str "oben.c/" prefix "-" (gensym))))
+
+(o/defmacro %break
+  []
+  (if-let [label (get-in &env [:oben/c-loop :break])]
+    (list 'go label)
+    (throw (ex-info "break used outside a C loop" {}))))
+
+(o/defmacro %continue
+  []
+  (if-let [label (get-in &env [:oben/c-loop :continue])]
+    (list 'go label)
+    (throw (ex-info "continue used outside a C loop" {}))))
+
+(def break %break)
+(def continue %continue)
+
+(o/defmacro %for
+  [init test update & body]
+  (let [head-label (c-loop-label "for-head")
+        continue-label (c-loop-label "for-continue")
+        break-label (c-loop-label "for-break")
+        loop-env (assoc &env
+                        :oben/c-loop {:break break-label
+                                      :continue continue-label})
+        init (if (nil? init) '(nop) init)
+        test (if (nil? test) true test)
+        update (if (nil? update) '(nop) update)
+        body (if (seq body) body ['(nop)])]
+    (o/parse
+     `(do
+        ~init
+        (tagbody
+          ~head-label
+          (when (not ~test)
+            (go ~break-label))
+          (do ~@body)
+          ~continue-label
+          ~update
+          (go ~head-label)
+          ~break-label)
+        (nop))
+     loop-env)))
+
 (defn- c-pointer-offset
   [ptr offset]
   ;; `nodes/%gep` uses core integer indices.  Preserve C signedness during the
@@ -1163,7 +1209,7 @@
 (defmacro define-c-float-binary-op
   [multifn instruction-fn]
   `(do
-     ~@(for [dispatch# '([::CFloat ::CFloat]
+     ~@(clj/for [dispatch# '([::CFloat ::CFloat]
                           [::CFloat ::CInt]
                           [::CInt ::CFloat]
                           [::CFloat ::N/Number]
@@ -1188,7 +1234,7 @@
 (defmacro define-c-float-compare-op
   [multifn predicate]
   `(do
-     ~@(for [dispatch# '([::CFloat ::CFloat]
+     ~@(clj/for [dispatch# '([::CFloat ::CFloat]
                           [::CFloat ::CInt]
                           [::CInt ::CFloat]
                           [::CFloat ::N/Number]
@@ -1247,7 +1293,7 @@
 (defmacro define-c-logical-binary-op
   [multifn implementation]
   `(do
-     ~@(for [dispatch# '([::CInt ::CInt]
+     ~@(clj/for [dispatch# '([::CInt ::CInt]
                          [::CInt ::CFloat]
                          [::CFloat ::CInt]
                          [::CFloat ::CFloat]
@@ -1329,3 +1375,7 @@
   "C postfix decrement: updates `place` and returns its old value."
   [place]
   (c-update-place place Place/post-update! Algebra/-))
+
+;; Keep this alias after the macro definitions above so it does not shadow
+;; clojure.core/for while this namespace is being compiled.
+(def for %for)
