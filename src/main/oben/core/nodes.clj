@@ -8,6 +8,7 @@
   (:require [oben.core.protocols.Place :as Place])
   (:require [oben.core.protocols.Logical :as Logical])
   (:require [oben.core.protocols.Conditional :as Conditional])
+  (:require [oben.core.protocols.Callable :as Callable])
   (:require [oben.core.types.Fn :as Fn])
   (:require [oben.core.types.Aggregate :as Aggregate])
   (:require [oben.core.context :as ctx])
@@ -354,9 +355,26 @@
         params (o/parse (first (o/move-types-to-meta signature)) &env)
         _ (assert (vector? params))
         return-type (o/resolve-type-from-meta params)
-        param-types (mapv o/resolve-type-from-meta params)
+        declared-param-types (mapv o/resolve-type-from-meta params)
         param-names (mapv o/drop-meta params)
-        params (mapv function-parameter param-names param-types)]
+        fn-options (let [opts (get &env :oben/fn-options)]
+                     (when opts
+                       (assoc opts :prototype? (get opts :prototype? true))))
+        param-types (if-let [transform (:parameter-type-transform fn-options)]
+                      (mapv transform declared-param-types)
+                      declared-param-types)
+        _ (when (and fn-options (not (:prototype? fn-options)))
+            (throw (ex-info "an Oben function definition requires a prototype"
+                            {:options fn-options})))
+        fn-type (if fn-options
+                  (Fn/Fn return-type param-types fn-options)
+                  (Fn/Fn return-type param-types))
+        ir-fn-options (some-> fn-options
+                               (dissoc :prototype? :variadic? :call-semantics
+                                       :parameter-type-transform))
+        params (mapv function-parameter param-names param-types)
+        ir-params (cond-> params
+                    (:variadic? fn-options) (conj :&))]
     (if (seq body)
       (let [void? (= return-type %void)
             env (into &env (map vector param-names params))
@@ -364,7 +382,7 @@
             body-node (if void?
                         body-node
                         (%cast return-type body-node))]
-        (o/make-node (Ptr/Ptr (Fn/Fn return-type param-types))
+        (o/make-node (Ptr/Ptr fn-type)
           (fn [ctx]
             (let [saved ctx
                   fname (ctx/get-assigned-name ctx)
@@ -372,7 +390,11 @@
                   ctx (reduce ctx/compile-node ctx params)
                   f (ir/function fname
                                  (ctx/compiled-type ctx return-type)
-                                 (mapv #(ctx/compiled-node ctx %) params))]
+                                 (mapv #(if (= % :&)
+                                          :&
+                                          (ctx/compiled-node ctx %))
+                                       ir-params)
+                                 ir-fn-options)]
               (letfn [(compile-return [ctx]
                         (if void?
                           (ctx/compile-instruction ctx (ir/ret))
@@ -393,7 +415,7 @@
                     (merge (select-keys saved
                                         [:f :fdata :compiled-nodes]))))))
           {:class :oben/fn}))
-      (o/make-node (Ptr/Ptr (Fn/Fn return-type param-types))
+      (o/make-node (Ptr/Ptr fn-type)
         (fn [ctx]
           (let [fname (-> ctx :compiling-node meta :name)
                 _ (assert fname)
@@ -401,18 +423,52 @@
                 ctx (reduce ctx/compile-node ctx params)
                 f (ir/function fname
                                (ctx/compiled-type ctx return-type)
-                               (mapv #(ctx/compiled-node ctx %) params))]
+                               (mapv #(if (= % :&)
+                                        :&
+                                        (ctx/compiled-node ctx %))
+                                     ir-params)
+                               ir-fn-options)]
             (-> ctx
                 (update :m ir/add-function f)
                 (ctx/save-ir f))))
         {:class :oben/fn}))))
 
-(defn %funcall
-  [fnode & args]
-  (assert (o/fnode? fnode))
-  (let [ftype (-> fnode o/type-of meta :object-type)
-        {:keys [return-type param-types]} (meta ftype)
-        args (mapv %cast param-types args)]
+(defn make-external-function
+  "Creates a callable node for an externally defined LLVM function.
+
+   Compiling the node registers a declaration in the current module. `opts`
+   may contain LLVM function attributes such as `:linkage` and `:cconv`; call
+   semantic options are intentionally ignored by the LLVM layer."
+  [name ftype opts]
+  (when-not (symbol? name)
+    (throw (ex-info "external function name must be a symbol" {:name name})))
+  (o/make-node
+   (Ptr/Ptr ftype)
+   (fn [ctx]
+     (let [ctx (ctx/compile-type ctx ftype)
+           [_ return-type param-types] (ctx/compiled-type ctx ftype)
+           f (ir/function name return-type param-types
+                          (dissoc opts :prototype? :variadic? :call-semantics
+                                       :parameter-type-transform))]
+       (-> ctx
+           (update :m ir/add-function f)
+           (ctx/save-ir f))))
+   {:class :oben/extern
+    :name name}))
+
+(defn make-funcall-node
+  "Builds a call node from a callable and already-converted arguments.
+
+   Arguments lower before the callee in vector order. For C this is a valid
+   implementation choice for C17's unspecified argument-evaluation order;
+   Oben does not diagnose C's unsequenced-side-effect undefined behavior."
+  [fnode args]
+  (when-not (o/fnode? fnode)
+    (throw (ex-info "cannot call a non-function value"
+                    {:callee fnode
+                     :type (when (o/node? fnode)
+                             (o/type-of fnode))})))
+  (let [return-type (-> fnode o/type-of meta :object-type meta :return-type)]
     (o/make-node return-type
       (fn [ctx]
         (letfn [(compile-args [ctx]
@@ -423,7 +479,25 @@
                                      (map #(ctx/compiled-node ctx %) args))]
                     (ctx/compile-instruction ctx ins)))]
           (-> ctx compile-args compile-call)))
-      {:class :oben/funcall})))
+      {:class :oben/funcall
+       :callee fnode
+       :args args
+       :argument-evaluation-order :left-to-right})))
+
+(defmethod Callable/call :default
+  [fnode args]
+  (let [ftype (-> fnode o/type-of meta :object-type)
+        {:keys [param-types]} (meta ftype)]
+    (when-not (= (count param-types) (count args))
+      (throw (ex-info "invalid number of arguments in function call"
+                      {:expected (count param-types)
+                       :actual (count args)
+                       :callee fnode})))
+    (make-funcall-node fnode (mapv %cast param-types args))))
+
+(defn %funcall
+  [fnode & args]
+  (Callable/call fnode (vec args)))
 
 (defn %when
   [cond-node & then-nodes]

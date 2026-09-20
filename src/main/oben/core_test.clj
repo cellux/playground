@@ -48,7 +48,18 @@
          => [:struct 'Vec3.0.0 [:float :float :float]])
  (m/fact (compile-type (Fn (Number/UInt 64)
                            [(Number/FP 64) (Number/FP 32)]))
-         => [:fn [:integer 64] [:double :float]]))
+         => [:fn [:integer 64] [:double :float]])
+ (let [t (Fn (Number/UInt 32)
+             [(Number/UInt 32)]
+             {:variadic? true
+              :call-semantics :c17})]
+   (m/fact (select-keys (meta t)
+                        [:prototype? :variadic? :call-semantics])
+           => {:prototype? true
+               :variadic? true
+               :call-semantics :c17})
+   (m/fact (compile-type t)
+           => [:fn [:integer 32] [[:integer 32] :&]])))
 
 (m/facts
  "primitive types"

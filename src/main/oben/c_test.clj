@@ -8,7 +8,8 @@
             [oben.core.types.Bool :as Bool]
             [oben.core.types.Number :as Number]
             [oben.core.types.Ptr :as Ptr]
-            [oben.core.types.Void :as Void]))
+            [oben.core.types.Void :as Void]
+            [oben.core.protocols.Callable :as Callable]))
 
 (oben/with-target :inprocess
   (let [add (oben/fn ^c/int [^c/int lhs ^c/int rhs]
@@ -73,6 +74,71 @@
             (promoted 1 2) => 3)
     (m/fact "_Bool uses the same usual-arithmetic-conversion path"
             (int-bool-add 4) => 5)))
+
+(oben/with-target :inprocess
+  (let [t (target/current)
+        signature (c/c-function-type (c/int t)
+                                     [(c/int t)]
+                                     {:variadic? true})
+        callee (o/make-node (Ptr/Ptr signature) identity)
+        call (Callable/call
+              callee
+              [(o/cast (c/short t) 1 false)
+               (o/cast (c/float t) 1.0 false)])]
+    (m/fact "C variadic calls apply fixed conversions and default promotions"
+            (mapv o/type-of (:args (meta call)))
+            => [(c/int t) (c/double t)])))
+
+(oben/with-target :inprocess
+  (let [identity (c/fn ^c/int [^c/int x]
+                   x)
+        caller (oben/fn ^c/int []
+                 (identity (c/short 7)))
+        lvalue-caller (c/fn c/int []
+                        (let [x (var c/int (c/int 9))]
+                          (identity x)))]
+    (m/fact "c/fn marks function calls with C17 semantics"
+            (caller) => 7)
+    (m/fact "C scalar lvalues undergo lvalue-to-rvalue conversion at calls"
+            (lvalue-caller) => 9)))
+
+(oben/with-target :inprocess
+  (let [head (c/fn c/int [(oben/Array c/int 3) xs]
+               (get xs 0))
+        caller (c/fn c/int []
+                 (let [xs (var (oben/Array c/int 3)
+                               [(c/int 7) (c/int 8) (c/int 9)])]
+                   (head xs)))]
+    (m/fact "C array parameters adjust to pointers and array arguments decay"
+            (caller) => 7)))
+
+(oben/with-target :inprocess
+  (let [printf (c/extern printf c/int [(* c/char)] {:variadic? true})
+        old-style (c/extern old_style c/int [] {:prototype? false})
+        variadic (c/fn ^c/int [^c/int x] {:variadic? true}
+                   x)
+        caller (c/fn ^c/int []
+                 (printf nil (c/float 1.0)))
+        old-style-caller (c/fn ^c/int []
+                           (old-style (c/short 1) (c/float 2.0)))
+        compile-source (fn [f]
+                         (let [fnode ((:parse-for-target (meta f))
+                                      (target/current))]
+                           (:source (compiler/compile-function
+                                     (target/current)
+                                     (target/ctx)
+                                     fnode))))]
+    (m/fact "c/extern emits a C variadic declaration and promoted call"
+            (compile-source caller)
+            => #(and (.contains % "declare i32 @printf(i8*, ...)")
+                     (.contains % "@printf(i8* null, double 1.0)")))
+    (m/fact "a declaration without a prototype promotes every argument"
+            (compile-source old-style-caller)
+            => #(and (.contains % "declare i32 @old_style(...)")
+                     (.contains % "@old_style(i32 1, double 2.0)")))
+    (m/fact "c/fn can define a variadic LLVM function"
+            (compile-source variadic)
+            => #(.contains % "define i32 @fn.1.0(i32 %x, ...)"))))
 
 (oben/with-target :inprocess
   (let [t (target/current)

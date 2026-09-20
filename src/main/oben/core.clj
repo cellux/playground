@@ -34,27 +34,30 @@
 ;; Fn/fn/defn
 
 (clj/defn make-fn-type
-  [return-type param-types lexical-bindings]
+  [return-type param-types lexical-bindings & [opts]]
   (with-meta
     (memoize
      (clj/fn [target]
-       (o/parse (list 'Fn return-type param-types)
+       (o/parse (cond-> (list 'Fn return-type param-types)
+                  opts (concat [opts]))
                 (assoc lexical-bindings :oben/target target))))
     {:kind :oben/PORTABLE}))
 
 (clj/defmacro Fn
-  [return-type param-types]
+  [return-type param-types & [opts]]
   `(with-lexical-bindings bindings#
-     (make-fn-type '~return-type '~param-types bindings#)))
+     (make-fn-type '~return-type '~param-types bindings# ~opts)))
 
 (clj/defn make-fn
-  [name params body lexical-bindings]
+  [name params body lexical-bindings & [opts]]
   (assert (vector? params) "invalid fn")
   (assert (:tag (meta params)) "fn without return type")
   (let [parse-for-target (memoize
                           (clj/fn [target]
                             (-> (o/parse (list* 'fn params body)
-                                         (assoc lexical-bindings :oben/target target))
+                                         (assoc lexical-bindings
+                                                :oben/target target
+                                                :oben/fn-options opts))
                                 (vary-meta assoc :name name))))]
     (with-meta
       (clj/fn [& args]

@@ -4,8 +4,10 @@
    Requiring this namespace registers type-directed implementations for C
    values. Core operators remain unchanged for non-C values; plain operators
    acquire C semantics when their operands have C integer types."
-  (:refer-clojure :exclude [char double float for int long short])
+  (:refer-clojure :exclude [char double float fn for int long short])
   (:require [clojure.core :as clj]
+            [clojure.set :as set]
+            [oben.core :as oben]
             [oben.core.api :as o]
             [oben.core.context :as ctx]
             [oben.core.target :as target]
@@ -13,12 +15,14 @@
             [oben.core.protocols.Bitwise :as Bitwise]
             [oben.core.protocols.Logical :as Logical]
             [oben.core.protocols.Conditional :as Conditional]
+            [oben.core.protocols.Callable :as Callable]
             [oben.core.protocols.Place :as Place]
             [oben.core.protocols.Eq :as Eq]
             [oben.core.protocols.Ord :as Ord]
             [oben.core.types.Number :as N]
             [oben.core.types.Bool :as Bool]
             [oben.core.types.Ptr :as Ptr]
+            [oben.core.types.Array :as Array]
             [oben.core.types.Fn :as Fn]
             [oben.core.types.Void :as Void]
             [oben.core.nodes :as nodes]
@@ -261,12 +265,12 @@
     (let [value (normalize type (o/constant->value node))]
       (o/make-constant-node
        type value
-       (fn [ctx]
+       (clj/fn [ctx]
          (let [ctx (ctx/compile-type ctx type)]
            (ctx/save-ir ctx (ir/const (ctx/compiled-type ctx type) value))))))
     (o/make-node
      type
-     (fn [ctx]
+     (clj/fn [ctx]
        (let [ctx (ctx/compile-type ctx type)
              ctx (ctx/compile-node ctx node)
              instruction (op (ctx/compiled-node ctx node)
@@ -301,7 +305,7 @@
     (o/make-constant-node
      type
      value
-     (fn [ctx]
+     (clj/fn [ctx]
        (let [ctx (ctx/compile-type ctx type)]
          (ctx/save-ir ctx (ir/const (ctx/compiled-type ctx type) value)))))))
 
@@ -335,7 +339,7 @@
   (o/make-constant-node
    type
    (normalize-float type value)
-   (fn [ctx]
+   (clj/fn [ctx]
      (let [ctx (ctx/compile-type ctx type)]
        (ctx/save-ir ctx
                      (ir/const (ctx/compiled-type ctx type)
@@ -464,14 +468,14 @@
     (o/make-constant-node
      type
      (if (o/constant->value node) 1 0)
-     (fn [ctx]
+     (clj/fn [ctx]
        (let [ctx (ctx/compile-type ctx type)]
          (ctx/save-ir ctx
                        (ir/const (ctx/compiled-type ctx type)
                                  (if (o/constant->value node) 1 0))))))
     (o/make-node
      type
-     (fn [ctx]
+     (clj/fn [ctx]
        (let [ctx (ctx/compile-type ctx type)
              ctx (ctx/compile-node ctx node)
              instruction (ir/zext (ctx/compiled-node ctx node)
@@ -488,7 +492,7 @@
                      (o/constant->value zero)))
     (o/make-node
      Bool/%bool
-     (fn [ctx]
+     (clj/fn [ctx]
        (let [ctx (ctx/compile-node ctx node)
              ctx (ctx/compile-node ctx zero)
              instruction (ir-fn (ctx/compiled-node ctx node)
@@ -617,7 +621,7 @@
   (let [{:keys [type lhs rhs]} (usual-arithmetic-conversions lhs rhs)]
     (o/make-node
      type
-     (fn [ctx]
+     (clj/fn [ctx]
        (let [ctx (ctx/compile-node ctx lhs)
              ctx (ctx/compile-node ctx rhs)
              instruction (instruction-fn (ctx/compiled-node ctx lhs)
@@ -632,7 +636,7 @@
         node (o/cast type node false)]
     (o/make-node
      type
-     (fn [ctx]
+     (clj/fn [ctx]
        (let [ctx (ctx/compile-node ctx node)
              instruction (instruction-fn (ctx/compiled-node ctx node)
                                          (ctx/compiled-type ctx type))]
@@ -724,7 +728,7 @@
         bool-node
         (o/make-node
          Bool/%bool
-         (fn [ctx]
+         (clj/fn [ctx]
            (let [ctx (ctx/compile-node ctx lhs)
                  ctx (ctx/compile-node ctx rhs)
                  instruction (instruction-fn type
@@ -755,15 +759,15 @@
 
 (define-c-comparison-op
   Eq/=
-  (fn [_type lhs rhs] (ir/icmp :eq lhs rhs {})))
+  (clj/fn [_type lhs rhs] (ir/icmp :eq lhs rhs {})))
 (define-c-comparison-op
   Eq/!=
-  (fn [_type lhs rhs] (ir/icmp :ne lhs rhs {})))
+  (clj/fn [_type lhs rhs] (ir/icmp :ne lhs rhs {})))
 
 (defmacro define-c-ordered-op
   [multifn signed-predicate unsigned-predicate]
   `(define-c-comparison-op ~multifn
-     (fn [type# lhs# rhs#]
+     (clj/fn [type# lhs# rhs#]
        (ir/icmp (if (:signed? (meta type#))
                   ~signed-predicate
                   ~unsigned-predicate)
@@ -795,7 +799,7 @@
         rhs (o/cast result-type (o/cast promoted-rhs rhs false) false)]
     (o/make-node
      result-type
-     (fn [ctx]
+     (clj/fn [ctx]
        (let [ctx (ctx/compile-node ctx lhs)
              ctx (ctx/compile-node ctx rhs)
              instruction (instruction-fn
@@ -819,10 +823,10 @@
        (c-shift-node lhs# rhs# ~instruction-fn))))
 
 (define-c-shift-op Bitwise/bit-shift-left
-  (fn [_type lhs rhs] (ir/shl lhs rhs {})))
+  (clj/fn [_type lhs rhs] (ir/shl lhs rhs {})))
 
 (define-c-shift-op Bitwise/bit-shift-right
-  (fn [type lhs rhs]
+  (clj/fn [type lhs rhs]
     (if (:signed? (meta type))
       (ir/ashr lhs rhs {})
       (ir/lshr lhs rhs {}))))
@@ -830,7 +834,7 @@
 (defmethod Bitwise/bit-not [::CInt]
   [node]
   (c-unary-node node
-                (fn [node type]
+                (clj/fn [node type]
                   (ir/xor node (ir/const type -1) {}))))
 
 (defn- c-float-type?
@@ -1142,7 +1146,7 @@
         control-node (as-c-node (o/parse control &env))
         control-type (promoted-type (o/type-of control-node))
         control-node (o/cast control-type control-node false)
-        clauses (mapv (fn [clause]
+        clauses (mapv (clj/fn [clause]
                         (when-not (sequential? clause)
                           (throw (ex-info "invalid C switch clause"
                                           {:clause clause})))
@@ -1169,7 +1173,7 @@
         _ (when (> (count default-clauses) 1)
             (throw (ex-info "C switch may contain only one :default clause" {})))
         seen-values (atom #{})
-        clauses (mapv (fn [clause]
+        clauses (mapv (clj/fn [clause]
                         (let [label (c-loop-label "switch-case")]
                           (if (= :case (:kind clause))
                             (let [value-node (o/cast control-type
@@ -1189,12 +1193,12 @@
                       clauses)
         default-label (:label (first (filter #(= :default (:kind %)) clauses)))
         dispatch (concat
-                  (map (fn [{:keys [label value-node]}]
+                  (map (clj/fn [{:keys [label value-node]}]
                          `(when (= ~switch-value ~value-node)
                             (go ~label)))
                        (filter #(= :case (:kind %)) clauses))
                   [`(go ~(or default-label break-label))])
-        arms (mapcat (fn [{:keys [label body]}]
+        arms (mapcat (clj/fn [{:keys [label body]}]
                        [label (if (seq body)
                                 `(do ~@body)
                                 '(nop))])
@@ -1252,7 +1256,7 @@
           difference-node
           (o/make-node
            result-type
-           (fn [ctx]
+           (clj/fn [ctx]
              (let [ctx (ctx/compile-type ctx result-type)
                    ctx (ctx/compile-node ctx lhs)
                    ctx (ctx/compile-node ctx rhs)
@@ -1265,7 +1269,7 @@
         difference-node
         (o/make-node
          result-type
-         (fn [ctx]
+         (clj/fn [ctx]
            (let [ctx (ctx/compile-type ctx result-type)
                  ctx (ctx/compile-node ctx difference-node)
                  instruction (ir/sdiv
@@ -1345,7 +1349,7 @@
          `(defmethod ~multifn ~dispatch#
             [lhs# rhs#]
             (c-comparison-node lhs# rhs#
-                               (fn [_type# lhs# rhs#]
+                               (clj/fn [_type# lhs# rhs#]
                                  (ir/fcmp ~predicate lhs# rhs# {})))))))
 
 (define-c-float-compare-op Eq/= :oeq)
@@ -1476,6 +1480,234 @@
   "C postfix decrement: updates `place` and returns its old value."
   [place]
   (c-update-place place Place/post-update! Algebra/-))
+
+(declare c-array-decay c-default-lvalue-to-rvalue)
+
+(defn- c-default-argument-promotion
+  "Applies C17's default argument promotions to one argument."
+  [node]
+  (let [node (c-default-lvalue-to-rvalue node)
+        node (c-array-decay node)
+        type (o/type-of node)]
+    (cond
+      (c-int-type? type)
+      (o/cast (promoted-type type) node false)
+
+      (bool-type? type)
+      (let [c-node (as-c-node node)]
+        (o/cast (promoted-type (o/type-of c-node)) c-node false))
+
+      (isa? (o/tid-of-type type) ::N/Int)
+      (let [c-node (as-c-node node)]
+        (o/cast (promoted-type (o/type-of c-node)) c-node false))
+
+      (c-float-type? type)
+      (if (= 32 (:bits (meta type)))
+        (o/cast (double (target/current)) node false)
+        node)
+
+      (isa? (o/tid-of-type type) ::N/FP)
+      (o/cast (double (target/current)) node false)
+
+      :else
+      node)))
+
+(defn c-parameter-type
+  "Returns a C function parameter's adjusted type.
+
+   C17 6.7.6.3 adjusts array parameters to pointers to their first element and
+   function parameters to pointers to function. Top-level qualifiers on a
+   parameter do not affect calls, so they are removed as well."
+  [type]
+  (let [type (unqualified-type type)]
+    (cond
+      (isa? (o/tid-of-type type) ::Array/Array)
+      (Ptr/Ptr (:element-type (meta type)))
+
+      (isa? (o/tid-of-type type) ::Fn/Fn)
+      (Ptr/Ptr type)
+
+      :else
+      type)))
+
+(defn- array-pointer?
+  [type]
+  (and (c-pointer-type? type)
+       (isa? (o/tid-of-type (:object-type (meta type))) ::Array/Array)))
+
+(defn- c-array-decay
+  "Performs array-to-pointer conversion for an addressable array object."
+  [node]
+  (let [type (o/type-of node)]
+    (if (array-pointer? type)
+      ;; A pointer to an array object is how Oben represents addressable array
+      ;; storage. `gep [0 0]` is its C decay to a pointer to element zero.
+      (let [index-type (N/UInt (target/attr :address-size))
+            zero (N/make-constant-number-node index-type 0)]
+        (nodes/%gep node [zero zero]))
+      node)))
+
+(defn- c-compatible-pointer-parameter?
+  [from-type to-type]
+  (let [from-object (unqualified-type (:object-type (meta from-type)))
+        to-object (unqualified-type (:object-type (meta to-type)))
+        from-qualifiers (o/qualifiers (:object-type (meta from-type)))
+        to-qualifiers (o/qualifiers (:object-type (meta to-type)))]
+    (and (or (= from-object to-object)
+             (and (not (isa? (o/tid-of-type from-object) ::Fn/Fn))
+                  (not (isa? (o/tid-of-type to-object) ::Fn/Fn))
+                  (or (void-object-type? from-object)
+                      (void-object-type? to-object))))
+         ;; A call may add pointed-to qualifiers but must not discard them.
+         (set/subset? from-qualifiers to-qualifiers))))
+
+(defn- c-object-place?
+  "Whether `node` is one of Oben's address-producing C object expressions.
+
+   Pointer values returned from calls are not included: treating every pointer
+   as an lvalue would incorrectly dereference a pointer rvalue supplied to a
+   scalar parameter."
+  [node]
+  (contains? #{:oben/var :oben/global :oben/gep}
+             (o/class-of-node node)))
+
+(defn- c-default-lvalue-to-rvalue
+  [argument]
+  (let [argument-type (o/type-of argument)]
+    (if (and (c-object-place? argument)
+             (c-pointer-type? argument-type)
+             (let [object-type (:object-type (meta argument-type))]
+               (and (not (isa? (o/tid-of-type object-type) ::Array/Array))
+                    (not (isa? (o/tid-of-type object-type) ::Fn/Fn)))))
+      (Place/load argument)
+      argument)))
+
+(defn- c-lvalue-to-rvalue
+  [parameter-type argument]
+  (if (c-pointer-type? (c-parameter-type parameter-type))
+    argument
+    (c-default-lvalue-to-rvalue argument)))
+
+(defn- c-fixed-argument-conversion
+  [parameter-type argument]
+  (let [parameter-type (c-parameter-type parameter-type)
+        argument (c-lvalue-to-rvalue parameter-type argument)
+        argument (c-array-decay argument)
+        argument-type (o/type-of argument)]
+    (cond
+      (and (c-pointer-type? parameter-type)
+           (c-pointer-type? argument-type))
+      (do
+        (when-not (c-compatible-pointer-parameter? argument-type parameter-type)
+          (throw (ex-info "incompatible pointer argument in C function call"
+                          {:argument-type argument-type
+                           :parameter-type parameter-type})))
+        (o/cast parameter-type argument false))
+
+      :else
+      (o/cast (unqualified-type parameter-type) argument false))))
+
+(defn c-function-type
+  "Constructs a function type using C17 call semantics."
+  ([return-type param-types]
+   (c-function-type return-type param-types {}))
+  ([return-type param-types opts]
+   (let [opts (assoc opts :call-semantics :c17)
+         param-types (mapv c-parameter-type param-types)]
+     (when (and (:variadic? opts) (empty? param-types))
+       (throw (ex-info "a C variadic function requires a named parameter before ..."
+                       {:return-type return-type :param-types param-types})))
+     (Fn/Fn return-type param-types opts))))
+
+(defn make-extern
+  "Creates a target-portable declaration for an external C function."
+  [name return-type param-types lexical-bindings opts]
+  (with-meta
+   (memoize
+    (clj/fn [target]
+      (let [env (assoc lexical-bindings :oben/target target)
+            return-type (o/parse return-type env)
+            param-types (o/parse param-types env)]
+        (nodes/make-external-function
+         name
+         (c-function-type return-type param-types opts)
+         opts))))
+   {:kind :oben/PORTABLE}))
+
+(defn- c17-call-arguments
+  [fnode args]
+  (when-not (o/fnode? fnode)
+    (throw (ex-info "cannot call a non-function value"
+                    {:callee fnode
+                     :type (when (o/node? fnode)
+                             (o/type-of fnode))})))
+  (let [ftype (-> fnode o/type-of meta :object-type)
+        {:keys [param-types prototype? variadic?]} (meta ftype)
+        fixed-count (count param-types)
+        arg-count (count args)]
+    (cond
+      (and prototype? (not variadic?) (not= fixed-count arg-count))
+      (throw (ex-info "invalid number of arguments in C function call"
+                      {:expected fixed-count
+                       :actual arg-count
+                       :callee fnode}))
+
+      (and prototype? variadic? (< arg-count fixed-count))
+      (throw (ex-info "not enough arguments in C variadic function call"
+                      {:expected-at-least fixed-count
+                       :actual arg-count
+                       :callee fnode})))
+    (let [fixed-args (if prototype?
+                       (mapv c-fixed-argument-conversion
+                             param-types
+                             (take fixed-count args))
+                       [])
+          variadic-args (if (and prototype? variadic?)
+                          (drop fixed-count args)
+                          (if prototype?
+                            []
+                            args))]
+      (into fixed-args (map c-default-argument-promotion variadic-args)))))
+
+(defmethod Callable/call :c17
+  [fnode args]
+  (nodes/make-funcall-node fnode (c17-call-arguments fnode args)))
+
+(clj/defmacro fn
+  "Defines an Oben function whose calls use C17 argument semantics.
+
+   An optional map immediately after the parameter vector accepts `:variadic?`
+   and LLVM declaration attributes. Variadic function bodies may use their
+   fixed parameters; C varargs access (`va_list`) is not yet modeled."
+  [& decl]
+  (let [[signature body] (o/split-after vector? decl)
+        params (first (o/move-types-to-meta signature))
+        [opts body] (if (map? (first body))
+                      [(first body) (next body)]
+                      [{} body])
+        opts (assoc opts
+                    :call-semantics :c17
+                    :parameter-type-transform `c-parameter-type)]
+    (when (= false (:prototype? opts))
+      (throw (ex-info "c/fn definitions require a prototype" {:options opts})))
+    (when (and (:variadic? opts) (empty? params))
+      (throw (ex-info "a C variadic function requires a named parameter before ..."
+                      {:options opts})))
+    `(oben/with-lexical-bindings bindings#
+       (oben/make-fn nil '~params '~body bindings# ~opts))))
+
+(clj/defmacro extern
+  "Declares an external C function.
+
+   Example: `(c/extern printf c/int [(* c/char)] {:variadic? true})`."
+  [name return-type param-types & [opts]]
+  `(oben/with-lexical-bindings bindings#
+     (make-extern '~name '~return-type '~param-types bindings# ~(or opts {}))))
+
+(clj/defmacro defextern
+  "Defines a named target-portable external C declaration."
+  [name return-type param-types & [opts]]
+  `(def ~name (extern ~name ~return-type ~param-types ~@(when opts [opts]))))
 
 ;; Keep this alias after the macro definitions above so it does not shadow
 ;; clojure.core/for while this namespace is being compiled.

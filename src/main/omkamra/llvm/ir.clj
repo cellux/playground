@@ -1376,14 +1376,17 @@ end:
    (param name type nil)))
 
 (defn render-function-parameter
-  [{:keys [type attrs] :as param}]
-  (let [name (name-of-typed-value param)]
-    (with-out-str
-      (printf "%s" (render-type type))
-      (when attrs
-        (printf " %s" (render-attributes attrs)))
-      (when name
-        (printf " %s" (render-name name))))))
+  [param]
+  (if (= param :&)
+    "..."
+    (let [{:keys [type attrs] :as param} param
+          name (name-of-typed-value param)]
+      (with-out-str
+        (printf "%s" (render-type type))
+        (when attrs
+          (printf " %s" (render-attributes attrs)))
+        (when name
+          (printf " %s" (render-name name)))))))
 
 (m/facts
  (m/fact
@@ -1511,6 +1514,7 @@ end:
 (defn sanitize-param
   [param]
   (cond
+    (= param :&) param
     (map? param) param
     (clj/or (simple-type? param)
             (complex-type? param)) {:type param}
@@ -1523,7 +1527,7 @@ end:
             :kind :function
             :name name
             :result-type result-type
-            :type [:ptr [:fn result-type (map :type params)]]
+            :type [:ptr [:fn result-type (map #(if (= % :&) :& (:type %)) params)]]
             :params params
             :basic-blocks nil)))
   ([name result-type params]
@@ -1579,7 +1583,7 @@ end:
                    names)
                  (IdentityHashMap.)
                  (concat
-                  params
+                  (remove #(= % :&) params)
                   (mapcat #(cons % (:instructions %)) basic-blocks)))
                 {})]
       (with-out-str
