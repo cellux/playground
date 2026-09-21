@@ -21,13 +21,15 @@
         place (nodes/%var matrix nil)
         decayed (c/c-expression-value place)
         address (c/c-expression-result Place/address-of place)
-        pointer (nodes/function-parameter 'p (Ptr/Ptr row))]
-    (m/facts "array decay respects value categories, not just pointer types"
-      (o/type-of decayed) => (m/exactly (Ptr/Ptr row))
+        pointer (nodes/function-parameter 'p (Ptr/Ptr row))
+        row-pointer (c/c-parameter-type (Ptr/Ptr row))
+        matrix-pointer (c/c-parameter-type (Ptr/Ptr matrix))]
+    (m/facts "array decay tags pointer rvalues with C semantics"
+      (o/type-of decayed) => (m/exactly row-pointer)
       (c/c-expression-value decayed) => (m/exactly decayed)
       (c/c-expression-value address) => (m/exactly address)
-      (o/type-of address) => (m/exactly (Ptr/Ptr matrix))
-      (c/c-expression-value pointer) => (m/exactly pointer))))
+      (o/type-of address) => (m/exactly matrix-pointer)
+      (o/type-of (c/c-expression-value pointer)) => (m/exactly row-pointer))))
 
 (c/with-target :inprocess
   (let [Row (oben/Array c/int 3)

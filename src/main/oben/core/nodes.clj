@@ -361,12 +361,15 @@
   (let [[signature body] (o/split-after vector? decl)
         params (o/parse (first (o/move-types-to-meta signature)) &env)
         _ (assert (vector? params))
-        return-type (o/resolve-type-from-meta params)
+        declared-return-type (o/resolve-type-from-meta params)
         declared-param-types (mapv o/resolve-type-from-meta params)
         param-names (mapv o/drop-meta params)
         fn-options (let [opts (get &env :oben/fn-options)]
                      (when opts
                        (assoc opts :prototype? (get opts :prototype? true))))
+        return-type (if-let [transform (:return-type-transform fn-options)]
+                      (transform declared-return-type)
+                      declared-return-type)
         param-types (if-let [transform (:parameter-type-transform fn-options)]
                       (mapv transform declared-param-types)
                       declared-param-types)
@@ -379,6 +382,7 @@
         ir-fn-options (some-> fn-options
                                (dissoc :prototype? :call-semantics
                                        :parameter-type-transform
+                                       :return-type-transform
                                        :expression-semantics))
         expression-semantics (:expression-semantics fn-options)
         params (mapv function-parameter param-names param-types)

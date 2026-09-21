@@ -555,7 +555,7 @@
   [form env]
   (let [op (parse (first form) env)
         args (next form)
-        {:keys [convert-value argument? convert-result]
+        {:keys [convert-value argument? convert-result transform-type-argument]
          :or {convert-value identity
               argument? (constantly true)}} (:oben/expression-semantics env)]
     (if (oben-macro? op)
@@ -583,7 +583,10 @@
             (into []
                   (map-indexed
                    (fn [index arg]
-                     (let [value (parse arg env)]
+                     (let [value (parse arg env)
+                           value (if (and transform-type-argument (type? value))
+                                   (transform-type-argument op index value)
+                                   value)]
                        (if (and (not (and converted-callee? (zero? index)))
                                 (argument? op index))
                          (convert-value value)
@@ -606,9 +609,10 @@
   "Parses a form using lexical bindings and semantic context in `env`.
 
    Optional :oben/expression-semantics hooks operate on parsed values:
-     :convert-value  value -> value
-     :argument?      resolved operator, argument index -> boolean
-     :convert-result resolved operator, result -> result
+     :convert-value           value -> value
+     :argument?               resolved operator, argument index -> boolean
+     :convert-result          resolved operator, result -> result
+     :transform-type-argument resolved operator, argument index, type -> type
    Macros receive raw forms and control their own argument parsing."
   ([form env]
    (letfn [(die []

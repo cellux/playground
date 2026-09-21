@@ -79,6 +79,63 @@
    #(ctx/save-ir % [:integer 1])
    {:bits bits}))
 
+;; C pointers have the same LLVM representation as core pointers, but they
+;; carry C expression semantics. Keeping that distinction in the type
+;; hierarchy lets C extend shared operator multimethods without intercepting
+;; ordinary Oben pointers.
+(o/define-typeclass ^:private CPtr [::Ptr/Ptr]
+  [object-type]
+  (o/make-type
+   (Ptr/Ptr object-type)
+   {:object-type object-type}))
+
+(defn- c-pointer-type?
+  [type]
+  (isa? (o/tid-of-type type) ::CPtr))
+
+(defn- pointer-type?
+  [type]
+  (isa? (o/tid-of-type type) ::Ptr/Ptr))
+
+(defn- c-pointer-type
+  "Returns C's semantic pointer type for `type`, preserving its pointee."
+  [type]
+  (if (c-pointer-type? type)
+    type
+    (do
+      (when-not (pointer-type? type)
+        (throw (ex-info "expected a pointer type" {:type type})))
+      (CPtr (:object-type (meta type))))))
+
+(defn- c-pointer-node
+  "Retags a representation-compatible core pointer as a C pointer value.
+
+   The wrapper compiles the original node rather than using `vary-meta`: the
+   latter creates a distinct compiler identity for allocas and globals, which
+   would allocate duplicate storage."
+  [node]
+  (if (c-pointer-type? (o/type-of node))
+    node
+    (let [type (c-pointer-type (o/type-of node))]
+      (o/make-node
+       type
+       (clj/fn [ctx]
+         (let [ctx (ctx/compile-node ctx node)]
+           (ctx/save-ir ctx (ctx/compiled-node ctx node))))
+       {:class ::c-pointer}))))
+
+;; A C pointer and a core pointer always have identical LLVM representation.
+;; Retagging therefore needs no bitcast instruction. C-to-C casts retain the
+;; core pointer implementation because differing pointees require an LLVM
+;; bitcast.
+(defmethod o/cast [::CPtr ::CPtr]
+  [type node force?]
+  ((get-method o/cast [::Ptr/Ptr ::Ptr/Ptr]) type node force?))
+
+(defmethod o/cast [::CPtr ::Ptr/Ptr]
+  [_type node _force?]
+  (c-pointer-node node))
+
 (defn- rank-for-bits
   [bits char-size short-size int-size long-size fallback]
   (cond
@@ -425,7 +482,7 @@
   [type node _force?]
   (c-int->core-int type node))
 
-(defmethod o/cast [::Ptr/Ptr ::CInt]
+(defmethod o/cast [::CPtr ::CInt]
   [type node _force?]
   ;; An integer arm is a C null pointer constant only when it is the
   ;; compile-time integer constant zero.  Do not silently turn arbitrary
@@ -892,10 +949,6 @@
   [type]
   (isa? (o/tid-of-type type) ::Bool/Bool))
 
-(defn- c-pointer-type?
-  [type]
-  (isa? (o/tid-of-type type) ::Ptr/Ptr))
-
 (defn- null-pointer-constant?
   [node]
   (and (o/constant-node? node)
@@ -951,7 +1004,7 @@
           object-type (if (seq qualifiers)
                         (vary-meta object-type assoc :qualifiers qualifiers)
                         object-type)]
-      (Ptr/Ptr object-type))))
+      (CPtr object-type))))
 
 (defn- c-conditional-type
   "Selects the result type for the non-arithmetic conditional cases.
@@ -968,7 +1021,16 @@
 
 (defn- c-conditional
   [condition then-node else-node]
-  (let [then-type (o/type-of then-node)
+  ;; C context promotes pointer operands into the C pointer subtype before
+  ;; selecting their composite type. This also makes explicit `c/conditional`
+  ;; usable with an addressable core pointer produced outside a C body.
+  (let [then-node (if (pointer-type? (o/type-of then-node))
+                    (c-pointer-node then-node)
+                    then-node)
+        else-node (if (pointer-type? (o/type-of else-node))
+                    (c-pointer-node else-node)
+                    else-node)
+        then-type (o/type-of then-node)
         else-type (o/type-of else-node)]
     (cond
       (and (c-pointer-type? then-type)
@@ -1011,11 +1073,11 @@
 (define-c-conditional ::Bool/Bool ::CInt)
 (define-c-conditional ::CFloat ::Bool/Bool)
 (define-c-conditional ::Bool/Bool ::CFloat)
-(define-c-conditional ::Ptr/Ptr ::Ptr/Ptr)
-(define-c-conditional ::Ptr/Ptr ::CInt)
-(define-c-conditional ::CInt ::Ptr/Ptr)
-(define-c-conditional ::Ptr/Ptr ::N/Int)
-(define-c-conditional ::N/Int ::Ptr/Ptr)
+(define-c-conditional ::CPtr ::CPtr)
+(define-c-conditional ::CPtr ::CInt)
+(define-c-conditional ::CInt ::CPtr)
+(define-c-conditional ::CPtr ::N/Int)
+(define-c-conditional ::N/Int ::CPtr)
 
 ;; An explicitly C-typed condition gives C semantics to otherwise-untyped
 ;; numeric arms as well.  This is what makes `(if c-condition 1 2)` produce
@@ -1029,16 +1091,23 @@
 
 (define-c-conditioned-conditional ::CInt)
 (define-c-conditioned-conditional ::CFloat)
-(define-c-conditioned-conditional ::Ptr/Ptr)
+(define-c-conditioned-conditional ::CPtr)
 
 (defn conditional
   "C's value-producing conditional expression.
 
-  The ordinary Oben `if` form uses the same dispatch after requiring this
-  namespace; this named entry point is useful when constructing an expression
-  programmatically."
+  The ordinary Oben `if` form uses C semantics when its operands have C
+  semantic types. This explicit entry point accepts a core pointer as a
+  convenience and promotes it at the C boundary."
   [condition then-node else-node]
-  (Conditional/select condition then-node else-node))
+  (Conditional/select
+   condition
+   (if (pointer-type? (o/type-of then-node))
+     (c-pointer-node then-node)
+     then-node)
+   (if (pointer-type? (o/type-of else-node))
+     (c-pointer-node else-node)
+     else-node)))
 
 (defn comma
   "C's comma expression: evaluate `lhs`, then return `rhs`."
@@ -1196,21 +1265,22 @@
   [ptr offset]
   ;; `nodes/%gep` uses core integer indices.  Preserve C signedness during the
   ;; conversion so negative offsets remain negative at the pointer width.
-  (nodes/%gep ptr [(o/cast (N/UInt (target/attr :address-size)) offset false)]))
+  (c-pointer-node
+   (nodes/%gep ptr [(o/cast (N/UInt (target/attr :address-size)) offset false)])))
 
-(defmethod Algebra/+ [::Ptr/Ptr ::CInt]
+(defmethod Algebra/+ [::CPtr ::CInt]
   [ptr offset]
   (c-pointer-offset ptr offset))
 
-(defmethod Algebra/+ [::CInt ::Ptr/Ptr]
+(defmethod Algebra/+ [::CInt ::CPtr]
   [offset ptr]
   (c-pointer-offset ptr offset))
 
-(defmethod Algebra/+ [::N/Int ::Ptr/Ptr]
+(defmethod Algebra/+ [::N/Int ::CPtr]
   [offset ptr]
   (c-pointer-offset ptr offset))
 
-(defmethod Algebra/- [::Ptr/Ptr ::CInt]
+(defmethod Algebra/- [::CPtr ::CInt]
   [ptr offset]
   (c-pointer-offset ptr (Algebra/- offset)))
 
@@ -1259,7 +1329,7 @@
              (ctx/compile-instruction ctx instruction)))
          {:class ::pointer-difference})))))
 
-(defmethod Algebra/- [::Ptr/Ptr ::Ptr/Ptr]
+(defmethod Algebra/- [::CPtr ::CPtr]
   [lhs rhs]
   (c-pointer-difference lhs rhs))
 
@@ -1274,16 +1344,16 @@
 (defmacro define-c-null-pointer-comparison
   [multifn]
   `(do
-     (defmethod ~multifn [::Ptr/Ptr ::CInt]
+     (defmethod ~multifn [::CPtr ::CInt]
        [ptr# integer#]
        (~multifn ptr# (c-null-pointer ptr# integer#)))
-     (defmethod ~multifn [::CInt ::Ptr/Ptr]
+     (defmethod ~multifn [::CInt ::CPtr]
        [integer# ptr#]
        (~multifn (c-null-pointer ptr# integer#) ptr#))
-     (defmethod ~multifn [::Ptr/Ptr ::N/Int]
+     (defmethod ~multifn [::CPtr ::N/Int]
        [ptr# integer#]
        (~multifn ptr# (c-null-pointer ptr# integer#)))
-     (defmethod ~multifn [::N/Int ::Ptr/Ptr]
+     (defmethod ~multifn [::N/Int ::CPtr]
        [integer# ptr#]
        (~multifn (c-null-pointer ptr# integer#) ptr#))))
 
@@ -1339,14 +1409,6 @@
 (define-c-float-compare-op Ord/>= :oge)
 (define-c-float-compare-op Ord/> :ogt)
 
-(defn- c-target?
-  "Whether the current target has a C ABI profile installed.
-
-   Some C multimethods dispatch on core types such as pointers. Keep those
-   methods from changing ordinary Oben semantics on generic targets."
-  []
-  (contains? (target/attrs) :c-int-size))
-
 (defn- c-logical-zero
   []
   (o/cast (c-int-type) 0 false))
@@ -1355,59 +1417,32 @@
   []
   (o/cast (c-int-type) 1 false))
 
-(defn- generic-logical-and
-  [lhs rhs]
-  (list 'if
-        (o/cast Bool/%bool lhs false)
-        (o/cast Bool/%bool rhs false)
-        false))
-
-(defn- generic-logical-or
-  [lhs rhs]
-  (list 'if
-        (o/cast Bool/%bool lhs false)
-        true
-        (o/cast Bool/%bool rhs false)))
-
-(defn- generic-logical-not
-  [node]
-  (list 'if
-        (o/cast Bool/%bool node false)
-        false
-        true))
-
 (defn- c-logical-and
   [lhs rhs]
-  (if-not (c-target?)
-    (generic-logical-and lhs rhs)
-    (let [lhs (o/cast Bool/%bool lhs false)
-          rhs (o/cast Bool/%bool rhs false)
-          zero (c-logical-zero)
-          one (c-logical-one)]
-      (list 'if lhs
-            (list 'if rhs one zero)
-            zero))))
+  (let [lhs (o/cast Bool/%bool lhs false)
+        rhs (o/cast Bool/%bool rhs false)
+        zero (c-logical-zero)
+        one (c-logical-one)]
+    (list 'if lhs
+          (list 'if rhs one zero)
+          zero)))
 
 (defn- c-logical-or
   [lhs rhs]
-  (if-not (c-target?)
-    (generic-logical-or lhs rhs)
-    (let [lhs (o/cast Bool/%bool lhs false)
-          rhs (o/cast Bool/%bool rhs false)
-          zero (c-logical-zero)
-          one (c-logical-one)]
-      (list 'if lhs
-            one
-            (list 'if rhs one zero)))))
+  (let [lhs (o/cast Bool/%bool lhs false)
+        rhs (o/cast Bool/%bool rhs false)
+        zero (c-logical-zero)
+        one (c-logical-one)]
+    (list 'if lhs
+          one
+          (list 'if rhs one zero))))
 
 (defn- c-logical-not
   [node]
-  (if-not (c-target?)
-    (generic-logical-not node)
-    (let [node (o/cast Bool/%bool node false)
-          zero (c-logical-zero)
-          one (c-logical-one)]
-      (list 'if node zero one))))
+  (let [node (o/cast Bool/%bool node false)
+        zero (c-logical-zero)
+        one (c-logical-one)]
+    (list 'if node zero one)))
 
 (defmacro define-c-logical-binary-op
   [multifn implementation]
@@ -1424,15 +1459,15 @@
                          [::N/Number ::CInt]
                          [::CFloat ::N/Number]
                          [::N/Number ::CFloat]
-                         [::Ptr/Ptr ::Ptr/Ptr]
-                         [::Ptr/Ptr ::CInt]
-                         [::CInt ::Ptr/Ptr]
-                         [::Ptr/Ptr ::CFloat]
-                         [::CFloat ::Ptr/Ptr]
-                         [::Ptr/Ptr ::Bool/Bool]
-                         [::Bool/Bool ::Ptr/Ptr]
-                         [::Ptr/Ptr ::N/Number]
-                         [::N/Number ::Ptr/Ptr])]
+                         [::CPtr ::CPtr]
+                         [::CPtr ::CInt]
+                         [::CInt ::CPtr]
+                         [::CPtr ::CFloat]
+                         [::CFloat ::CPtr]
+                         [::CPtr ::Bool/Bool]
+                         [::Bool/Bool ::CPtr]
+                         [::CPtr ::N/Number]
+                         [::N/Number ::CPtr])]
        `(defmethod ~multifn ~dispatch#
           [lhs# rhs#]
           (~implementation lhs# rhs#)))))
@@ -1448,7 +1483,7 @@
   [node]
   (c-logical-not node))
 
-(defmethod Logical/not [::Ptr/Ptr]
+(defmethod Logical/not [::CPtr]
   [node]
   (c-logical-not node))
 
@@ -1523,6 +1558,23 @@
       :else
       node)))
 
+(defn c-local-declaration-type
+  "Returns the C semantic type of a local object declaration.
+
+   Unlike function parameters, arrays and functions are not adjusted here;
+   only explicitly declared pointer objects acquire the C pointer subtype."
+  [type]
+  (if (pointer-type? type)
+    (c-pointer-type type)
+    type))
+
+(defn c-type-argument
+  "Applies C declaration typing to type arguments parsed in a C body."
+  [op index type]
+  (if (and (= op nodes/%var) (zero? index))
+    (c-local-declaration-type type)
+    type))
+
 (defn c-parameter-type
   "Returns a C function parameter's adjusted type.
 
@@ -1533,17 +1585,22 @@
   (let [type (unqualified-type type)]
     (cond
       (isa? (o/tid-of-type type) ::Array/Array)
-      (Ptr/Ptr (:element-type (meta type)))
+      (CPtr (:element-type (meta type)))
 
       (isa? (o/tid-of-type type) ::Fn/Fn)
-      (Ptr/Ptr type)
+      (CPtr type)
+
+      (pointer-type? type)
+      (c-pointer-type type)
 
       :else
       type)))
 
 (defn- array-pointer?
   [type]
-  (and (c-pointer-type? type)
+  ;; Addressable C arrays originate as core pointers to array storage. They
+  ;; become C pointers only after the array-to-pointer conversion below.
+  (and (pointer-type? type)
        (isa? (o/tid-of-type (:object-type (meta type))) ::Array/Array)))
 
 (defn decay-array
@@ -1564,7 +1621,7 @@
       ;; GEP normally denotes an addressable subobject. This particular GEP is
       ;; C's array value conversion, whose result is a pointer rvalue; retain
       ;; that distinction so a later conversion pass does not load element 0.
-      (vary-meta (nodes/%gep node [zero zero])
+      (vary-meta (c-pointer-node (nodes/%gep node [zero zero]))
                  assoc :oben.c/value-category :rvalue))))
 
 (defn decay-function
@@ -1575,7 +1632,7 @@
    operation and validates that its operand is a function designator."
   [node]
   (if (o/fnode? node)
-    node
+    (c-pointer-node node)
     (throw (ex-info "C function decay requires a function designator"
                     {:node node
                      :type (when (o/node? node) (o/type-of node))}))))
@@ -1662,9 +1719,9 @@
    pointer arithmetic without changing core Oben's place operations."
   [op node]
   (if (and (o/node? node)
-           (c-pointer-type? (o/type-of node))
+           (pointer-type? (o/type-of node))
            (contains? #{Place/address-of nodes/%gep Algebra/+ Algebra/-} op))
-    (c-pointer-rvalue node)
+    (c-pointer-rvalue (c-pointer-node node))
     node))
 
 (defn c-expression-argument?
@@ -1711,8 +1768,19 @@
         (o/fnode? node)
         (decay-function node)
 
-        (and (c-object-place? node) (c-pointer-type? type))
-        (Place/load node)
+        ;; C local/global storage is represented by a core pointer. Loading
+        ;; it produces either a scalar value or (for pointer objects) a C
+        ;; pointer rvalue.
+        (and (c-object-place? node) (pointer-type? type))
+        (let [value (Place/load node)]
+          (if (pointer-type? (o/type-of value))
+            (c-pointer-node value)
+            value))
+
+        ;; Pointer rvalues entering a C expression (for example, a value
+        ;; returned by an Oben helper) cross the C semantic boundary here.
+        (pointer-type? type)
+        (c-pointer-node node)
 
         :else
         node))))
@@ -1741,6 +1809,9 @@
    (c-function-type return-type param-types {}))
   ([return-type param-types opts]
    (let [opts (assoc opts :call-semantics :c17)
+         return-type (if (pointer-type? return-type)
+                       (c-pointer-type return-type)
+                       return-type)
          param-types (mapv c-parameter-type param-types)]
      (when (and (:variadic? opts) (empty? param-types))
        (throw (ex-info "a C variadic function requires a named parameter before ..."
@@ -1816,10 +1887,12 @@
         opts (assoc opts
                     :call-semantics :c17
                     :parameter-type-transform `c-parameter-type
+                    :return-type-transform `c-parameter-type
                     :expression-semantics
                     {:convert-value `c-expression-value
                      :argument? `c-expression-argument?
-                     :convert-result `c-expression-result})]
+                     :convert-result `c-expression-result
+                     :transform-type-argument `c-type-argument})]
     (when (= false (:prototype? opts))
       (throw (ex-info "c/fn definitions require a prototype" {:options opts})))
     (when (and (:variadic? opts) (empty? params))

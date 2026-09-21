@@ -411,7 +411,7 @@
             => (m/exactly double-type))
     (m/fact "C object pointers combine with void pointers"
             (o/type-of void-conditional)
-            => (m/exactly (Ptr/Ptr Void/%void)))
+            => (m/exactly (c/c-parameter-type (Ptr/Ptr Void/%void))))
     (m/fact "C pointers to same-width but distinct integer types are incompatible"
             (o/parse '(c/conditional (c/int 1)
                                      (var c/int 0)
@@ -420,7 +420,7 @@
 
 (c/with-target :dump
   (let [void-ptr (Ptr/Ptr Void/%void)
-        f (oben/fn void-ptr [^c/int condition]
+        f (c/fn void-ptr [^c/int condition]
             (let [values (var (array c/int [4 7 9]))
                   pointer (gep values [0 0])]
               (if condition
@@ -454,9 +454,9 @@
                  (/ divisor divisor)))
         explicit (oben/fn ^c/int [^c/int condition]
                    (c/conditional condition 7 (c/int 9)))
-        pointer-arm (oben/fn ^c/int [^c/int condition]
+        pointer-arm (c/fn c/int [^c/int condition]
                       (let [p (var c/int 7)]
-                        (deref (if condition p (c/int 0)))))]
+                        (deref (if condition (address-of p) (c/int 0)))))]
     (m/fact "C conditional expressions use the common floating type"
             (mixed-float 1) => 1.5
             (mixed-float 0) => 2.0)
@@ -588,39 +588,39 @@
                      (add= v n)
                      (mul= v (c/float 2.0))
                      @v))
-        pointer-add (oben/fn ^c/int [^c/int offset]
+        pointer-add (c/fn c/int [^c/int offset]
                       (let [values (var (array c/int [4 7 9]))
                             pointer (var (* c/int) (gep values [0 0]))]
                         (add= pointer offset)
                         @@pointer))
-        pointer-left-add (oben/fn ^c/int []
+        pointer-left-add (c/fn c/int []
                            (let [values (var (array c/int [4 7 9]))
                                  pointer (gep values [0 0])]
                              (deref (+ 1 pointer))))
-        pointer-difference (oben/fn ^c/ptrdiff_t []
+        pointer-difference (c/fn c/ptrdiff_t []
                              (let [values (var (array c/int [4 7 9]))]
                                (- (gep values [0 2])
                                   (gep values [0 0]))))
-        pointer-one-past-difference (oben/fn ^c/ptrdiff_t []
+        pointer-one-past-difference (c/fn c/ptrdiff_t []
                                      (let [values (var (array c/int [4 7 9]))]
                                        (- (gep values [0 3])
                                           (gep values [0 0]))))
-        pointer-order (oben/fn ^bool []
+        pointer-order (c/fn Bool/%bool []
                         (let [values (var (array c/int [4 7 9]))]
                           (< (gep values [0 0])
                              (gep values [0 2]))))
-        pointer-zero-eq (oben/fn ^bool []
+        pointer-zero-eq (c/fn Bool/%bool []
                          (let [values (var (array c/int [4 7 9]))]
                            (= (gep values [0 0]) 0)))
-        pointer-zero-ne (oben/fn ^bool []
+        pointer-zero-ne (c/fn Bool/%bool []
                          (let [values (var (array c/int [4 7 9]))]
                            (!= (gep values [0 0]) 0)))
-        pointer-sub (oben/fn ^c/int [^c/short offset]
+        pointer-sub (c/fn c/int [^c/short offset]
                       (let [values (var (array c/int [4 7 9]))
                             pointer (var (* c/int) (gep values [0 2]))]
                         (sub= pointer offset)
                         @@pointer))
-        pointer-constant-add (oben/fn ^c/int []
+        pointer-constant-add (c/fn c/int []
                                (let [values (var (array c/int [4 7 9]))
                                      pointer (var (* c/int) (gep values [0 0]))]
                                  (add= pointer (c/int 1))
@@ -660,6 +660,13 @@
     (m/fact "readable shorthand aliases remain available"
             (shorthand) => 1)))
 
+(oben/with-target :inprocess
+  (let [ordinary-pointer-not (oben/fn Bool/%bool []
+                               (let [value (var Number/%u32 1)]
+                                 (not (address-of value))))]
+    (m/fact "ordinary Oben pointer logic works after requiring C"
+            (ordinary-pointer-not) => 0)))
+
 (c/with-target :inprocess
   (let [pre-inc (oben/fn ^c/int []
                   (let [v (var c/int 3)]
@@ -680,11 +687,11 @@
         float-inc (oben/fn ^c/float []
                     (let [v (var c/float (c/float 1.5))]
                       (c/pre-inc! v)))
-        pointer-inc (oben/fn ^c/int []
+        pointer-inc (c/fn c/int []
                       (let [values (var (array c/int [4 7 9]))
                             p (var (* c/int) (gep values [0 0]))]
                         (deref (c/pre-inc! p))))
-        pointer-dec-state (oben/fn ^c/int []
+        pointer-dec-state (c/fn c/int []
                            (let [values (var (array c/int [4 7 9]))
                                  p (var (* c/int) (gep values [0 1]))]
                              (c/post-dec! p)
