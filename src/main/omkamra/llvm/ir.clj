@@ -125,7 +125,8 @@
   (cond
     (integer? x) (str \% x)
     (keyword? x) (str \% (render-name-string (name x)))
-    (symbol? x) (str \@ (render-name-string (name x)))))
+    (symbol? x) (str \@ (render-name-string (name x)))
+    :else (throw (ex-info "invalid value name" {:name x}))))
 
 (defn render-type-name
   [x]
@@ -134,6 +135,10 @@
     (clj/or (keyword? x) (symbol? x))
     (str \% (render-name-string (name x)))
     :else (throw (ex-info "invalid type name" {:name x}))))
+
+(m/facts
+ (m/fact (render-value-name nil) => (m/throws #"invalid value name"))
+ (m/fact (render-type-name nil) => (m/throws #"invalid type name")))
 
 (declare render-type)
 
