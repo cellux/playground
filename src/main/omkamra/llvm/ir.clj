@@ -1055,7 +1055,7 @@
 (defn vararg?
   [f]
   (let [[_ptr [_fn _result-type _param-types {:keys [variadic?]}]] (:type f)]
-    (boolean (clj/or (:variadic? f) variadic?))))
+    variadic?))
 
 (defn call
   ([callee args opts]
