@@ -43,7 +43,7 @@
 (def ^:private rank-float 1)
 (def ^:private rank-double 2)
 
-(o/define-typeclass CInt [:oben/Value]
+(o/define-typeclass ^:private CInt [:oben/Value]
   [c-type bits signed? rank]
   (o/make-type
    #(ctx/save-ir % [:integer bits])
@@ -52,7 +52,7 @@
     :signed? signed?
     :rank rank}))
 
-(o/define-typeclass CFloat [:oben/Value]
+(o/define-typeclass ^:private CFloat [:oben/Value]
   [c-type bits rank]
   (o/make-type
    (let [ir-type (case bits
@@ -64,18 +64,6 @@
    {:c-type c-type
     :bits bits
     :rank rank}))
-
-(def i8 (CInt :i8 8 true rank-char))
-(def u8 (CInt :i8 8 false rank-char))
-(def i16 (CInt :i16 16 true rank-short))
-(def u16 (CInt :i16 16 false rank-short))
-(def i32 (CInt :i32 32 true rank-int))
-(def u32 (CInt :i32 32 false rank-int))
-(def i64 (CInt :i64 64 true rank-long))
-(def u64 (CInt :i64 64 false rank-long))
-
-(def f32 (CFloat :float 32 rank-float))
-(def f64 (CFloat :double 64 rank-double))
 
 (defn- attr
   [target name default]
@@ -207,36 +195,6 @@
 (defmethod o/sizeof* ::CFloat
   [ctx type]
   (c-sizeof ctx type))
-
-(defn int32
-  "Creates a C-style signed 32-bit integer value."
-  [value]
-  (o/cast i32 value false))
-
-(defn uint32
-  "Creates a C-style unsigned 32-bit integer value."
-  [value]
-  (o/cast u32 value false))
-
-(defn int64
-  "Creates a C-style signed 64-bit integer value."
-  [value]
-  (o/cast i64 value false))
-
-(defn uint64
-  "Creates a C-style unsigned 64-bit integer value."
-  [value]
-  (o/cast u64 value false))
-
-(defn float32
-  "Creates a C-style 32-bit floating-point value."
-  [value]
-  (o/cast f32 value false))
-
-(defn float64
-  "Creates a C-style 64-bit floating-point value."
-  [value]
-  (o/cast f64 value false))
 
 (defn- normalize-constant
   [type value]
