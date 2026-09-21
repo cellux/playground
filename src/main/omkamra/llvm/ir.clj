@@ -244,7 +244,7 @@
          => "{i8, i16*, i32}")
  (m/fact (render-type [:struct :foo [[:integer 8] [:ptr [:integer 16]] [:integer 32]]])
          => "%foo")
- (m/fact "Clojure symbols name globals, but still name LLVM types with %."
+ (m/fact "Named struct types use % regardless of the source name type."
          (render-type [:struct 'foo [[:integer 8] [:ptr [:integer 16]] [:integer 32]]])
          => "%foo")
  (m/fact (render-type [:packed-struct nil [[:integer 8] [:ptr [:integer 16]] [:integer 32]]])
