@@ -65,6 +65,12 @@
     :bits bits
     :rank rank}))
 
+(o/define-typeclass ^:private CBool [::Bool/Bool]
+  [bits]
+  (o/make-type
+   #(ctx/save-ir % [:integer 1])
+   {:bits bits}))
+
 (defn- attr
   [target name default]
   (get (target/attrs* target) name default))
@@ -87,9 +93,12 @@
                   (attr target :c-long-size 64)
                   rank-long-long))
 
-;; `_Bool` has boolean semantics in Oben and the required one-byte C object
-;; size.  The C conversion methods below already promote it through c/int.
-(def _Bool Bool/%bool)
+;; `_Bool` has boolean value semantics, but its object size is target-dependent.
+;; The C conversion methods below already promote it through c/int.
+(o/defportable _Bool
+  [target]
+  (CBool (attr target :c-bool-size
+               (attr target :c-char-size 8))))
 
 (o/defportable signed-char
   [target]
@@ -193,6 +202,10 @@
   (c-sizeof ctx type))
 
 (defmethod o/sizeof* ::CFloat
+  [ctx type]
+  (c-sizeof ctx type))
+
+(defmethod o/sizeof* ::CBool
   [ctx type]
   (c-sizeof ctx type))
 

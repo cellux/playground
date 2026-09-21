@@ -202,8 +202,9 @@
         size-t (c/size_t t)
         ptrdiff-t (c/ptrdiff_t t)
         bool-type (o/parse 'c/_Bool)]
-    (m/fact "C _Bool is represented by Oben Bool"
-            bool-type => (m/exactly Bool/%bool)
+    (m/fact "C _Bool is a C-specific Bool type"
+            (:class (meta bool-type)) => :oben.c/CBool
+            (:bits (meta bool-type)) => 8
             (o/sizeof bool-type) => 1)
     (m/fact "signed and unsigned char are distinct C integer types"
             (:c-type (meta signed-char)) => :signed-char
