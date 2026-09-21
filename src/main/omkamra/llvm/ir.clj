@@ -120,7 +120,7 @@
     (render-quoted-string name-string)
     name-string))
 
-(defn render-name
+(defn render-value-name
   [x]
   (cond
     (integer? x) (str \% x)
@@ -329,7 +329,7 @@
   (let [name (name-of-typed-value obj)]
     (cond
       name
-      (format "%s %s" (render-type type) (render-name name))
+      (format "%s %s" (render-type type) (render-value-name name))
 
       (= :void type)
       "void"
@@ -344,7 +344,7 @@
   [{:keys [type value] :as obj}]
   (let [name (name-of-typed-value obj)]
     (if name
-      (render-name name)
+      (render-value-name name)
       (render-literal type value))))
 
 (defn const
@@ -515,7 +515,7 @@
        [{:keys [~'value ~@opts] :as ~'i}]
        (let [~'name (name-of-typed-value ~'i)]
          (with-out-str
-           (print (render-name ~'name))
+           (print (render-value-name ~'name))
            (print (str " = " ~(name op)))
            ~@(for [opt opts] `(when ~opt
                                 (print ~(str " " (name opt)))))
@@ -538,7 +538,7 @@
        [{:keys [~'lhs ~'rhs ~@opts] :as ~'i}]
        (let [~'name (name-of-typed-value ~'i)]
          (with-out-str
-           (print (render-name ~'name))
+           (print (render-value-name ~'name))
            (print (str " = " ~(name op)))
            ~@(for [opt opts] `(when ~opt
                                 (print ~(str " " (name opt)))))
@@ -701,7 +701,7 @@
   [{:keys [object-type address-space array-size align] :as i}]
   (let [name (name-of-typed-value i)]
     (format "%s = alloca %s%s"
-            (render-name name)
+            (render-value-name name)
             (render-type object-type)
             (if align (format ", align %d" align) ""))))
 
@@ -750,7 +750,7 @@
   [{:keys [object-type ptr align volatile] :as i}]
   (let [name (name-of-typed-value i)]
     (format "%s = load %s%s, %s%s"
-            (render-name name)
+            (render-value-name name)
             (if volatile "volatile " "")
             (render-type object-type)
             (render-type-and-value ptr)
@@ -860,7 +860,7 @@
        [{:keys [~'value ~'dest-type] :as ~'i}]
        (let [~'name (name-of-typed-value ~'i)]
          (format ~(str "%s = " op " %s to %s")
-                 (render-name ~'name)
+                 (render-value-name ~'name)
                  (render-type-and-value ~'value)
                  (render-type ~'dest-type))))))
 
@@ -939,7 +939,7 @@
   [{:keys [pred lhs rhs] :as i}]
   (let [name (name-of-typed-value i)]
     (format "%s = icmp %s %s, %s"
-            (render-name name)
+            (render-value-name name)
             (render-predicate pred)
             (render-type-and-value lhs)
             (render-value rhs))))
@@ -972,7 +972,7 @@
   [{:keys [pred lhs rhs] :as i}]
   (let [name (name-of-typed-value i)]
     (format "%s = fcmp %s %s, %s"
-            (render-name name)
+            (render-value-name name)
             (render-predicate pred)
             (render-type-and-value lhs)
             (render-value rhs))))
@@ -990,7 +990,7 @@
   [{:keys [type values] :as i}]
   (let [name (name-of-typed-value i)]
     (format "%s = phi %s %s"
-            (render-name name)
+            (render-value-name name)
             (render-type type)
             (->> values
                  (map #(format "[ %s, %s ]"
@@ -1030,7 +1030,7 @@
   [{:keys [cond then else] :as i}]
   (let [name (name-of-typed-value i)]
     (format "%s = select %s, %s, %s"
-            (render-name name)
+            (render-value-name name)
             (render-type-and-value cond)
             (render-type-and-value then)
             (render-type-and-value else))))
@@ -1071,10 +1071,10 @@
         type-str (render-type (if (vararg? callee)
                                 (let [[_ptr ftype] (:type callee)] ftype)
                                 (result-type callee)))
-        callee-name (render-name (name-of-typed-value callee))]
+        callee-name (render-value-name (name-of-typed-value callee))]
     (if name
       (format "%s = call %s %s(%s)"
-              (render-name name)
+              (render-value-name name)
               type-str
               callee-name
               (str/join ", " (map render-type-and-value args)))
@@ -1154,7 +1154,7 @@
   [{:keys [base-type ptr indices inbounds] :as i}]
   (let [name (name-of-typed-value i)]
     (format "%s = getelementptr%s %s, %s, %s"
-            (render-name name)
+            (render-value-name name)
             (if inbounds " inbounds" "")
             (render-type base-type)
             (render-type-and-value ptr)
@@ -1189,7 +1189,7 @@
   [{:keys [val indices] :as i}]
   (let [name (name-of-typed-value i)]
     (format "%s = extractvalue %s, %s"
-            (render-name name)
+            (render-value-name name)
             (render-type-and-value val)
             (str/join ", " (map render-value indices)))))
 
@@ -1226,7 +1226,7 @@
   [{:keys [val elt indices] :as i}]
   (let [name (name-of-typed-value i)]
     (format "%s = insertvalue %s, %s, %s"
-            (render-name name)
+            (render-value-name name)
             (render-type-and-value val)
             (render-type-and-value elt)
             (str/join ", " (map render-value indices)))))
@@ -1386,7 +1386,7 @@ end:
         (when attrs
           (printf " %s" (render-attributes attrs)))
         (when name
-          (printf " %s" (render-name name)))))))
+          (printf " %s" (render-value-name name)))))))
 
 (m/facts
  (m/fact
@@ -1451,7 +1451,7 @@ end:
            externally-initialized constant initializer
            section partition comdat align metadata attrs]}]
   (with-out-str
-    (printf "%s = " (render-name name))
+    (printf "%s = " (render-value-name name))
     (if linkage
       (printf "%s " (render-linkage linkage))
       (when-not initializer
@@ -1601,7 +1601,7 @@ end:
         (when result-attrs
           (printf "%s " (render-attributes result-attrs)))
         (printf "%s " (render-type result-type))
-        (printf "%s(" (render-name name))
+        (printf "%s(" (render-value-name name))
         (print
          (->> params
               (map render-function-parameter)
