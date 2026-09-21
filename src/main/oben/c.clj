@@ -12,6 +12,7 @@
             [oben.core.api :as o]
             [oben.core.context :as ctx]
             [oben.core.target :as target]
+            [oben.c.target :as c-target]
             [oben.core.protocols.Algebra :as Algebra]
             [oben.core.protocols.Assignment :as Assignment]
             [oben.core.protocols.Bitwise :as Bitwise]
@@ -30,6 +31,13 @@
             [oben.core.types.Void :as Void]
             [oben.core.nodes :as nodes]
             [omkamra.llvm.ir :as ir]))
+
+(def create-target c-target/create)
+
+(clj/defmacro with-target
+  "Executes body with a temporary C-compatible target selected."
+  [opts & body]
+  `(c-target/with-target ~opts ~@body))
 
 ;; C's conversion rules are based on type rank, not merely representation
 ;; width.  In particular, an LP64 target still has distinct `int` and `long`
@@ -1331,6 +1339,14 @@
 (define-c-float-compare-op Ord/>= :oge)
 (define-c-float-compare-op Ord/> :ogt)
 
+(defn- c-target?
+  "Whether the current target has a C ABI profile installed.
+
+   Some C multimethods dispatch on core types such as pointers. Keep those
+   methods from changing ordinary Oben semantics on generic targets."
+  []
+  (contains? (target/attrs) :c-int-size))
+
 (defn- c-logical-zero
   []
   (o/cast (c-int-type) 0 false))
@@ -1339,32 +1355,59 @@
   []
   (o/cast (c-int-type) 1 false))
 
+(defn- generic-logical-and
+  [lhs rhs]
+  (list 'if
+        (o/cast Bool/%bool lhs false)
+        (o/cast Bool/%bool rhs false)
+        false))
+
+(defn- generic-logical-or
+  [lhs rhs]
+  (list 'if
+        (o/cast Bool/%bool lhs false)
+        true
+        (o/cast Bool/%bool rhs false)))
+
+(defn- generic-logical-not
+  [node]
+  (list 'if
+        (o/cast Bool/%bool node false)
+        false
+        true))
+
 (defn- c-logical-and
   [lhs rhs]
-  (let [lhs (o/cast Bool/%bool lhs false)
-        rhs (o/cast Bool/%bool rhs false)
-        zero (c-logical-zero)
-        one (c-logical-one)]
-    (list 'if lhs
-          (list 'if rhs one zero)
-          zero)))
+  (if-not (c-target?)
+    (generic-logical-and lhs rhs)
+    (let [lhs (o/cast Bool/%bool lhs false)
+          rhs (o/cast Bool/%bool rhs false)
+          zero (c-logical-zero)
+          one (c-logical-one)]
+      (list 'if lhs
+            (list 'if rhs one zero)
+            zero))))
 
 (defn- c-logical-or
   [lhs rhs]
-  (let [lhs (o/cast Bool/%bool lhs false)
-        rhs (o/cast Bool/%bool rhs false)
-        zero (c-logical-zero)
-        one (c-logical-one)]
-    (list 'if lhs
-          one
-          (list 'if rhs one zero))))
+  (if-not (c-target?)
+    (generic-logical-or lhs rhs)
+    (let [lhs (o/cast Bool/%bool lhs false)
+          rhs (o/cast Bool/%bool rhs false)
+          zero (c-logical-zero)
+          one (c-logical-one)]
+      (list 'if lhs
+            one
+            (list 'if rhs one zero)))))
 
 (defn- c-logical-not
   [node]
-  (let [node (o/cast Bool/%bool node false)
-        zero (c-logical-zero)
-        one (c-logical-one)]
-    (list 'if node zero one)))
+  (if-not (c-target?)
+    (generic-logical-not node)
+    (let [node (o/cast Bool/%bool node false)
+          zero (c-logical-zero)
+          one (c-logical-one)]
+      (list 'if node zero one))))
 
 (defmacro define-c-logical-binary-op
   [multifn implementation]

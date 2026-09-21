@@ -55,23 +55,6 @@
       (get attr-map name)
       (throw (ex-info "missing target attribute" {:name name})))))
 
-(defn common-lp64-c-attrs
-  "Returns the common LP64 C ABI attributes for `address-size` bits."
-  [address-size]
-  {:c-bool-size 8
-   :c-char-size 8
-   :c-char-signed? true
-   :c-short-size 16
-   :c-int-size 32
-   :c-long-size 64
-   :c-long-long-size 64
-   :c-size-t-size address-size
-   :c-size-t-rank 4
-   :c-ptrdiff-t-size address-size
-   :c-ptrdiff-t-rank 4
-   :c-float-size 32
-   :c-double-size 64})
-
 (defn invoke-function
   [this fnode args]
   (swap! this Target/compile-function fnode)

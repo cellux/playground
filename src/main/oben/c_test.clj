@@ -11,7 +11,7 @@
             [oben.core.types.Void :as Void]
             [oben.core.protocols.Callable :as Callable]))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [add (oben/fn ^c/int [^c/int lhs ^c/int rhs]
              (+ lhs rhs))
         constant-add (oben/fn ^c/int []
@@ -75,7 +75,7 @@
     (m/fact "_Bool uses the same usual-arithmetic-conversion path"
             (int-bool-add 4) => 5)))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [t (target/current)
         signature (c/c-function-type (c/int t)
                                      [(c/int t)]
@@ -89,7 +89,7 @@
             (mapv o/type-of (:args (meta call)))
             => [(c/int t) (c/double t)])))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [identity (c/fn ^c/int [^c/int x]
                    x)
         caller (oben/fn ^c/int []
@@ -102,7 +102,7 @@
     (m/fact "C scalar lvalues undergo lvalue-to-rvalue conversion at calls"
             (lvalue-caller) => 9)))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [head (c/fn c/int [(oben/Array c/int 3) xs]
                (get xs 0))
         caller (c/fn c/int []
@@ -112,7 +112,7 @@
     (m/fact "C array parameters adjust to pointers and array arguments decay"
             (caller) => 7)))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [sum (c/fn c/int []
               (let [x (var c/int (c/int 3))
                     y (var c/int x)]
@@ -164,7 +164,7 @@
             (function-argument) => 12
             (explicit-function-decay) => 12)))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [printf (c/extern printf c/int [(* c/char)] {:variadic? true})
         old-style (c/extern old_style c/int [] {:prototype? false})
         variadic (c/fn ^c/int [^c/int x] {:variadic? true}
@@ -192,7 +192,7 @@
             (compile-source variadic)
             => #(.contains % "define i32 @fn.1.0(i32 %x, ...)"))))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [t (target/current)
         signed-char (c/signed-char t)
         unsigned-char (c/unsigned-char t)
@@ -224,14 +224,14 @@
             (:bits (meta ptrdiff-t)) => (target/attr :address-size)
             (:signed? (meta ptrdiff-t)) => true)))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [sizeof-int (o/parse '(sizeof c/int))
         alignof-int (o/parse '(alignof c/int))]
     (m/fact "value-producing layout forms use C type layout"
             (o/constant->value sizeof-int) => 4
             (o/constant->value alignof-int) => 4)))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [left-shift (oben/fn ^c/int [^c/short value ^c/short count]
                     (bit-shift-left value count))
         signed-right-shift (oben/fn ^c/int [^c/int value ^c/short count]
@@ -252,7 +252,7 @@
     (m/fact "C unary bit-not promotes small integer operands before lowering"
             (bit-not-short 0) => -1)))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [float-add (oben/fn ^c/float [^c/float x ^c/int n]
                     (+ x n))
         double-product (oben/fn ^c/double [^c/double x ^c/double y]
@@ -279,7 +279,7 @@
     (m/fact "C floating != treats NaN as unequal"
             (nan-not-equal Double/NaN) => 1)))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [t (target/current)
         convert (fn [lhs-type lhs rhs-type rhs]
                   (c/usual-arithmetic-conversions
@@ -299,7 +299,7 @@
      (c/float t) 16777216.0 (c/double t) 16777217.0
      (c/double t) 16777216.0 16777217.0)))
 
-(oben/with-target :dump
+(c/with-target :dump
   (let [signed (oben/fn ^c/int [^c/double x]
                  (cast c/int x))
         unsigned (oben/fn ^c/uint [^c/double x]
@@ -326,7 +326,7 @@
     (m/fact "numeric float-to-unsigned-integer casts use fptoui"
             (compile numeric-unsigned) => (m/contains "fptoui double"))))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [logical-and (oben/fn ^c/int [^c/int lhs ^c/int rhs]
                        (and lhs rhs))
         logical-or (oben/fn ^c/int [^c/int lhs ^c/int rhs]
@@ -357,7 +357,7 @@
             (short-circuit 0) => 0
             (short-circuit 2) => 1)))
 
-(oben/with-target {:type :inprocess
+(c/with-target {:type :inprocess
                    :attrs {:c-int-size 64
                            :c-long-size 64
                            :c-float-size 64}}
@@ -367,13 +367,13 @@
     (m/fact "portable C qualifiers are preserved"
             (:qualifiers (meta qualified-int)) => #{:const :volatile})))
 
-(oben/with-target {:type :inprocess
+(c/with-target {:type :inprocess
                    :attrs {:c-char-size 16}}
   (m/fact "non-8-bit C CHAR_BIT targets are rejected by sizeof"
           (o/sizeof (o/parse 'c/char))
           => (m/throws #"non-8-bit CHAR_BIT")))
 
-(oben/with-target {:type :inprocess
+(c/with-target {:type :inprocess
                    :attrs {:c-int-size 64
                            :c-long-size 64
                            :c-float-size 64}}
@@ -418,7 +418,7 @@
                                      (var c/long 0)))
             => (m/throws #"conditional pointer types are incompatible"))))
 
-(oben/with-target :dump
+(c/with-target :dump
   (let [void-ptr (Ptr/Ptr Void/%void)
         f (oben/fn void-ptr [^c/int condition]
             (let [values (var (array c/int [4 7 9]))
@@ -433,7 +433,7 @@
     (m/fact "C object-pointer and void-pointer conditionals lower via i8*"
             source => (m/contains "i8*"))))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [mixed-float (oben/fn ^c/double [^c/int condition]
                        (if condition
                          (c/float 1.5)
@@ -478,7 +478,7 @@
     (m/fact "C conditional pointers accept integer constant zero"
             (pointer-arm 1) => 7)))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [t (target/current)
         comma-value (oben/fn ^c/int []
                       (let [v (var c/int 0)]
@@ -490,7 +490,7 @@
     (m/fact "C comma expressions have the rhs type"
             (o/type-of comma-type) => (m/exactly (c/long t)))))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [for-sum (oben/fn ^c/int [^c/int limit]
                   (let [i (var c/int 0)
                         sum (var c/int 0)]
@@ -509,7 +509,7 @@
             (o/parse '(c/break)) => (m/throws #"break used outside")
             (o/parse '(c/continue)) => (m/throws #"continue used outside"))))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [do-while-once (oben/fn ^c/int [^c/int limit]
                         (let [i (var c/int 0)]
                           (c/do-while (< @i limit)
@@ -531,7 +531,7 @@
     (m/fact "C do-while gives continue the condition-check target"
             (do-while-control) => 4)))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [switch-value (oben/fn ^c/int [^c/int value]
                        (let [result (var c/int 0)]
                          (c/switch value
@@ -556,7 +556,7 @@
                        (:case (c/int 1) (nop))))
             => (m/throws #"duplicate C switch case value"))))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [arithmetic (oben/fn ^c/int []
                    (let [v (var c/int 10)]
                      (add= v 5)
@@ -660,7 +660,7 @@
     (m/fact "readable shorthand aliases remain available"
             (shorthand) => 1)))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [pre-inc (oben/fn ^c/int []
                   (let [v (var c/int 3)]
                     (c/pre-inc! v)))

@@ -186,9 +186,8 @@
       (assoc this :ctx ctx))))
 
 (def default-attrs
-  (merge {:address-size platform/address-size
-          :align-min 1}
-         (target/common-lp64-c-attrs platform/address-size)))
+  {:address-size platform/address-size
+   :align-min 1})
 
 (defn create
   [{:keys [attrs invoke-strategy target-layout] :as _opts}]

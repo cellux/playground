@@ -12,9 +12,8 @@
 (def default-url "http://127.0.0.1:18080")
 
 (def default-attrs
-  (merge {:address-size platform/address-size
-          :align-min 1}
-         (target/common-lp64-c-attrs platform/address-size)))
+  {:address-size platform/address-size
+   :align-min 1})
 
 (defn- endpoint
   [url & segments]

@@ -14,7 +14,7 @@
   (let [node ((:parse-for-target (meta f)) (target/current))]
     (:source (compiler/compile-function (target/current) (target/ctx) node))))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [int-type (c/int (target/current))
         row (Array/Array int-type 3)
         matrix (Array/Array row 2)
@@ -29,7 +29,7 @@
       (o/type-of address) => (m/exactly (Ptr/Ptr matrix))
       (c/c-expression-value pointer) => (m/exactly pointer))))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [Row (oben/Array c/int 3)
         Matrix (oben/Array Row 2)
         last-in-second-row (c/fn c/int [(* Row) rows]
@@ -46,7 +46,7 @@
     (m/fact "multidimensional arguments decay once; &array does not decay"
       (caller) => 23)))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [head (c/fn c/int [(* c/int) p] (load p))
         aliases (c/fn c/int []
                   (let [x (var c/int (c/int 1))
@@ -78,7 +78,7 @@
     (m/fact "taking an address does not clone the underlying alloca"
       (count (re-seq #"alloca i32" alias-source)) => 1)))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [Pair (oben/Struct [c/int x c/int y])
         read-fields (c/fn c/int []
                       (let [p (var Pair [(c/int 4) (c/int 5)])]
@@ -92,7 +92,7 @@
       (read-fields) => 12
       (core-read) => 12)))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [f (c/fn c/int [c/int x] x)
         node ((:parse-for-target (meta f)) (target/current))
         signature (:object-type (meta (o/type-of node)))
@@ -103,7 +103,7 @@
       (c/c-function-type int-type [int-type] {:linkage :external})
       => (m/exactly signature))))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [int-type (c/int (target/current))
         source-type (Ptr/Ptr (o/qualify int-type :const))
         dest-type (Ptr/Ptr (o/qualify int-type :const))
@@ -113,7 +113,7 @@
     (m/fact "equally qualified pointer arguments have compatible object types"
       (o/type-of (nodes/%funcall callee arg)) => (m/exactly int-type))))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [outer (c/fn c/int [c/int unused] {:variadic? true}
                 (let [inner (fn c/int [] (c/int 5))]
                   (inner)))
@@ -121,7 +121,7 @@
     (m/fact "a nested core function does not inherit C definition options"
       (count (re-seq #"\.\.\." source)) => 1)))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [int-type (c/int (target/current))
         int-pointer (Ptr/Ptr int-type)
         const-int-pointer (Ptr/Ptr (o/qualify int-type :const))
@@ -140,7 +140,7 @@
        (Ptr/Ptr (c/c-function-type int-type [const-int-pointer])))
       => (m/throws #"incompatible pointer argument"))))
 
-(oben/with-target :inprocess
+(c/with-target :inprocess
   (let [Row (oben/Array c/int 3)
         Matrix (oben/Array Row 2)
         old-style (c/extern old_style c/int [] {:prototype? false})
