@@ -52,12 +52,12 @@
  (let [t (Fn (Number/UInt 32)
              [(Number/UInt 32)]
              {:variadic? true
-              :call-semantics :c17})]
+              :semantics :c17})]
    (m/fact (select-keys (meta t)
-                        [:prototype? :variadic? :call-semantics])
+                        [:prototype? :variadic? :semantics])
            => {:prototype? true
                :variadic? true
-               :call-semantics :c17})
+               :semantics :c17})
    (m/fact (compile-type t)
            => [:fn [:integer 32] [[:integer 32]] {:variadic? true}])))
 

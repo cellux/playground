@@ -7,18 +7,17 @@
   (:require [clojure.core :as clj]
             [oben.core.api :as o]))
 
-(defn call-semantics
-  "Returns the call-semantics tag for a callable node.
+(defn semantics
+  "Returns the language-semantics tag for a callable node.
 
-   Function nodes are pointers to `Fn` types, so the metadata describing call
-   semantics lives on the pointed-to function type rather than on the pointer
-   type itself."
+   Function nodes are pointers to `Fn` types, so the metadata describing their
+   semantics lives on the pointed-to function type."
   [callee]
   (let [type (o/type-of callee)
         object-type (:object-type (meta type))]
-    (or (:call-semantics (meta object-type))
+    (or (:semantics (meta object-type))
         :oben)))
 
 (clj/defmulti call
   (fn [callee _args]
-    (call-semantics callee)))
+    (semantics callee)))

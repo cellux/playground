@@ -9,6 +9,7 @@
   (:require [oben.core.protocols.Logical :as Logical])
   (:require [oben.core.protocols.Conditional :as Conditional])
   (:require [oben.core.protocols.Callable :as Callable])
+  (:require [oben.core.protocols.Semantics :as Semantics])
   (:require [oben.core.types.Fn :as Fn])
   (:require [oben.core.types.Aggregate :as Aggregate])
   (:require [oben.core.context :as ctx])
@@ -218,12 +219,8 @@
    (let [{:keys [block-id return-label return-type return-types] :as block-data}
          (get-in &env [:oben/blocks block-name])
          parsed-value (o/parse form &env)
-         value-node (if-let [convert-value
-                             (get-in &env
-                                     [:oben/expression-semantics
-                                      :convert-value])]
-                      (convert-value parsed-value)
-                      parsed-value)
+         semantics (get &env :oben/semantics :oben)
+         value-node (Semantics/expression-value semantics parsed-value)
          value-node (if return-type
                       (%cast return-type value-node)
                       value-node)]
@@ -367,40 +364,31 @@
         fn-options (let [opts (get &env :oben/fn-options)]
                      (when opts
                        (assoc opts :prototype? (get opts :prototype? true))))
-        return-type (if-let [transform (:return-type-transform fn-options)]
-                      (transform declared-return-type)
-                      declared-return-type)
-        param-types (if-let [transform (:parameter-type-transform fn-options)]
-                      (mapv transform declared-param-types)
-                      declared-param-types)
+        semantics (get fn-options :semantics :oben)
         _ (when (and fn-options (not (:prototype? fn-options)))
             (throw (ex-info "an Oben function definition requires a prototype"
                             {:options fn-options})))
-        fn-type (if fn-options
-                  (Fn/Fn return-type param-types (Fn/signature-options fn-options))
-                  (Fn/Fn return-type param-types))
+        fn-type (Fn/function-type declared-return-type
+                                  declared-param-types
+                                  (or fn-options {}))
+        {:keys [return-type param-types]} (meta fn-type)
         ir-fn-options (some-> fn-options
-                               (dissoc :prototype? :call-semantics
-                                       :parameter-type-transform
-                                       :return-type-transform
-                                       :expression-semantics))
-        expression-semantics (:expression-semantics fn-options)
+                              (dissoc :prototype? :semantics))
         params (mapv function-parameter param-names param-types)
         ir-params params]
     (if (seq body)
       (let [void? (= return-type %void)
             ;; Function options belong to this definition, not to nested core
-            ;; fn forms. Always establish a fresh expression-policy boundary.
+            ;; fn forms. Always establish a fresh language-semantics boundary.
             env (-> (into &env (map vector param-names params))
                     (dissoc :oben/fn-options)
-                    (assoc :oben/expression-semantics expression-semantics))
+                    (assoc :oben/semantics semantics))
             body-node (o/parse (list* 'block :oben/fn-block body) env)
-            convert-value (:convert-value expression-semantics)
             body-node (if void?
                         body-node
-                        (%cast return-type (if convert-value
-                                            (convert-value body-node)
-                                            body-node)))]
+                        (%cast return-type
+                               (Semantics/expression-value
+                                semantics body-node)))]
         (o/make-node (Ptr/Ptr fn-type)
           (fn [ctx]
             (let [saved ctx
@@ -464,8 +452,7 @@
            compiled-ftype (ctx/compiled-type ctx ftype)
            [_ return-type param-types {:keys [variadic?]}] compiled-ftype
            f (ir/function name return-type param-types
-                          (assoc (dissoc opts :prototype? :call-semantics
-                                         :parameter-type-transform)
+                          (assoc (dissoc opts :prototype? :semantics)
                                  :variadic? (or variadic?
                                                 (:variadic? opts)
                                                 (not (:prototype? opts)))))]
@@ -503,7 +490,7 @@
        :args args
        :argument-evaluation-order :left-to-right})))
 
-(defmethod Callable/call :default
+(defmethod Callable/call :oben
   [fnode args]
   (let [ftype (-> fnode o/type-of meta :object-type)
         {:keys [param-types]} (meta ftype)]

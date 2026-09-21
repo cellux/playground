@@ -4,6 +4,7 @@
   (:require [clojure.string :as str])
   (:require [clojure.walk :as walk])
   (:require [oben.core.target :as target])
+  (:require [oben.core.protocols.Semantics :as Semantics])
   (:import [java.util WeakHashMap]))
 
 (defn make-tid
@@ -553,16 +554,15 @@
 
 (defn- parse-application
   [form env]
-  (let [op (parse (first form) env)
-        args (next form)
-        {:keys [convert-value argument? convert-result transform-type-argument]
-         :or {convert-value identity
-              argument? (constantly true)}} (:oben/expression-semantics env)]
+  (let [semantics (get env :oben/semantics :oben)
+        op (parse (first form) env)
+        args (next form)]
     (if (oben-macro? op)
       ;; Macros own their argument parsing. Do not convert their raw forms.
       (let [result (parse (apply op form env args) env)]
-        (if convert-result (convert-result op result) result))
-      (let [callee (when (node? op) (convert-value op))
+        (Semantics/expression-result semantics op result))
+      (let [callee (when (node? op)
+                     (Semantics/expression-value semantics op))
             ;; Normalize call/access shorthand BEFORE converting arguments.
             ;; Re-parsing `(funcall callee converted-args...)` would apply the
             ;; language's argument conversion twice, and access shorthand must
@@ -584,12 +584,15 @@
                   (map-indexed
                    (fn [index arg]
                      (let [value (parse arg env)
-                           value (if (and transform-type-argument (type? value))
-                                   (transform-type-argument op index value)
+                           value (if (type? value)
+                                   (Semantics/type-argument
+                                    semantics op index value)
                                    value)]
                        (if (and (not (and converted-callee? (zero? index)))
-                                (argument? op index))
-                         (convert-value value)
+                                (= :value
+                                   (Semantics/operand-context
+                                    semantics op index)))
+                         (Semantics/expression-value semantics value)
                          value))))
                   args)
             result (cond
@@ -603,17 +606,14 @@
                      (throw (ex-info "cannot apply operator"
                                      {:form form :operator op})))
             result (parse result env)]
-        (if convert-result (convert-result op result) result)))))
+        (Semantics/expression-result semantics op result)))))
 
 (defn parse
   "Parses a form using lexical bindings and semantic context in `env`.
 
-   Optional :oben/expression-semantics hooks operate on parsed values:
-     :convert-value           value -> value
-     :argument?               resolved operator, argument index -> boolean
-     :convert-result          resolved operator, result -> result
-     :transform-type-argument resolved operator, argument index, type -> type
-   Macros receive raw forms and control their own argument parsing."
+   :oben/semantics selects the language semantics implemented by
+   oben.core.protocols.Semantics; it defaults to :oben. Macros receive raw
+   forms and control their own argument parsing."
   ([form env]
    (letfn [(die []
              (throw (ex-info "cannot parse form" {:form form :env env})))

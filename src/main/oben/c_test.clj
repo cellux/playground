@@ -5,11 +5,13 @@
             [oben.core.api :as o]
             [oben.core.compiler :as compiler]
             [oben.core.target :as target]
+            [oben.core.types.Array :as Array]
             [oben.core.types.Bool :as Bool]
             [oben.core.types.Number :as Number]
             [oben.core.types.Ptr :as Ptr]
             [oben.core.types.Void :as Void]
-            [oben.core.protocols.Callable :as Callable]))
+            [oben.core.protocols.Callable :as Callable]
+            [oben.core.protocols.Semantics :as Semantics]))
 
 (c/with-target :inprocess
   (let [add (oben/fn ^c/int [^c/int lhs ^c/int rhs]
@@ -85,9 +87,14 @@
               callee
               [(o/cast (c/short t) 1 false)
                (o/cast (c/float t) 1.0 false)])]
+    (m/fact "C function types carry one unified semantics identifier"
+            (:semantics (meta signature)) => :c17)
     (m/fact "C variadic calls apply fixed conversions and default promotions"
             (mapv o/type-of (:args (meta call)))
-            => [(c/int t) (c/double t)])))
+            => [(c/int t) (c/double t)])
+    (m/fact "C function return types are validated independently of parameters"
+            (c/c-function-type (Array/Array (c/int t) 2) [])
+            => (m/throws #"cannot return an array or function type"))))
 
 (c/with-target :inprocess
   (let [identity (c/fn ^c/int [^c/int x]
@@ -411,7 +418,8 @@
             => (m/exactly double-type))
     (m/fact "C object pointers combine with void pointers"
             (o/type-of void-conditional)
-            => (m/exactly (c/c-parameter-type (Ptr/Ptr Void/%void))))
+            => (m/exactly (Semantics/parameter-type
+                           :c17 (Ptr/Ptr Void/%void))))
     (m/fact "C pointers to same-width but distinct integer types are incompatible"
             (o/parse '(c/conditional (c/int 1)
                                      (var c/int 0)

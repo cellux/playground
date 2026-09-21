@@ -19,6 +19,7 @@
             [oben.core.protocols.Logical :as Logical]
             [oben.core.protocols.Conditional :as Conditional]
             [oben.core.protocols.Callable :as Callable]
+            [oben.core.protocols.Semantics :as Semantics]
             [oben.core.protocols.Container :as Container]
             [oben.core.protocols.Place :as Place]
             [oben.core.protocols.Eq :as Eq]
@@ -566,12 +567,10 @@
           (isa? (o/tid-of-type type) ::N/SInt)
           (rank-for-target-bits (target/current) bits))))
 
-(declare c-expression-value)
-
 (defn- as-c-node
   "Gives an integer operand its C semantic type before integer promotions."
   [node]
-  (let [node (c-expression-value node)
+  (let [node (Semantics/expression-value :c17 node)
         type (o/type-of node)]
     (cond
       (c-int-type? type) node
@@ -1533,7 +1532,7 @@
 (defn- c-default-argument-promotion
   "Applies C17's default argument promotions to one argument."
   [node]
-  (let [node (c-expression-value node)
+  (let [node (Semantics/expression-value :c17 node)
         type (o/type-of node)]
     (cond
       (c-int-type? type)
@@ -1568,33 +1567,55 @@
     (c-pointer-type type)
     type))
 
-(defn c-type-argument
-  "Applies C declaration typing to type arguments parsed in a C body."
-  [op index type]
+(defmethod Semantics/type-argument [:c17 ::Ptr/Ptr]
+  [_ op index type]
   (if (and (= op nodes/%var) (zero? index))
     (c-local-declaration-type type)
     type))
 
-(defn c-parameter-type
-  "Returns a C function parameter's adjusted type.
+(defmethod Semantics/type-argument [:c17 :oben/Any]
+  [_ _ _ type]
+  type)
 
-   C17 6.7.6.3 adjusts array parameters to pointers to their first element and
-   function parameters to pointers to function. Top-level qualifiers on a
-   parameter do not affect calls, so they are removed as well."
+;; C17 6.7.6.3 adjusts array parameters to pointers to their first element and
+;; function parameters to pointers to function. Top-level qualifiers on a
+;; parameter do not affect calls.
+(defmethod Semantics/parameter-type [:c17 ::Array/Array]
+  [_ type]
+  (CPtr (:element-type (meta (unqualified-type type)))))
+
+(defmethod Semantics/parameter-type [:c17 ::Fn/Fn]
+  [_ type]
+  (CPtr (unqualified-type type)))
+
+(defmethod Semantics/parameter-type [:c17 ::Ptr/Ptr]
+  [_ type]
+  (c-pointer-type (unqualified-type type)))
+
+(defmethod Semantics/parameter-type [:c17 :oben/Any]
+  [_ type]
+  (unqualified-type type))
+
+(defn- invalid-c-return-type
   [type]
-  (let [type (unqualified-type type)]
-    (cond
-      (isa? (o/tid-of-type type) ::Array/Array)
-      (CPtr (:element-type (meta type)))
+  (throw (ex-info "a C function cannot return an array or function type"
+                  {:return-type type})))
 
-      (isa? (o/tid-of-type type) ::Fn/Fn)
-      (CPtr type)
+(defmethod Semantics/return-type [:c17 ::Array/Array]
+  [_ type]
+  (invalid-c-return-type type))
 
-      (pointer-type? type)
-      (c-pointer-type type)
+(defmethod Semantics/return-type [:c17 ::Fn/Fn]
+  [_ type]
+  (invalid-c-return-type type))
 
-      :else
-      type)))
+(defmethod Semantics/return-type [:c17 ::Ptr/Ptr]
+  [_ type]
+  (c-pointer-type type))
+
+(defmethod Semantics/return-type [:c17 :oben/Any]
+  [_ type]
+  type)
 
 (defn- array-pointer?
   [type]
@@ -1666,8 +1687,8 @@
            (isa? (o/tid-of-type to-type) ::Fn/Fn))
       (c-compatible-function-type? from-type to-type)
       (and (c-pointer-type? from-type) (c-pointer-type? to-type))
-      ;; Top-level parameter qualifiers were removed by `c-parameter-type`,
-      ;; but qualifiers on the pointed-to type remain part of a function
+      ;; Top-level parameter qualifiers were removed by the parameter-type
+      ;; semantics, but qualifiers on the pointed-to type remain part of a function
       ;; pointer's compatible signature.
       (and (= (o/qualifiers (:object-type (meta from-type)))
               (o/qualifiers (:object-type (meta to-type))))
@@ -1714,81 +1735,73 @@
       {:class ::pointer-rvalue
        :oben.c/value-category :rvalue})))
 
-(defn c-expression-result
-  "Preserves the pointer value category of address-of, explicit GEP, and
-   pointer arithmetic without changing core Oben's place operations."
-  [op node]
-  (if (and (o/node? node)
-           (pointer-type? (o/type-of node))
-           (contains? #{Place/address-of nodes/%gep Algebra/+ Algebra/-} op))
+(defmethod Semantics/expression-result [:c17 ::Ptr/Ptr]
+  [_ op node]
+  (if (contains? #{Place/address-of nodes/%gep Algebra/+ Algebra/-} op)
     (c-pointer-rvalue (c-pointer-node node))
     node))
 
-(defn c-expression-argument?
-  "Whether an argument is an ordinary C value-expression position.
+(defmethod Semantics/expression-result [:c17 :oben/Any]
+  [_ _ node]
+  node)
 
-   The first operand of explicit place operations is intentionally excluded:
-   `&x`, assignment targets, and explicit loads require the original place.
-   Core aggregate access retains its receiver (including array dimensions).
-   Array/function decay helpers similarly receive their unconverted operand."
-  [op index]
-  (not (and (zero? index)
-            (contains? #{Place/address-of Place/load Place/store! Ptr/%deref
-                         Place/pre-update! Place/post-update! Place/update!
-                         Container/get Container/get-in Container/at Container/at-in
-                         Container/assoc! Container/assoc-in!
-                         nodes/%set! nodes/%gep
-                         pre-inc! post-inc! pre-dec! post-dec!
-                         Assignment/add-assign Assignment/sub-assign
-                         Assignment/mul-assign Assignment/div-assign
-                         Assignment/rem-assign Assignment/shift-left-assign
-                         Assignment/shift-right-assign Assignment/bit-and-assign
-                         Assignment/bit-xor-assign Assignment/bit-or-assign
-                         decay-array decay-function}
-                       op))))
+(def ^:private c-place-operand-operators
+  #{Place/address-of Place/load Place/store! Ptr/%deref
+    Place/pre-update! Place/post-update! Place/update!
+    Container/get Container/get-in Container/at Container/at-in
+    Container/assoc! Container/assoc-in!
+    nodes/%set! nodes/%gep
+    pre-inc! post-inc! pre-dec! post-dec!
+    Assignment/add-assign Assignment/sub-assign
+    Assignment/mul-assign Assignment/div-assign
+    Assignment/rem-assign Assignment/shift-left-assign
+    Assignment/shift-right-assign Assignment/bit-and-assign
+    Assignment/bit-xor-assign Assignment/bit-or-assign
+    decay-array decay-function})
 
-(defn c-expression-value
-  "Applies C's ordinary expression value conversions.
+(defmethod Semantics/operand-context :c17
+  [_ op index]
+  (if (and (zero? index) (contains? c-place-operand-operators op))
+    :place
+    :value))
 
-   Arrays decay before lvalue-to-rvalue conversion, function designators
-   already are pointers in Oben, and addressable scalar/pointer object places
-   are loaded. The C parser installs this only for C function bodies; core
-   Oben retains its explicit aggregate and place semantics."
+(defn- c-pointer-expression-value
   [node]
-  (if-not (o/node? node)
-    node
-    (let [type (o/type-of node)]
-      (cond
-        ;; A pointer-to-array value is not an array designator. In particular,
-        ;; &array, pointer parameters, and the result of a previous decay must
-        ;; retain their pointer type on subsequent conversion passes.
-        (and (c-object-place? node) (array-pointer? type))
-        (decay-array node)
+  (let [type (o/type-of node)]
+    (cond
+      ;; A pointer-to-array value is not an array designator. In particular,
+      ;; &array, pointer parameters, and the result of a previous decay must
+      ;; retain their pointer type on subsequent conversion passes.
+      (and (c-object-place? node) (array-pointer? type))
+      (decay-array node)
 
-        (o/fnode? node)
-        (decay-function node)
+      (o/fnode? node)
+      (decay-function node)
 
-        ;; C local/global storage is represented by a core pointer. Loading
-        ;; it produces either a scalar value or (for pointer objects) a C
-        ;; pointer rvalue.
-        (and (c-object-place? node) (pointer-type? type))
-        (let [value (Place/load node)]
-          (if (pointer-type? (o/type-of value))
-            (c-pointer-node value)
-            value))
+      ;; C local/global storage is represented by a core pointer. Loading it
+      ;; produces either a scalar value or a C pointer rvalue.
+      (c-object-place? node)
+      (let [value (Place/load node)]
+        (if (pointer-type? (o/type-of value))
+          (c-pointer-node value)
+          value))
 
-        ;; Pointer rvalues entering a C expression (for example, a value
-        ;; returned by an Oben helper) cross the C semantic boundary here.
-        (pointer-type? type)
-        (c-pointer-node node)
+      ;; Pointer rvalues crossing into C acquire the C pointer subtype.
+      :else
+      (c-pointer-node node))))
 
-        :else
-        node))))
+(defmethod Semantics/expression-value [:c17 ::Ptr/Ptr]
+  [_ node]
+  (c-pointer-expression-value node))
+
+(defmethod Semantics/expression-value [:c17 :oben/Any]
+  [_ node]
+  node)
 
 (defn- c-fixed-argument-conversion
   [parameter-type argument]
-  (let [parameter-type (c-parameter-type parameter-type)
-        argument (c-expression-value argument)
+  (let [parameter-type (Semantics/parameter-type :c17 parameter-type)
+        argument (Semantics/expression-value :c17 argument)
         argument-type (o/type-of argument)]
     (cond
       (and (c-pointer-type? parameter-type)
@@ -1808,15 +1821,11 @@
   ([return-type param-types]
    (c-function-type return-type param-types {}))
   ([return-type param-types opts]
-   (let [opts (assoc opts :call-semantics :c17)
-         return-type (if (pointer-type? return-type)
-                       (c-pointer-type return-type)
-                       return-type)
-         param-types (mapv c-parameter-type param-types)]
+   (let [opts (assoc opts :semantics :c17)]
      (when (and (:variadic? opts) (empty? param-types))
        (throw (ex-info "a C variadic function requires a named parameter before ..."
                        {:return-type return-type :param-types param-types})))
-     (Fn/Fn return-type param-types (Fn/signature-options opts)))))
+     (Fn/function-type return-type param-types opts))))
 
 (defn make-extern
   "Creates a target-portable declaration for an external C function."
@@ -1884,15 +1893,7 @@
         [opts body] (if (map? (first body))
                       [(first body) (next body)]
                       [{} body])
-        opts (assoc opts
-                    :call-semantics :c17
-                    :parameter-type-transform `c-parameter-type
-                    :return-type-transform `c-parameter-type
-                    :expression-semantics
-                    {:convert-value `c-expression-value
-                     :argument? `c-expression-argument?
-                     :convert-result `c-expression-result
-                     :transform-type-argument `c-type-argument})]
+        opts (assoc opts :semantics :c17)]
     (when (= false (:prototype? opts))
       (throw (ex-info "c/fn definitions require a prototype" {:options opts})))
     (when (and (:variadic? opts) (empty? params))

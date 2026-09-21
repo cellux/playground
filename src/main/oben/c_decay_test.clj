@@ -8,7 +8,8 @@
             [oben.core.target :as target]
             [oben.core.types.Array :as Array]
             [oben.core.types.Ptr :as Ptr]
-            [oben.core.protocols.Place :as Place]))
+            [oben.core.protocols.Place :as Place]
+            [oben.core.protocols.Semantics :as Semantics]))
 
 (defn- compile-source [f]
   (let [node ((:parse-for-target (meta f)) (target/current))]
@@ -19,17 +20,18 @@
         row (Array/Array int-type 3)
         matrix (Array/Array row 2)
         place (nodes/%var matrix nil)
-        decayed (c/c-expression-value place)
-        address (c/c-expression-result Place/address-of place)
+        decayed (Semantics/expression-value :c17 place)
+        address (Semantics/expression-result :c17 Place/address-of place)
         pointer (nodes/function-parameter 'p (Ptr/Ptr row))
-        row-pointer (c/c-parameter-type (Ptr/Ptr row))
-        matrix-pointer (c/c-parameter-type (Ptr/Ptr matrix))]
+        row-pointer (Semantics/parameter-type :c17 (Ptr/Ptr row))
+        matrix-pointer (Semantics/parameter-type :c17 (Ptr/Ptr matrix))]
     (m/facts "array decay tags pointer rvalues with C semantics"
       (o/type-of decayed) => (m/exactly row-pointer)
-      (c/c-expression-value decayed) => (m/exactly decayed)
-      (c/c-expression-value address) => (m/exactly address)
+      (Semantics/expression-value :c17 decayed) => (m/exactly decayed)
+      (Semantics/expression-value :c17 address) => (m/exactly address)
       (o/type-of address) => (m/exactly matrix-pointer)
-      (o/type-of (c/c-expression-value pointer)) => (m/exactly row-pointer))))
+      (o/type-of (Semantics/expression-value :c17 pointer))
+      => (m/exactly row-pointer))))
 
 (c/with-target :inprocess
   (let [Row (oben/Array c/int 3)
