@@ -75,7 +75,7 @@
   [target name default]
   (get (target/attrs* target) name default))
 
-(defn- rank-for-bits*
+(defn- rank-for-bits
   [bits char-size short-size int-size long-size fallback]
   (cond
     (<= bits char-size) rank-char
@@ -86,7 +86,7 @@
 
 (defn- rank-for-target-bits
   [target bits]
-  (rank-for-bits* bits
+  (rank-for-bits bits
                   (target/attr* target :c-char-size)
                   (target/attr* target :c-short-size)
                   (target/attr* target :c-int-size)
@@ -500,17 +500,13 @@
 
 (declare bool-type?)
 
-(defn- rank-for-bits
-  [bits]
-  (rank-for-bits* bits 8 16 32 64 rank-long))
-
 (defn- number->c-type
   [type]
   (let [bits (:size (meta type))]
     (CInt :core-integer
           bits
           (isa? (o/tid-of-type type) ::N/SInt)
-          (rank-for-bits bits))))
+          (rank-for-target-bits (target/current) bits))))
 
 (declare c-expression-value)
 
