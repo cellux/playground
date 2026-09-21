@@ -113,6 +113,58 @@
             (caller) => 7)))
 
 (oben/with-target :inprocess
+  (let [sum (c/fn c/int []
+              (let [x (var c/int (c/int 3))
+                    y (var c/int x)]
+                (set! y x)
+                (+ x y)))
+        array-compare (c/fn c/int []
+                        (let [xs (var (oben/Array c/int 2)
+                                      [(c/int 1) (c/int 2)])]
+                          (!= xs nil)))
+        head (c/fn c/int [(* c/int) p]
+               (get p 0))
+        explicit-array-decay (c/fn c/int []
+                               (let [xs (var (oben/Array c/int 2)
+                                             [(c/int 7) (c/int 8)])]
+                                 (head (c/decay-array xs))))
+        address-of-head (c/fn c/int []
+                          (let [x (var c/int (c/int 13))]
+                            (head (address-of x))))
+        conditional-head (c/fn c/int [c/int choose]
+                           (let [xs (var (oben/Array c/int 2)
+                                         [(c/int 1) (c/int 2)])
+                                 ys (var (oben/Array c/int 2)
+                                         [(c/int 3) (c/int 4)])]
+                             (head (if choose xs ys))))
+        identity (c/fn c/int [c/int x] x)
+        apply-one (c/fn c/int [(* (c/c-function-type c/int [c/int])) f]
+                    (f (c/int 12)))
+        indirect (c/fn c/int []
+                   (let [fp (var (* (c/c-function-type c/int [c/int]))
+                                 identity)]
+                     (fp (c/int 11))))
+        function-argument (c/fn c/int []
+                            (apply-one identity))
+        explicit-function-decay (c/fn c/int []
+                                  (apply-one (c/decay-function identity)))]
+    (m/fact "C initializer and assignment value contexts load scalar places"
+            (sum) => 6)
+    (m/fact "array values decay before C pointer comparisons"
+            (array-compare) => 1)
+    (m/fact "explicit C array decay produces the same element pointer"
+            (explicit-array-decay) => 7)
+    (m/fact "C address-of suppresses lvalue-to-rvalue conversion"
+            (address-of-head) => 13)
+    (m/fact "conditional array arms decay by one level"
+            (conditional-head 1) => 1
+            (conditional-head 0) => 3)
+    (m/fact "function designators decay to function pointers"
+            (indirect) => 11
+            (function-argument) => 12
+            (explicit-function-decay) => 12)))
+
+(oben/with-target :inprocess
   (let [printf (c/extern printf c/int [(* c/char)] {:variadic? true})
         old-style (c/extern old_style c/int [] {:prototype? false})
         variadic (c/fn ^c/int [^c/int x] {:variadic? true}

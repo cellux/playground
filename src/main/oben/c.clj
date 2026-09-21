@@ -12,10 +12,12 @@
             [oben.core.context :as ctx]
             [oben.core.target :as target]
             [oben.core.protocols.Algebra :as Algebra]
+            [oben.core.protocols.Assignment :as Assignment]
             [oben.core.protocols.Bitwise :as Bitwise]
             [oben.core.protocols.Logical :as Logical]
             [oben.core.protocols.Conditional :as Conditional]
             [oben.core.protocols.Callable :as Callable]
+            [oben.core.protocols.Container :as Container]
             [oben.core.protocols.Place :as Place]
             [oben.core.protocols.Eq :as Eq]
             [oben.core.protocols.Ord :as Ord]
@@ -538,10 +540,13 @@
           (isa? (o/tid-of-type type) ::N/SInt)
           (rank-for-bits bits))))
 
+(declare c-expression-value)
+
 (defn- as-c-node
   "Gives an integer operand its C semantic type before integer promotions."
   [node]
-  (let [type (o/type-of node)]
+  (let [node (c-expression-value node)
+        type (o/type-of node)]
     (cond
       (c-int-type? type) node
       (bool-type? type) (o/cast (c-int-type) node false)
@@ -935,7 +940,12 @@
 
 (defn- unqualified-type
   [type]
-  (vary-meta type dissoc :qualifiers))
+  ;; `vary-meta` creates a distinct function object. Preserve identity when
+  ;; there are no qualifiers so repeated function-type designators remain
+  ;; compatible (notably for function-pointer parameters).
+  (if (seq (:qualifiers (meta type)))
+    (vary-meta type dissoc :qualifiers)
+    type))
 
 (defn- c-compatible-object-type
   "Returns the C composite object type for two pointed-to types, or nil.
@@ -1072,13 +1082,13 @@
 
 (o/defmacro %break
   []
-  (if-let [label (get-in &env [:oben/c-loop :break])]
+  (if-let [label (get-in &env [:oben.c/loop :break])]
     (list 'go label)
     (throw (ex-info "break used outside a C loop" {}))))
 
 (o/defmacro %continue
   []
-  (if-let [label (get-in &env [:oben/c-loop :continue])]
+  (if-let [label (get-in &env [:oben.c/loop :continue])]
     (list 'go label)
     (throw (ex-info "continue used outside a C loop" {}))))
 
@@ -1091,7 +1101,7 @@
         continue-label (c-loop-label "for-continue")
         break-label (c-loop-label "for-break")
         loop-env (assoc &env
-                        :oben/c-loop {:break break-label
+                        :oben.c/loop {:break break-label
                                       :continue continue-label})
         init (if (nil? init) '(nop) init)
         test (if (nil? test) true test)
@@ -1118,7 +1128,7 @@
         continue-label (c-loop-label "do-while-continue")
         break-label (c-loop-label "do-while-break")
         loop-env (assoc &env
-                        :oben/c-loop {:break break-label
+                        :oben.c/loop {:break break-label
                                       :continue continue-label})
         body (if (seq body) body ['(nop)])]
     (o/parse
@@ -1139,9 +1149,9 @@
     (throw (ex-info "C switch requires at least one clause" {})))
   (let [switch-value (gensym "switch-value")
         break-label (c-loop-label "switch-break")
-        outer-loop (get &env :oben/c-loop {})
+        outer-loop (get &env :oben.c/loop {})
         switch-env (assoc &env
-                           :oben/c-loop
+                           :oben.c/loop
                            (assoc outer-loop :break break-label))
         control-node (as-c-node (o/parse control &env))
         control-type (promoted-type (o/type-of control-node))
@@ -1481,13 +1491,10 @@
   [place]
   (c-update-place place Place/post-update! Algebra/-))
 
-(declare c-array-decay c-default-lvalue-to-rvalue)
-
 (defn- c-default-argument-promotion
   "Applies C17's default argument promotions to one argument."
   [node]
-  (let [node (c-default-lvalue-to-rvalue node)
-        node (c-array-decay node)
+  (let [node (c-expression-value node)
         type (o/type-of node)]
     (cond
       (c-int-type? type)
@@ -1535,17 +1542,77 @@
   (and (c-pointer-type? type)
        (isa? (o/tid-of-type (:object-type (meta type))) ::Array/Array)))
 
-(defn- c-array-decay
-  "Performs array-to-pointer conversion for an addressable array object."
+(defn decay-array
+  "Explicit C array-to-pointer conversion.
+
+   `node` must designate an addressable array object. The result is a pointer
+   to its first element; multidimensional arrays consequently decay by exactly
+   one level. Core Oben deliberately does not apply this conversion itself."
   [node]
   (let [type (o/type-of node)]
-    (if (array-pointer? type)
-      ;; A pointer to an array object is how Oben represents addressable array
-      ;; storage. `gep [0 0]` is its C decay to a pointer to element zero.
-      (let [index-type (N/UInt (target/attr :address-size))
-            zero (N/make-constant-number-node index-type 0)]
-        (nodes/%gep node [zero zero]))
-      node)))
+    (when-not (array-pointer? type)
+      (throw (ex-info "C array decay requires an addressable array object"
+                      {:node node :type type})))
+    ;; A pointer to an array object is how Oben represents addressable array
+    ;; storage. `gep [0 0]` is its C decay to a pointer to element zero.
+    (let [index-type (N/UInt (target/attr :address-size))
+          zero (N/make-constant-number-node index-type 0)]
+      ;; GEP normally denotes an addressable subobject. This particular GEP is
+      ;; C's array value conversion, whose result is a pointer rvalue; retain
+      ;; that distinction so a later conversion pass does not load element 0.
+      (vary-meta (nodes/%gep node [zero zero])
+                 assoc :oben.c/value-category :rvalue))))
+
+(defn decay-function
+  "Explicit C function-to-pointer conversion.
+
+   LLVM and Oben represent named function designators as `Ptr(Fn ...)`, so the
+   conversion has no IR instruction to emit. It exists as an explicit C-level
+   operation and validates that its operand is a function designator."
+  [node]
+  (if (o/fnode? node)
+    node
+    (throw (ex-info "C function decay requires a function designator"
+                    {:node node
+                     :type (when (o/node? node) (o/type-of node))}))))
+
+(declare c-compatible-call-type?)
+
+(defn- c-compatible-function-type?
+  [from-type to-type]
+  (let [{from-return :return-type from-params :param-types
+         from-prototype? :prototype? from-variadic? :variadic?} (meta from-type)
+        {to-return :return-type to-params :param-types
+         to-prototype? :prototype? to-variadic? :variadic?} (meta to-type)]
+    (and (= from-prototype? to-prototype?)
+         (= from-variadic? to-variadic?)
+         (= (count from-params) (count to-params))
+         (c-compatible-call-type? from-return to-return)
+         (every? true? (map c-compatible-call-type? from-params to-params)))))
+
+(defn- c-compatible-call-type?
+  "C type compatibility used for function signatures.
+
+   Function types can have different constructor options but equivalent call
+   signatures. Compare those structurally; object types retain their semantic
+   identity, independent of the metadata wrapper used for qualifiers."
+  [from-type to-type]
+  (let [from-type (unqualified-type from-type)
+        to-type (unqualified-type to-type)]
+    (cond
+      (= (o/tid-of-type from-type) (o/tid-of-type to-type)) true
+      (and (isa? (o/tid-of-type from-type) ::Fn/Fn)
+           (isa? (o/tid-of-type to-type) ::Fn/Fn))
+      (c-compatible-function-type? from-type to-type)
+      (and (c-pointer-type? from-type) (c-pointer-type? to-type))
+      ;; Top-level parameter qualifiers were removed by `c-parameter-type`,
+      ;; but qualifiers on the pointed-to type remain part of a function
+      ;; pointer's compatible signature.
+      (and (= (o/qualifiers (:object-type (meta from-type)))
+              (o/qualifiers (:object-type (meta to-type))))
+           (c-compatible-call-type? (:object-type (meta from-type))
+                                    (:object-type (meta to-type))))
+      :else false)))
 
 (defn- c-compatible-pointer-parameter?
   [from-type to-type]
@@ -1553,7 +1620,7 @@
         to-object (unqualified-type (:object-type (meta to-type)))
         from-qualifiers (o/qualifiers (:object-type (meta from-type)))
         to-qualifiers (o/qualifiers (:object-type (meta to-type)))]
-    (and (or (= from-object to-object)
+    (and (or (c-compatible-call-type? from-object to-object)
              (and (not (isa? (o/tid-of-type from-object) ::Fn/Fn))
                   (not (isa? (o/tid-of-type to-object) ::Fn/Fn))
                   (or (void-object-type? from-object)
@@ -1568,31 +1635,88 @@
    as an lvalue would incorrectly dereference a pointer rvalue supplied to a
    scalar parameter."
   [node]
-  (contains? #{:oben/var :oben/global :oben/gep}
-             (o/class-of-node node)))
+  (and (not= :rvalue (:oben.c/value-category (meta node)))
+       (contains? #{:oben/var :oben/global :oben/gep}
+                  (o/class-of-node node))))
 
-(defn- c-default-lvalue-to-rvalue
-  [argument]
-  (let [argument-type (o/type-of argument)]
-    (if (and (c-object-place? argument)
-             (c-pointer-type? argument-type)
-             (let [object-type (:object-type (meta argument-type))]
-               (and (not (isa? (o/tid-of-type object-type) ::Array/Array))
-                    (not (isa? (o/tid-of-type object-type) ::Fn/Fn)))))
-      (Place/load argument)
-      argument)))
+(defn- c-pointer-rvalue
+  "Keep the original node as a dependency rather than cloning its compiler.
+   Cloning an alloca/global node with vary-meta would allocate a second object
+   instead of returning the address of the first one."
+  [node]
+  (if (= :rvalue (:oben.c/value-category (meta node)))
+    node
+    (o/make-node (o/type-of node)
+      (clj/fn [ctx]
+        (let [ctx (ctx/compile-node ctx node)]
+          (ctx/save-ir ctx (ctx/compiled-node ctx node))))
+      {:class ::pointer-rvalue
+       :oben.c/value-category :rvalue})))
 
-(defn- c-lvalue-to-rvalue
-  [parameter-type argument]
-  (if (c-pointer-type? (c-parameter-type parameter-type))
-    argument
-    (c-default-lvalue-to-rvalue argument)))
+(defn c-expression-result
+  "Preserves the pointer value category of address-of, explicit GEP, and
+   pointer arithmetic without changing core Oben's place operations."
+  [op node]
+  (if (and (o/node? node)
+           (c-pointer-type? (o/type-of node))
+           (contains? #{Place/address-of nodes/%gep Algebra/+ Algebra/-} op))
+    (c-pointer-rvalue node)
+    node))
+
+(defn c-expression-argument?
+  "Whether an argument is an ordinary C value-expression position.
+
+   The first operand of explicit place operations is intentionally excluded:
+   `&x`, assignment targets, and explicit loads require the original place.
+   Core aggregate access retains its receiver (including array dimensions).
+   Array/function decay helpers similarly receive their unconverted operand."
+  [op index]
+  (not (and (zero? index)
+            (contains? #{Place/address-of Place/load Place/store! Ptr/%deref
+                         Place/pre-update! Place/post-update! Place/update!
+                         Container/get Container/get-in Container/at Container/at-in
+                         Container/assoc! Container/assoc-in!
+                         nodes/%set! nodes/%gep
+                         pre-inc! post-inc! pre-dec! post-dec!
+                         Assignment/add-assign Assignment/sub-assign
+                         Assignment/mul-assign Assignment/div-assign
+                         Assignment/rem-assign Assignment/shift-left-assign
+                         Assignment/shift-right-assign Assignment/bit-and-assign
+                         Assignment/bit-xor-assign Assignment/bit-or-assign
+                         decay-array decay-function}
+                       op))))
+
+(defn c-expression-value
+  "Applies C's ordinary expression value conversions.
+
+   Arrays decay before lvalue-to-rvalue conversion, function designators
+   already are pointers in Oben, and addressable scalar/pointer object places
+   are loaded. The C parser installs this only for C function bodies; core
+   Oben retains its explicit aggregate and place semantics."
+  [node]
+  (if-not (o/node? node)
+    node
+    (let [type (o/type-of node)]
+      (cond
+        ;; A pointer-to-array value is not an array designator. In particular,
+        ;; &array, pointer parameters, and the result of a previous decay must
+        ;; retain their pointer type on subsequent conversion passes.
+        (and (c-object-place? node) (array-pointer? type))
+        (decay-array node)
+
+        (o/fnode? node)
+        (decay-function node)
+
+        (and (c-object-place? node) (c-pointer-type? type))
+        (Place/load node)
+
+        :else
+        node))))
 
 (defn- c-fixed-argument-conversion
   [parameter-type argument]
   (let [parameter-type (c-parameter-type parameter-type)
-        argument (c-lvalue-to-rvalue parameter-type argument)
-        argument (c-array-decay argument)
+        argument (c-expression-value argument)
         argument-type (o/type-of argument)]
     (cond
       (and (c-pointer-type? parameter-type)
@@ -1617,7 +1741,7 @@
      (when (and (:variadic? opts) (empty? param-types))
        (throw (ex-info "a C variadic function requires a named parameter before ..."
                        {:return-type return-type :param-types param-types})))
-     (Fn/Fn return-type param-types opts))))
+     (Fn/Fn return-type param-types (Fn/signature-options opts)))))
 
 (defn make-extern
   "Creates a target-portable declaration for an external C function."
@@ -1687,7 +1811,11 @@
                       [{} body])
         opts (assoc opts
                     :call-semantics :c17
-                    :parameter-type-transform `c-parameter-type)]
+                    :parameter-type-transform `c-parameter-type
+                    :expression-semantics
+                    {:convert-value `c-expression-value
+                     :argument? `c-expression-argument?
+                     :convert-result `c-expression-result})]
     (when (= false (:prototype? opts))
       (throw (ex-info "c/fn definitions require a prototype" {:options opts})))
     (when (and (:variadic? opts) (empty? params))

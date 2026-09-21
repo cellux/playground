@@ -3,6 +3,13 @@
   (:require [oben.core.context :as ctx])
   (:require [midje.sweet :as m]))
 
+(defn signature-options
+  "Canonical call-signature options. Parser hooks and LLVM declaration
+   attributes must not participate in a memoized function type's identity."
+  [opts]
+  (merge {:prototype? true :variadic? false :call-semantics :oben}
+         (select-keys opts [:prototype? :variadic? :call-semantics])))
+
 (o/define-typeclass Fn [:oben/Value]
   [return-type param-types & [opts]]
   (let [{:keys [prototype? variadic? call-semantics]

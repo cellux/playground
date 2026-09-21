@@ -549,7 +549,67 @@
       (oben-macro? form)
       (multifn? form)))
 
+(declare parse)
+
+(defn- parse-application
+  [form env]
+  (let [op (parse (first form) env)
+        args (next form)
+        {:keys [convert-value argument? convert-result]
+         :or {convert-value identity
+              argument? (constantly true)}} (:oben/expression-semantics env)]
+    (if (oben-macro? op)
+      ;; Macros own their argument parsing. Do not convert their raw forms.
+      (let [result (parse (apply op form env args) env)]
+        (if convert-result (convert-result op result) result))
+      (let [callee (when (node? op) (convert-value op))
+            ;; Normalize call/access shorthand BEFORE converting arguments.
+            ;; Re-parsing `(funcall callee converted-args...)` would apply the
+            ;; language's argument conversion twice, and access shorthand must
+            ;; obey get's receiver policy, not that of the original operator.
+            [op args converted-callee?]
+            (cond
+              (fnode? callee)
+              [(resolve 'funcall {}) (cons callee args) true]
+
+              (node? op)
+              [(resolve 'get {}) (cons op args) false]
+
+              (keyword? op)
+              [(resolve 'get {}) (list* (first args) op (rest args)) false]
+
+              :else [op args false])
+            parsed-args
+            (into []
+                  (map-indexed
+                   (fn [index arg]
+                     (let [value (parse arg env)]
+                       (if (and (not (and converted-callee? (zero? index)))
+                                (argument? op index))
+                         (convert-value value)
+                         value))))
+                  args)
+            result (cond
+                     (type? op)
+                     (cast op (first parsed-args) false)
+
+                     (or (fn? op) (multifn? op))
+                     (apply op parsed-args)
+
+                     :else
+                     (throw (ex-info "cannot apply operator"
+                                     {:form form :operator op})))
+            result (parse result env)]
+        (if convert-result (convert-result op result) result)))))
+
 (defn parse
+  "Parses a form using lexical bindings and semantic context in `env`.
+
+   Optional :oben/expression-semantics hooks operate on parsed values:
+     :convert-value  value -> value
+     :argument?      resolved operator, argument index -> boolean
+     :convert-result resolved operator, result -> result
+   Macros receive raw forms and control their own argument parsing."
   ([form env]
    (letfn [(die []
              (throw (ex-info "cannot parse form" {:form form :env env})))
@@ -603,40 +663,16 @@
          (parse (replace-stars-with-ptr form) env)
 
          (sequential? form)
-         (let [op (parse (first form) env)
-               args (next form)
-               result (cond
-                        (fnode? op)
-                        (list* 'funcall op (map #(parse % env) args))
-
-                        ;; Aggregate/container nodes can be used as generic
-                        ;; accessors: (value key) is equivalent to
-                        ;; (get value key). Function pointers retain priority
-                        ;; through the fnode? branch above.
-                        (node? op)
-                        (list* 'get op (map #(parse % env) args))
-
-                        (type? op)
-                        (cast op (parse (first args) env) false)
-
-                        (oben-macro? op)
-                        (apply op form env args)
-
-                        (or (fn? op) (multifn? op))
-                        (apply op (map #(parse % env) args))
-
-                        (keyword? op)
-                        (list* 'get (first args) op (rest args))
-
-                        :else (die))]
-           (parse result env))
+         (parse-application form env)
 
          :else (die))
        (catch clojure.lang.ExceptionInfo e
          (throw (ex-info (.getMessage e)
-                         (update (ex-data e) :forms concat (annotate form)))))
+                         (update (ex-data e) :forms concat (annotate form))
+                         e)))
        (catch Throwable e
          (throw (ex-info (.getMessage e)
-                         {:forms (annotate form)}))))))
+                         {:forms (annotate form)}
+                         e))))))
   ([form]
    (parse form {})))

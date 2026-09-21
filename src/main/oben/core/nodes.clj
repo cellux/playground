@@ -217,9 +217,16 @@
    (assert (map? (get-in &env [:oben/blocks block-name])))
    (let [{:keys [block-id return-label return-type return-types] :as block-data}
          (get-in &env [:oben/blocks block-name])
+         parsed-value (o/parse form &env)
+         value-node (if-let [convert-value
+                             (get-in &env
+                                     [:oben/expression-semantics
+                                      :convert-value])]
+                      (convert-value parsed-value)
+                      parsed-value)
          value-node (if return-type
-                      (o/parse `(cast ~return-type ~form) &env)
-                      (o/parse form &env))]
+                      (%cast return-type value-node)
+                      value-node)]
      (when-not return-type
        (swap! return-types conj (o/type-of value-node)))
      (o/make-node %unseen
@@ -367,21 +374,30 @@
             (throw (ex-info "an Oben function definition requires a prototype"
                             {:options fn-options})))
         fn-type (if fn-options
-                  (Fn/Fn return-type param-types fn-options)
+                  (Fn/Fn return-type param-types (Fn/signature-options fn-options))
                   (Fn/Fn return-type param-types))
         ir-fn-options (some-> fn-options
                                (dissoc :prototype? :variadic? :call-semantics
-                                       :parameter-type-transform))
+                                       :parameter-type-transform
+                                       :expression-semantics))
+        expression-semantics (:expression-semantics fn-options)
         params (mapv function-parameter param-names param-types)
         ir-params (cond-> params
                     (:variadic? fn-options) (conj :&))]
     (if (seq body)
       (let [void? (= return-type %void)
-            env (into &env (map vector param-names params))
+            ;; Function options belong to this definition, not to nested core
+            ;; fn forms. Always establish a fresh expression-policy boundary.
+            env (-> (into &env (map vector param-names params))
+                    (dissoc :oben/fn-options)
+                    (assoc :oben/expression-semantics expression-semantics))
             body-node (o/parse (list* 'block :oben/fn-block body) env)
+            convert-value (:convert-value expression-semantics)
             body-node (if void?
                         body-node
-                        (%cast return-type body-node))]
+                        (%cast return-type (if convert-value
+                                            (convert-value body-node)
+                                            body-node)))]
         (o/make-node (Ptr/Ptr fn-type)
           (fn [ctx]
             (let [saved ctx
