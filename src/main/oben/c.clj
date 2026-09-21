@@ -87,10 +87,10 @@
 (defn- rank-for-target-bits
   [target bits]
   (rank-for-bits* bits
-                  (attr target :c-char-size 8)
-                  (attr target :c-short-size 16)
-                  (attr target :c-int-size 32)
-                  (attr target :c-long-size 64)
+                  (target/attr* target :c-char-size)
+                  (target/attr* target :c-short-size)
+                  (target/attr* target :c-int-size)
+                  (target/attr* target :c-long-size)
                   rank-long-long))
 
 ;; `_Bool` has boolean value semantics, but its object size is target-dependent.
