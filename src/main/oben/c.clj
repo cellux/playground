@@ -1,9 +1,10 @@
 (ns oben.c
   "C-oriented semantic types and operations.
 
-   Requiring this namespace registers type-directed implementations for C
-   values. Core operators remain unchanged for non-C values; plain operators
-   acquire C semantics when their operands have C integer types."
+   Requiring this namespace registers C-specific implementations for core
+   operator multimethods. Existing behavior for non-C values is preserved;
+   ordinary operator forms acquire C semantics when their operands have C
+   semantic types."
   (:refer-clojure :exclude [char double float fn for int long short])
   (:require [clojure.core :as clj]
             [clojure.set :as set]
