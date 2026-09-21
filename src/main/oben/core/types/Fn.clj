@@ -30,10 +30,11 @@
                (save-ir [ctx]
                  (ctx/save-ir
                   ctx
-                  [:fn
-                   (ctx/compiled-type ctx return-type)
-                   (cond-> (mapv #(ctx/compiled-type ctx %) param-types)
-                     (or variadic? (not prototype?)) (conj :&))]))]
+                  (cond-> [:fn
+                           (ctx/compiled-type ctx return-type)
+                           (mapv #(ctx/compiled-type ctx %) param-types)]
+                    (or variadic? (not prototype?))
+                    (conj {:variadic? true}))))]
          (-> ctx
              compile-return-type
              compile-param-types

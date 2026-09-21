@@ -154,7 +154,6 @@
     :md "metadata"
     :x86_mmx "x86_mmx"
     :token "token"
-    :& "..."
     (throw (ex-info "invalid type" {:type t}))))
 
 (def complex-type? vector?)
@@ -177,13 +176,17 @@
   [[_ elt]]
   (format "%s*" (render-type elt)))
 
+(defn render-function-type-parameter-list
+  [param-types variadic?]
+  (str/join ", "
+            (concat (map render-type param-types)
+                    (when variadic? ["..."]))))
+
 (defmethod render-complex-type :fn
-  [[_ return-type param-types]]
+  [[_ return-type param-types {:keys [variadic?]}]]
   (format "%s (%s)"
           (render-type return-type)
-          (->> param-types
-               (map render-type)
-               (str/join ", "))))
+          (render-function-type-parameter-list param-types variadic?)))
 
 (defn- format-struct-type
   [format-string [_ name field-types]]
@@ -230,13 +233,15 @@
 (m/facts
  (m/fact (render-type :void) => "void")
  (m/fact (render-type :float) => "float")
- (m/fact (render-type :&) => "...")
+ (m/fact (render-type :&) => (m/throws #"invalid type"))
  (m/fact (render-type [:integer 16]) => "i16")
  (m/fact (render-type [:array [:integer 8] 3]) => "[3 x i8]")
  (m/fact (render-type [:vector [:integer 8] 3]) => "<3 x i8>")
  (m/fact (render-type [:ptr [:integer 8]]) => "i8*")
  (m/fact (render-type [:fn [:integer 8] [[:ptr [:integer 16]] [:integer 32]]])
          => "i8 (i16*, i32)")
+ (m/fact (render-type [:fn [:integer 8] [[:ptr [:integer 16]]] {:variadic? true}])
+         => "i8 (i16*, ...)")
  (m/fact (render-type [:struct nil [[:integer 8] [:ptr [:integer 16]] [:integer 32]]])
          => "{i8, i16*, i32}")
  (m/fact (render-type [:struct :foo [[:integer 8] [:ptr [:integer 16]] [:integer 32]]])
@@ -1048,8 +1053,8 @@
 
 (defn vararg?
   [f]
-  (let [[_ptr [_fn result-type param-types]] (:type f)]
-    (= :& (last param-types))))
+  (let [[_ptr [_fn _result-type _param-types {:keys [variadic?]}]] (:type f)]
+    (boolean (clj/or (:variadic? f) variadic?))))
 
 (defn call
   ([callee args opts]
@@ -1385,12 +1390,10 @@ end:
         (printf " %s" (render-value-name name))))))
 
 (defn render-function-parameters
-  [params]
-  (let [variadic? (= :& (last params))
-        params (if variadic? (butlast params) params)]
-    (str/join ", "
-              (concat (map render-function-parameter params)
-                      (when variadic? ["..."])))))
+  [params variadic?]
+  (str/join ", "
+            (concat (map render-function-parameter params)
+                    (when variadic? ["..."]))))
 
 (m/facts
  (m/fact
@@ -1407,7 +1410,7 @@ end:
    (param nil [:ptr [:ptr i8]])) => "i8**")
  (m/fact
   (render-function-parameters
-   [(param :argc i32) :&]) => "i32 %argc, ...")
+   [(param :argc i32)] true) => "i32 %argc, ...")
  (m/fact
   (render-function-parameter :&) => (m/throws #"invalid function parameter")))
 
@@ -1523,7 +1526,6 @@ end:
 (defn sanitize-param
   [param]
   (cond
-    (= param :&) param
     (map? param) param
     (clj/or (simple-type? param)
             (complex-type? param)) {:type param}
@@ -1531,12 +1533,15 @@ end:
 
 (defn function
   ([name result-type params opts]
-   (let [params (map sanitize-param params)]
+   (let [opts (clj/or opts {})
+         params (mapv sanitize-param params)
+         variadic? (boolean (:variadic? opts))]
      (assoc opts
             :kind :function
             :name name
             :result-type result-type
-            :type [:ptr [:fn result-type (map #(if (= % :&) :& (:type %)) params)]]
+            :type [:ptr [:fn result-type (mapv :type params)
+                         {:variadic? variadic?}]]
             :params params
             :basic-blocks nil)))
   ([name result-type params]
@@ -1576,7 +1581,7 @@ end:
            cconv result-attrs result-type name params
            unnamed-addr address-space function-attrs
            section comdat align gc prefix prologue personality
-           metadata basic-blocks] :as f}]
+           metadata basic-blocks variadic?] :as f}]
   (let [definition? (if (nil? basic-blocks) false true)
         next-name (let [counter (atom 0)]
                     (fn []
@@ -1592,7 +1597,7 @@ end:
                    names)
                  (IdentityHashMap.)
                  (concat
-                  (remove #(= % :&) params)
+                  params
                   (mapcat #(cons % (:instructions %)) basic-blocks)))
                 {})]
       (with-out-str
@@ -1611,7 +1616,7 @@ end:
           (printf "%s " (render-attributes result-attrs)))
         (printf "%s " (render-type result-type))
         (printf "%s(" (render-value-name name))
-        (print (render-function-parameters params))
+        (print (render-function-parameters params variadic?))
         (print ")")
         (when unnamed-addr
           (printf " %s" (render-unnamed-addr unnamed-addr)))
@@ -1651,8 +1656,14 @@ entry:
 ")
  (m/fact
   (render-function
-   (function 'printf i32 [[:ptr i8] :&] {:function-attrs 1}))
-  => "declare i32 @printf(i8*, ...) #1"))
+   (function 'printf i32 [[:ptr i8]] {:function-attrs 1
+                                      :variadic? true}))
+  => "declare i32 @printf(i8*, ...) #1")
+ (m/fact
+  (let [f (function 'printf i32 [[:ptr i8]] {:variadic? true})]
+    [(:params f) (:type f)])
+  => [[{:type [:ptr i8]}]
+      [:ptr [:fn i32 [[:ptr i8]] {:variadic? true}]]]))
 
 (defn module
   ([opts]
@@ -1700,7 +1711,7 @@ entry:
         retval (alloca i32 {:align 4})
         argc-addr (alloca i32 {:align 4})
         argv-addr (alloca [:ptr [:ptr i8]] {:align 4})
-        printf (function 'printf i32 [[:ptr i8] :&])
+        printf (function 'printf i32 [[:ptr i8]] {:variadic? true})
         pstr (getelementptr str [0 0] {:inbounds true})
         call (call printf [pstr])
         entry (-> (basic-block :entry)

@@ -59,7 +59,7 @@
                :variadic? true
                :call-semantics :c17})
    (m/fact (compile-type t)
-           => [:fn [:integer 32] [[:integer 32] :&]])))
+           => [:fn [:integer 32] [[:integer 32]] {:variadic? true}])))
 
 (m/facts
  "primitive types"

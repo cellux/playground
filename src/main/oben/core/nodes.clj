@@ -377,13 +377,12 @@
                   (Fn/Fn return-type param-types (Fn/signature-options fn-options))
                   (Fn/Fn return-type param-types))
         ir-fn-options (some-> fn-options
-                               (dissoc :prototype? :variadic? :call-semantics
+                               (dissoc :prototype? :call-semantics
                                        :parameter-type-transform
                                        :expression-semantics))
         expression-semantics (:expression-semantics fn-options)
         params (mapv function-parameter param-names param-types)
-        ir-params (cond-> params
-                    (:variadic? fn-options) (conj :&))]
+        ir-params params]
     (if (seq body)
       (let [void? (= return-type %void)
             ;; Function options belong to this definition, not to nested core
@@ -406,9 +405,7 @@
                   ctx (reduce ctx/compile-node ctx params)
                   f (ir/function fname
                                  (ctx/compiled-type ctx return-type)
-                                 (mapv #(if (= % :&)
-                                          :&
-                                          (ctx/compiled-node ctx %))
+                                 (mapv #(ctx/compiled-node ctx %)
                                        ir-params)
                                  ir-fn-options)]
               (letfn [(compile-return [ctx]
@@ -439,9 +436,7 @@
                 ctx (reduce ctx/compile-node ctx params)
                 f (ir/function fname
                                (ctx/compiled-type ctx return-type)
-                               (mapv #(if (= % :&)
-                                        :&
-                                        (ctx/compiled-node ctx %))
+                               (mapv #(ctx/compiled-node ctx %)
                                      ir-params)
                                ir-fn-options)]
             (-> ctx
@@ -462,10 +457,14 @@
    (Ptr/Ptr ftype)
    (fn [ctx]
      (let [ctx (ctx/compile-type ctx ftype)
-           [_ return-type param-types] (ctx/compiled-type ctx ftype)
+           compiled-ftype (ctx/compiled-type ctx ftype)
+           [_ return-type param-types {:keys [variadic?]}] compiled-ftype
            f (ir/function name return-type param-types
-                          (dissoc opts :prototype? :variadic? :call-semantics
-                                       :parameter-type-transform))]
+                          (assoc (dissoc opts :prototype? :call-semantics
+                                         :parameter-type-transform)
+                                 :variadic? (or variadic?
+                                                (:variadic? opts)
+                                                (not (:prototype? opts)))))]
        (-> ctx
            (update :m ir/add-function f)
            (ctx/save-ir f))))
