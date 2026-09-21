@@ -181,17 +181,13 @@
   [[_ elt]]
   (format "%s*" (render-type elt)))
 
-(defn render-function-type-parameter-list
-  [param-types variadic?]
-  (str/join ", "
-            (concat (map render-type param-types)
-                    (when variadic? ["..."]))))
-
 (defmethod render-complex-type :fn
   [[_ return-type param-types {:keys [variadic?]}]]
   (format "%s (%s)"
           (render-type return-type)
-          (render-function-type-parameter-list param-types variadic?)))
+          (str/join ", "
+                    (concat (map render-type param-types)
+                            (when variadic? ["..."])))))
 
 (defn- format-struct-type
   [format-string [_ name field-types]]
@@ -1394,12 +1390,6 @@ end:
       (when name
         (printf " %s" (render-value-name name))))))
 
-(defn render-function-parameters
-  [params variadic?]
-  (str/join ", "
-            (concat (map render-function-parameter params)
-                    (when variadic? ["..."]))))
-
 (m/facts
  (m/fact
   (render-function-parameter
@@ -1413,9 +1403,6 @@ end:
  (m/fact
   (render-function-parameter
    (param nil [:ptr [:ptr i8]])) => "i8**")
- (m/fact
-  (render-function-parameters
-   [(param :argc i32)] true) => "i32 %argc, ...")
  (m/fact
   (render-function-parameter :&) => (m/throws #"invalid function parameter")))
 
@@ -1621,7 +1608,9 @@ end:
           (printf "%s " (render-attributes result-attrs)))
         (printf "%s " (render-type result-type))
         (printf "%s(" (render-value-name name))
-        (print (render-function-parameters params variadic?))
+        (print (str/join ", "
+                          (concat (map render-function-parameter params)
+                                  (when variadic? ["..."]))))
         (print ")")
         (when unnamed-addr
           (printf " %s" (render-unnamed-addr unnamed-addr)))
