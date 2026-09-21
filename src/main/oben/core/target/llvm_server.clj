@@ -12,16 +12,9 @@
 (def default-url "http://127.0.0.1:18080")
 
 (def default-attrs
-  {:address-size platform/address-size
-   :align-min 1
-   ;; Defaults for the common LP64 C data model.
-   :c-char-size 8
-   :c-char-signed? true
-   :c-short-size 16
-   :c-int-size 32
-   :c-long-size 64
-   :c-float-size 32
-   :c-double-size 64})
+  (merge {:address-size platform/address-size
+          :align-min 1}
+         (target/common-lp64-c-attrs platform/address-size)))
 
 (defn- endpoint
   [url & segments]

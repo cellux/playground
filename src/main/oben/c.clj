@@ -71,10 +71,6 @@
    #(ctx/save-ir % [:integer 1])
    {:bits bits}))
 
-(defn- attr
-  [target name default]
-  (get (target/attrs* target) name default))
-
 (defn- rank-for-bits
   [bits char-size short-size int-size long-size fallback]
   (cond
@@ -97,93 +93,90 @@
 ;; The C conversion methods below already promote it through c/int.
 (o/defportable _Bool
   [target]
-  (CBool (attr target :c-bool-size
-               (attr target :c-char-size 8))))
+  (CBool (target/attr* target :c-bool-size)))
 
 (o/defportable signed-char
   [target]
   (CInt :signed-char
-        (attr target :c-char-size 8)
+        (target/attr* target :c-char-size)
         true
         rank-char))
 
 (o/defportable unsigned-char
   [target]
   (CInt :unsigned-char
-        (attr target :c-char-size 8)
+        (target/attr* target :c-char-size)
         false
         rank-char))
 
 (o/defportable char
   [target]
   (CInt :char
-        (attr target :c-char-size 8)
-        (attr target :c-char-signed? true)
+        (target/attr* target :c-char-size)
+        (target/attr* target :c-char-signed?)
         rank-char))
 
 (o/defportable short
   [target]
-  (CInt :short (attr target :c-short-size 16) true rank-short))
+  (CInt :short (target/attr* target :c-short-size) true rank-short))
 
 (o/defportable ushort
   [target]
-  (CInt :short (attr target :c-short-size 16) false rank-short))
+  (CInt :short (target/attr* target :c-short-size) false rank-short))
 
 (o/defportable int
   [target]
-  (CInt :int (attr target :c-int-size 32) true rank-int))
+  (CInt :int (target/attr* target :c-int-size) true rank-int))
 
 (o/defportable uint
   [target]
-  (CInt :int (attr target :c-int-size 32) false rank-int))
+  (CInt :int (target/attr* target :c-int-size) false rank-int))
 
 (o/defportable long
   [target]
-  (CInt :long (attr target :c-long-size 64) true rank-long))
+  (CInt :long (target/attr* target :c-long-size) true rank-long))
 
 (o/defportable ulong
   [target]
-  (CInt :long (attr target :c-long-size 64) false rank-long))
+  (CInt :long (target/attr* target :c-long-size) false rank-long))
 
 (o/defportable long-long
   [target]
   (CInt :long-long
-        (attr target :c-long-long-size 64)
+        (target/attr* target :c-long-long-size)
         true
         rank-long-long))
 
 (o/defportable ulong-long
   [target]
   (CInt :long-long
-        (attr target :c-long-long-size 64)
+        (target/attr* target :c-long-long-size)
         false
         rank-long-long))
 
 (o/defportable size_t
   [target]
-  (let [bits (attr target :c-size-t-size (attr target :address-size 64))]
+  (let [bits (target/attr* target :c-size-t-size)]
     (CInt :size_t
           bits
           false
-          (attr target :c-size-t-rank
-                 (rank-for-target-bits target bits)))))
+          (target/attr* target :c-size-t-rank))))
 
 (o/defportable ptrdiff_t
   [target]
-  (let [bits (attr target :c-ptrdiff-t-size (attr target :address-size 64))]
+  (let [bits (target/attr* target :c-ptrdiff-t-size)]
     (CInt :ptrdiff_t
           bits
           true
-          (attr target :c-ptrdiff-t-rank
-                 (rank-for-target-bits target bits)))))
+          (target/attr* target :c-ptrdiff-t-rank))))
 
 (o/defportable float
   [target]
-  (CFloat :float (attr target :c-float-size 32) rank-float))
+  (CFloat :float (target/attr* target :c-float-size) rank-float))
 
 (o/defportable double
   [target]
-  (CFloat :double (attr target :c-double-size 64) rank-double))
+  (CFloat :double (target/attr* target :c-double-size) rank-double))
 
 (defn- c-int-type
   []

@@ -34,11 +34,17 @@
       (m/fact (:target-attrs result)
               => {:address-size 32
                   :align-min 1
+                  :c-bool-size 8
                   :c-char-size 8
                   :c-char-signed? true
                   :c-short-size 16
                   :c-int-size 32
                   :c-long-size 64
+                  :c-long-long-size 64
+                  :c-size-t-size 64
+                  :c-size-t-rank 4
+                  :c-ptrdiff-t-size 64
+                  :c-ptrdiff-t-rank 4
                   :c-float-size 32
                   :c-double-size 64}))
     (finally
