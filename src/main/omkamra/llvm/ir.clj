@@ -1528,7 +1528,7 @@ end:
    (let [opts (clj/or opts {})
          params (mapv sanitize-param params)
          variadic? (boolean (:variadic? opts))]
-     (assoc opts
+     (assoc (dissoc opts :variadic?)
             :kind :function
             :name name
             :result-type result-type
@@ -1573,8 +1573,9 @@ end:
            cconv result-attrs result-type name params
            unnamed-addr address-space function-attrs
            section comdat align gc prefix prologue personality
-           metadata basic-blocks variadic?] :as f}]
+           metadata basic-blocks] :as f}]
   (let [definition? (if (nil? basic-blocks) false true)
+        variadic? (vararg? f)
         next-name (let [counter (atom 0)]
                     (fn []
                       (let [name @counter]
