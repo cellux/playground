@@ -128,9 +128,6 @@
     (symbol? x) (str \@ (render-name-string (name x)))))
 
 (defn render-type-name
-  "Renders an LLVM named-type identifier. Unlike global symbols, named types
-   always use the '%' sigil, including when their source name is a Clojure
-   symbol."
   [x]
   (cond
     (integer? x) (str \% x)
@@ -1109,7 +1106,7 @@
       :ptr
       (let [[_ elt] type]
         (recur elt (rest indices)))
-      
+
       (:array :vector)
       (let [[_ elt size] type]
         (recur elt (rest indices)))
@@ -1376,17 +1373,24 @@ end:
    (param name type nil)))
 
 (defn render-function-parameter
-  [param]
-  (if (= param :&)
-    "..."
-    (let [{:keys [type attrs] :as param} param
-          name (name-of-typed-value param)]
-      (with-out-str
-        (printf "%s" (render-type type))
-        (when attrs
-          (printf " %s" (render-attributes attrs)))
-        (when name
-          (printf " %s" (render-value-name name)))))))
+  [{:keys [type attrs] :as param}]
+  (when-not (map? param)
+    (throw (ex-info "invalid function parameter" {:param param})))
+  (let [name (name-of-typed-value param)]
+    (with-out-str
+      (printf "%s" (render-type type))
+      (when attrs
+        (printf " %s" (render-attributes attrs)))
+      (when name
+        (printf " %s" (render-value-name name))))))
+
+(defn render-function-parameters
+  [params]
+  (let [variadic? (= :& (last params))
+        params (if variadic? (butlast params) params)]
+    (str/join ", "
+              (concat (map render-function-parameter params)
+                      (when variadic? ["..."])))))
 
 (m/facts
  (m/fact
@@ -1400,7 +1404,12 @@ end:
    (param :argv [:ptr [:ptr i8]])) => "i8** %argv")
  (m/fact
   (render-function-parameter
-   (param nil [:ptr [:ptr i8]])) => "i8**"))
+   (param nil [:ptr [:ptr i8]])) => "i8**")
+ (m/fact
+  (render-function-parameters
+   [(param :argc i32) :&]) => "i32 %argc, ...")
+ (m/fact
+  (render-function-parameter :&) => (m/throws #"invalid function parameter")))
 
 (defn render-unnamed-addr
   [unnamed-addr]
@@ -1602,10 +1611,7 @@ end:
           (printf "%s " (render-attributes result-attrs)))
         (printf "%s " (render-type result-type))
         (printf "%s(" (render-value-name name))
-        (print
-         (->> params
-              (map render-function-parameter)
-              (str/join ", ")))
+        (print (render-function-parameters params))
         (print ")")
         (when unnamed-addr
           (printf " %s" (render-unnamed-addr unnamed-addr)))
