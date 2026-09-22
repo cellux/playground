@@ -3,6 +3,7 @@
             [oben.c :as c]
             [oben.core :as oben]
             [oben.core.api :as o]
+            [oben.core.context :as ctx]
             [oben.core.compiler :as compiler]
             [oben.core.target :as target]
             [oben.core.types.Array :as Array]
@@ -212,6 +213,8 @@
     (m/fact "C _Bool is a C-specific Bool type"
             (:class (meta bool-type)) => :oben.c/CBool
             (:bits (meta bool-type)) => 8
+            (ctx/compiled-type (ctx/compile-type (target/ctx) bool-type)
+                               bool-type) => [:integer 8]
             (o/sizeof bool-type) => 1)
     (m/fact "signed and unsigned char are distinct C integer types"
             (:c-type (meta signed-char)) => :signed-char

@@ -77,7 +77,7 @@
 (o/define-typeclass ^:private CBool [::Bool/Bool]
   [bits]
   (o/make-type
-   #(ctx/save-ir % [:integer 1])
+   #(ctx/save-ir % [:integer bits])
    {:bits bits}))
 
 ;; C pointers have the same LLVM representation as core pointers, but they
