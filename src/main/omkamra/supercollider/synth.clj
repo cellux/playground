@@ -2,9 +2,127 @@
   (:require [omkamra.osc :as osc])
   (:refer-clojure :exclude [sync]))
 
+(def ^:private scsynth-options
+  [[:udp-port "-u" :value]
+   [:tcp-port "-t" :value]
+   [:bind-address "-B" :value]
+   [:control-bus-channels "-c" :value]
+   [:audio-bus-channels "-a" :value]
+   [:input-bus-channels "-i" :value]
+   [:output-bus-channels "-o" :value]
+   [:block-size "-z" :value]
+   [:hardware-buffer-size "-Z" :value]
+   [:hardware-sample-rate "-S" :value]
+   [:sample-buffers "-b" :value]
+   [:max-nodes "-n" :value]
+   [:max-synthdefs "-d" :value]
+   [:real-time-memory-size "-m" :value]
+   [:wire-buffers "-w" :value]
+   [:random-seeds "-r" :value]
+   [:load-synthdefs? "-D" :boolean]
+   [:rendezvous? "-R" :boolean]
+   [:max-logins "-l" :value]
+   [:session-password "-p" :value]
+   [:memory-locking? "-L" :flag]
+   [:hardware-device-name "-H" :value]
+   [:verbosity "-V" :value]
+   [:ugen-plugins-path "-U" :value]
+   [:restricted-path "-P" :value]])
+
+(def ^:private scsynth-option-keys
+  (set (map first scsynth-options)))
+
+(defn- option-args
+  [params [key option kind]]
+  (when (contains? params key)
+    (let [value (get params key)]
+      (when (some? value)
+        (case kind
+          :flag (when value [option])
+          :boolean [option (if value "1" "0")]
+          :value [option (str value)])))))
+
+(defn- scsynth-args
+  [params]
+  (let [unknown-keys (seq (remove (into scsynth-option-keys
+                                        #{:executable :extra-args})
+                                  (keys params)))
+        extra-args (or (:extra-args params) [])]
+    (when unknown-keys
+      (throw (ex-info "unknown scsynth parameter"
+                      {:keys (vec unknown-keys)})))
+    (when-not (sequential? extra-args)
+      (throw (IllegalArgumentException. ":extra-args must be sequential")))
+    (into (vec (mapcat #(or (option-args params %) []) scsynth-options))
+          (map str extra-args))))
+
+(defn start
+  "Start scsynth asynchronously and return a description of the process.
+
+  The supported keys correspond to scsynth's command-line options, for example
+  `:udp-port`, `:input-bus-channels`, and `:load-synthdefs?`. `:executable`
+  may be used to select a scsynth executable, and `:extra-args` may be used for
+  options not represented here."
+  ([]
+   (start {}))
+  ([params]
+   (when-not (map? params)
+     (throw (IllegalArgumentException. "scsynth parameters must be a map")))
+   (let [executable (or (:executable params) "scsynth")
+         command (into [(str executable)] (scsynth-args params))
+         process (.start (doto (ProcessBuilder. ^java.util.List command)
+                           (.redirectOutput java.lang.ProcessBuilder$Redirect/INHERIT)
+                           (.redirectError java.lang.ProcessBuilder$Redirect/INHERIT)))]
+     {:pid (.pid process)
+      :command command
+      :params (dissoc params :executable :extra-args)})))
+
+(defn stop
+  "Stop the process described by `process` using its stored PID.
+
+  Returns true when a termination request was sent, and false when the PID no
+  longer refers to a process or the process rejected the request."
+  [{:keys [pid]}]
+  (when-not (some? pid)
+    (throw (IllegalArgumentException. "process description must contain :pid")))
+  (let [handle (java.lang.ProcessHandle/of (long pid))]
+    (if (.isPresent handle)
+      (.destroy ^java.lang.ProcessHandle (.get handle))
+      false)))
+
+(defn- synth-instance?
+  [x]
+  (and (map? x)
+       (contains? x :pid)
+       (map? (:params x))))
+
+(defn- synth-connect-args
+  [{:keys [params]}]
+  (let [[scheme port] (if-let [tcp-port (:tcp-port params)]
+                        ["tcp" tcp-port]
+                        ["udp" (or (:udp-port params) 57110)])
+        host (:bind-address params)]
+    [(str scheme "://"
+          (if (or (nil? host)
+                  (= host "0.0.0.0")
+                  (= host "::"))
+            "127.0.0.1"
+            host)
+          ":"
+          port)]))
+
 (defn connect
-  [& args]
-  (apply osc/connect args))
+  "Connect to a synth instance or pass arguments through to `osc/connect`.
+
+  A synth instance is connected using its `:tcp-port`, `:udp-port`, or the
+  default scsynth UDP port. Additional arguments after a synth instance are
+  passed to `osc/connect` instead, allowing an explicit OSC URI to be supplied."
+  [target & args]
+  (if (synth-instance? target)
+    (apply osc/connect (if (seq args)
+                         args
+                         (synth-connect-args target)))
+    (apply osc/connect target args)))
 
 (defn close
   [conn]
