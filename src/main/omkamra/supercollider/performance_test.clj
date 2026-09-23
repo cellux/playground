@@ -66,6 +66,53 @@
     (is (= 0.5 (clock/beat->seconds (:clock parent) 1.0)))
     (is (= 2 (count @(:clocks session))))))
 
+(deftest concurrent-players-with-independent-clocks-schedule-independently
+  (let [session (test-session)
+        slow-player (performance/create-player session {:logical-time 0.0})
+        fast-clock (clock/derive (:clock slow-player) {:bpm 180})
+        fast-player (seq/fork-player slow-player
+                                     {:clock fast-clock
+                                      :logical-time 0.0})
+        sent (atom [])]
+    (try
+      (with-redefs [synth/cmd (fn [connection & packet]
+                                (swap! sent conj [connection packet]))]
+        (let [slow-done (async/go
+                          (async/<! (seq/sleep-beats slow-player 1.0))
+                          (performance/instantiate! slow-player #'test-tone
+                                                     {:freq 110.0})
+                          :slow)
+              fast-done (async/go
+                          (async/<! (seq/sleep-beats fast-player 1.0))
+                          (performance/instantiate! fast-player #'test-tone
+                                                     {:freq 220.0})
+                          :fast)]
+          (is (= :slow (async/<!! slow-done)))
+          (is (= :fast (async/<!! fast-done)))
+          (let [event-for (fn [frequency]
+                            (some #(when (= frequency
+                                             (last (second (second %))))
+                                     %)
+                                  @sent))
+                slow-event (event-for 110.0)
+                fast-event (event-for 220.0)
+                slow-time (:logical-time slow-player)
+                fast-time (:logical-time fast-player)
+                slow-timestamp (first (second slow-event))
+                fast-timestamp (first (second fast-event))]
+            (is (= 0.5 (double @slow-time)))
+            (is (= (/ 1.0 3.0) (double @fast-time)))
+            (is (.isBefore fast-timestamp slow-timestamp))
+            (is (< 0.15
+                   (/ (double (.toNanos ^java.time.Duration
+                                        (java.time.Duration/between
+                                         fast-timestamp slow-timestamp)))
+                      1000000000.0)
+                   0.19)))))
+      (finally
+        (clock/stop! (:clock slow-player))
+        (clock/stop! (:clock fast-player))))))
+
 (deftest perform-loads-vars-and-rebinds-synthdef-names
   (let [session (test-session)
         loaded (atom nil)
