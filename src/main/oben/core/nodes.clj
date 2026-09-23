@@ -493,13 +493,30 @@
 (defmethod Callable/call :oben
   [fnode args]
   (let [ftype (-> fnode o/type-of meta :object-type)
-        {:keys [param-types]} (meta ftype)]
-    (when-not (= (count param-types) (count args))
+        {:keys [param-types variadic?]} (meta ftype)
+        fixed-count (count param-types)
+        arg-count (count args)]
+    (cond
+      (and variadic? (< arg-count fixed-count))
+      (throw (ex-info "not enough arguments in variadic function call"
+                      {:expected-at-least fixed-count
+                       :actual arg-count
+                       :callee fnode}))
+
+      (and (not variadic?) (not= arg-count fixed-count))
       (throw (ex-info "invalid number of arguments in function call"
-                      {:expected (count param-types)
-                       :actual (count args)
+                      {:expected fixed-count
+                       :actual arg-count
                        :callee fnode})))
-    (make-funcall-node fnode (mapv %cast param-types args))))
+    (let [fixed-args (mapv %cast param-types (take fixed-count args))
+          variadic-args (if variadic?
+                          (drop fixed-count args)
+                          [])]
+      ;; Oben has no implicit conversions.  The fixed portion is therefore
+      ;; cast according to the function type, while variadic arguments retain
+      ;; their caller-provided types.  Languages such as C17 can specialize
+      ;; this step with their own promotion rules.
+      (make-funcall-node fnode (into fixed-args variadic-args)))))
 
 (defn %funcall
   [fnode & args]

@@ -52,7 +52,9 @@
   [name params body lexical-bindings & [opts]]
   (assert (vector? params) "invalid fn")
   (assert (:tag (meta params)) "fn without return type")
-  (let [parse-for-target (memoize
+  (let [variadic? (:variadic? opts)
+        fixed-count (count params)
+        parse-for-target (memoize
                           (clj/fn [target]
                             (-> (o/parse (list* 'fn params body)
                                          (assoc lexical-bindings
@@ -61,9 +63,16 @@
                                 (vary-meta assoc :name name))))]
     (with-meta
       (clj/fn [& args]
-        (assert (= (count args) (count params))
-                (format "invalid number of arguments in function call: expected %d, got %d"
-                        (count params) (count args)))
+        (let [arg-count (count args)
+              valid-arity? (if variadic?
+                             (<= fixed-count arg-count)
+                             (= fixed-count arg-count))]
+          (assert valid-arity?
+                  (if variadic?
+                    (format "invalid number of arguments in variadic function call: expected at least %d, got %d"
+                            fixed-count arg-count)
+                    (format "invalid number of arguments in function call: expected %d, got %d"
+                            fixed-count arg-count))))
         (let [target (target/current)
               fnode (parse-for-target target)]
           (target/invoke-function target fnode args)))
@@ -73,16 +82,22 @@
 (clj/defmacro fn
   [& decl]
   (let [[signature body] (o/split-after vector? decl)
-        params (first (o/move-types-to-meta signature))]
+        params (first (o/move-types-to-meta signature))
+        [opts body] (if (map? (first body))
+                      [(first body) (next body)]
+                      [{} body])]
     `(with-lexical-bindings bindings#
-       (make-fn nil '~params '~body bindings#))))
+       (make-fn nil '~params '~body bindings# ~opts))))
 
 (clj/defmacro defn
   [name & decl]
   (let [[signature body] (o/split-after vector? decl)
-        params (first (o/move-types-to-meta signature))]
+        params (first (o/move-types-to-meta signature))
+        [opts body] (if (map? (first body))
+                      [(first body) (next body)]
+                      [{} body])]
     `(with-lexical-bindings bindings#
-       (def ~name (make-fn '~name '~params '~body bindings#)))))
+       (def ~name (make-fn '~name '~params '~body bindings# ~opts)))))
 
 ;; Struct/defstruct
 

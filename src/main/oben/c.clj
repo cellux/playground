@@ -1894,13 +1894,12 @@
                       [(first body) (next body)]
                       [{} body])
         opts (assoc opts :semantics :c17)]
-    (when (= false (:prototype? opts))
-      (throw (ex-info "c/fn definitions require a prototype" {:options opts})))
     (when (and (:variadic? opts) (empty? params))
       (throw (ex-info "a C variadic function requires a named parameter before ..."
                       {:options opts})))
-    `(oben/with-lexical-bindings bindings#
-       (oben/make-fn nil '~params '~body bindings# ~opts))))
+    ;; Core owns function declaration parsing and option handling. C only
+    ;; supplies its semantic mode and retains the C-specific variadic rule.
+    `(oben/fn ~@signature ~opts ~@body)))
 
 (clj/defmacro extern
   "Declares an external C function.

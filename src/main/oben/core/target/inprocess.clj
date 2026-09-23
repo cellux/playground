@@ -82,21 +82,49 @@
 (defmulti make-function-invoker
   (fn [invoke-strategy ctx f] invoke-strategy))
 
+(defn- variadic-function?
+  [f]
+  (let [{:keys [type]} f
+        [_ function-type] type
+        [_ _ _ function-options] function-type]
+    (boolean (:variadic? function-options))))
+
+(defn- inferred-vararg-type
+  "Infers the native type used for an extra host-side argument.
+
+   Compiled Oben calls retain their exact argument types.  This fallback is
+   only for invoking a variadic function directly from the host API, where
+   only host values are available."
+  [arg]
+  (cond
+    (boolean? arg) [:integer 1]
+    (integer? arg) [:integer 64]
+    (instance? Float arg) :float
+    (number? arg) :double
+    :else (throw (ex-info "cannot infer a native type for variadic argument"
+                          {:argument arg}))))
+
 (defmethod make-function-invoker :jnr
   [_ ctx f]
   (let [address (get-function-address ctx f)
         _ (when (zero? address)
             (throw (ex-info "cannot get function address" {:function f})))
         result-type (:result-type f)
-        param-types (map :type (:params f))
-        cc (CallContext/getCallContext
-            (jnr-type-of result-type)
-            (into-array Type (map jnr-type-of param-types))
-            CallingConvention/DEFAULT
-            false)
+        fixed-param-types (mapv :type (:params f))
+        variadic? (variadic-function? f)
         invoker (Invoker/getInstance)]
     (fn [& args]
-      (let [hib (HeapInvocationBuffer. cc)]
+      (let [param-types (if variadic?
+                          (into fixed-param-types
+                                (map inferred-vararg-type
+                                     (drop (count fixed-param-types) args)))
+                          fixed-param-types)
+            cc (CallContext/getCallContext
+                (jnr-type-of result-type)
+                (into-array Type (map jnr-type-of param-types))
+                CallingConvention/DEFAULT
+                false)
+            hib (HeapInvocationBuffer. cc)]
         (doseq [[arg type] (map vector args param-types)]
           (case (ir/extract-type-tag type)
             :integer (let [[_ size] type]

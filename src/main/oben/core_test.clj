@@ -98,6 +98,19 @@
      (f 1 2) => 3)
     (m/fact (f 5 3) => 8)))
 
+(oben/with-target :inprocess
+  (let [f (oben/fn ^u32 [^u32 x] {:variadic? true}
+            x)
+        caller (oben/fn ^u32 []
+                 (f 7 11 13))]
+    (m/fact
+     "Oben variadic functions accept additional caller-typed arguments"
+     (f 7 11 13) => 7
+     (caller) => 7)
+    (m/fact
+     "Oben variadic functions still require every fixed argument"
+     (f) => (m/throws AssertionError))))
+
 ;; to denote the type of a parameter or return value we can use:
 ;;
 ;; 1. type tag => ^u32

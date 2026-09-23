@@ -68,6 +68,10 @@
   [fnode function]
   (let [ftype (:object-type (meta (o/type-of fnode)))]
     (and (seq (:basic-blocks function))
+         ;; The byte-buffer adapter has a fixed host-side parameter layout and
+         ;; therefore cannot represent an arbitrary number of varargs.  Such
+         ;; functions use the native invocation path instead.
+         (not (:variadic? (meta ftype)))
          (not (some pointer-type? (:param-types (meta ftype))))
          (not (pointer-type? (:return-type (meta ftype)))))))
 
