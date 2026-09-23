@@ -13,6 +13,10 @@
   [[freq 440.0]]
   (ugen/Out.ar 0 (ugen/SinOsc.ar freq)))
 
+(synthdef/define required-tone
+  [freq [amp 0.5]]
+  (ugen/Out.ar 0 (ugen/SinOsc.ar freq)))
+
 (defn- test-session
   []
   (let [clock (clock/create)]
@@ -35,6 +39,15 @@
       (performance/load-synthdefs! session [#'test-tone])
       (is (= 1 (count @received)))
       (is (= test-tone (get @(:loaded-synthdefs session) "test-tone"))))))
+
+(deftest required-synthdef-controls-must-be-supplied
+  (let [session (test-session)
+        player (performance/create-player session {:logical-time 0.0})]
+    (is (= true (get-in required-tone [:params 0 :required])))
+    (is (nil? (get-in required-tone [:params 1 :required])))
+    (is (thrown-with-msg? IllegalArgumentException
+                            #"missing required controls"
+                            (performance/instantiate! player #'required-tone {})))))
 
 (deftest player-instances-use-future-osc-bundles
   (let [session (test-session)

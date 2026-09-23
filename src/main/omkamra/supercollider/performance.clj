@@ -282,16 +282,24 @@
   session)
 
 (defn- validate-controls!
-  [definition controls]
-  (when-not (map? controls)
-    (throw (IllegalArgumentException.
-            (str "synth controls must be a map: " (pr-str controls)))))
-  (let [known (set (map :name (:params definition)))
-        unknown (seq (remove #(contains? known (name %)) (keys controls)))]
-    (when unknown
-      (throw (IllegalArgumentException.
-              (str "unknown controls for " (:name definition) ": " unknown))))
-    controls))
+  ([definition controls]
+   (validate-controls! definition controls false))
+  ([definition controls require-required?]
+   (when-not (map? controls)
+     (throw (IllegalArgumentException.
+             (str "synth controls must be a map: " (pr-str controls)))))
+   (let [known (set (map :name (:params definition)))
+         provided (set (map name (keys controls)))
+         unknown (seq (remove #(contains? known (name %)) (keys controls)))
+         required (set (keep #(when (:required %) (:name %)) (:params definition)))
+         missing (seq (remove provided required))]
+     (when unknown
+       (throw (IllegalArgumentException.
+               (str "unknown controls for " (:name definition) ": " unknown))))
+     (when (and require-required? missing)
+       (throw (IllegalArgumentException.
+               (str "missing required controls for " (:name definition) ": " missing))))
+     controls)))
 
 (defn instantiate!
   "Schedule a SynthDef Var as a new synth at the player's logical time.
@@ -302,7 +310,7 @@
   [player synthdef-var controls]
   (let [{:keys [session target-id add-action]} player
         definition (synthdef-from-var synthdef-var)
-        controls (validate-controls! definition controls)
+        controls (validate-controls! definition controls true)
         id (swap! (:next-node-id session) inc)
         logical-time (player-time player)
         timestamp (timestamp-for player logical-time)

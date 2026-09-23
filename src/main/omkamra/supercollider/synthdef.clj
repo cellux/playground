@@ -17,12 +17,26 @@
                        (pr-str name))))))
 
 (defn- argument-spec
-  [[name default :as spec]]
-  (when-not (and (sequential? spec) (= 2 (count spec)))
+  [spec]
+  (cond
+    (symbol? spec)
+    [(synthdef-name spec) 0.0 true]
+
+    (and (sequential? spec) (<= 2 (count spec) 3))
+    (let [[name default required?] spec]
+      (when-not (and (or (string? name)
+                         (keyword? name)
+                         (symbol? name))
+                     (or (not= 3 (count spec))
+                         (boolean? required?)))
+        (throw (IllegalArgumentException.
+                (str "invalid synthdef argument: " (pr-str spec)))))
+      [(synthdef-name name) default (boolean required?)])
+
+    :else
     (throw (IllegalArgumentException.
-            (str "synthdef argument must be [name default]: "
-                 (pr-str spec)))))
-  [(synthdef-name name) default])
+            (str "synthdef argument must be a symbol or [name default]: "
+                 (pr-str spec))))))
 
 (defn create
   "Create a SynthDef map from a name, argument specifications, and body fn.
@@ -41,13 +55,20 @@
      (throw (IllegalArgumentException.
              "synthdef body must be a function")))
    (let [args (mapv argument-spec args)
-         controls (mapv (fn [[arg-name default] index]
-                         (ugen/control arg-name default index))
-                       args
-                       (range))
-         root (apply body controls)]
-     (assoc (ugen/compile root controls)
-            :name (synthdef-name name)))))
+         controls (mapv (fn [[arg-name default _required?] index]
+                          (ugen/control arg-name default index))
+                        args
+                        (range))
+         root (apply body controls)
+         compiled (ugen/compile root controls)
+         params (mapv (fn [param [_ _ required?]]
+                        (cond-> param
+                          required? (assoc :required true)))
+                      (:params compiled)
+                      args)]
+     (assoc compiled
+            :name (synthdef-name name)
+            :params params))))
 
 (defmacro define-synthdef
   "Define a named SynthDef var using lexical control bindings."
@@ -58,18 +79,31 @@
   (when-not (vector? args)
     (throw (IllegalArgumentException.
             "define-synthdef arguments must be a vector")))
-  (let [arg-names (mapv first args)
-        arg-specs (mapv (fn [[arg-name default :as spec]]
-                          (when-not (and (symbol? arg-name)
-                                         (= 2 (count spec)))
-                            (throw (IllegalArgumentException.
-                                    (str "invalid synthdef argument: "
-                                         (pr-str spec)))))
-                          [(clojure.core/name arg-name) default])
-                        args)]
+  (let [arg-specs (mapv (fn [spec]
+                          (if (symbol? spec)
+                            [spec 0.0 true]
+                            (let [[arg-name default required?] spec]
+                              (when-not (and (vector? spec)
+                                             (<= 2 (count spec) 3)
+                                             (symbol? arg-name)
+                                             (or (= 2 (count spec))
+                                                 (boolean? required?)))
+                                (throw (IllegalArgumentException.
+                                        (str "invalid synthdef argument: "
+                                             (pr-str spec)))))
+                              [arg-name
+                               default
+                               (boolean required?)])))
+                        args)
+        arg-names (mapv first arg-specs)
+        runtime-arg-specs (mapv (fn [[arg-name default required?]]
+                                 [(clojure.core/name arg-name)
+                                  default
+                                  required?])
+                               arg-specs)]
     `(def ~name
        (create ~(clojure.core/name name)
-               ~arg-specs
+               ~runtime-arg-specs
                (fn [~@arg-names]
                  ~@body)))))
 
