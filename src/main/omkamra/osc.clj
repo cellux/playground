@@ -1,7 +1,8 @@
 (ns omkamra.osc
   (:require [omkamra.osc.message :as message]
             [omkamra.osc.transport :as transport]
-            [omkamra.osc.transport.tcp :as tcp])
+            [omkamra.osc.transport.tcp :as tcp]
+            [omkamra.osc.transport.udp :as udp])
   (:import (java.time Instant)
            (java.util Date)
            (java.nio ByteBuffer)
@@ -77,9 +78,9 @@
       (throw (IllegalArgumentException. (str "Uri does not specify a host:" uri))))
     (when-not (integer? port)
       (throw (IllegalArgumentException. (str "URI does not specify a port:" uri))))
-    (if (= scheme "tcp")
-      (tcp/connect host port)
-      (throw (UnsupportedOperationException. "UDP transport is not yet supported")))))
+    (case scheme
+      "tcp" (tcp/connect host port)
+      "udp" (udp/connect host port))))
 
 (defn send
   ([conn data]
