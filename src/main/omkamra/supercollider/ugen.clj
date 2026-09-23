@@ -248,17 +248,31 @@
                     (:outputs spec))
               {:special-index (:special-index spec)})))))
 
+(defn- defining-ns-symbol
+  [name]
+  (symbol (str "omkamra.supercollider.ugen/" name)))
+
 (defmacro define-ugen
-  "Generate a UGen constructor from an entry in `metadata`."
+  "Generate a UGen constructor and rate-specific aliases from metadata."
   [constructor-name metadata-key]
   (let [spec (get metadata metadata-key)]
     (when-not spec
       (throw (IllegalArgumentException.
               (str "no metadata for UGen " metadata-key))))
-    `(defn ~constructor-name
-       ~(:doc spec)
-       [& args#]
-       (make-ugen ~metadata-key args#))))
+    (let [constructor-var (defining-ns-symbol constructor-name)
+          aliases (for [rate (sort-by clojure.core/name (:rates spec))]
+                    (let [rate-name (clojure.core/name rate)
+                          alias (symbol (str constructor-name "." rate-name))]
+                      `(defn ~alias
+                         ~(str (:doc spec) " (" rate-name "-rate alias.)")
+                         [& args#]
+                         (apply ~constructor-var ~rate args#))))]
+      `(do
+         (defn ~constructor-name
+           ~(:doc spec)
+           [& args#]
+           (make-ugen ~metadata-key args#))
+         ~@aliases))))
 
 (define-ugen SinOsc :SinOsc)
 (define-ugen Out :Out)

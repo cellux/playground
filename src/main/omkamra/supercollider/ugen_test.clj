@@ -39,6 +39,14 @@
     (is (= "anonymous" (:name sdef)))
     (is (= [{:name "freq" :index 0}] (:params sdef)))))
 
+(deftest metadata-generated-constructors-generate-rate-aliases
+  (is (= (ugen/SinOsc :ar 440.0 0.0)
+         (ugen/SinOsc.ar 440.0 0.0)))
+  (is (= (ugen/SinOsc :kr {:freq 220.0 :phase 0.0})
+         (ugen/SinOsc.kr {:freq 220.0 :phase 0.0})))
+  (is (= (ugen/Out :ar 0 1)
+         (ugen/Out.ar 0 1))))
+
 (deftest metadata-generated-constructors-support-named-inputs
   (is (= [440.0 0.0]
          (:inputs (ugen/SinOsc :ar {:freq 440.0 :phase 0.0}))))
