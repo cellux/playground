@@ -1,6 +1,7 @@
 (ns omkamra.supercollider.seq
   "Core.async helpers for concurrent players sharing a performance clock."
   (:require [clojure.core.async :as async]
+            [omkamra.supercollider.clock :as clock]
             [omkamra.supercollider.performance :as performance]))
 
 (defn- require-player
@@ -40,24 +41,91 @@
               (str "logical time cannot move backwards from " previous
                    " to " time))))
     (performance/at! player time)
-    (let [now (performance/logical-now (:session player))
-          delay-ms (max 0.0 (* 1000.0 (- time now)))]
-      (async/timeout (long (Math/ceil delay-ms))))))
+    (async/go
+      (async/<! (clock/schedule-wake! (:clock player)
+                                       {:seconds time}))
+      nil)))
+
+(defmacro wait
+  "Park the current perform/player routine for logical seconds.
+
+  This macro is intended for use inside `perform`, where the body runs inside
+  a core.async go block. It makes timed code read synchronously."
+  [duration]
+  `(async/<! (sleep ~duration)))
+
+(defmacro wait-beats
+  "Park the current perform/player routine for logical beats."
+  [duration]
+  `(async/<! (sleep-beats ~duration)))
 
 (defn sleep
-  "Return a channel that delivers after `duration` logical seconds.
+  "Return a channel that delivers after logical seconds.
 
-  This is deliberately non-blocking. A player routine should use:
+  With one argument, use the dynamically active player. With two arguments,
+  use the supplied player explicitly. This function is non-blocking; use
+  `wait` for the synchronous-looking go-block form."
+  ([duration]
+   (sleep (performance/current-player) duration))
+  ([player duration]
+   (require-player player)
+   (let [duration (require-duration duration)]
+     (wait-until player (+ (performance/player-time player) duration)))))
 
-  ```clojure
-  (<! (sleep player 1.0))
-  ```
-
-  Other core.async players continue running while this player is parked."
-  [player duration]
+(defn wait-until-beat
+  "Return a channel that delivers when `player` reaches logical beat `beat`."
+  [player beat]
   (require-player player)
-  (let [duration (require-duration duration)]
-    (wait-until player (+ (performance/player-time player) duration))))
+  (when-not (and (number? beat) (not (neg? beat)))
+    (throw (IllegalArgumentException.
+            (str "beat must be non-negative: " (pr-str beat)))))
+  (let [beat (double beat)
+        current-beat (clock/seconds->beat
+                      (:clock player)
+                      (performance/player-time player))]
+    (when (< beat current-beat)
+      (throw (IllegalArgumentException.
+              (str "beat cannot move backwards from " current-beat
+                   " to " beat))))
+    (performance/at! player
+                      (clock/beat->seconds (:clock player) beat))
+    (async/go
+      (let [wake (async/<! (clock/schedule-wake!
+                            (:clock player)
+                            {:beat beat}))]
+        (performance/at! player (:logical-seconds wake))
+        nil))))
+
+(defn sleep-beats
+  "Return a channel that delivers after logical beats.
+
+  With one argument, use the dynamically active player. With two arguments,
+  use the supplied player explicitly."
+  ([duration]
+   (sleep-beats (performance/current-player) duration))
+  ([player duration]
+   (require-player player)
+   (let [duration (require-duration duration)
+         beat (+ (clock/seconds->beat
+                  (:clock player)
+                  (performance/player-time player))
+                 duration)]
+     (wait-until-beat player beat))))
+
+(defn current-beat
+  ([]
+   (current-beat (performance/current-player)))
+  ([player]
+   (require-player player)
+   (clock/seconds->beat (:clock player)
+                        (performance/player-time player))))
+
+(defn set-tempo!
+  "Set the shared performance tempo beginning at a beat position."
+  [player beat bpm]
+  (require-player player)
+  (clock/set-tempo! (:clock player) beat bpm)
+  player)
 
 (defn synth-function
   "Return a SynthDef instancer bound to `player`."
@@ -70,9 +138,18 @@
    (fork-player parent {}))
   ([parent options]
    (require-player parent)
-   (performance/create-player
-    (:session parent)
-    (merge {:logical-time (performance/player-time parent)} options))))
+   (let [player-clock (or (:clock options) (:clock parent))
+         options (dissoc options :clock)
+         inherited-time (if (contains? options :logical-time)
+                          (:logical-time options)
+                          (if (identical? player-clock (:clock parent))
+                            (performance/player-time parent)
+                            (clock/now-seconds player-clock)))]
+     (performance/create-player
+      (:session parent)
+      (assoc options
+             :clock player-clock
+             :logical-time inherited-time)))))
 
 (defn spawn!
   "Create a new core.async player sharing the parent's clock.
@@ -95,7 +172,8 @@
   (when-not (ifn? body-fn)
     (throw (IllegalArgumentException. "player body must be a function")))
   (let [player (fork-player parent)
-        done (body-fn player)]
+        done (binding [performance/*player* player]
+               (body-fn player))]
     {:type :player-handle
      :player player
      :done done}))

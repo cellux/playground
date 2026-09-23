@@ -242,21 +242,32 @@
   [conn & names]
   (osc/send conn (apply vector "/d_free" names)))
 
+(defn n-free-message
+  [& ids]
+  (apply vector "/n_free" (map int ids)))
+
 (defn n_free
   [conn & ids]
-  (osc/send conn (apply vector "/n_free" (map int ids))))
+  (osc/send conn (apply n-free-message ids)))
 
 (defn- run-flag
   [x]
   (int (if (boolean? x) (if x 1 0) x)))
 
-(defn n_run
-  [conn & node-ids-and-flags]
+(defn n-run-message
+  [& node-ids-and-flags]
+  (when (odd? (count node-ids-and-flags))
+    (throw (IllegalArgumentException.
+            "n_run expects node-id/flag pairs")))
   (let [args (reduce
               (fn [result [node-id flag]]
                 (conj result (int node-id) (run-flag flag)))
               [] (partition 2 node-ids-and-flags))]
-    (osc/send conn (apply vector "/n_run" args))))
+    (apply vector "/n_run" args)))
+
+(defn n_run
+  [conn & node-ids-and-flags]
+  (osc/send conn (apply n-run-message node-ids-and-flags)))
 
 (defn- control-index
   [x]
@@ -286,15 +297,22 @@
                   (str "control value must be numeric, a bus reference, or a vector: "
                        (pr-str x))))))
 
-(defn n_set
-  [conn node-id & control-indices-and-values]
+(defn n-set-message
+  [node-id & control-indices-and-values]
+  (when (odd? (count control-indices-and-values))
+    (throw (IllegalArgumentException.
+            "n_set controls must be supplied as index/value pairs")))
   (let [args (reduce
               (fn [result [index value]]
                 (conj result
                       (control-index index)
                       (control-value value)))
               [] (partition 2 control-indices-and-values))]
-    (osc/send conn (apply vector "/n_set" (int node-id) args))))
+    (apply vector "/n_set" (int node-id) args)))
+
+(defn n_set
+  [conn node-id & control-indices-and-values]
+  (osc/send conn (apply n-set-message node-id control-indices-and-values)))
 
 (defn n_setn
   [conn node-id & control-indices-and-values]
