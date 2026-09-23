@@ -73,6 +73,11 @@
                (fn [~@arg-names]
                  ~@body)))))
 
+(defmacro define
+  "Alias for `define-synthdef`."
+  [name args & body]
+  `(define-synthdef ~name ~args ~@body))
+
 (defn- require-integer
   [label value]
   (when-not (integer? value)

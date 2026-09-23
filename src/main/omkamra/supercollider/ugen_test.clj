@@ -2,7 +2,8 @@
   (:require [clojure.test :refer [deftest is]]
             [omkamra.supercollider.env :as env]
             [omkamra.supercollider.synthdef :as synthdef]
-            [omkamra.supercollider.ugen :as ugen]))
+            [omkamra.supercollider.ugen :as ugen]
+            [omkamra.supercollider.ugen.all :as all]))
 
 (synthdef/define-synthdef test-beep
   [[freq 440.0]]
@@ -50,6 +51,15 @@
     (is (= 2 (nth (:inputs named) 4)))
     (is (= (drop 5 (:inputs positional))
            (drop 5 (:inputs named))))))
+
+(deftest all-namespace-contains-metadata-generated-constructors
+  (is (= (ugen/SinOsc.ar 440.0 0.0)
+         (all/SinOsc.ar 440.0 0.0)))
+  (is (= (ugen/Out.ar 0 (ugen/SinOsc.ar 220.0 0.0))
+         (all/Out.ar 0 (all/SinOsc.ar 220.0 0.0))))
+  (is (= (ugen/SinOsc.ar 440.0 0.0)
+         (all/SinOsc:ar 440.0 0.0)))
+  (is (fn? all/EnvGen.ar)))
 
 (deftest metadata-generated-constructors-generate-rate-aliases
   (is (= (ugen/SinOsc :ar 440.0 0.0)

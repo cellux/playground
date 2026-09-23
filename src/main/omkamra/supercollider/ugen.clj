@@ -228,7 +228,8 @@
                          specs)]
       (vec values))))
 
-(defn- make-ugen
+(defn make-ugen
+  "Construct a metadata-driven UGen node."
   [metadata-key args]
   (let [spec (get metadata metadata-key)]
     (when-not spec
@@ -300,7 +301,8 @@
                    (pr-str value)))))
     (vec data)))
 
-(defn- make-envgen
+(defn make-envgen
+  "Construct an EnvGen node, including envelope literal expansion."
   [_metadata-key args]
   (let [first-arg (first args)
         [rate input-args]
@@ -347,27 +349,36 @@
       (node "EnvGen" rate inputs [rate]))))
 
 (defn- defining-ns-symbol
-  [name]
-  (symbol (str "omkamra.supercollider.ugen/" name)))
+  [namespace name]
+  (symbol (str namespace "/" name)))
 
 (defmacro define-ugen
   "Generate a UGen constructor and rate-specific aliases from metadata."
   [constructor-name metadata-key]
-  (let [spec (get metadata metadata-key)]
+  (let [spec (get metadata metadata-key)
+        target-ns (ns-name *ns*)
+        implementation-ns 'omkamra.supercollider.ugen]
     (when-not spec
       (throw (IllegalArgumentException.
               (str "no metadata for UGen " metadata-key))))
-    (let [constructor-var (defining-ns-symbol constructor-name)
+    (let [constructor-var (defining-ns-symbol target-ns constructor-name)
           constructor (if-let [custom (:constructor spec)]
-                        (defining-ns-symbol custom)
-                        (defining-ns-symbol 'make-ugen))
+                        (defining-ns-symbol implementation-ns custom)
+                        (defining-ns-symbol implementation-ns 'make-ugen))
           aliases (for [rate (sort-by clojure.core/name (:rates spec))]
                     (let [rate-name (clojure.core/name rate)
-                          alias (symbol (str constructor-name "." rate-name))]
-                      `(defn ~alias
-                         ~(str (:doc spec) " (" rate-name "-rate alias.)")
-                         [& args#]
-                         (apply ~constructor-var ~rate args#))))]
+                          doc (str (:doc spec) " (" rate-name "-rate alias.)")
+                          dot-alias (symbol (str constructor-name "." rate-name))
+                          colon-alias (symbol (str constructor-name ":" rate-name))]
+                      `(do
+                         (defn ~dot-alias
+                           ~doc
+                           [& args#]
+                           (apply ~constructor-var ~rate args#))
+                         (defn ~colon-alias
+                           ~doc
+                           [& args#]
+                           (apply ~constructor-var ~rate args#)))))]
       `(do
          (defn ~constructor-name
            ~(:doc spec)

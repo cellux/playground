@@ -12,6 +12,12 @@
   [buf]
   (apply str (map #(format "%02x" (bit-and 0xff %)) (buffer-bytes buf))))
 
+(synthdef/define alias-tone
+  [[freq 220.0]]
+  (omkamra.supercollider.ugen/Out.ar
+   0
+   (omkamra.supercollider.ugen/SinOsc.ar freq 0.0)))
+
 (def test-synthdef
   {:name "test"
    :constants [0.0]
@@ -33,6 +39,10 @@
             :outputs []
             :special-index 0}]
    :variants []})
+
+(deftest define-is-an-alias-for-define-synthdef
+  (is (= "alias-tone" (:name alias-tone)))
+  (is (= [{:name "freq" :index 0}] (:params alias-tone))))
 
 (deftest serialize-matches-synthdef2-wire-format
   (is (= 136 (.remaining (synthdef/serialize test-synthdef))))
