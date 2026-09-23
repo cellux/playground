@@ -11,8 +11,8 @@
 (def ^:private default-startup-delay-ms 500)
 (def ^:private default-startup-timeout-ms 5000)
 
-(defonce ^{:doc "The current scsynth performance session, or nil.\n\nA session owns one process/OSC connection, a shared logical clock, SynthDef\nload cache, and node-ID allocator. It deliberately survives namespace reloads\nso REPL evaluation does not start a new server each time."}
-  current-scsynth
+(defonce ^:private ^{:doc "The current scsynth performance session, or nil.\n\nA session owns one process/OSC connection, a shared logical clock, SynthDef\nload cache, and node-ID allocator. It deliberately survives namespace reloads\nso REPL evaluation does not start a new server each time."}
+  current-session*
   (atom nil))
 
 (def ^:dynamic *player*
@@ -89,7 +89,7 @@
           startup-delay-ms default-startup-delay-ms
           startup-timeout-ms default-startup-timeout-ms
           bpm 120.0}}]
-   (when @current-scsynth
+   (when @current-session*
      (throw (IllegalStateException.
              "a current scsynth session already exists; call stop! first")))
    (when-not (map? scsynth)
@@ -112,7 +112,7 @@
                       :loaded-synthdefs (atom {})
                       :next-node-id (atom 1000)
                       :next-player-id (atom 0)}]
-         (reset! current-scsynth session)
+         (reset! current-session* session)
          session)
        (catch Throwable throwable
          (try (synth/close connection) (catch Throwable _))
@@ -124,15 +124,15 @@
   ([]
    (ensure-session! {}))
   ([options]
-   (locking current-scsynth
-     (or @current-scsynth (start! options)))))
+   (locking current-session*
+     (or @current-session* (start! options)))))
 
 (defn current-session
   "Return the current performance session, or nil."
   []
-  @current-scsynth)
+  @current-session*)
 
-(defn set-current-scsynth!
+(defn set-current-session!
   "Install an already-created performance session as the current session.
 
   This is primarily useful when connecting a performance to externally managed
@@ -141,14 +141,14 @@
   (when-not (session? session)
     (throw (IllegalArgumentException.
             "current scsynth session has invalid shape")))
-  (reset! current-scsynth session))
+  (reset! current-session* session))
 
 (defn stop!
   "Close and stop the current scsynth session. Returns true when one existed."
   []
-  (locking current-scsynth
-    (when-let [{:keys [connection process clocks]} @current-scsynth]
-      (reset! current-scsynth nil)
+  (locking current-session*
+    (when-let [{:keys [connection process clocks]} @current-session*]
+      (reset! current-session* nil)
       (try (synth/close connection) (catch Throwable _))
       (doseq [clock-value @clocks]
         (clock/stop! clock-value))
