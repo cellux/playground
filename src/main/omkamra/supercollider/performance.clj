@@ -315,7 +315,8 @@
              ~player-symbol (create-player ~session-symbol ~player-options)]
          (load-synthdefs! ~session-symbol
                           [~@(map (fn [s] `(var ~s)) synthdefs)])
-         (let [~@(mapcat (fn [s]
+         (let [~'player ~player-symbol
+               ~@(mapcat (fn [s]
                             [s `(synth-function ~player-symbol (var ~s))])
                           synthdefs)]
            ~@body)))))

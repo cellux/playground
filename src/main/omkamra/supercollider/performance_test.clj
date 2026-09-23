@@ -1,6 +1,8 @@
 (ns omkamra.supercollider.performance-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.core.async :as async]
+            [clojure.test :refer [deftest is testing]]
             [omkamra.supercollider.performance :as performance]
+            [omkamra.supercollider.seq :as seq]
             [omkamra.supercollider.synth :as synth]
             [omkamra.supercollider.synthdef :as synthdef]
             [omkamra.supercollider.ugen :as ugen])
@@ -78,3 +80,18 @@
 (deftest synth-new-message-preserves-fractional-controls
   (is (= ["/s_new" "test" 1001 0 1 "freq" 110.5]
          (synth/s-new-message "test" 1001 :head 1 :freq 110.5))))
+
+(deftest logical-sleep-parks-without-blocking
+  (let [session (test-session)
+        player (performance/create-player session {:logical-time 0.0})
+        wake (seq/sleep player 0.0)]
+    (is (nil? (async/<!! wake)))
+    (is (= 0.0 (performance/player-time player)))))
+
+(deftest perform-exposes-player-for-sequencing
+  (let [session (test-session)]
+    (with-redefs [performance/ensure-session! (fn [_] session)
+                  performance/load-synthdefs! (fn [_ _] session)]
+      (is (= :player
+             (:type (performance/perform {:synthdefs [test-tone]}
+                      player)))))))
