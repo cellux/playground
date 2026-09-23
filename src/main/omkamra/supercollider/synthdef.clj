@@ -1,4 +1,5 @@
 (ns omkamra.supercollider.synthdef
+  (:require [omkamra.supercollider.ugen :as ugen])
   (:import (java.nio ByteBuffer ByteOrder)
            (java.nio.charset StandardCharsets)))
 
@@ -6,14 +7,71 @@
 (def ^:private file-version 2)
 (def ^:private max-pstring-length 255)
 
+(defn- synthdef-name
+  [name]
+  (cond
+    (string? name) name
+    (or (keyword? name) (symbol? name)) (clojure.core/name name)
+    :else (throw (IllegalArgumentException.
+                  (str "synthdef name must be a string, keyword, or symbol: "
+                       (pr-str name))))))
+
+(defn- argument-spec
+  [[name default :as spec]]
+  (when-not (and (sequential? spec) (= 2 (count spec)))
+    (throw (IllegalArgumentException.
+            (str "synthdef argument must be [name default]: "
+                 (pr-str spec)))))
+  [(synthdef-name name) default])
+
 (defn create
-  []
-  {:name nil
-   :constants []
-   :param-values []
-   :params []
-   :ugens []
-   :variants []})
+  "Create a SynthDef map from a name, argument specifications, and body fn.
+
+  The body function receives one control node for each `[name default]`
+  argument specification and must return the root UGen graph node."
+  ([]
+   {:name nil
+    :constants []
+    :param-values []
+    :params []
+    :ugens []
+    :variants []})
+  ([name args body]
+   (when-not (ifn? body)
+     (throw (IllegalArgumentException.
+             "synthdef body must be a function")))
+   (let [args (mapv argument-spec args)
+         controls (mapv (fn [[arg-name default] index]
+                         (ugen/control arg-name default index))
+                       args
+                       (range))
+         root (apply body controls)]
+     (assoc (ugen/compile root controls)
+            :name (synthdef-name name)))))
+
+(defmacro define-synthdef
+  "Define a named SynthDef var using lexical control bindings."
+  [name args & body]
+  (when-not (symbol? name)
+    (throw (IllegalArgumentException.
+            "define-synthdef name must be a symbol")))
+  (when-not (vector? args)
+    (throw (IllegalArgumentException.
+            "define-synthdef arguments must be a vector")))
+  (let [arg-names (mapv first args)
+        arg-specs (mapv (fn [[arg-name default :as spec]]
+                          (when-not (and (symbol? arg-name)
+                                         (= 2 (count spec)))
+                            (throw (IllegalArgumentException.
+                                    (str "invalid synthdef argument: "
+                                         (pr-str spec)))))
+                          [(clojure.core/name arg-name) default])
+                        args)]
+    `(def ~name
+       (create ~(clojure.core/name name)
+               ~arg-specs
+               (fn [~@arg-names]
+                 ~@body)))))
 
 (defn- require-integer
   [label value]
