@@ -52,6 +52,10 @@
     (is (= (drop 5 (:inputs positional))
            (drop 5 (:inputs named))))))
 
+(deftest binary-operator-ugens-use-supercollider-opcodes
+  (is (= 0 (:special-index (ugen/Add.ar 1.0 2.0))))
+  (is (= 2 (:special-index (ugen/Mul.ar 1.0 2.0)))))
+
 (deftest all-namespace-contains-metadata-generated-constructors
   (is (= (ugen/SinOsc.ar 440.0 0.0)
          (all/SinOsc.ar 440.0 0.0)))

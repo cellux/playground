@@ -28,6 +28,26 @@
                :rate :same-as-ugen}]
     :special-index 0}
 
+   :Add
+   {:name "BinaryOpUGen"
+    :doc "Add two signals or numbers."
+    :rates #{:ar :kr}
+    :inputs [{:name :left :type :signal-or-number}
+             {:name :right :type :signal-or-number}]
+    :outputs [{:type :signal
+               :rate :same-as-ugen}]
+    :special-index 0}
+
+   :Mul
+   {:name "BinaryOpUGen"
+    :doc "Multiply two signals or numbers."
+    :rates #{:ar :kr}
+    :inputs [{:name :left :type :signal-or-number}
+             {:name :right :type :signal-or-number}]
+    :outputs [{:type :signal
+               :rate :same-as-ugen}]
+    :special-index 2}
+
    :Out
    {:name "Out"
     :doc "Write one or more signals to an audio or control bus."
@@ -387,6 +407,8 @@
          ~@aliases))))
 
 (define-ugen SinOsc :SinOsc)
+(define-ugen Add :Add)
+(define-ugen Mul :Mul)
 (define-ugen Out :Out)
 (define-ugen EnvGen :EnvGen)
 
