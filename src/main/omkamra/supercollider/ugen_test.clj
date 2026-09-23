@@ -1,5 +1,6 @@
 (ns omkamra.supercollider.ugen-test
   (:require [clojure.test :refer [deftest is]]
+            [omkamra.supercollider.env :as env]
             [omkamra.supercollider.synthdef :as synthdef]
             [omkamra.supercollider.ugen :as ugen]))
 
@@ -38,6 +39,17 @@
                 (ugen/Out :ar 0 (ugen/SinOsc :ar freq 0.0))))]
     (is (= "anonymous" (:name sdef)))
     (is (= [{:name "freq" :index 0}] (:params sdef)))))
+
+(deftest envgen-expands-envelope-and-supports-rate-aliases
+  (let [envelope (env/perc 0.01 1.0)
+        positional (ugen/EnvGen :ar envelope)
+        named (ugen/EnvGen.ar {:envelope envelope
+                               :done-action :free-self})]
+    (is (= 2 (:rate positional)))
+    (is (= 2 (:rate named)))
+    (is (= 2 (nth (:inputs named) 4)))
+    (is (= (drop 5 (:inputs positional))
+           (drop 5 (:inputs named))))))
 
 (deftest metadata-generated-constructors-generate-rate-aliases
   (is (= (ugen/SinOsc :ar 440.0 0.0)

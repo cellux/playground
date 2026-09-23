@@ -1,4 +1,5 @@
 (ns omkamra.supercollider.ugen
+  (:require [omkamra.supercollider.env :as env])
   (:refer-clojure :exclude [compile])
   (:import (java.util IdentityHashMap)))
 
@@ -38,6 +39,20 @@
               :type :signal
               :variadic true}]
     :outputs []
+    :special-index 0}
+
+   :EnvGen
+   {:name "EnvGen"
+    :doc "Generate a signal from an envelope."
+    :constructor 'make-envgen
+    :rates #{:ar :kr}
+    :inputs [{:name :envelope :type :envelope}
+             {:name :gate :type :signal-or-number :default 1.0}
+             {:name :level-scale :type :signal-or-number :default 1.0}
+             {:name :level-bias :type :signal-or-number :default 0.0}
+             {:name :time-scale :type :signal-or-number :default 1.0}
+             {:name :done-action :type :done-action :default 0}]
+    :outputs [{:type :signal :rate :same-as-ugen}]
     :special-index 0}})
 
 (defn rate-number
@@ -248,6 +263,88 @@
                     (:outputs spec))
               {:special-index (:special-index spec)})))))
 
+(def ^:private done-actions
+  {:none 0
+   :pause-self 1
+   :free-self 2
+   :free-self-and-prev 3
+   :free-self-and-next 4
+   :free-self-and-free-all-in-prev 5
+   :free-self-and-free-all-in-next 6
+   :free-self-to-head 7
+   :free-self-to-tail 8
+   :free-self-and-deep-free-prev 9
+   :free-self-and-deep-free-next 10
+   :free-all-in-group 13
+   :free-group 14
+   :free-self-resume-next 15})
+
+(defn- done-action-number
+  [value]
+  (cond
+    (keyword? value) (or (get done-actions value)
+                         (throw (IllegalArgumentException.
+                                 (str "unknown done action: " value))))
+    (and (integer? value) (<= 0 value 15)) value
+    :else (throw (IllegalArgumentException.
+                  (str "done action must be an integer or keyword: "
+                       (pr-str value))))))
+
+(defn- envelope-data
+  [value]
+  (let [data (if (env/envelope? value) (env/as-array value) value)]
+    (when-not (and (sequential? data) (seq data) (every? number? data))
+      (throw (IllegalArgumentException.
+              (str "EnvGen envelope must be an Envelope or numeric sequence: "
+                   (pr-str value)))))
+    (vec data)))
+
+(defn- make-envgen
+  [_metadata-key args]
+  (let [first-arg (first args)
+        [rate input-args]
+        (if (and (map? first-arg) (not (env/envelope? first-arg)))
+          [(get first-arg :rate) [(dissoc first-arg :rate)]]
+          [first-arg (next args)])
+        rate (rate-number rate)
+        allowed-rates (set (map rate-number (:rates (:EnvGen metadata))))
+        options (if (and (= 1 (count input-args))
+                          (map? (first input-args))
+                          (not (env/envelope? (first input-args))))
+                  (first input-args)
+                  nil)
+        options (if (and (nil? options)
+                          (= 2 (count input-args))
+                          (map? (second input-args)))
+                  (assoc (second input-args) :envelope (first input-args))
+                  options)
+        values (if options
+                 (let [known #{:envelope :gate :level-scale :level-bias
+                               :time-scale :done-action}
+                       unknown (seq (remove known (keys options)))]
+                   (when unknown
+                     (throw (IllegalArgumentException.
+                             (str "EnvGen received unknown inputs: " unknown))))
+                   [(get options :envelope)
+                    (get options :gate 1.0)
+                    (get options :level-scale 1.0)
+                    (get options :level-bias 0.0)
+                    (get options :time-scale 1.0)
+                    (get options :done-action 0)])
+                 (let [values (vec input-args)]
+                   (when (or (empty? values) (> (count values) 6))
+                     (throw (IllegalArgumentException.
+                             "EnvGen expects envelope and at most five parameters")))
+                   (vec (take 6 (concat values [1.0 1.0 0.0 1.0 0])))))
+        [envelope gate level-scale level-bias time-scale done-action] values]
+    (when-not (contains? allowed-rates rate)
+      (throw (IllegalArgumentException.
+              (str "EnvGen does not support rate " rate))))
+    (let [inputs (into [gate level-scale level-bias time-scale
+                        (done-action-number done-action)]
+                       (envelope-data envelope))]
+      (node "EnvGen" rate inputs [rate]))))
+
 (defn- defining-ns-symbol
   [name]
   (symbol (str "omkamra.supercollider.ugen/" name)))
@@ -260,6 +357,9 @@
       (throw (IllegalArgumentException.
               (str "no metadata for UGen " metadata-key))))
     (let [constructor-var (defining-ns-symbol constructor-name)
+          constructor (if-let [custom (:constructor spec)]
+                        (defining-ns-symbol custom)
+                        (defining-ns-symbol 'make-ugen))
           aliases (for [rate (sort-by clojure.core/name (:rates spec))]
                     (let [rate-name (clojure.core/name rate)
                           alias (symbol (str constructor-name "." rate-name))]
@@ -271,11 +371,12 @@
          (defn ~constructor-name
            ~(:doc spec)
            [& args#]
-           (make-ugen ~metadata-key args#))
+           (~constructor ~metadata-key args#))
          ~@aliases))))
 
 (define-ugen SinOsc :SinOsc)
 (define-ugen Out :Out)
+(define-ugen EnvGen :EnvGen)
 
 (defn- identity-map
   []
