@@ -260,7 +260,14 @@
 
 (defn- control-index
   [x]
-  (if (string? x) x (int x)))
+  (cond
+    (string? x) x
+    (keyword? x) (name x)
+    (symbol? x) (name x)
+    (integer? x) (int x)
+    :else (throw (IllegalArgumentException.
+                  (str "control index must be a name or integer: "
+                       (pr-str x))))))
 
 (defn- bus-ref
   [x]
@@ -270,12 +277,14 @@
 
 (defn- control-value
   [x]
-  (cond (float? x) (float x)
-        (int? x) (int x)
-        (vector? x) (mapv control-value x)
-        (symbol? x) (bus-ref (name x))
-        (string? x) (bus-ref x)
-        :else (int x)))
+  (cond
+    (number? x) (float x)
+    (vector? x) (mapv control-value x)
+    (symbol? x) (bus-ref (name x))
+    (string? x) (bus-ref x)
+    :else (throw (IllegalArgumentException.
+                  (str "control value must be numeric, a bus reference, or a vector: "
+                       (pr-str x))))))
 
 (defn n_set
   [conn node-id & control-indices-and-values]
@@ -392,20 +401,30 @@
                           (int target-id)
                           (map int ids))))
 
-(defn s_new
-  [conn
-   synthdef-name synth-id
-   action target-id
-   & control-indices-and-values]
+(defn s-new-message
+  "Create a `/s_new` OSC message.
+
+  Control names may be strings, keywords, or symbols. Numeric values are
+  encoded as OSC float values so fractional controls are never truncated."
+  [synthdef-name synth-id action target-id & control-indices-and-values]
+  (when (odd? (count control-indices-and-values))
+    (throw (IllegalArgumentException.
+            "s_new controls must be supplied as index/value pairs")))
   (let [args (reduce
               (fn [result [c v]]
                 (conj result
                       (control-index c)
                       (control-value v)))
               [] (partition 2 control-indices-and-values))]
-    (osc/send conn (apply vector "/s_new"
-                          (str synthdef-name)
-                          (int synth-id)
-                          (add-action action)
-                          (int target-id)
-                          args))))
+    (apply vector "/s_new"
+           (str synthdef-name)
+           (int synth-id)
+           (add-action action)
+           (int target-id)
+           args)))
+
+(defn s_new
+  [conn synthdef-name synth-id action target-id & control-indices-and-values]
+  (osc/send conn
+            (apply s-new-message synthdef-name synth-id action target-id
+                   control-indices-and-values)))

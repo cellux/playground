@@ -236,7 +236,7 @@
               (str "unknown UGen metadata: " metadata-key))))
     (let [first-arg (first args)
           [rate input-args]
-          (if (map? first-arg)
+          (if (and (map? first-arg) (not (:type first-arg)))
             [(get first-arg :rate) [(dissoc first-arg :rate)]]
             [first-arg (next args)])
           rate (rate-number rate)
@@ -246,7 +246,8 @@
                 (str (:name spec) " does not support rate " rate))))
       (let [specs (input-specs spec)
             values (if (and (= 1 (count input-args))
-                           (map? (first input-args)))
+                           (map? (first input-args))
+                           (not (:type (first input-args))))
                      (named-inputs (:name spec) specs (first input-args))
                      (positional-inputs (:name spec) specs input-args))
             expanded-specs (if-let [variadic (last (filter :variadic specs))]
