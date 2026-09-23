@@ -39,6 +39,18 @@
     (is (= "anonymous" (:name sdef)))
     (is (= [{:name "freq" :index 0}] (:params sdef)))))
 
+(deftest metadata-generated-constructors-support-named-inputs
+  (is (= [440.0 0.0]
+         (:inputs (ugen/SinOsc :ar {:freq 440.0 :phase 0.0}))))
+  (is (= [0 1 2]
+         (:inputs (ugen/Out :ar {:bus 0 :channels [1 2]}))))
+  (is (thrown-with-msg? IllegalArgumentException
+                          #"unknown inputs"
+                          (ugen/SinOsc :ar {:frequency 440.0})))
+  (is (thrown-with-msg? IllegalArgumentException
+                          #"requires input :channels"
+                          (ugen/Out :ar {:bus 0 :channels []}))))
+
 (deftest output-references-select-multi-output-channel
   (let [multi (ugen/node "Multi" :ar [] [:ar :ar])
         root (ugen/node "Use" :ar [(ugen/output multi 1)] [])

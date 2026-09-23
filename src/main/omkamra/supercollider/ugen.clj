@@ -12,6 +12,34 @@
    :dr 3
    :demand 3})
 
+(def metadata
+  {:SinOsc
+   {:name "SinOsc"
+    :doc "Sine oscillator."
+    :rates #{:ar :kr}
+    :inputs [{:name :freq
+              :type :signal-or-number
+              :default 440.0}
+             {:name :phase
+              :type :signal-or-number
+              :default 0.0}]
+    :outputs [{:type :signal
+               :rate :same-as-ugen}]
+    :special-index 0}
+
+   :Out
+   {:name "Out"
+    :doc "Write one or more signals to an audio or control bus."
+    :rates #{:ar :kr}
+    :inputs [{:name :bus
+              :type :bus-index
+              :default 0}
+             {:name :channels
+              :type :signal
+              :variadic true}]
+    :outputs []
+    :special-index 0}})
+
 (defn rate-number
   [rate]
   (if (keyword? rate)
@@ -81,15 +109,159 @@
    :source ugen
    :index output-index})
 
-(defn SinOsc
-  ([rate freq]
-   (SinOsc rate freq 0.0))
-  ([rate freq phase]
-   (node "SinOsc" rate [freq phase] [rate])))
+(defn- graph-value?
+  [value]
+  (contains? #{:ugen :output :control} (:type value)))
 
-(defn Out
-  [rate bus signal]
-  (node "Out" rate [bus signal] []))
+(defn- parameter-key
+  [value]
+  (cond
+    (keyword? value) value
+    (symbol? value) (keyword (clojure.core/name value))
+    (string? value) (keyword value)
+    :else value))
+
+(defn- type-valid?
+  [type value]
+  (case type
+    :number (number? value)
+    :bus-index (integer? value)
+    :signal (or (number? value) (graph-value? value))
+    :signal-or-number (or (number? value) (graph-value? value))
+    :any true
+    false))
+
+(defn- validate-input!
+  [ugen-name input-spec value]
+  (when-not (type-valid? (:type input-spec) value)
+    (throw (IllegalArgumentException.
+            (str ugen-name " input " (:name input-spec)
+                 " expects " (:type input-spec)
+                 ", got " (pr-str value))))))
+
+(defn- input-specs
+  [spec]
+  (let [inputs (:inputs spec)
+        variadic (filter :variadic inputs)]
+    (when (> (count variadic) 1)
+      (throw (IllegalArgumentException.
+              "UGen metadata may contain at most one variadic input")))
+    (when (and (seq variadic)
+               (not (:variadic (last inputs))))
+      (throw (IllegalArgumentException.
+              "a variadic UGen input must be last")))
+    inputs))
+
+(defn- required-input?
+  [input-spec]
+  (and (not (:variadic input-spec))
+       (not (contains? input-spec :default))))
+
+(defn- positional-inputs
+  [ugen-name specs args]
+  (let [variadic (last (filter :variadic specs))
+        fixed (if variadic (vec (butlast specs)) (vec specs))]
+    (when (< (count args) (count (filter required-input? fixed)))
+      (throw (IllegalArgumentException.
+              (str ugen-name " is missing required inputs"))))
+    (when (and (nil? variadic) (> (count args) (count fixed)))
+      (throw (IllegalArgumentException.
+              (str ugen-name " received too many inputs"))))
+    (let [fixed-values (mapv (fn [input-spec value]
+                               (if (= ::missing value)
+                                 (:default input-spec)
+                                 value))
+                             fixed
+                             (concat args
+                                     (repeat ::missing)))
+          variadic-values (if variadic
+                            (vec (drop (count fixed) args))
+                            [])]
+      (when (and variadic (empty? variadic-values))
+        (throw (IllegalArgumentException.
+                (str ugen-name " requires at least one " (:name variadic)
+                     " input"))))
+      (into fixed-values variadic-values))))
+
+(defn- named-inputs
+  [ugen-name specs named]
+  (let [named (into {} (map (fn [[key value]] [(parameter-key key) value]) named))
+        known (set (map :name specs))
+        unknown (seq (remove known (keys named)))]
+    (when unknown
+      (throw (IllegalArgumentException.
+              (str ugen-name " received unknown inputs: " unknown))))
+    (let [values (mapcat (fn [input-spec]
+                           (if (:variadic input-spec)
+                             (let [value (get named (:name input-spec))
+                                   values (if (and (sequential? value)
+                                                   (not (graph-value? value)))
+                                            (vec value)
+                                            (when (some? value) [value]))]
+                               (when-not (seq values)
+                                 (throw (IllegalArgumentException.
+                                         (str ugen-name " requires input "
+                                              (:name input-spec)))))
+                               values)
+                             [(if (contains? named (:name input-spec))
+                                (get named (:name input-spec))
+                                (if (contains? input-spec :default)
+                                  (:default input-spec)
+                                  (throw (IllegalArgumentException.
+                                          (str ugen-name " is missing input "
+                                               (:name input-spec))))))]))
+                         specs)]
+      (vec values))))
+
+(defn- make-ugen
+  [metadata-key args]
+  (let [spec (get metadata metadata-key)]
+    (when-not spec
+      (throw (IllegalArgumentException.
+              (str "unknown UGen metadata: " metadata-key))))
+    (let [first-arg (first args)
+          [rate input-args]
+          (if (map? first-arg)
+            [(get first-arg :rate) [(dissoc first-arg :rate)]]
+            [first-arg (next args)])
+          rate (rate-number rate)
+          allowed-rates (set (map rate-number (:rates spec)))]
+      (when (and (seq (:rates spec)) (not (contains? allowed-rates rate)))
+        (throw (IllegalArgumentException.
+                (str (:name spec) " does not support rate " rate))))
+      (let [specs (input-specs spec)
+            values (if (and (= 1 (count input-args))
+                           (map? (first input-args)))
+                     (named-inputs (:name spec) specs (first input-args))
+                     (positional-inputs (:name spec) specs input-args))
+            expanded-specs (if-let [variadic (last (filter :variadic specs))]
+                             (into (vec (butlast specs))
+                                   (repeat (- (count values) (count (butlast specs)))
+                                           variadic))
+                             specs)]
+        (doseq [[input-spec value] (map vector expanded-specs values)]
+          (validate-input! (:name spec) input-spec value))
+        (node (:name spec)
+              rate
+              values
+              (mapv #(if (= :same-as-ugen (:rate %)) rate (:rate %))
+                    (:outputs spec))
+              {:special-index (:special-index spec)})))))
+
+(defmacro define-ugen
+  "Generate a UGen constructor from an entry in `metadata`."
+  [constructor-name metadata-key]
+  (let [spec (get metadata metadata-key)]
+    (when-not spec
+      (throw (IllegalArgumentException.
+              (str "no metadata for UGen " metadata-key))))
+    `(defn ~constructor-name
+       ~(:doc spec)
+       [& args#]
+       (make-ugen ~metadata-key args#))))
+
+(define-ugen SinOsc :SinOsc)
+(define-ugen Out :Out)
 
 (defn- identity-map
   []
