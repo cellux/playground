@@ -3,6 +3,7 @@
             [clojure.test :refer [deftest is testing]]
             [omkamra.supercollider.clock :as clock]
             [omkamra.supercollider.performance :as performance]
+            [omkamra.supercollider.pattern :as pattern]
             [omkamra.supercollider.seq :as seq]
             [omkamra.supercollider.synth :as synth]
             [omkamra.supercollider.synthdef :as synthdef]
@@ -125,6 +126,25 @@
       (finally
         (clock/stop! (:clock slow-player))
         (clock/stop! (:clock fast-player))))))
+
+(deftest finite-pattern-playback-schedules-events
+  (let [session (test-session)
+        player (performance/create-player session {:logical-time 0.0})
+        sent (atom [])
+        p (pattern/pbind
+           [[:instrument #'test-tone]
+            [:freq (pattern/pseq [110.0 220.0])]
+            [:dur 0.0]])]
+    (with-redefs [performance/load-synthdefs! (fn [_ _] session)
+                  synth/cmd (fn [connection & packet]
+                              (swap! sent conj [connection packet]))]
+      (let [handle (performance/play-pattern! p player)]
+        (is (= :done (async/<!! (:done handle))))
+        (is (= 2 (count @sent)))
+        (is (= ["/s_new" "test-tone" 1001 0 1 "freq" 110.0]
+               (second (second (first @sent)))))
+        (is (= ["/s_new" "test-tone" 1002 0 1 "freq" 220.0]
+               (second (second (second @sent)))))))))
 
 (deftest perform-loads-vars-and-rebinds-synthdef-names
   (let [session (test-session)

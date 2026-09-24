@@ -2,6 +2,7 @@
   "REPL-oriented performance sessions and player-bound SynthDef functions."
   (:require [clojure.core.async :as async]
             [omkamra.supercollider.clock :as clock]
+            [omkamra.supercollider.pattern :as pattern]
             [omkamra.supercollider.synth :as synth]
             [omkamra.supercollider.synthdef :as synthdef])
   (:import (java.time Instant))
@@ -379,6 +380,90 @@
   (fn
     ([] (instantiate! player synthdef-var {}))
     ([controls] (instantiate! player synthdef-var controls))))
+
+(def ^:private pattern-event-keys
+  #{:instrument :dur :delta :type :rest :stretch})
+
+(defn- pattern-event-value
+  [event key]
+  (some (fn [candidate]
+          (when (contains? event candidate)
+            (get event candidate)))
+        [key (name key) (symbol (name key))]))
+
+(defn- pattern-event-controls
+  [event]
+  (reduce (fn [controls key]
+            (dissoc controls key (name key) (symbol (name key))))
+          event
+          pattern-event-keys))
+
+(defn- pattern-duration
+  [event]
+  (let [duration (or (pattern-event-value event :delta)
+                     (pattern-event-value event :dur)
+                     1.0)]
+    (when-not (and (number? duration) (not (neg? duration)))
+      (throw (IllegalArgumentException.
+              (str "pattern event duration must be non-negative: "
+                   (pr-str duration)))))
+    (double duration)))
+
+(defn- pattern-rest?
+  [event]
+  (or (true? (pattern-event-value event :rest))
+      (= :rest (pattern-event-value event :type))
+      (= "rest" (pattern-event-value event :type))))
+
+(defn- play-pattern-loop
+  [pattern player]
+  (async/thread
+    (loop [stream (pattern/stream pattern)]
+      (if-let [result (pattern/step stream {})]
+        (let [event (:value result)
+              duration (pattern-duration event)
+              current-beat (clock/seconds->beat
+                            (:clock player)
+                            (player-time player))]
+          (when-not (pattern-rest? event)
+            (let [synthdef-var (pattern-event-value event :instrument)]
+              (when-not (var? synthdef-var)
+                (throw (IllegalArgumentException.
+                        (str "pattern event :instrument must be a SynthDef Var: "
+                             (pr-str synthdef-var)))))
+              (load-synthdefs! (:session player) [synthdef-var])
+              (instantiate! player synthdef-var
+                            (pattern-event-controls event))))
+          (let [target-beat (+ current-beat duration)
+                target-seconds (clock/beat->seconds (:clock player) target-beat)]
+            (at! player target-seconds)
+            (when-let [wake (async/<!! (clock/schedule-wake!
+                                        (:clock player)
+                                        {:beat target-beat}))]
+              (at! player (:logical-seconds wake))
+              (recur (:stream result)))))
+        :done))))
+
+(defn play-pattern!
+  "Play a Pattern, returning a handle with its completion channel.
+
+  The explicit form uses the supplied player. The one-argument form ensures a
+  session and creates a player automatically. Pattern events must contain an
+  `:instrument` SynthDef Var unless they are rests. `:dur` or `:delta` is
+  interpreted as a duration in beats."
+  ([pattern]
+   (play-pattern! pattern (create-player (ensure-session!))))
+  ([pattern player]
+   (when-not (pattern/pattern? pattern)
+     (throw (IllegalArgumentException.
+             "play-pattern! expects a Pattern")))
+   (when-not (and (map? player) (= :player (:type player)))
+     (throw (IllegalArgumentException. "play-pattern! expects a player")))
+   (let [done (play-pattern-loop pattern player)]
+     {:type :pattern-playback
+      :pattern pattern
+      :player player
+      :done done})))
 
 (defn with-player
   "Ensure a session, create a player, and invoke `f` with that player."
