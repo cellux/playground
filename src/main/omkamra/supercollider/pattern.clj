@@ -22,7 +22,7 @@
   [value]
   (satisfies? PatternStream value))
 
-(declare ->ConstantStream ->PseqStream)
+(declare ->ConstantStream ->PseqStream ->PbindStream)
 
 (defrecord ConstantPattern [value]
   Pattern
@@ -135,3 +135,54 @@
      (valid-repeats! repeats)
      (valid-offset! offset)
      (->Pseq (vec items) repeats offset))))
+
+(defrecord Pbind [pairs]
+  Pattern
+  (make-stream [pattern]
+    (->PbindStream pattern
+                   (mapv (fn [[key value]]
+                           [key (omkamra.supercollider.pattern/stream value)])
+                         (:pairs pattern)))))
+
+(defrecord PbindStream [pattern streams]
+  PatternStream
+  (step [stream input-event]
+    (let [event (or input-event {})]
+      (loop [remaining (:streams stream)
+             event event
+             next-streams []]
+        (if-let [[key value-stream] (first remaining)]
+          (if-let [result (omkamra.supercollider.pattern/step
+                           value-stream event)]
+            (recur (clojure.core/next remaining)
+                   (assoc event key (:value result))
+                   (conj next-streams [key (:stream result)]))
+            nil)
+          {:value event
+           :stream (assoc stream :streams (vec next-streams))})))))
+
+(defn- valid-pbind-pair!
+  [pair]
+  (when-not (and (vector? pair)
+                 (= 2 (count pair)))
+    (throw (IllegalArgumentException.
+            (str "Pbind entries must be [key value] pairs: "
+                 (pr-str pair)))))
+  (let [[key _value] pair]
+    (when-not (or (keyword? key) (symbol? key) (string? key))
+      (throw (IllegalArgumentException.
+              (str "Pbind keys must be keywords, symbols, or strings: "
+                   (pr-str key))))))
+  pair)
+
+(defn pbind
+  "Bind independent value patterns into event maps.
+
+  Entries are ordered so later value patterns receive the event containing
+  keys produced by earlier entries. Literal values, such as `[:amp 0.5]`, are
+  automatically promoted to constant patterns."
+  [pairs]
+  (when-not (sequential? pairs)
+    (throw (IllegalArgumentException.
+            (str "Pbind entries must be sequential: " (pr-str pairs)))))
+  (->Pbind (mapv valid-pbind-pair! pairs)))

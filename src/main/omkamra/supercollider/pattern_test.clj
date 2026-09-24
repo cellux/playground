@@ -58,6 +58,42 @@
   (is (= [42 42]
          (take-values (pattern/stream 42) 2))))
 
+(deftest pbind-combines-patterns-and-promotes-literals
+  (let [events (take-values
+                (pattern/stream
+                 (pattern/pbind
+                  [[:freq (pattern/pseq [55 65] {:repeats :inf})]
+                   [:amp 0.5]
+                   [:dur 1.0]]))
+                3)]
+    (is (= [{:freq 55 :amp 0.5 :dur 1.0}
+            {:freq 65 :amp 0.5 :dur 1.0}
+            {:freq 55 :amp 0.5 :dur 1.0}]
+           events))))
+
+(deftest pbind-preserves-input-event
+  (let [result (pattern/step
+                (pattern/stream
+                 (pattern/pbind [[:freq 440]]))
+                {:instrument :bass})]
+    (is (= {:instrument :bass :freq 440}
+           (:value result)))))
+
+(deftest pbind-ends-when-a-child-pattern-ends
+  (let [s (pattern/stream
+            (pattern/pbind [[:freq (pattern/pseq [55 65])]
+                            [:amp 0.5]]))
+        first-result (pattern/step s {})
+        second-result (pattern/step (:stream first-result) {})
+        third-result (pattern/step (:stream second-result) {})]
+    (is (some? first-result))
+    (is (some? second-result))
+    (is (nil? third-result))))
+
+(deftest pbind-validates-entries
+  (is (thrown? IllegalArgumentException (pattern/pbind [[:freq]])))
+  (is (thrown? IllegalArgumentException (pattern/pbind [[42 1]]))))
+
 (deftest pseq-validates-options
   (is (thrown? IllegalArgumentException (pattern/pseq [])))
   (is (thrown? IllegalArgumentException
