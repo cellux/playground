@@ -3,7 +3,7 @@
   (:require [clojure.core.async :as async]
             [omkamra.supercollider.clock :as clock]
             [omkamra.supercollider.session :as session]
-            [omkamra.supercollider.synth :as synth])
+            [omkamra.supercollider.scsynth :as scsynth])
   (:refer-clojure :exclude [run!]))
 
 (defrecord Player [type id session clock logical-time target-id add-action])
@@ -264,9 +264,9 @@
         logical-time (player-time player)
         timestamp (timestamp-for player logical-time)
         control-pairs (mapcat (fn [[control value]] [(name control) value]) controls)
-        message (apply synth/s-new-message (:name definition) id add-action target-id
+        message (apply scsynth/s-new-message (:name definition) id add-action target-id
                        control-pairs)]
-    (synth/cmd (:connection session) timestamp message)
+    (scsynth/cmd (:connection session) timestamp message)
     {:type :synth
      :id id
      :name (:name definition)
@@ -287,10 +287,10 @@
         player (:player instance)
         session (:session instance)
         timestamp (timestamp-for player (player-time player))
-        message (apply synth/n-set-message (:id instance)
+        message (apply scsynth/n-set-message (:id instance)
                        (mapcat (fn [[control value]] [(name control) value])
                                controls))]
-    (synth/cmd (:connection session) timestamp message)
+    (scsynth/cmd (:connection session) timestamp message)
     (update instance :controls merge controls)))
 
 (defn set!
@@ -305,8 +305,8 @@
   (let [player (:player instance)
         session (:session instance)
         timestamp (timestamp-for player (player-time player))
-        message (synth/n-run-message (:id instance) running?)]
-    (synth/cmd (:connection session) timestamp message)
+        message (scsynth/n-run-message (:id instance) running?)]
+    (scsynth/cmd (:connection session) timestamp message)
     (assoc instance :running (boolean running?))))
 
 (defn free!
@@ -317,8 +317,8 @@
   (let [player (:player instance)
         session (:session instance)
         timestamp (timestamp-for player (player-time player))
-        message (synth/n-free-message (:id instance))]
-    (synth/cmd (:connection session) timestamp message)
+        message (scsynth/n-free-message (:id instance))]
+    (scsynth/cmd (:connection session) timestamp message)
     (assoc instance :freed true :running false)))
 
 (defn synth-function

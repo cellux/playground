@@ -1,7 +1,7 @@
 (ns omkamra.supercollider.session
   "scsynth sessions and their shared server resources."
   (:require [omkamra.supercollider.clock :as clock]
-            [omkamra.supercollider.synth :as synth]
+            [omkamra.supercollider.scsynth :as scsynth]
             [omkamra.supercollider.synthdef :as synthdef]))
 
 (def ^:private default-lookahead-ms 100)
@@ -33,7 +33,7 @@
   [connection timeout-ms]
   (let [result (deref (future
                         (try
-                          (synth/status connection)
+                          (scsynth/status connection)
                           (catch Throwable throwable
                             throwable)))
                       timeout-ms
@@ -52,7 +52,7 @@
   "Start scsynth, connect to it, and make a new current performance session.
 
   Options:
-  * `:scsynth` — map accepted by `omkamra.supercollider.synth/start`
+  * `:scsynth` — map accepted by `omkamra.supercollider.scsynth/start`
   * `:lookahead-ms` — amount by which OSC bundles lead real time (default 100)
   * `:startup-delay-ms` — initial process boot delay (default 500)
   * `:startup-timeout-ms` — readiness timeout after that delay (default 5000)
@@ -75,9 +75,9 @@
    (require-positive-number ":lookahead-ms" lookahead-ms)
    (require-positive-number ":startup-delay-ms" startup-delay-ms)
    (require-positive-number ":startup-timeout-ms" startup-timeout-ms)
-   (let [process (synth/start scsynth)
+   (let [process (scsynth/start scsynth)
          _ (Thread/sleep (long startup-delay-ms))
-         connection (synth/connect process)]
+         connection (scsynth/connect process)]
      (try
        (await-ready! connection (long startup-timeout-ms))
        (let [logical-clock (clock/create (cond-> {:bpm bpm}
@@ -93,8 +93,8 @@
          (reset! current-session* session)
          session)
        (catch Throwable throwable
-         (try (synth/close connection) (catch Throwable _))
-         (try (synth/stop process) (catch Throwable _))
+         (try (scsynth/close connection) (catch Throwable _))
+         (try (scsynth/stop process) (catch Throwable _))
          (throw throwable))))))
 
 (defn ensure-session!
@@ -127,11 +127,11 @@
   (locking current-session*
     (when-let [{:keys [connection process clocks]} @current-session*]
       (reset! current-session* nil)
-      (try (synth/close connection) (catch Throwable _))
+      (try (scsynth/close connection) (catch Throwable _))
       (doseq [clock-value @clocks]
         (clock/stop! clock-value))
       (when process
-        (try (synth/stop process) (catch Throwable _)))
+        (try (scsynth/stop process) (catch Throwable _)))
       true)))
 
 (defn logical-now
@@ -189,7 +189,7 @@
           name (:name definition)]
       (locking (:loaded-synthdefs session)
         (when-not (= definition (get @(:loaded-synthdefs session) name))
-          (let [reply (synth/d_recv (:connection session)
+          (let [reply (scsynth/d_recv (:connection session)
                                     (synthdef/serialize definition))]
             (when (:error reply)
               (throw (ex-info "scsynth rejected SynthDef"

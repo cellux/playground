@@ -6,7 +6,7 @@
             [omkamra.supercollider.session :as session]
             [omkamra.supercollider.pattern :as pattern]
             [omkamra.supercollider.player :as player]
-            [omkamra.supercollider.synth :as synth]
+            [omkamra.supercollider.scsynth :as scsynth]
             [omkamra.supercollider.synthdef :as synthdef]
             [omkamra.supercollider.ugen :as ugen])
   (:import (java.time Instant)))
@@ -34,7 +34,7 @@
 (deftest load-synthdefs-caches-unchanged-definitions
   (let [session (test-session)
         received (atom [])]
-    (with-redefs [synth/d_recv (fn [_ payload]
+    (with-redefs [scsynth/d_recv (fn [_ payload]
                                  (swap! received conj payload)
                                  ["/done" "/d_recv"])]
       (session/load-synthdefs! session [#'test-tone])
@@ -55,7 +55,7 @@
   (let [session (test-session)
         player (player/create-player session {:logical-time 2.0})
         sent (atom [])]
-    (with-redefs [synth/cmd (fn [connection & packet]
+    (with-redefs [scsynth/cmd (fn [connection & packet]
                               (swap! sent conj [connection packet]))]
       (let [instance (player/instantiate! player #'test-tone {:freq 110.5})
             [_ [timestamp message]] (first @sent)]
@@ -91,7 +91,7 @@
                                       :logical-time 0.0})
         sent (atom [])]
     (try
-      (with-redefs [synth/cmd (fn [connection & packet]
+      (with-redefs [scsynth/cmd (fn [connection & packet]
                                 (swap! sent conj [connection packet]))]
         (let [slow-done (async/go
                           (async/<! (player/sleep-beats slow-player 1.0))
@@ -138,7 +138,7 @@
             [:freq (pattern/pseq [110.0 220.0])]
             [:dur 0.0]])]
     (with-redefs [session/load-synthdefs! (fn [_ _] session)
-                  synth/cmd (fn [connection & packet]
+                  scsynth/cmd (fn [connection & packet]
                               (swap! sent conj [connection packet]))]
       (let [handle (performance/play-pattern! p player)]
         (is (= :done (async/<!! (:done handle))))
@@ -169,19 +169,19 @@
 
 (deftest synth-new-message-preserves-fractional-controls
   (is (= ["/s_new" "test" 1001 0 1 "freq" 110.5]
-         (synth/s-new-message "test" 1001 :head 1 :freq 110.5)))
+         (scsynth/s-new-message "test" 1001 :head 1 :freq 110.5)))
   (is (= ["/n_set" 1001 "freq" 220.25]
-         (synth/n-set-message 1001 :freq 220.25)))
+         (scsynth/n-set-message 1001 :freq 220.25)))
   (is (= ["/n_run" 1001 0]
-         (synth/n-run-message 1001 false)))
+         (scsynth/n-run-message 1001 false)))
   (is (= ["/n_free" 1001]
-         (synth/n-free-message 1001))))
+         (scsynth/n-free-message 1001))))
 
 (deftest synth-lifecycle-operations-use-the-player-clock
   (let [session (test-session)
         player (player/create-player session {:logical-time 2.0})
         sent (atom [])]
-    (with-redefs [synth/cmd (fn [connection & packet]
+    (with-redefs [scsynth/cmd (fn [connection & packet]
                               (swap! sent conj [connection packet]))]
       (let [instance (player/instantiate! player #'test-tone {:freq 110.5})]
         (player/set-controls! instance {:freq 220.25})

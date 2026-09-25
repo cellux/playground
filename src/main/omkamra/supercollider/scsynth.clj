@@ -1,4 +1,4 @@
-(ns omkamra.supercollider.synth
+(ns omkamra.supercollider.scsynth
   (:require [omkamra.osc :as osc])
   (:refer-clojure :exclude [sync]))
 
@@ -90,13 +90,13 @@
       (.destroy ^java.lang.ProcessHandle (.get handle))
       false)))
 
-(defn- synth-instance?
+(defn- scsynth-instance?
   [x]
   (and (map? x)
        (contains? x :pid)
        (map? (:params x))))
 
-(defn- synth-connect-args
+(defn- scsynth-connect-args
   [{:keys [params]}]
   (let [[scheme port] (if-let [tcp-port (:tcp-port params)]
                         ["tcp" tcp-port]
@@ -112,16 +112,16 @@
           port)]))
 
 (defn connect
-  "Connect to a synth instance or pass arguments through to `osc/connect`.
+  "Connect to an scsynth instance or pass arguments through to `osc/connect`.
 
-  A synth instance is connected using its `:tcp-port`, `:udp-port`, or the
-  default scsynth UDP port. Additional arguments after a synth instance are
+  An scsynth instance is connected using its `:tcp-port`, `:udp-port`, or the
+  default scsynth UDP port. Additional arguments after an scsynth instance are
   passed to `osc/connect` instead, allowing an explicit OSC URI to be supplied."
   [target & args]
-  (if (synth-instance? target)
+  (if (scsynth-instance? target)
     (apply osc/connect (if (seq args)
                          args
-                         (synth-connect-args target)))
+                         (scsynth-connect-args target)))
     (apply osc/connect target args)))
 
 (defn close
