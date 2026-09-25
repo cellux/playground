@@ -130,7 +130,9 @@
                     (try
                       (dispatch! (log-info "Attempting to connect to VICE binary monitor at %s:%d"
                                            bm-host bm-port))
-                      (vice/connect bm-host bm-port event-handler)
+                      (vice/connect {:address bm-host
+                                     :port bm-port}
+                                    event-handler)
                       (catch Throwable t nil
                         (do
                           (dispatch! (log-error "Connection to binary monitor failed: %s" t))
