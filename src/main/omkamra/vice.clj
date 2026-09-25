@@ -92,6 +92,11 @@
 (defn connect
   "Connect to the binary monitor described by `instance`.
 
+  Connecting to VICE enters the monitor and pauses emulation. Monitor
+  requests also leave VICE paused; call
+  `omkamra.vice.binary-monitor/resume` (or `exit`) as the final request when
+  execution should resume.
+
   An optional event handler receives unsolicited binary-monitor events; it
   defaults to `prn`."
   ([instance]
