@@ -12,6 +12,29 @@
         (recur (:stream result) (conj values (:value result)))
         values))))
 
+(deftest event-values-support-sc-key-forms
+  (let [event {"freq" 440
+               'amp 0.5
+               :dur 2.0
+               :stretch 0.5
+               :instrument #'take-values}]
+    (is (= 440 (pattern/event-value event :freq)))
+    (is (= 0.5 (pattern/event-value event :amp)))
+    (is (= {"freq" 440 'amp 0.5}
+           (pattern/event-controls event)))))
+
+(deftest event-delta-uses-supercollider-stretch
+  (is (= 1.0 (pattern/event-delta {:dur 2.0 :stretch 0.5})))
+  (is (= 3.0 (pattern/event-delta {:delta 3.0 :dur 2.0 :stretch 0.5})))
+  (is (thrown? IllegalArgumentException
+               (pattern/event-delta {:dur -1.0}))))
+
+(deftest rest-event-detects-sc-rest-events
+  (is (pattern/rest-event? {:type :rest}))
+  (is (pattern/rest-event? {"type" "rest"}))
+  (is (pattern/rest-event? {:rest true}))
+  (is (not (pattern/rest-event? {:type :note}))))
+
 (deftest pseq-yields-items-in-order
   (let [p (pattern/pseq [1 2 3])
         s (pattern/stream p)]

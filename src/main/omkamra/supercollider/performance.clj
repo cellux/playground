@@ -7,60 +7,26 @@
             [omkamra.supercollider.session :as session])
   (:refer-clojure :exclude [run!]))
 
-(def ^:private pattern-event-keys
-  #{:instrument :dur :delta :type :rest :stretch})
-
-(defn- pattern-event-value
-  [event key]
-  (some (fn [candidate]
-          (when (contains? event candidate)
-            (get event candidate)))
-        [key (name key) (symbol (name key))]))
-
-(defn- pattern-event-controls
-  [event]
-  (reduce (fn [controls key]
-            (dissoc controls key (name key) (symbol (name key))))
-          event
-          pattern-event-keys))
-
-(defn- pattern-duration
-  [event]
-  (let [duration (or (pattern-event-value event :delta)
-                     (pattern-event-value event :dur)
-                     1.0)]
-    (when-not (and (number? duration) (not (neg? duration)))
-      (throw (IllegalArgumentException.
-              (str "pattern event duration must be non-negative: "
-                   (pr-str duration)))))
-    (double duration)))
-
-(defn- pattern-rest?
-  [event]
-  (or (true? (pattern-event-value event :rest))
-      (= :rest (pattern-event-value event :type))
-      (= "rest" (pattern-event-value event :type))))
-
 (defn- play-pattern-loop
   [pattern player]
   (async/thread
     (loop [stream (pattern/stream pattern)]
       (if-let [result (pattern/step stream {})]
         (let [event (:value result)
-              duration (pattern-duration event)
+              delta (pattern/event-delta event)
               current-beat (clock/seconds->beat
                             (:clock player)
                             (player/player-time player))]
-          (when-not (pattern-rest? event)
-            (let [synthdef-var (pattern-event-value event :instrument)]
+          (when-not (pattern/rest-event? event)
+            (let [synthdef-var (pattern/event-value event :instrument)]
               (when-not (var? synthdef-var)
                 (throw (IllegalArgumentException.
                         (str "pattern event :instrument must be a SynthDef Var: "
                              (pr-str synthdef-var)))))
               (session/load-synthdefs! (:session player) [synthdef-var])
               (player/instantiate! player synthdef-var
-                            (pattern-event-controls event))))
-          (let [target-beat (+ current-beat duration)
+                            (pattern/event-controls event))))
+          (let [target-beat (+ current-beat delta)
                 target-seconds (clock/beat->seconds (:clock player) target-beat)]
             (player/at! player target-seconds)
             (when-let [wake (async/<!! (clock/schedule-wake!
@@ -75,8 +41,8 @@
 
   The explicit form uses the supplied player. The one-argument form ensures a
   session and creates a player automatically. Pattern events must contain an
-  `:instrument` SynthDef Var unless they are rests. `:dur` or `:delta` is
-  interpreted as a duration in beats."
+  `:instrument` SynthDef Var unless they are rests. `:delta`, or `:dur`
+  multiplied by `:stretch`, determines the inter-event spacing in beats."
   ([pattern]
    (play-pattern! pattern (player/create-player (session/ensure-session!))))
   ([pattern player]

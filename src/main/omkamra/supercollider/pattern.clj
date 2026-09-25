@@ -22,6 +22,48 @@
   [value]
   (satisfies? PatternStream value))
 
+(def ^:private event-keys
+  #{:instrument :dur :delta :type :rest :stretch})
+
+(defn event-value
+  "Return an event value while accepting keyword, string, or symbol keys."
+  [event key]
+  (some (fn [candidate]
+          (when (contains? event candidate)
+            (get event candidate)))
+        [key (name key) (symbol (name key))]))
+
+(defn event-controls
+  "Return synth controls from an event, excluding pattern metadata keys."
+  [event]
+  (reduce (fn [controls key]
+            (dissoc controls key (name key) (symbol (name key))))
+          event
+          event-keys))
+
+(defn event-delta
+  "Return the event's inter-event duration in beats.
+
+  An explicit `:delta` wins. Otherwise SuperCollider's `:dur * :stretch`
+  calculation is used, with both values defaulting to `1.0`."
+  [event]
+  (let [delta-value (event-value event :delta)
+        dur (or (event-value event :dur) 1.0)
+        stretch (or (event-value event :stretch) 1.0)
+        delta (or delta-value (* dur stretch))]
+    (when-not (and (number? delta) (not (neg? delta)))
+      (throw (IllegalArgumentException.
+              (str "pattern event delta must be non-negative: "
+                   (pr-str delta)))))
+    (double delta)))
+
+(defn rest-event?
+  "Return true when an event represents a rest rather than a synth note."
+  [event]
+  (or (true? (event-value event :rest))
+      (= :rest (event-value event :type))
+      (= "rest" (event-value event :type))))
+
 (declare ->ConstantStream ->PseqStream ->PbindStream)
 
 (defrecord ConstantPattern [value]
