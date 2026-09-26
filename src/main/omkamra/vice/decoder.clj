@@ -1168,17 +1168,44 @@
          (io/delete-file fifo-path true)
          (throw error))))))
 
+(defn- release-stream-state!
+  "Drop the large mutable ingestion collections after capture finalization.
+
+  The finalized artifact owns the canonical raw stream. The recorder's
+  ingestion atom only needs lightweight counters/status afterwards, otherwise
+  retaining a stopped recorder would keep a second copy of all samples alive."
+  [stream-state]
+  (swap! stream-state
+         (fn [stream]
+           {:status (:status stream)
+            :event-count (:event-count stream)
+            :definition-count (or (:definition-count stream)
+                                  (count (:definitions stream)))
+            :sequence-count (or (:sequence-count stream)
+                                (count (:sequences stream)))
+            :run-count (or (:run-count stream)
+                           (count (:runs stream)))
+            :pending-definition-count 0
+            :error (:error stream)})))
+
 (defn capture-status
   "Return lightweight progress for a streaming recorder without copying events."
   [capture]
   (let [stream @(:stream-state capture)]
-    (merge @(:state capture)
+    ;; `:artifact` is retained in the decoder state solely so a repeated
+    ;; stop-capture call can return it. Never expose it through a lightweight
+    ;; status query (or copy it into higher-level session state).
+    (merge (dissoc @(:state capture) :artifact)
            {:event-count (:event-count stream)
-            :definition-count (count (:definitions stream))
-            :sequence-count (count (:sequences stream))
-            :run-count (count (:runs stream))
+            :definition-count (or (:definition-count stream)
+                                  (count (:definitions stream)))
+            :sequence-count (or (:sequence-count stream)
+                                (count (:sequences stream)))
+            :run-count (or (:run-count stream)
+                           (count (:runs stream)))
             :pending-definition-count
-            (count (:pending-definition-ids stream))
+            (or (:pending-definition-count stream)
+                (count (:pending-definition-ids stream)))
             :reader-status (:status stream)
             :reader-alive? (.isAlive ^Thread (:reader-thread capture))
             :reader-error (some-> (:error stream) .getMessage)})))
@@ -1548,7 +1575,12 @@
           (bm/ignore-unsolicited-types! conn prior-ignored-types)
           (close-fifo-reader! reader-ref reader-thread 1000)
           (io/delete-file fifo-path true)
-          (bm/drain-events conn))))))
+          (bm/drain-events conn)
+          ;; The artifact now owns the canonical stream. Do not leave the
+          ;; ingestion atom holding its duplicate definitions/samples.
+          (release-stream-state! stream-state)
+          (reset! reader-ref nil)
+          (reset! checkpoint-number nil))))))
 
 (defn write-artifact!
   "Stream a canonical raw, pipeline, or session artifact as readable EDN."

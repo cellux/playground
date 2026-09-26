@@ -395,7 +395,9 @@
                                    :input (:input session)
                                    :error error}))]
                    (deliver (:completion session) result)
-                   result))]
+                   ;; The session's completion promise is the result owner;
+                   ;; do not retain the same artifact in the FutureTask result.
+                   nil))]
     (assoc session :worker worker)))
 
 (defn status

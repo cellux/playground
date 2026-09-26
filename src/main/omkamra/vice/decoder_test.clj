@@ -131,3 +131,24 @@
                                   (:node-versions execution)))))
     (is (= #{[0 1] [2]}
            (set (map :definition-ids (:sequences execution)))))))
+
+(deftest releases-stream-ingestion-state-after-finalization
+  (let [release-stream-state (var-get (ns-resolve 'omkamra.vice.decoder
+                                                   'release-stream-state!))
+        stream-state (atom {:status :stopped
+                            :event-count 123
+                            :definitions (vec (repeat 4 {:id 0}))
+                            :sequences (vec (repeat 3 {:id 0}))
+                            :runs (vec (repeat 2 {:sequence-id 0}))
+                            :samples (vec (repeat 123 [0 1 2]))
+                            :pending-definition-ids [0 1]
+                            :first-by-pc {1 {:event-index 0}}})]
+    (release-stream-state stream-state)
+    (is (= {:status :stopped
+            :event-count 123
+            :definition-count 4
+            :sequence-count 3
+            :run-count 2
+            :pending-definition-count 0
+            :error nil}
+           @stream-state))))
