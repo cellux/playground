@@ -21,10 +21,17 @@ The project source directory is `src/main`. Initialize it once per nREPL session
 ```clojure
 (require '[clj-reload.core :as reload])
 
-(reload/init
-  {:dirs ["src/main"]
-   :output :quieter})
+;; Return nil so an nREPL client does not print clj-reload's internal state.
+(do
+  (reload/init
+    {:dirs ["src/main"]
+     :output :quiet})
+  nil)
 ```
+
+`init` returns its complete scan state, which can be very large. The
+`:output` setting controls clj-reload's own log messages, not the value printed
+by the nREPL client. Discard the return value when initializing or reloading.
 
 Do not start another development server just to reload code. Use `clojure_eval` against the already-running nREPL.
 
@@ -33,7 +40,17 @@ Do not start another development server just to reload code. Use `clojure_eval` 
 After editing source files, run:
 
 ```clojure
-(reload/reload)
+(do
+  (reload/reload)
+  nil)
+```
+
+For a full reload, use the same quiet wrapper:
+
+```clojure
+(do
+  (reload/reload {:only :all})
+  nil)
 ```
 
 The default `:only :changed` behavior is preferred. It reloads changed namespaces that are already loaded and their downstream dependents, while leaving unrelated or experimental namespaces alone.
