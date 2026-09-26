@@ -5,32 +5,6 @@
    [clojure.string :as str]
    [omkamra.vice.binary-monitor :as bm]))
 
-(defn- register-ids
-  [conn]
-  (into {}
-        (map (fn [[id {:keys [name]}]] [name id]))
-        (bm/registers-available conn)))
-
-(defn- sample
-  [conn register-ids]
-  (let [values (bm/registers-get conn)
-        value (fn [name] (get-in values [(register-ids name) :value]))]
-    {:pc (value "PC")
-     :raster-line (value "LIN")
-     :cpu-cycle (value "CYC")
-     :a (value "A")
-     :x (value "X")
-     :y (value "Y")
-     :sp (value "SP")
-     :flags (value "FL")}))
-
-(def ^:private timing-state-keys
-  [:pc :raster-line :cpu-cycle])
-
-(defn- timing-state
-  [entry]
-  (select-keys entry timing-state-keys))
-
 (defn- parse-monitor-header
   [line]
   (when-let [[_ operation pc raster-line cpu-cycle]
@@ -67,22 +41,6 @@
                 :flags flags
                 :global-cycle (Long/parseLong global-cycle)})))))
 
-(defn parse-monitor-trace
-  "Parse VICE monitor trace output into a data-first trace vector."
-  [log]
-  (let [lines (if (string? log) (str/split-lines log) log)]
-    (loop [remaining lines
-           header nil
-           result []]
-      (if-let [line (first remaining)]
-        (if-let [new-header (parse-monitor-header line)]
-          (recur (next remaining) new-header result)
-          (if (and header (str/starts-with? line ".C:"))
-            (recur (next remaining) nil
-                   (conj result (parse-monitor-instruction line header)))
-            (recur (next remaining) header result)))
-        result))))
-
 (def ^:private mode-width
   {:imp 1 :acc 1 :imm 2 :zp 2 :zpx 2 :zpy 2 :rel 2
    :abs 3 :absx 3 :absy 3 :ind 3 :indx 2 :indy 2})
@@ -111,11 +69,6 @@
 (defn- u8
   [x]
   (bit-and (int x) 0xff))
-
-(defn- word-at
-  [memory address]
-  (bit-or (u8 (nth memory (bit-and address 0xffff)))
-          (bit-shift-left (u8 (nth memory (bit-and (inc address) 0xffff))) 8)))
 
 (defn- operand-text
   [mode bytes pc]
@@ -157,60 +110,6 @@
   (let [bytes (mapv #(u8 (nth memory (bit-and (+ pc %) 0xffff))) (range 4))]
     (disassemble-bytes pc bytes)))
 
-(defn trace->assembly
-  "Render a trace vector against a memory image.
-
-  Each line is annotated with the raster line and CPU cycle at which the
-  instruction was executed. Repeated trace entries intentionally remain in the
-  output, preserving execution order."
-  [trace memory]
-  (str/join
-   "\n"
-   (map (fn [{:keys [pc raster-line cpu-cycle bytes]}]
-          (let [{decoded-bytes :bytes text :text}
-                (if bytes
-                  (disassemble-bytes pc bytes)
-                  (disassemble memory pc))]
-            (format "; line %03d cycle %02d\n$%04X  %-8s %s"
-                    raster-line cpu-cycle pc
-                    (str/join " " (map #(format "%02X" %) decoded-bytes))
-                    text)))
-        trace)))
-
-(declare stream-definition-ids occurrence-map)
-
-(defn- execution-span-instructions
-  [execution span event-stream]
-  (let [definitions (into {} (map (juxt :id identity)
-                                  (:instruction-definitions execution)))
-        sequences (into {} (map (juxt :id identity) (:sequences execution)))]
-    (if (= :omkamra.vice/versioned-execution-v2 (:format execution))
-      (let [start (:start-index span)
-            end (:end-index span)
-            definition-ids (take (- end start)
-                                 (drop start
-                                       (stream-definition-ids event-stream)))
-            samples (subvec (:samples event-stream) start end)]
-        (map (fn [definition-id sample]
-               (let [definition (definitions definition-id)]
-                 (merge (-> (select-keys definition
-                                         [:bytes :mnemonic :mode :operand :text])
-                            (assoc :pc (:address definition)))
-                        (zipmap (:sample-keys event-stream) sample))))
-             definition-ids samples))
-      (mapcat (fn [{:keys [sequence-id iterations samples]}]
-                (let [definition-ids (:definition-ids (sequences sequence-id))
-                      static (map (fn [definition-id]
-                                    (let [definition (definitions definition-id)]
-                                      (-> (select-keys definition
-                                                       [:bytes :mnemonic :mode
-                                                        :operand :text])
-                                          (assoc :pc (:address definition)))))
-                                  (apply concat
-                                         (repeat iterations definition-ids)))]
-                  (map merge static samples)))
-              (:runs span)))))
-
 (defn- span-assembly-header
   [{:keys [kind start-index end-index trigger entry-pc return-pc]}]
   (str (format "; span %-7s events %d..%d"
@@ -242,9 +141,7 @@
         definitions (:instruction-definitions execution)
         sequences (:sequences execution)
         spans (sort-by :start-index (:spans execution))
-        runs (if (= :omkamra.vice/versioned-execution-v2 (:format execution))
-               (vec (:runs execution))
-               (vec (mapcat :runs spans)))]
+        runs (vec (:runs execution))]
     (.write writer "; interned sequence dictionary\n")
     (doseq [{:keys [id definition-ids]} sequences]
       (.write writer
@@ -292,62 +189,39 @@
                           index))))))]
           (recur (next remaining-spans) next-run-index))))))
 
-(defn- write-expanded-assembly!
-  [writer artifact]
-  (let [execution (require-execution artifact)]
-    (doseq [[span-index span]
-            (map-indexed vector (sort-by :start-index (:spans execution)))]
-      (when (pos? span-index) (.write writer "\n"))
-      (.write writer (span-assembly-header span))
-      (.write writer "\n")
-      (doseq [instruction
-              (execution-span-instructions execution span
-                                           (get-in artifact [:raw :events]))]
-        (when (.isInterrupted (Thread/currentThread))
-          (throw (InterruptedException. "assembly rendering cancelled")))
-        (.write writer (trace->assembly [instruction] nil))
-        (.write writer "\n")))))
-
 (defn- render-assembly!
-  [writer artifact {:keys [expanded?] :or {expanded? false}}]
-  (let [execution (require-execution artifact)]
-    (if expanded?
-      (write-expanded-assembly! writer artifact)
-      (write-compressed-assembly! writer artifact))))
+  [writer artifact]
+  (write-compressed-assembly! writer artifact))
 
 (defn artifact->assembly
   "Render a pipeline artifact using the canonical assembly renderer.
 
   Dictionary-coded captures default to a deduplicated report: each interned
   sequence body is emitted once and the chronological span/run timeline refers
-  to it by sequence ID. Pass `{:expanded? true}` to emit every instruction
-  occurrence. Without `:output-file`, this returns a string; with an output
-  file, rendering is streamed and the file is returned. Both paths use the
-  same renderer.
+  to it by sequence ID. Without `:output-file`, this returns a string; with an
+  output file, rendering is streamed and the file is returned. Both paths use
+  the same renderer.
 
   Options:
-  * `:expanded?` - emit every occurrence instead of the compact report.
   * `:output-file` - stream the result to this file instead of returning text."
   ([artifact]
    (artifact->assembly artifact {}))
-  ([artifact {:keys [output-file] :as options}]
+  ([artifact {:keys [output-file]}]
    (if output-file
      (with-open [writer (io/writer output-file)]
-       (render-assembly! writer artifact options)
+       (render-assembly! writer artifact)
        output-file)
      (let [writer (java.io.StringWriter.)]
-       (render-assembly! writer artifact options)
+       (render-assembly! writer artifact)
        (str writer)))))
 
 
-;; Frame capture -------------------------------------------------------------
+;; Pipeline enrichment -------------------------------------------------------
 ;;
-;; The binary monitor does not stream memory-write events.  capture-trace
-;; therefore samples each instruction through ADVANCE_INSTRUCTIONS and derives
-;; CPU writes from the pre-instruction registers, captured opcode bytes, and a
-;; mutable copy of the memory snapshot taken at the frame boundary.  The raw
-;; monitor samples and both memory snapshots remain in the result, so derived
-;; interpretations can always be checked or replaced later.
+;; The binary monitor does not stream memory-write events. CPU writes are
+;; therefore derived from the pre-instruction registers, captured opcode bytes,
+;; and a mutable copy of the initial memory snapshot. The raw monitor samples
+;; and both memory snapshots remain in the result for replay and inspection.
 
 (def ^:private vic-register-addresses
   (conj (set (range 0xd000 0xd02f)) 0xdd00))
@@ -658,9 +532,6 @@
                   {:period period :end end :iterations iterations}))))
           (range 1 (inc (min max-loop-body (quot remaining min-loop-repetitions)))))))
 
-(def ^:private static-instruction-keys
-  #{:pc :bytes :mnemonic :mode :operand :text :vice-text :instruction-index})
-
 (defn- instruction-definition
   [id instruction]
   {:id id
@@ -770,19 +641,15 @@
           (swap! sequence-ids assoc definition-ids id)
           id))))
 
-(defn- dynamic-sample
-  [instruction]
-  (apply dissoc instruction static-instruction-keys))
-
 (defn versioned-execution
   "Build the canonical, lossless dictionary-coded execution representation.
 
   Static instruction images appear once in `:instruction-definitions`.
-  Repeated instruction bodies appear once in `:sequences`; span runs reference
-  them by `:sequence-id` and carry only their dynamic execution samples. The
-  `:node-versions` timeline records every change of executed bytes at an
-  address. Use `expand-execution` to materialize the original instruction
-  stream for inspection."
+  Repeated instruction bodies appear once in `:sequences`; execution runs
+  reference them by `:sequence-id`. The `:node-versions` timeline records every
+  change of executed bytes at an address. The compact representation preserves
+  the complete execution timeline without materializing repeated instruction
+  occurrences."
   ([instructions spans]
    (versioned-execution instructions spans {}))
   ([instructions spans options]
@@ -803,77 +670,22 @@
                                                                         definition-ids)]
                                       (-> (dissoc segment :definition-ids)
                                           (assoc :sequence-id sequence-id
-                                                 :instruction-count (- end-index start-index)
-                                                 :samples (mapv dynamic-sample
-                                                                (subvec instructions
-                                                                        start-index
-                                                                        end-index))))))
+                                                 :instruction-count (- end-index start-index)))))
                                   segments)]
                    (-> (select-keys span [:kind :start-index :end-index :trigger
                                            :entry-pc :return-pc :capture-index])
                        (assoc :instruction-count (- end start)
                               :runs runs))))
                spans)]
-     {:format :omkamra.vice/versioned-execution-v1
+     {:format :omkamra.vice/versioned-execution-v2
       :event-count (count instructions)
       :instruction-definitions definitions
       :node-versions node-versions
       :sequences @sequences
-      :spans execution-spans})))
-
-(defn expand-execution
-  "Materialize a `versioned-execution` trace. Intended for validation and
-  interactive inspection; persisted captures should retain the compact form."
-  [execution]
-  (let [definitions (into {} (map (juxt :id identity)
-                                  (:instruction-definitions execution)))
-        sequences (into {} (map (juxt :id identity) (:sequences execution)))]
-    (->> (:spans execution)
-         (sort-by :start-index)
-         (mapcat (fn [{:keys [runs]}]
-                   (mapcat (fn [{:keys [sequence-id iterations samples]}]
-                             (let [definition-ids (:definition-ids (sequences sequence-id))
-                                   static (mapv (fn [definition-id]
-                                                  (let [definition (definitions definition-id)]
-                                                    (-> (select-keys definition
-                                                                     [:bytes :mnemonic :mode
-                                                                      :operand :text])
-                                                        (assoc :pc (:address definition)))))
-                                                (apply concat
-                                                       (repeat iterations definition-ids)))]
-                               (map merge static samples)))
-                           runs)))
-         vec)))
+      :runs (vec (mapcat :runs execution-spans))
+      :spans (mapv #(dissoc % :runs) execution-spans)})))
 
 (declare raw-artifact run-pipeline expand-raw-events)
-
-(defn execution-session
-  "Combine canonical pipeline captures and rerun all stages over one timeline.
-
-  The session is the unit of analysis: raw events are concatenated first, then
-  normalization, decoding, memory, structure, video, and semantics stages run
-  once over the complete history."
-  [captures]
-  (let [captures (vec captures)
-        events (mapv #(expand-raw-events (get-in % [:raw :events])) captures)
-        initial-memory (get-in (first captures) [:raw :memory :initial])
-        final-memory (get-in (last captures) [:raw :memory :final])
-        raw (raw-artifact
-             (vec (mapcat identity events))
-             {:initial-memory initial-memory
-              :final-memory final-memory
-              :metadata {:captures (mapv (fn [capture-index capture]
-                                           {:capture-index capture-index
-                                            :frame (:frame capture)
-                                            :frame-code (get-in capture [:stages :structure :frame-code])
-                                            :event-count (count (get-in capture [:raw :events]))
-                                            :display (get-in capture [:raw :display])
-                                            :palette (get-in capture [:raw :palette])})
-                                         (range)
-                                         captures)}})]
-    (assoc (run-pipeline raw)
-           :format :omkamra.vice/session-v1
-           :captures (:captures (get-in raw [:raw :metadata])))))
 
 (defn- code-span
   [instructions kind start end]
@@ -971,92 +783,34 @@
      {:first-ram-code (first-code-entry spans :non-irq options)
       :first-ram-irq-code (first-code-entry spans :irq options)})))
 
-(declare capture-trace)
-
-(defn await-frame-code
-  "Capture frames until demo RAM IRQ code is observed.
-
-  This is intended to be called after `binary-monitor/autostart`, which has
-  already resumed VICE. It leaves VICE resumed on success, timeout, or error.
-  The returned `:capture` is the first qualifying capture (or the final
-  capture when `:max-frames` is exhausted)."
-  ([conn]
-   (await-frame-code conn {}))
-  ([conn {:keys [max-frames max-instructions min-instructions
-                 include-display? frame-code-options]
-          :or {max-frames 3
-               max-instructions 20000
-               min-instructions 32
-               include-display? true
-               frame-code-options {}}}]
-   (try
-     (loop [frame-number 1]
-       (let [capture (capture-trace
-                      conn {:max-instructions max-instructions
-                            :min-instructions min-instructions
-                            :include-display? include-display?
-                            :resume? false})
-             marker (get-in capture [:stages :structure :frame-code])]
-         (if (or (:first-ram-irq-code marker)
-                 (>= frame-number max-frames))
-           (assoc-in capture [:frame :frame-code-frame-number] frame-number)
-           (recur (inc frame-number)))))
-     (finally
-       (bm/resume conn)))))
-
 (def ^:private stream-events-format
   :omkamra.vice/dictionary-event-stream-v2)
-
-(def ^:private dictionary-event-stream-formats
-  #{:omkamra.vice/dictionary-event-stream-v1
-    :omkamra.vice/dictionary-event-stream-v2})
-
-(def ^:private stream-occurrence-keys
-  [:definition-id :raster-line :cpu-cycle :a :x :y :sp :flags :global-cycle])
-
-(defn- occurrence-map
-  [events occurrence]
-  (if (map? occurrence)
-    occurrence
-    (zipmap (or (:occurrence-keys events) stream-occurrence-keys)
-            occurrence)))
 
 (def ^:private stream-sample-keys
   [:raster-line :cpu-cycle :a :x :y :sp :flags :global-cycle])
 
 (defn- dictionary-event-stream?
   [events]
-  (contains? dictionary-event-stream-formats (:format events)))
+  (= stream-events-format (:format events)))
 
 (defn- stream-definition-ids
   [events]
-  (if (= :omkamra.vice/dictionary-event-stream-v2 (:format events))
-    (let [sequences (:sequences events)]
-      (mapcat (fn [{:keys [sequence-id iterations]}]
-                (apply concat
-                       (repeat iterations
-                               (:definition-ids (nth sequences sequence-id)))))
-              (:runs events)))
-    (map (fn [occurrence]
-           (:definition-id (occurrence-map events occurrence)))
-         (:occurrences events))))
+  (let [sequences (:sequences events)]
+    (mapcat (fn [{:keys [sequence-id iterations]}]
+              (apply concat
+                     (repeat iterations
+                             (:definition-ids (nth sequences sequence-id)))))
+            (:runs events))))
 
 (defn- expand-raw-events
   [events]
   (if (dictionary-event-stream? events)
     (let [definitions (:definitions events)]
-      (if (= stream-events-format (:format events))
-        (mapv (fn [definition-id sample]
-                (merge (dissoc (nth definitions definition-id) :id)
-                       (zipmap (:sample-keys events) sample)))
-              (stream-definition-ids events)
-              (:samples events))
-        (mapv (fn [occurrence]
-                (let [{:keys [definition-id] :as occurrence}
-                      (occurrence-map events occurrence)]
-                  (merge (dissoc (nth definitions definition-id) :id)
-                         (dissoc occurrence :definition-id))))
-              (:occurrences events))))
+      (mapv (fn [definition-id sample]
+              (merge (dissoc (nth definitions definition-id) :id)
+                     (zipmap (:sample-keys events) sample)))
+            (stream-definition-ids events)
+            (:samples events)))
     (vec events)))
 
 (defn raw-artifact
@@ -1186,85 +940,7 @@
            artifact
            stages)))
 
-(defn- capture-display
-  [conn use-vic-ii?]
-  (let [display (bm/display-get conn {:use-vic-ii? use-vic-ii? :format 0})]
-    (assoc display :buffer (mapv u8 (:buffer display)))))
-
-(defn- trace-boundary
-  [trace min-instructions]
-  (let [trace (vec trace)
-        initial (timing-state (first trace))
-        exact-index (first (keep-indexed
-                            (fn [index entry]
-                              (when (and (>= index min-instructions)
-                                         (= initial (timing-state entry)))
-                                index))
-                            trace))
-        ;; A demo may legitimately change its CPU state between frames (for
-        ;; example, a KERNAL cursor/timer path), so an exact PC/raster/cycle
-        ;; recurrence is not guaranteed. Raster wrap is the monitor-observable
-        ;; frame boundary fallback.
-        wrap-index (when-not exact-index
-                     (first (keep-indexed
-                             (fn [index entry]
-                               (when (and (>= index min-instructions)
-                                          (pos? index)
-                                          (< (:raster-line entry)
-                                             (:raster-line (nth trace (dec index)))))
-                                 index))
-                             trace)))]
-    (if-let [boundary-index (or exact-index wrap-index)]
-      {:trace (subvec trace 0 boundary-index)
-       :boundary-entry (nth trace boundary-index)
-       :boundary-mode (if exact-index :timing-state :raster-wrap)
-       :reason :frame}
-      {:trace trace :boundary-entry nil :boundary-mode nil :reason :max-instructions})))
-
-(defn- bulk-monitor-trace
-  [conn {:keys [max-instructions min-instructions bulk-timeout-ms progress-atom]}]
-  (let [log-file (str "/tmp/omkamra-vice/capture-" (System/nanoTime) ".log")
-        checkpoint-number (atom nil)]
-    (spit log-file "")
-    (try
-      (when progress-atom
-        (reset! progress-atom {:status :bulk-running
-                               :instruction-count 0
-                               :log-file log-file}))
-      (let [checkpoint (bm/checkpoint-set
-                        conn {:start 0
-                              :end 0xffff
-                              :stop? false
-                              :enabled? true
-                              :op 4
-                              :temporary? false})]
-        (reset! checkpoint-number (:number checkpoint)))
-      (bm/resource-set conn {:name "MonitorLogFileName" :value log-file})
-      (bm/resource-set conn {:name "MonitorLogEnabled" :value 1})
-      ;; The execute tracepoint is non-stopping. ADVANCE_INSTRUCTIONS supplies
-      ;; the single stop event after the requested bulk count.
-      (bm/advance-and-wait conn {:count max-instructions
-                                 :timeout-ms (or bulk-timeout-ms
-                                                 (* 10 max-instructions))})
-      (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
-      (let [raw-trace (->> (parse-monitor-trace (slurp log-file))
-                           (filter #(= :exec (:operation %)))
-                           vec)
-            bounded (trace-boundary raw-trace min-instructions)]
-        (when progress-atom
-          (swap! progress-atom assoc
-                 :status :bulk-complete
-                 :instruction-count (count raw-trace)))
-        (assoc bounded :raw-trace raw-trace :log-file log-file))
-      (finally
-        (try (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
-             (catch Throwable _ nil))
-        (when-let [number @checkpoint-number]
-          (try (bm/checkpoint-delete conn {:number number})
-               (catch Throwable _ nil)))))))
-
-(def ^:private monitor-event-static-keys
-  [:operation :pc :bytes :vice-text])
+(def ^:private stream-definition-window-size 4096)
 
 (def ^:private stream-definition-window-size 4096)
 
@@ -1873,139 +1549,6 @@
           (close-fifo-reader! reader-ref reader-thread 1000)
           (io/delete-file fifo-path true)
           (bm/drain-events conn))))))
-
-(defn capture-trace
-  "Capture one bounded execution chunk through the VICE binary monitor.
-
-  The result is data-first and self-contained: `:raw` retains the direct
-  monitor samples and memory/display snapshots; `:trace`, `:irq-sections`,
-  `:vic`, and `:assets` are reproducible derived views.  CPU writes are marked
-  `:inferred? true`, since VICE's binary monitor exposes instruction stepping
-  but not a binary memory-write event stream.
-
-  Options:
-  * `:max-instructions` (default 20000) is the bulk trace budget.
-  * `:min-instructions` (default 32) rejects an incidental early recurrence.
-  * `:bulk?` (default true) uses VICE's remote execution trace/log facility.
-  * `:bulk-timeout-ms` (default 60000) bounds the bulk advance request.
-  * `:timeout-ms` (default 1000) is the wait per stepped instruction in the
-    fallback path.
-  * `:pause?` (default true) enters the monitor before sampling.
-  * `:resume?` (default true) resumes VICE after collecting the capture.
-  * `:include-display?` (default true) includes indexed framebuffer and palette.
-  * `:use-vic-ii?` (default true) selects the VIC-II display/palette.
-  * `:cycles-per-line` and `:raster-lines` default to PAL C64 values (63/312)
-    and locate inferred store events within their instructions.
-  * `:progress-atom`, when supplied, is updated with the current instruction
-    count and latest timing sample while stepping.
-
-  The emulator remains paused for the whole capture because monitor tracing
-  runs under the binary monitor. The bulk path advances the requested budget in
-  one monitor operation rather than performing one network round-trip per
-  instruction. With the
-  default `:resume? true`, it resumes in the `finally` path, including on an
-  interrupted capture. The frame boundary is recurrence of the initial
-  `(PC LIN CYC)` state. A result whose `:frame/:reason` is `:max-instructions`
-  is a partial capture."
-  ([conn] (capture-trace conn {}))
-  ([conn {:keys [max-instructions min-instructions timeout-ms bulk-timeout-ms
-                 bulk? pause? resume? include-display? use-vic-ii?
-                 cycles-per-line raster-lines progress-atom]
-          :or {max-instructions 20000
-               min-instructions 32
-               timeout-ms 1000
-               bulk-timeout-ms 60000
-               bulk? true
-               pause? true
-               resume? true
-               include-display? true
-               use-vic-ii? true
-               cycles-per-line 63
-               raster-lines 312}}]
-   (when progress-atom
-     (reset! progress-atom {:status :starting
-                            :instruction-count 0
-                            :latest-entry nil}))
-   (when-not (pos-int? max-instructions)
-     (throw (IllegalArgumentException. ":max-instructions must be positive")))
-   (when-not (<= 0 min-instructions max-instructions)
-     (throw (IllegalArgumentException.
-             ":min-instructions must be between 0 and :max-instructions")))
-   (try
-     (bm/drain-events conn)
-     (when pause? (bm/ping conn))
-     (bm/drain-events conn)
-     (let [ids (when-not bulk? (register-ids conn))]
-       (when (and (not bulk?) (not (every? ids ["PC" "LIN" "CYC"])))
-         (throw (ex-info "VICE monitor does not expose PC, LIN, and CYC registers"
-                         {:registers (keys ids)})))
-       (let [initial-memory (mapv u8 (:memory (bm/mem-get conn {:start 0 :end 65535})))
-             trace-data (if bulk?
-                          (bulk-monitor-trace
-                           conn {:max-instructions max-instructions
-                                 :min-instructions min-instructions
-                                 :bulk-timeout-ms bulk-timeout-ms
-                                 :progress-atom progress-atom})
-                          (loop [trace [(sample conn ids)]]
-                            (let [entry (peek trace)
-                                  executed (dec (count trace))]
-                              (when progress-atom
-                                (reset! progress-atom {:status :running
-                                                       :instruction-count (count trace)
-                                                       :latest-entry entry}))
-                              (cond
-                                (and (>= executed min-instructions)
-                                     (= (timing-state entry)
-                                        (timing-state (first trace))))
-                                {:trace (pop trace)
-                                 :boundary-entry entry
-                                 :reason :frame}
-
-                                (>= executed max-instructions)
-                                {:trace trace
-                                 :boundary-entry nil
-                                 :reason :max-instructions}
-
-                                :else
-                                (do
-                                  (bm/advance-and-wait
-                                   conn {:count 1 :timeout-ms timeout-ms})
-                                  (recur (conj trace (sample conn ids))))))))
-             {:keys [trace boundary-entry boundary-mode reason]} trace-data
-             trace (or (:raw-trace trace-data) trace)
-             final-memory (mapv u8 (:memory (bm/mem-get conn {:start 0 :end 65535})))
-             display (when include-display? (capture-display conn use-vic-ii?))
-             palette (when include-display? (bm/palette-get conn {:use-vic-ii? use-vic-ii?}))
-             pipeline (-> (raw-artifact
-                            trace
-                            {:initial-memory initial-memory
-                             :final-memory final-memory
-                             :boundary-entry boundary-entry
-                             :display display
-                             :palette palette
-                             :metadata {:decode-options
-                                        {:cycles-per-line cycles-per-line
-                                         :raster-lines raster-lines}
-                                        :frame-boundary
-                                        {:reason reason
-                                         :boundary-mode boundary-mode}}})
-                          run-pipeline
-                          (assoc :format :omkamra.vice/pipeline-v1))]
-         (-> pipeline
-             (assoc :frame {:reason reason
-                            :boundary-mode boundary-mode
-                            :initial-entry (first trace)
-                            :boundary-entry boundary-entry
-                            :instruction-count (count trace)
-                            :raster-lines raster-lines
-                            :cycles-per-line cycles-per-line})
-             (update :raw assoc
-                     :monitor-trace (:raw-trace trace-data)
-                     :monitor-log-file (:log-file trace-data)))))
-     (finally
-       (when resume? (bm/resume conn))
-       (when progress-atom
-         (swap! progress-atom assoc :status (if resume? :resumed :paused)))))))
 
 (defn write-artifact!
   "Stream a canonical raw, pipeline, or session artifact as readable EDN."

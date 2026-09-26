@@ -1,5 +1,5 @@
 (ns omkamra.vice.decoder-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.test :refer [deftest is]]
             [omkamra.vice.decoder :as decoder]))
 
 (deftest disassembles-mos-6510-addressing-modes
@@ -14,33 +14,6 @@
     (is (= "LDA #$42" (:text (decoder/disassemble memory 0x1000))))
     (is (= "BNE $1000" (:text (decoder/disassemble memory 0x1002))))
     (is (= "JMP $1234" (:text (decoder/disassemble memory 0x1004))))))
-
-(deftest assembly-preserves-execution-timing
-  (let [memory (byte-array 65536)]
-    (aset-byte memory 0x2000 (unchecked-byte 0xea)) ; NOP
-    (is (= "; line 123 cycle 17\n$2000  EA       NOP"
-           (decoder/trace->assembly [{:pc 0x2000
-                                      :raster-line 123
-                                      :cpu-cycle 17}]
-                                     memory)))))
-
-(deftest parses-vice-monitor-trace
-  (let [log "#1 (Trace  exec 1093)    0/$000,   0/$00\n.C:1093  4C 93 10    JMP $1093      - A:00 X:28 Y:CD SP:fd ..-...ZC   66004848"
-        entry (first (decoder/parse-monitor-trace log))]
-    (is (= {:operation :exec
-            :pc 0x1093 :raster-line 0 :cpu-cycle 0
-            :bytes [0x4c 0x93 0x10]
-            :a 0 :x 0x28 :y 0xcd :sp 0xfd
-            :flags "..-...ZC" :global-cycle 66004848
-            :vice-text "JMP $1093"}
-           entry))))
-
-(deftest assembly-uses-captured-instruction-bytes
-  (is (= "; line 001 cycle 02\n$1093  4C 93 10 JMP $1093"
-         (decoder/trace->assembly
-          [{:pc 0x1093 :raster-line 1 :cpu-cycle 2
-            :bytes [0x4c 0x93 0x10]}]
-          nil))))
 
 (deftest renders-all-canonical-execution-spans
   (let [instructions [{:pc 0x1000 :bytes [0xea]
@@ -108,12 +81,17 @@
 
 (deftest pipeline-replays-dictionary-coded-raw-events
   (let [memory (byte-array 65536)
-        stream {:format :omkamra.vice/dictionary-event-stream-v1
+        stream {:format :omkamra.vice/dictionary-event-stream-v2
                 :event-count 2
+                :sample-keys [:raster-line :cpu-cycle :a :x :y :sp :flags
+                              :global-cycle]
                 :definitions [{:id 0 :operation :exec :pc 0x1000
                                :bytes [0xea] :vice-text "NOP"}]
-                :occurrences [{:definition-id 0 :raster-line 1 :cpu-cycle 2}
-                              {:definition-id 0 :raster-line 2 :cpu-cycle 3}]}
+                :sequences [{:id 0 :definition-ids [0]}]
+                :runs [{:kind :sequence :start-index 0 :end-index 2
+                        :iterations 2 :sequence-id 0}]
+                :samples [[1 2 0 0 0 255 "........" 0]
+                          [2 3 0 0 0 255 "........" 1]]}
         artifact (-> (decoder/raw-artifact
                       stream {:initial-memory memory :final-memory memory})
                      (decoder/run-pipeline {:compact? true}))]
@@ -139,7 +117,7 @@
         spans [{:kind :non-irq :start-index 0 :end-index 6}
                {:kind :non-irq :start-index 6 :end-index 13}]
         execution (decoder/versioned-execution instructions spans)
-        runs (mapcat :runs (:spans execution))]
+        runs (:runs execution)]
     ;; The repeated two-instruction loop body has one dictionary entry even
     ;; though it occurs in both spans.
     (is (= 3 (count (:instruction-definitions execution))))
@@ -151,71 +129,5 @@
     (is (= [0 1]
            (mapv :version (filter #(= 0x1000 (:address %))
                                   (:node-versions execution)))))
-    (is (= (mapv #(select-keys % [:pc :bytes :raster-line :cpu-cycle :text])
-                 instructions)
-           (mapv #(select-keys % [:pc :bytes :raster-line :cpu-cycle :text])
-                 (decoder/expand-execution execution))))))
-
-(deftest interns-sequences-across-capture-boundaries
-  (let [memory (byte-array 65536)
-        _ (aset-byte memory 0x1000 (unchecked-byte 0xea))
-        _ (aset-byte memory 0x1001 (unchecked-byte 0x4c))
-        _ (aset-byte memory 0x1002 (unchecked-byte 0x00))
-        _ (aset-byte memory 0x1003 (unchecked-byte 0x10))
-        events [{:pc 0x1000 :raster-line 0 :cpu-cycle 0}
-                {:pc 0x1001 :raster-line 0 :cpu-cycle 3}
-                {:pc 0x1000 :raster-line 0 :cpu-cycle 6}
-                {:pc 0x1001 :raster-line 0 :cpu-cycle 9}
-                {:pc 0x1000 :raster-line 0 :cpu-cycle 12}
-                {:pc 0x1001 :raster-line 0 :cpu-cycle 15}]
-        capture (decoder/raw-artifact events {:initial-memory memory
-                                               :final-memory memory})
-        session (decoder/execution-session [capture capture])
-        execution (get-in session [:stages :structure :execution])]
-    (is (= 12 (:event-count execution)))
-    (is (= 1 (count (:sequences execution))))
-    (is (= [0 1] (get-in execution [:sequences 0 :definition-ids])))
-    (is (= 2 (count (get-in session [:raw :metadata :captures]))))))
-
-(deftest capture-trace-produces-pipeline-artifact
-  (let [memory (byte-array 65536)
-        _ (aset-byte memory 0x1000 (unchecked-byte 0x8d)) ; STA $D018
-        _ (aset-byte memory 0x1001 (unchecked-byte 0x18))
-        _ (aset-byte memory 0x1002 (unchecked-byte 0xd0))
-        _ (aset-byte memory 0x1003 (unchecked-byte 0xea)) ; NOP
-        _ (aset-byte memory 0xfffe (unchecked-byte 0x00)) ; IRQ vector $1000
-        _ (aset-byte memory 0xffff (unchecked-byte 0x10))
-        samples (atom [{:pc 0x1000 :raster-line 50 :cpu-cycle 5 :a 0x18}
-                       {:pc 0x1003 :raster-line 50 :cpu-cycle 9 :a 0x18}
-                       {:pc 0x1000 :raster-line 50 :cpu-cycle 5 :a 0x18}])
-        resumed? (atom false)
-        registers (fn [{:keys [pc raster-line cpu-cycle a]}]
-                    {1 {:value pc} 2 {:value raster-line} 3 {:value cpu-cycle}
-                     4 {:value a} 5 {:value 0} 6 {:value 0}
-                     7 {:value 0} 8 {:value 0}})]
-    (with-redefs [omkamra.vice.binary-monitor/drain-events (fn [& _] [])
-                  omkamra.vice.binary-monitor/ping (fn [& _] {})
-                  omkamra.vice.binary-monitor/registers-available
-                  (fn [& _] {1 {:name "PC"} 2 {:name "LIN"} 3 {:name "CYC"}
-                             4 {:name "A"} 5 {:name "X"} 6 {:name "Y"}
-                             7 {:name "SP"} 8 {:name "FL"}})
-                  omkamra.vice.binary-monitor/registers-get
-                  (fn [& _] (registers (let [sample (first @samples)]
-                                          (swap! samples rest)
-                                          sample)))
-                  omkamra.vice.binary-monitor/advance-and-wait (fn [& _] {})
-                  omkamra.vice.binary-monitor/mem-get (fn [& _] {:memory memory})
-                  omkamra.vice.binary-monitor/resume (fn [& _] (reset! resumed? true))]
-      (let [capture (decoder/capture-trace {} {:min-instructions 2
-                                                :include-display? false
-                                                :bulk? false})]
-        (is (= :frame (get-in capture [:frame :reason])))
-        (is (= [{:address 0xd018 :value 0x18 :kind :store :inferred? true}]
-               (mapv #(select-keys % [:address :value :kind :inferred? true])
-                     (get-in capture [:stages :decoded :writes]))))
-        (is (= 0x18 (get-in capture [:stages :video :vic :final-state 0xd018])))
-        (is (= [[50 5]]
-               (mapv (juxt (comp :raster-line :trigger)
-                           (comp :cpu-cycle :trigger))
-                     (get-in capture [:stages :structure :irq-sections]))))
-        (is @resumed?)))))
+    (is (= #{[0 1] [2]}
+           (set (map :definition-ids (:sequences execution)))))))
