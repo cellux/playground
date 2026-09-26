@@ -33,6 +33,7 @@
 (def ^:private default-connect-timeout-ms 30000)
 (def ^:private default-connect-retry-ms 100)
 (def ^:private default-autostart-timeout-ms 5000)
+(def ^:private terminal-statuses #{:stopped :failed})
 
 (defn- fail
   [message data]
@@ -125,9 +126,14 @@
                           ;; monitor handshake.
                           (bm/ping conn)
                           {:conn conn}
+                          (catch InterruptedException error
+                            (vice/close conn)
+                            (throw error))
                           (catch Throwable error
                             (vice/close conn)
                             {:error error})))
+                      (catch InterruptedException error
+                        (throw error))
                       (catch Throwable error
                         {:error error}))]
         (if-let [conn (:conn attempt)]
@@ -145,10 +151,41 @@
   [session status & data]
   (apply swap! (:state session) assoc :status status data))
 
+(defn- request-stop!
+  [session reason]
+  (locking (:lifecycle-lock session)
+    (let [state @(:state session)]
+      (when (and (not (contains? terminal-statuses (:status state)))
+                 (not (:finalization-started state)))
+        (swap! (:state session)
+               (fn [state]
+                 (cond-> (assoc state :status :stopping)
+                   (nil? (:stop-reason state))
+                   (assoc :stop-reason reason))))
+        (when-not (realized? (:stop-requested session))
+          (deliver (:stop-requested session) reason)))))
+  @(:state session))
+
+(defn- cleanup-capture!
+  [session]
+  (when-let [capture @(:capture session)]
+    (try
+      (decoder/stop-capture capture)
+      (catch Throwable error
+        (swap! (:state session) assoc
+               :capture-cleanup-error (.getMessage error)))
+      (finally
+        (reset! (:capture session) nil)))))
+
 (defn- finalize-capture!
   [session capture]
   (update-status! session :finalizing)
   (let [artifact (decoder/stop-capture capture)
+        capture-summary (try
+                          (decoder/capture-status capture)
+                          (catch Throwable _ nil))
+        _ (swap! (:state session) assoc
+                 :capture-summary capture-summary)
         _ (reset! (:capture session) nil)
         edn-path (:edn-path session)
         assembly-path (:assembly-path session)]
@@ -160,19 +197,96 @@
      :input (:input session)
      :edn-path edn-path
      :assembly-path assembly-path
+     :stop-reason (:stop-reason @(:state session))
      :artifact artifact}))
+
+(defn- finalize-once!
+  [session capture]
+  (let [owner? (locking (:lifecycle-lock session)
+                 (if (:finalization-started @(:state session))
+                   false
+                   (do
+                     (swap! (:state session) assoc
+                            :finalization-started true
+                            :status :finalizing)
+                     true)))]
+    (if-not owner?
+      @(:finalization session)
+      (let [result (try
+                     (finalize-capture! session capture)
+                     (catch Throwable error
+                       (cleanup-capture! session)
+                       (swap! (:state session) assoc
+                              :status :failed
+                              :error-message (.getMessage error))
+                       {:status :failed
+                        :capture-id (:capture-id session)
+                        :input (:input session)
+                        :stop-reason (:stop-reason @(:state session))
+                        :error error}))]
+        (deliver (:finalization session) result)
+        result))))
 
 (defn- cleanup-resources!
   [session]
-  (when-let [conn @(:conn session)]
-    (try
-      (vice/close conn)
-      (catch Throwable _ nil)))
-  (when-let [instance @(:instance session)]
-    (try
-      (vice/stop instance)
-      (catch Throwable _ nil)))
-  (swap! (:state session) assoc :monitor :closed :vice :stopped))
+  (let [owner? (locking (:lifecycle-lock session)
+                 (if (:cleanup-started @(:state session))
+                   false
+                   (do
+                     (swap! (:state session) assoc :cleanup-started true)
+                     true)))]
+    (when owner?
+      (try
+        (when-let [conn @(:conn session)]
+          (try
+            (vice/close conn)
+            (catch Throwable error
+              (swap! (:state session) assoc
+                     :monitor-cleanup-error (.getMessage error))))
+          (reset! (:conn session) nil))
+        (when-let [instance @(:instance session)]
+          (try
+            (vice/stop instance)
+            (catch Throwable error
+              (swap! (:state session) assoc
+                     :vice-cleanup-error (.getMessage error))))
+          (reset! (:instance session) nil))
+        (finally
+          (swap! (:state session) assoc
+                 :monitor :closed
+                 :vice :stopped
+                 :cleanup-complete true))))))
+
+(defn- wait-for-stop!
+  [session instance capture]
+  (try
+    (loop []
+      (let [signal (deref (:stop-requested session) 100 ::timeout)
+            stream @(:stream-state capture)]
+        (cond
+          (not= ::timeout signal)
+          signal
+
+          (not (process-alive? instance))
+          (do
+            (request-stop! session {:kind :vice-exited
+                                    :message "VICE exited unexpectedly"})
+            (:stop-reason @(:state session)))
+
+          (:error stream)
+          (do
+            (request-stop! session {:kind :capture-reader-error
+                                    :error (:error stream)
+                                    :message "FIFO capture reader failed"})
+            (:stop-reason @(:state session)))
+
+          :else
+          (recur))))
+    (catch InterruptedException error
+      (request-stop! session {:kind :interrupted
+                              :error error
+                              :message "Capture worker was interrupted"})
+      (:stop-reason @(:state session)))))
 
 (defn- run-session!
   [session options]
@@ -200,7 +314,7 @@
           (reset! (:capture session) capture)
           (swap! (:state session) assoc :transport :fifo)
           (if (realized? (:stop-requested session))
-            (finalize-capture! session capture)
+            (finalize-once! session capture)
             (do
               (bm/autostart
                conn
@@ -212,19 +326,17 @@
                 :timeout-ms (or (:autostart-timeout-ms options)
                                 default-autostart-timeout-ms)})
               (update-status! session :running)
-              @(:stop-requested session)
-              (finalize-capture! session capture))))))
+              (wait-for-stop! session instance capture)
+              (finalize-once! session capture))))))
     (catch Throwable error
-      (when-let [capture @(:capture session)]
-        (try
-          (decoder/stop-capture capture)
-          (reset! (:capture session) nil)
-          (catch Throwable _ nil)))
+      (cleanup-capture! session)
       (swap! (:state session) assoc
              :status :failed
              :error-message (.getMessage error))
       {:status :failed
        :capture-id (:capture-id session)
+       :input (:input session)
+       :stop-reason (:stop-reason @(:state session))
        :error error})
     (finally
       (cleanup-resources! session))))
@@ -267,10 +379,21 @@
                  :instance (atom nil)
                  :conn (atom nil)
                  :capture (atom nil)
+                 :lifecycle-lock (Object.)
                  :stop-requested (promise)
+                 :finalization (promise)
                  :completion (promise)}
         worker (future
-                 (let [result (run-session! session options)]
+                 (let [result (try
+                                (run-session! session options)
+                                (catch Throwable error
+                                  (swap! (:state session) assoc
+                                         :status :failed
+                                         :error-message (.getMessage error))
+                                  {:status :failed
+                                   :capture-id (:capture-id session)
+                                   :input (:input session)
+                                   :error error}))]
                    (deliver (:completion session) result)
                    result))]
     (assoc session :worker worker)))
@@ -301,15 +424,23 @@
   "Stop a session, finalize its FIFO capture, and return output paths/results.
 
   This call blocks until startup/finalization completes. Calling it more than
-  once returns the same result. A startup or finalization failure is thrown as
-  an `ExceptionInfo` with the failed result in ex-data."
+  once returns the same result; only one caller performs finalization. A
+  startup or finalization failure is thrown as an `ExceptionInfo` with the
+  failed result in ex-data."
   [session]
   (when-not (map? session)
     (throw (IllegalArgumentException. "Session must be a map")))
-  (deliver (:stop-requested session) true)
-  (let [result @(:completion session)]
-    (if (= :failed (:status result))
-      (throw (ex-info "VICE capture failed"
-                      (dissoc result :error)
-                      (:error result)))
-      result)))
+  (request-stop! session {:kind :explicit
+                          :message "Capture stopped by caller"})
+  (try
+    (let [result @(:completion session)]
+      (if (= :failed (:status result))
+        (throw (ex-info "VICE capture failed"
+                        (dissoc result :error)
+                        (:error result)))
+        result))
+    (catch InterruptedException error
+      (request-stop! session {:kind :interrupted
+                              :error error
+                              :message "Waiting for capture shutdown was interrupted"})
+      (throw error))))
