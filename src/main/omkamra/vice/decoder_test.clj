@@ -15,7 +15,7 @@
     (is (= "BNE $1000" (:text (decoder/disassemble memory 0x1002))))
     (is (= "JMP $1234" (:text (decoder/disassemble memory 0x1004))))))
 
-(deftest renders-all-canonical-execution-spans
+(deftest artifact-assembly-renders-interned-blocks
   (let [instructions [{:pc 0x1000 :bytes [0xea]
                        :raster-line 1 :cpu-cycle 2 :mnemonic "NOP"}
                       {:pc 0x1001 :bytes [0x4c 0 16]
@@ -25,7 +25,6 @@
         artifact {:format :omkamra.vice/pipeline-v1
                   :stages {:structure {:execution execution}}}
         assembly (decoder/artifact->assembly artifact)]
-    (is (.contains assembly "; span non-irq events 0..1"))
     (is (.contains assembly "$1000  EA       NOP"))
     (is (.contains assembly "$1001  4C 00 10 JMP $1000"))))
 
@@ -47,7 +46,7 @@
              (slurp (decoder/artifact->assembly
                      artifact {:output-file output-file}))))
       (is (= 1 (count (re-seq #"\$2000  EA" assembly))))
-      (is (.contains assembly "; block-run events 0..1 block=0 iterations=2"))
+      (is (not (.contains assembly "; chronological span/block timeline")))
       (finally
         (.delete output-file)))))
 
@@ -83,7 +82,7 @@
     (is (= 1 (count (re-seq #"(?m)^; block " assembly))))
     (is (.contains assembly "; block 0, 3 instructions, 2 code-image variants"))
     (is (.contains assembly "$0079  AD ?? ?? LDA $????"))
-    (is (= 2 (count (re-seq #"; block-run events" assembly))))))
+    (is (not (.contains assembly "; chronological span/block timeline")))))
 
 (deftest assembly-masks-varying-immediate-operands
   (let [execution {:format :omkamra.vice/versioned-execution-v3

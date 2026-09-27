@@ -110,14 +110,6 @@
   (let [bytes (mapv #(u8 (nth memory (bit-and (+ pc %) 0xffff))) (range 4))]
     (disassemble-bytes pc bytes)))
 
-(defn- span-assembly-header
-  [{:keys [kind start-index end-index trigger entry-pc return-pc]}]
-  (str (format "; span %-7s events %d..%d"
-               (name kind) start-index (dec end-index))
-       (when trigger (str " trigger=" (pr-str trigger)))
-       (when entry-pc (format " entry=$%04X" entry-pc))
-       (when return-pc (format " return=$%04X" return-pc))))
-
 (defn- require-execution
   [artifact]
   (or (get-in artifact [:stages :structure :execution])
@@ -219,9 +211,9 @@
   [execution]
   (let [instructions (:instructions execution)
         exact-blocks (:blocks execution)
-        {:keys [shape-blocks shape-key-to-id block-to-shape]}
+        {:keys [shape-blocks shape-key-to-id]}
         (reduce
-         (fn [{:keys [shape-blocks shape-key-to-id block-to-shape] :as state}
+         (fn [{:keys [shape-blocks shape-key-to-id] :as state}
               block]
            (let [shape-key (mapv #(instruction-shape-key (nth instructions %))
                                  (:instruction-ids block))
@@ -232,16 +224,13 @@
              (if (nil? existing-shape-id)
                (-> state
                    (assoc-in [:shape-key-to-id shape-key] shape-id)
-                   (assoc-in [:block-to-shape (:id block)] shape-id)
                    (update :shape-blocks conj
                            {:id shape-id
                             :shape-key shape-key
                             :exact-block-ids [(:id block)]}))
-               (-> state
-                   (assoc-in [:block-to-shape (:id block)] shape-id)
-                   (update-in [:shape-blocks shape-id :exact-block-ids]
-                              conj (:id block))))))
-         {:shape-blocks [] :shape-key-to-id {} :block-to-shape {}}
+               (update-in state [:shape-blocks shape-id :exact-block-ids]
+                          conj (:id block)))))
+         {:shape-blocks [] :shape-key-to-id {}}
          exact-blocks)
         exact-block-by-id (into {} (map (juxt :id identity) exact-blocks))
         shape-blocks
@@ -259,14 +248,12 @@
                          instruction-id-groups)
                    :variant-count (count exact-block-ids)}))
               shape-blocks)]
-    {:blocks shape-blocks
-     :block-runs (mapv #(update % :block-id block-to-shape) (:block-runs execution))}))
+    {:blocks shape-blocks}))
 
 (defn- write-compressed-assembly!
   [writer artifact]
   (let [execution (require-execution artifact)
-        {:keys [blocks block-runs]} (assembly-dictionary execution)
-        spans (sort-by :start-index (:spans execution))]
+        {:keys [blocks]} (assembly-dictionary execution)]
     (.write writer "; structural basic-block template dictionary\n")
     (doseq [{:keys [id instructions variant-count]} blocks]
       (.write writer
@@ -277,45 +264,7 @@
                         (format ", %d code-image variants" variant-count)
                         "")))
       (doseq [instruction instructions]
-        (write-static-instruction! writer instruction)))
-    (.write writer "\n; chronological span/block timeline\n")
-    (loop [remaining-spans (seq spans)
-           run-index 0]
-      (when-let [span (first remaining-spans)]
-        (.write writer "\n")
-        (.write writer (span-assembly-header span))
-        (.write writer "\n")
-        (let [run-index
-              (loop [index run-index]
-                (if (and (< index (count block-runs))
-                         (<= (:end-index (nth block-runs index))
-                             (:start-index span)))
-                  (recur (inc index))
-                  index))
-              next-run-index
-              (loop [index run-index]
-                (if (>= index (count block-runs))
-                  index
-                  (let [{:keys [start-index end-index block-id iterations]}
-                        (nth block-runs index)]
-                    (if (>= start-index (:end-index span))
-                      index
-                      (let [overlap-start (max start-index (:start-index span))
-                            overlap-end (min end-index (:end-index span))]
-                        (.write writer
-                                (format "; block-run events %d..%d block=%d iterations=%d%s\n"
-                                        overlap-start
-                                        (dec overlap-end)
-                                        block-id
-                                        iterations
-                                        (if (or (not= overlap-start start-index)
-                                                (not= overlap-end end-index))
-                                          " clipped-to-span"
-                                          "")))
-                        (if (<= end-index (:end-index span))
-                          (recur (inc index))
-                          index))))))]
-          (recur (next remaining-spans) next-run-index))))))
+        (write-static-instruction! writer instruction)))))
 
 (defn- render-assembly!
   [writer artifact]
@@ -325,12 +274,11 @@
   "Render a pipeline artifact using the canonical assembly renderer.
 
   Dictionary-coded captures default to a deduplicated report: each
-  structural basic-block template is emitted once and the chronological
-  span/block timeline refers to it by block ID. Operand bytes that vary across
-  exact code images are rendered as wildcards; the exact variants remain in
-  the artifact. Without `:output-file`, this returns a string; with an output
-  file, rendering is streamed and the file is returned. Both paths use the
-  same renderer.
+  structural basic-block template is emitted once. Operand bytes that vary
+  across exact code images are rendered as wildcards; the exact variants and
+  chronological execution data remain in the artifact. Without `:output-file`,
+  this returns a string; with an output file, rendering is streamed and the
+  file is returned. Both paths use the same renderer.
 
   Options:
   * `:output-file` - stream the result to this file instead of returning text."
