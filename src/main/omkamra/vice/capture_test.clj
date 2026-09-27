@@ -81,19 +81,26 @@
                        (not= :running (:status @(:state session))))
               (Thread/sleep 5)
               (recur (inc attempt))))
-          (let [result (capture/stop! session)
+          (let [requested (capture/stop-async! session)
+                result (capture/stop! session)
                 repeated-result (capture/stop! session)]
-          (is (= result repeated-result))
-          (is (= :stopped (:status result)))
-          (is (= (.getPath (io/file directory "test-capture.edn"))
-                 (:edn-path result)))
-          (is (= (.getPath (io/file directory "test-capture.asm"))
-                 (:assembly-path result)))
-          (is (= [:capture-stop]
-                 (last (filter #(= :capture-stop (first %)) @calls))))
-          (is (some #(= :autostart (first %)) @calls))
-          (is (some #(= :close (first %)) @calls))
-          (is (some #(= :stop (first %)) @calls)))))
+            (is (#{:stopping :finalizing :stopped}
+                 (:status requested)))
+            (is (= {:kind :explicit
+                    :message "Capture stopped by caller"}
+                   (:stop-reason requested)))
+            (is (= result repeated-result))
+            (is (= :stopped (:status result)))
+            (is (not (contains? result :artifact)))
+            (is (= (.getPath (io/file directory "test-capture.edn"))
+                   (:edn-path result)))
+            (is (= (.getPath (io/file directory "test-capture.asm"))
+                   (:assembly-path result)))
+            (is (= [:capture-stop]
+                   (last (filter #(= :capture-stop (first %)) @calls))))
+            (is (some #(= :autostart (first %)) @calls))
+            (is (some #(= :close (first %)) @calls))
+            (is (some #(= :stop (first %)) @calls)))))
       (finally
         (.delete input)
         (.delete directory)))))

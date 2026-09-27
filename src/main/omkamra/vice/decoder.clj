@@ -124,11 +124,11 @@
       (throw (ex-info "Artifact has no structural execution stage"
                       {:format (:format artifact)}))))
 
-(defn- write-static-definition!
-  [writer definition]
-  (let [decoded (if (:text definition)
-                  definition
-                  (disassemble-bytes (:address definition) (:bytes definition)))]
+(defn- write-static-instruction!
+  [writer instruction]
+  (let [decoded (if (:text instruction)
+                  instruction
+                  (disassemble-bytes (:address instruction) (:bytes instruction)))]
     (.write writer
             (format "$%04X  %-8s %s\n"
                     (:address decoded)
@@ -138,18 +138,18 @@
 (defn- write-compressed-assembly!
   [writer artifact]
   (let [execution (require-execution artifact)
-        definitions (:instruction-definitions execution)
-        sequences (:sequences execution)
+        instructions (:instructions execution)
+        blocks (:blocks execution)
         spans (sort-by :start-index (:spans execution))
-        runs (vec (:runs execution))]
-    (.write writer "; interned sequence dictionary\n")
-    (doseq [{:keys [id definition-ids]} sequences]
+        block-runs (vec (:block-runs execution))]
+    (.write writer "; interned basic-block dictionary\n")
+    (doseq [{:keys [id instruction-ids]} blocks]
       (.write writer
-              (format "\n; sequence %d, %d instructions\n"
-                      id (count definition-ids)))
-      (doseq [definition-id definition-ids]
-        (write-static-definition! writer (nth definitions definition-id))))
-    (.write writer "\n; chronological span/run timeline\n")
+              (format "\n; block %d, %d instructions\n"
+                      id (count instruction-ids)))
+      (doseq [instruction-id instruction-ids]
+        (write-static-instruction! writer (nth instructions instruction-id))))
+    (.write writer "\n; chronological span/block timeline\n")
     (loop [remaining-spans (seq spans)
            run-index 0]
       (when-let [span (first remaining-spans)]
@@ -158,27 +158,26 @@
         (.write writer "\n")
         (let [run-index
               (loop [index run-index]
-                (if (and (< index (count runs))
-                         (<= (:end-index (nth runs index))
+                (if (and (< index (count block-runs))
+                         (<= (:end-index (nth block-runs index))
                              (:start-index span)))
                   (recur (inc index))
                   index))
               next-run-index
               (loop [index run-index]
-                (if (>= index (count runs))
+                (if (>= index (count block-runs))
                   index
-                  (let [{:keys [kind start-index end-index sequence-id iterations]}
-                        (nth runs index)]
+                  (let [{:keys [start-index end-index block-id iterations]}
+                        (nth block-runs index)]
                     (if (>= start-index (:end-index span))
                       index
                       (let [overlap-start (max start-index (:start-index span))
                             overlap-end (min end-index (:end-index span))]
                         (.write writer
-                                (format "; run %-8s events %d..%d sequence=%d iterations=%d%s\n"
-                                        (name kind)
+                                (format "; block-run events %d..%d block=%d iterations=%d%s\n"
                                         overlap-start
                                         (dec overlap-end)
-                                        sequence-id
+                                        block-id
                                         iterations
                                         (if (or (not= overlap-start start-index)
                                                 (not= overlap-end end-index))
@@ -197,8 +196,8 @@
   "Render a pipeline artifact using the canonical assembly renderer.
 
   Dictionary-coded captures default to a deduplicated report: each interned
-  sequence body is emitted once and the chronological span/run timeline refers
-  to it by sequence ID. Without `:output-file`, this returns a string; with an
+  basic block is emitted once and the chronological span/block timeline refers
+  to it by block ID. Without `:output-file`, this returns a string; with an
   output file, rendering is streamed and the file is returned. Both paths use
   the same renderer.
 
@@ -508,31 +507,7 @@
        (map first)
        (mapv #(asset-sample initial-memory writes %))))
 
-(defn- same-pc-block?
-  [pcs left right period]
-  (every? (fn [offset]
-            (= (nth pcs (+ left offset))
-               (nth pcs (+ right offset))))
-          (range period)))
-
-(defn- loop-at
-  [pcs start {:keys [max-loop-body min-loop-repetitions]
-              :or {max-loop-body 64
-                   min-loop-repetitions 3}}]
-  (let [remaining (- (count pcs) start)]
-    (some (fn [period]
-            (when (and (>= remaining (* period min-loop-repetitions))
-                       (every? #(same-pc-block? pcs start (+ start (* % period)) period)
-                               (range 1 min-loop-repetitions)))
-              (loop [end (+ start (* period min-loop-repetitions))
-                     iterations min-loop-repetitions]
-                (if (and (+ end period) (<= (+ end period) (count pcs))
-                         (same-pc-block? pcs start end period))
-                  (recur (+ end period) (inc iterations))
-                  {:period period :end end :iterations iterations}))))
-          (range 1 (inc (min max-loop-body (quot remaining min-loop-repetitions)))))))
-
-(defn- instruction-definition
+(defn- static-instruction
   [id instruction]
   {:id id
    :address (:pc instruction)
@@ -542,37 +517,35 @@
    :operand (:operand instruction)
    :text (:text instruction)})
 
-(defn- instruction-definition-key
+(defn- instruction-key
   [instruction]
   [(:pc instruction) (vec (:bytes instruction))])
 
-(defn- intern-instruction-definitions
+(defn- intern-instructions
   "Intern executed instruction images and record address-version intervals.
 
-  A definition is the immutable executed image `[PC bytes]`. A node version is
-  an address's chronological incarnation: executing changed bytes at a
+  An instruction is the immutable executed image `[PC bytes]`. A node version
+  is an address's chronological incarnation: executing changed bytes at a
   previously seen address starts a new version, including when bytes revert to
-  an older definition. `:first-event` and `:last-event` describe observations
+  an older instruction. `:first-event` and `:last-event` describe observations
   of that image, not an unobservable continuous memory-lifetime interval."
-  [instructions]
-  (let [state (reduce (fn [{:keys [definition-ids definitions address-state
-                                   node-versions definition-ids-by-event]
+  [executed-instructions]
+  (let [state (reduce (fn [{:keys [instruction-ids instructions address-state
+                                   node-versions instruction-ids-by-event]
                             :as state}
                            [event-index instruction]]
-                        (let [key (instruction-definition-key instruction)
-                              definition-id (or (get definition-ids key)
-                                                (count definitions))
-                              state (if (contains? definition-ids key)
+                        (let [key (instruction-key instruction)
+                              instruction-id (or (get instruction-ids key)
+                                                 (count instructions))
+                              state (if (contains? instruction-ids key)
                                       state
                                       (-> state
-                                          (assoc-in [:definition-ids key] definition-id)
-                                          (update :definitions conj
-                                                  (instruction-definition definition-id
-                                                                          instruction))))
+                                          (assoc-in [:instruction-ids key] instruction-id)
+                                          (update :instructions conj
+                                                  (static-instruction instruction-id instruction))))
                               {:keys [node-id version] :as prior}
                               (get-in state [:address-state (:pc instruction)])
-                              changed? (not= definition-id
-                                             (:definition-id prior))
+                              changed? (not= instruction-id (:instruction-id prior))
                               state (if changed?
                                       (let [next-node-id (count (:node-versions state))
                                             next-version (if prior (inc version) 0)]
@@ -581,109 +554,125 @@
                                                        {:id next-node-id
                                                         :address (:pc instruction)
                                                         :version next-version
-                                                        :definition-id definition-id
+                                                        :instruction-id instruction-id
                                                         :first-event event-index
                                                         :last-event event-index})
                                           true (assoc-in [:address-state (:pc instruction)]
-                                                         {:definition-id definition-id
+                                                         {:instruction-id instruction-id
                                                           :node-id next-node-id
                                                           :version next-version})))
                                       (assoc-in state [:node-versions node-id :last-event]
                                                 event-index))]
-                          (update state :definition-ids-by-event conj definition-id)))
-                      {:definition-ids {}
-                       :definitions []
+                          (update state :instruction-ids-by-event conj instruction-id)))
+                      {:instruction-ids {}
+                       :instructions []
                        :address-state {}
                        :node-versions []
-                       :definition-ids-by-event []}
-                      (map-indexed vector instructions))]
-    (select-keys state [:definitions :node-versions :definition-ids-by-event])))
+                       :instruction-ids-by-event []}
+                      (map-indexed vector executed-instructions))]
+    (select-keys state [:instructions :node-versions :instruction-ids-by-event])))
 
-(defn- segment-values
-  [values absolute-start options]
-  (let [values (vec values)
-        n (count values)]
-    (loop [index 0
-           plain-start 0
-           segments []]
-      (if (>= index n)
-        (cond-> segments
-          (< plain-start n)
-          (conj {:kind :sequence
-                 :start-index (+ absolute-start plain-start)
-                 :end-index (+ absolute-start n)
-                 :definition-ids (subvec values plain-start n)
-                 :iterations 1}))
-        (if-let [{:keys [period end iterations]} (loop-at values index options)]
-          (recur end
-                 end
-                 (cond-> segments
-                   (< plain-start index)
-                   (conj {:kind :sequence
-                          :start-index (+ absolute-start plain-start)
-                          :end-index (+ absolute-start index)
-                          :definition-ids (subvec values plain-start index)
-                          :iterations 1})
-                   true
-                   (conj {:kind :loop
-                          :start-index (+ absolute-start index)
-                          :end-index (+ absolute-start end)
-                          :definition-ids (subvec values index (+ index period))
-                          :iterations iterations})))
-          (recur (inc index) plain-start segments))))))
+(def ^:private basic-block-terminators
+  #{"BRK" "JMP" "JSR" "RTI" "RTS" "KIL"
+    "BCC" "BCS" "BEQ" "BMI" "BNE" "BPL" "BVC" "BVS"})
 
-(defn- intern-sequence!
-  [sequences sequence-ids definition-ids]
-  (let [definition-ids (vec definition-ids)]
-    (or (get @sequence-ids definition-ids)
-        (let [id (count @sequences)]
-          (swap! sequences conj {:id id :definition-ids definition-ids})
-          (swap! sequence-ids assoc definition-ids id)
-          id))))
+(defn- basic-block-terminator?
+  [instruction]
+  (contains? basic-block-terminators (:mnemonic instruction)))
+
+(defn- basic-block-builder-xf
+  "Group chronological instruction occurrences into dynamic basic blocks.
+
+  A block ends after every control-transfer instruction. Completion flushes a
+  final fall-through block, so a finite FIFO capture never loses its tail."
+  []
+  (fn [rf]
+    (let [block (volatile! nil)]
+      (fn
+        ([] (rf))
+        ([result]
+         (let [result (if-let [pending @block]
+                        (rf result pending)
+                        result)]
+           (vreset! block nil)
+           (rf result)))
+        ([result {:keys [event-index instruction-id instruction]}]
+         (let [pending (or @block
+                           {:start-index event-index
+                            :instruction-ids []})
+               pending (-> pending
+                           (update :instruction-ids conj instruction-id)
+                           (assoc :end-index (inc event-index)))]
+           (if (basic-block-terminator? instruction)
+             (do
+               (vreset! block nil)
+               (rf result pending))
+             (do
+               (vreset! block pending)
+               result))))))))
+
+(defn- deduplicate-basic-blocks-xf
+  "Intern basic-block instruction-ID vectors and emit chronological block runs."
+  [block-state]
+  (fn [rf]
+    (fn
+      ([] (rf))
+      ([result] (rf result))
+      ([result {:keys [instruction-ids] :as block}]
+       (let [instruction-ids (vec instruction-ids)
+             {:keys [block-ids blocks]} @block-state
+             block-id (or (get block-ids instruction-ids) (count blocks))]
+         (when-not (contains? block-ids instruction-ids)
+           (swap! block-state (fn [state]
+                                (-> state
+                                    (assoc-in [:block-ids instruction-ids] block-id)
+                                    (update :blocks conj
+                                            {:id block-id
+                                             :instruction-ids instruction-ids})))))
+         (rf result (-> block
+                        (dissoc :instruction-ids)
+                        (assoc :block-id block-id
+                               :iterations 1))))))))
+
+(defn- basic-block-execution
+  [occurrences]
+  (let [block-state (atom {:block-ids {} :blocks []})
+        block-runs (transduce (comp (basic-block-builder-xf)
+                                    (deduplicate-basic-blocks-xf block-state))
+                              conj [] occurrences)]
+    {:blocks (:blocks @block-state)
+     :block-runs block-runs}))
 
 (defn versioned-execution
-  "Build the canonical, lossless dictionary-coded execution representation.
+  "Build the canonical, lossless instruction/block execution representation.
 
-  Static instruction images appear once in `:instruction-definitions`.
-  Repeated instruction bodies appear once in `:sequences`; execution runs
-  reference them by `:sequence-id`. The `:node-versions` timeline records every
-  change of executed bytes at an address. The compact representation preserves
-  the complete execution timeline without materializing repeated instruction
-  occurrences."
+  Static instruction images are interned in `:instructions`. Dynamic basic
+  blocks reference them by `:instruction-ids`, and chronological
+  `:block-runs` preserve every executed occurrence without retaining expanded
+  instruction maps."
   ([instructions spans]
    (versioned-execution instructions spans {}))
-  ([instructions spans options]
-   (let [instructions (vec instructions)
-         {:keys [definitions node-versions definition-ids-by-event]}
-         (intern-instruction-definitions instructions)
-         sequences (atom [])
-         sequence-ids (atom {})
-         execution-spans
-         (mapv (fn [span]
-                 (let [start (:start-index span)
-                       end (:end-index span)
-                       segments (segment-values (subvec definition-ids-by-event start end)
-                                                start options)
-                       runs (mapv (fn [{:keys [definition-ids start-index end-index]
-                                         :as segment}]
-                                    (let [sequence-id (intern-sequence! sequences sequence-ids
-                                                                        definition-ids)]
-                                      (-> (dissoc segment :definition-ids)
-                                          (assoc :sequence-id sequence-id
-                                                 :instruction-count (- end-index start-index)))))
-                                  segments)]
-                   (-> (select-keys span [:kind :start-index :end-index :trigger
-                                           :entry-pc :return-pc :capture-index])
-                       (assoc :instruction-count (- end start)
-                              :runs runs))))
-               spans)]
-     {:format :omkamra.vice/versioned-execution-v2
-      :event-count (count instructions)
-      :instruction-definitions definitions
+  ([executed-instructions spans _options]
+   (let [executed-instructions (vec executed-instructions)
+         {:keys [instructions node-versions instruction-ids-by-event]}
+         (intern-instructions executed-instructions)
+         occurrences (mapv (fn [event-index instruction-id instruction]
+                             {:event-index event-index
+                              :instruction-id instruction-id
+                              :instruction instruction})
+                           (range) instruction-ids-by-event executed-instructions)
+         {:keys [blocks block-runs]} (basic-block-execution occurrences)]
+     {:format :omkamra.vice/versioned-execution-v3
+      :event-count (count executed-instructions)
+      :instructions instructions
       :node-versions node-versions
-      :sequences @sequences
-      :runs (vec (mapcat :runs execution-spans))
-      :spans (mapv #(dissoc % :runs) execution-spans)})))
+      :blocks blocks
+      :block-runs block-runs
+      :spans (mapv #(assoc (select-keys % [:kind :start-index :end-index :trigger
+                                            :entry-pc :return-pc :capture-index])
+                           :instruction-count
+                           (- (:end-index %) (:start-index %)))
+                   spans)})))
 
 (declare raw-artifact run-pipeline expand-raw-events)
 
@@ -784,32 +773,32 @@
       :first-ram-irq-code (first-code-entry spans :irq options)})))
 
 (def ^:private stream-events-format
-  :omkamra.vice/dictionary-event-stream-v2)
+  :omkamra.vice/instruction-block-stream-v3)
 
 (def ^:private stream-sample-keys
   [:raster-line :cpu-cycle :a :x :y :sp :flags :global-cycle])
 
-(defn- dictionary-event-stream?
+(defn- instruction-block-stream?
   [events]
   (= stream-events-format (:format events)))
 
-(defn- stream-definition-ids
+(defn- stream-instruction-ids
   [events]
-  (let [sequences (:sequences events)]
-    (mapcat (fn [{:keys [sequence-id iterations]}]
+  (let [blocks (:blocks events)]
+    (mapcat (fn [{:keys [block-id iterations]}]
               (apply concat
                      (repeat iterations
-                             (:definition-ids (nth sequences sequence-id)))))
-            (:runs events))))
+                             (:instruction-ids (nth blocks block-id)))))
+            (:block-runs events))))
 
 (defn- expand-raw-events
   [events]
-  (if (dictionary-event-stream? events)
-    (let [definitions (:definitions events)]
-      (mapv (fn [definition-id sample]
-              (merge (dissoc (nth definitions definition-id) :id)
+  (if (instruction-block-stream? events)
+    (let [instructions (:instructions events)]
+      (mapv (fn [instruction-id sample]
+              (merge (dissoc (nth instructions instruction-id) :id)
                      (zipmap (:sample-keys events) sample)))
-            (stream-definition-ids events)
+            (stream-instruction-ids events)
             (:samples events)))
     (vec events)))
 
@@ -823,7 +812,7 @@
    (raw-artifact events {}))
   ([events {:keys [initial-memory final-memory boundary-entry display palette metadata]}]
    {:format :omkamra.vice/raw-trace-v1
-    :raw {:events (if (dictionary-event-stream? events) events (vec events))
+    :raw {:events (if (instruction-block-stream? events) events (vec events))
           :memory {:initial initial-memory :final final-memory}
           :display display
           :palette palette
@@ -864,7 +853,7 @@
              :writes (get-in artifact [:stages :decoded :writes])}))
 
 (defn structure-stage
-  "Derive structural IRQ/span/sequence information, but no semantic roles."
+  "Derive structural IRQ/span/basic-block information, but no semantic roles."
   [artifact]
   (let [instructions (get-in artifact [:stages :decoded :instructions])
         initial-memory (get-in artifact [:raw :memory :initial])
@@ -940,96 +929,107 @@
            artifact
            stages)))
 
-(def ^:private stream-definition-window-size 4096)
-
-(def ^:private stream-definition-window-size 4096)
-
 (defn- empty-stream-state
   []
   {:status :starting
-   :definition-ids {}
-   :definitions []
-   :sequence-ids {}
-   :sequences []
-   :runs []
-   :pending-definition-ids []
-   :pending-start 0
+   :block-runs []
    :samples []
    :first-by-pc {}
    :event-count 0
    :error nil})
 
-(defn- intern-stream-sequence
-  [state definition-ids]
-  (let [definition-ids (vec definition-ids)]
-    (if-let [sequence-id (get (:sequence-ids state) definition-ids)]
-      [state sequence-id]
-      (let [sequence-id (count (:sequences state))]
-        [(-> state
-             (assoc-in [:sequence-ids definition-ids] sequence-id)
-             (update :sequences conj
-                     {:id sequence-id :definition-ids definition-ids}))
-         sequence-id]))))
+(defn- intern-stream-instructions-xf
+  "Intern parsed trace instructions and emit dynamic occurrences.
 
-(defn- flush-definition-window
-  [state]
-  (let [definition-ids (:pending-definition-ids state)]
-    (if (empty? definition-ids)
-      state
-      (let [segments (segment-values definition-ids (:pending-start state) {})
-            state (reduce
-                   (fn [state {:keys [definition-ids] :as segment}]
-                     (let [[state sequence-id]
-                           (intern-stream-sequence state definition-ids)]
-                       (update state :runs conj
-                               (-> (dissoc segment :definition-ids)
-                                   (assoc :sequence-id sequence-id)))))
-                   state
-                   segments)]
-        (assoc state
-               :pending-definition-ids []
-               :pending-start (:event-count state))))))
+  The instruction dictionary is side state because it is a static table, while
+  the reducer's accumulator remains the chronological capture state."
+  [instruction-state]
+  (fn [rf]
+    (fn
+      ([] (rf))
+      ([result] (rf result))
+      ([result event]
+       (let [pc (:pc event)
+             bytes (vec (:bytes event))
+             key [pc bytes]
+             {:keys [instruction-ids instructions]} @instruction-state
+             instruction-id (or (get instruction-ids key) (count instructions))
+             instruction (or (nth instructions instruction-id nil)
+                             (let [decoded (disassemble-bytes pc bytes)]
+                               {:id instruction-id
+                                :operation (:operation event)
+                                :pc pc
+                                :bytes bytes
+                                :vice-text (:vice-text event)
+                                :mnemonic (:mnemonic decoded)
+                                :mode (:mode decoded)
+                                :operand (:operand decoded)
+                                :text (:text decoded)}))]
+         (when-not (contains? instruction-ids key)
+           (swap! instruction-state
+                  (fn [state]
+                    (-> state
+                        (assoc-in [:instruction-ids key] instruction-id)
+                        (update :instructions conj instruction)))))
+         (rf result {:event event
+                     :instruction-id instruction-id
+                     :instruction instruction}))))))
 
-(defn- append-stream-event
-  [state event]
-  (let [definition-key [(:pc event) (vec (:bytes event))]
-        known-definition-id (get (:definition-ids state) definition-key)
-        definition-id (or known-definition-id (count (:definitions state)))
-        event-index (:event-count state)
-        definition {:id definition-id
-                    :operation (:operation event)
-                    :pc (:pc event)
-                    :bytes (vec (:bytes event))
-                    :vice-text (:vice-text event)}
-        sample (mapv #(get event %) stream-sample-keys)
-        state (-> state
-                  (assoc :status :streaming)
-                  (update :pending-definition-ids conj definition-id)
-                  (update :samples conj sample)
-                  (assoc-in [:first-by-pc (:pc event)]
-                            (or (get-in state [:first-by-pc (:pc event)])
-                                {:event-index event-index :entry event}))
-                  (update :event-count inc))
-        state (if (nil? known-definition-id)
-                (-> state
-                    (assoc-in [:definition-ids definition-key] definition-id)
-                    (update :definitions conj definition))
-                state)]
-    (if (>= (count (:pending-definition-ids state))
-            stream-definition-window-size)
-      (flush-definition-window state)
-      state)))
+(defn- collect-stream-samples-xf
+  "Append compact dynamic samples while passing occurrences to block stages."
+  []
+  (fn [rf]
+    (fn
+      ([] (rf))
+      ([result] (rf result))
+      ([result {:keys [event] :as occurrence}]
+       (let [event-index (:event-count result)
+             pc (:pc event)
+             result (-> result
+                        (assoc :status :streaming)
+                        (update :samples conj
+                                (mapv #(get event %) stream-sample-keys))
+                        (assoc-in [:first-by-pc pc]
+                                  (or (get-in result [:first-by-pc pc])
+                                      {:event-index event-index :entry event}))
+                        (update :event-count inc))]
+         (rf result (assoc occurrence :event-index event-index)))))))
 
-(defn- dictionary-event-stream
-  [stream-state]
-  (let [{:keys [definitions sequences runs samples event-count]}
-        (swap! stream-state flush-definition-window)]
+(defn- make-stream-ingester
+  "Create one fused transducer pipeline for a FIFO capture.
+
+  Parsed records flow through instruction interning, sample collection, basic
+  block construction, and block interning. `:complete` must be called exactly
+  once after the FIFO reaches EOF so the basic-block transducer flushes its
+  pending fall-through block."
+  []
+  (let [instruction-state (atom {:instruction-ids {} :instructions []})
+        block-state (atom {:block-ids {} :blocks []})
+        xf (comp (intern-stream-instructions-xf instruction-state)
+                 (collect-stream-samples-xf)
+                 (basic-block-builder-xf)
+                 (deduplicate-basic-blocks-xf block-state))
+        reducer (xf (fn
+                      ([] (empty-stream-state))
+                      ([result] result)
+                      ([result block-run]
+                       (update result :block-runs conj block-run))))]
+    {:step (fn [state event] (reducer state event))
+     :complete (fn [state] (reducer state))
+     :instruction-state instruction-state
+     :block-state block-state}))
+
+(defn- instruction-block-stream
+  [stream-state ingester]
+  (let [{:keys [block-runs samples event-count]} @stream-state
+        {:keys [instructions]} @(:instruction-state ingester)
+        {:keys [blocks]} @(:block-state ingester)]
     {:format stream-events-format
      :event-count event-count
      :sample-keys stream-sample-keys
-     :definitions definitions
-     :sequences sequences
-     :runs runs
+     :instructions instructions
+     :blocks blocks
+     :block-runs block-runs
      :samples samples}))
 
 (defn- create-fifo!
@@ -1047,34 +1047,72 @@
                        :exit-code (.exitValue process)}))))
   fifo-path)
 
+(defn- monitor-trace-records-xf
+  "Turn the FIFO's lazy line stream into parsed execution trace records."
+  []
+  (fn [rf]
+    (let [header (volatile! nil)]
+      (fn
+        ([] (rf))
+        ([result] (rf result))
+        ([result line]
+         (if-let [next-header (parse-monitor-header line)]
+           (do (vreset! header next-header) result)
+           (if (and @header (str/starts-with? line ".C:"))
+             (let [entry (parse-monitor-instruction line @header)]
+               (vreset! header nil)
+               (if (= :exec (:operation entry))
+                 (rf result entry)
+                 result))
+             result)))))))
+
+(defn- reduce-fifo-trace-records!
+  "Reduce the FIFO-backed lazy line stream through the parser transducer.
+
+  The reader remains owned by the calling `with-open`; reducing it eagerly on
+  the reader thread avoids the leaked-resource and arbitrary-thread behaviour
+  of exposing a lazy sequence to callers."
+  [reader consume!]
+  (transduce (monitor-trace-records-xf)
+             (fn
+               ([] nil)
+               ([result] result)
+               ([result record]
+                (consume! record)
+                result))
+             nil
+             (line-seq reader)))
+
+(defn- update-stream-state!
+  "Apply a stream update while excluding concurrent lifecycle updates.
+
+  The ingestion reducer owns static interning state, so retrying it through an
+  atom CAS race could duplicate its side effects. All capture lifecycle writes
+  therefore share this lock with the FIFO reader."
+  [stream-state f & args]
+  (locking stream-state
+    (apply swap! stream-state f args)))
+
 (defn- start-fifo-reader!
-  [fifo-path stream-state reader-ref]
+  [fifo-path stream-state ingester reader-ref]
   (let [thread
         (Thread.
          (fn []
            (try
              (with-open [reader (io/reader fifo-path)]
                (reset! reader-ref reader)
-               (swap! stream-state assoc :status :streaming)
-               (loop [header nil]
-                 (if-let [line (.readLine ^java.io.BufferedReader reader)]
-                   (if-let [next-header (parse-monitor-header line)]
-                     (recur next-header)
-                     (if (and header (str/starts-with? line ".C:"))
-                       (do
-                         (when-let [event (parse-monitor-instruction line header)]
-                           (when (= :exec (:operation event))
-                             (swap! stream-state append-stream-event event)))
-                         (recur nil))
-                       (recur header)))
-                   (swap! stream-state assoc :status :eof))))
+               (update-stream-state! stream-state assoc :status :streaming)
+               (reduce-fifo-trace-records!
+                reader
+                #(update-stream-state! stream-state (:step ingester) %))
+               (update-stream-state! stream-state assoc :status :eof))
              (catch java.io.IOException error
                ;; Closing the reader is the emergency unblock path during
                ;; cleanup. It is not an error after logging has been disabled.
                (when-not (#{:stopping :stopped} (:status @stream-state))
-                 (swap! stream-state assoc :status :error :error error)))
+                 (update-stream-state! stream-state assoc :status :error :error error)))
              (catch Throwable error
-               (swap! stream-state assoc :status :error :error error))))
+               (update-stream-state! stream-state assoc :status :error :error error))))
          (str "vice-trace-fifo-" (System/nanoTime)))]
     (.setDaemon thread true)
     (.start thread)
@@ -1094,11 +1132,10 @@
 (defn start-capture
   "Start a continuous, FIFO-backed execution capture while VICE is paused.
 
-  VICE writes monitor trace text into a Unix FIFO. A dedicated reader parses
-  each instruction immediately and interns its immutable `[PC bytes]`
-  definition; only dynamic timing/register samples are appended per occurrence.
-  No trace log is written to disk, and only the FIFO's bounded kernel buffer is
-  ever in flight.
+  VICE writes monitor trace text into a Unix FIFO. A dedicated reader reduces
+  its lazy line stream through parser, instruction-interning, basic-block, and
+  block-interning transducers. Only compact dynamic samples and interned static
+  instructions/blocks are retained; no trace log is written to disk.
 
   The returned recorder is consumed by `await-cpu-range`, `await-demo-part`,
   and `stop-capture`. Options are `:fifo-path`, `:metadata`, and
@@ -1112,6 +1149,7 @@
                             (System/nanoTime) ".fifo"))
          state (atom {:status :starting :instruction-count 0})
          stream-state (atom (empty-stream-state))
+         ingester (make-stream-ingester)
          reader-ref (atom nil)
          reader-thread (atom nil)
          checkpoint-number (atom nil)
@@ -1122,7 +1160,7 @@
        (bm/drain-events conn)
        (create-fifo! fifo-path)
        (reset! reader-thread
-               (start-fifo-reader! fifo-path stream-state reader-ref))
+               (start-fifo-reader! fifo-path stream-state ingester reader-ref))
        ;; A tracepoint also emits a binary CHECKPOINT_INFO event for every hit.
        ;; Suppress those unsolicited bodies before decoding/queueing; requested
        ;; checkpoint responses remain available.
@@ -1153,6 +1191,7 @@
           :metadata metadata
           :state state
           :stream-state stream-state
+          :ingester ingester
           :reader-ref reader-ref
           :reader-thread @reader-thread
           :prior-ignored-types prior-ignored-types})
@@ -1174,38 +1213,37 @@
   The finalized artifact owns the canonical raw stream. The recorder's
   ingestion atom only needs lightweight counters/status afterwards, otherwise
   retaining a stopped recorder would keep a second copy of all samples alive."
-  [stream-state]
-  (swap! stream-state
-         (fn [stream]
-           {:status (:status stream)
-            :event-count (:event-count stream)
-            :definition-count (or (:definition-count stream)
-                                  (count (:definitions stream)))
-            :sequence-count (or (:sequence-count stream)
-                                (count (:sequences stream)))
-            :run-count (or (:run-count stream)
-                           (count (:runs stream)))
-            :pending-definition-count 0
-            :error (:error stream)})))
+  [stream-state ingester]
+  (let [instruction-count (count (:instructions @(:instruction-state ingester)))
+        block-count (count (:blocks @(:block-state ingester)))]
+    (update-stream-state! stream-state
+           (fn [stream]
+             {:status (:status stream)
+              :event-count (:event-count stream)
+              :instruction-count (or (:instruction-count stream) instruction-count)
+              :block-count (or (:block-count stream) block-count)
+              :block-run-count (or (:block-run-count stream)
+                                   (count (:block-runs stream)))
+              :error (:error stream)}))
+    (reset! (:instruction-state ingester) {:instruction-ids {} :instructions []})
+    (reset! (:block-state ingester) {:block-ids {} :blocks []})))
 
 (defn capture-status
   "Return lightweight progress for a streaming recorder without copying events."
   [capture]
-  (let [stream @(:stream-state capture)]
+  (let [stream @(:stream-state capture)
+        ingester (:ingester capture)]
     ;; `:artifact` is retained in the decoder state solely so a repeated
     ;; stop-capture call can return it. Never expose it through a lightweight
     ;; status query (or copy it into higher-level session state).
     (merge (dissoc @(:state capture) :artifact)
            {:event-count (:event-count stream)
-            :definition-count (or (:definition-count stream)
-                                  (count (:definitions stream)))
-            :sequence-count (or (:sequence-count stream)
-                                (count (:sequences stream)))
-            :run-count (or (:run-count stream)
-                           (count (:runs stream)))
-            :pending-definition-count
-            (or (:pending-definition-count stream)
-                (count (:pending-definition-ids stream)))
+            :instruction-count (or (:instruction-count stream)
+                                   (count (:instructions @(:instruction-state ingester))))
+            :block-count (or (:block-count stream)
+                             (count (:blocks @(:block-state ingester))))
+            :block-run-count (or (:block-run-count stream)
+                                 (count (:block-runs stream)))
             :reader-status (:status stream)
             :reader-alive? (.isAlive ^Thread (:reader-thread capture))
             :reader-error (some-> (:error stream) .getMessage)})))
@@ -1278,7 +1316,7 @@
 (defn await-demo-part
   "Wait for one of `:entry-pcs` in a running streaming capture.
 
-  The FIFO reader performs parsing and definition interning concurrently, so
+  The FIFO reader performs parsing and instruction interning concurrently, so
   this function only polls the in-memory PC index and never rereads trace text.
   Options are `:entry-pcs` (required), `:timeout-ms` (default 30000), and
   `:poll-ms` (default 25)."
@@ -1307,38 +1345,38 @@
                                :timeout-ms timeout-ms
                                :event-count event-count})))))))))
 
-(defn- stream-definition-id-array
+(defn- stream-instruction-id-array
   [events]
   (let [ids (int-array (:event-count events))]
     (loop [event-index 0
-           definition-ids (seq (stream-definition-ids events))]
-      (if-let [definition-id (first definition-ids)]
-        (do (aset-int ids event-index (int definition-id))
-            (recur (inc event-index) (next definition-ids)))
+           instruction-ids (seq (stream-instruction-ids events))]
+      (if-let [instruction-id (first instruction-ids)]
+        (do (aset-int ids event-index (int instruction-id))
+            (recur (inc event-index) (next instruction-ids)))
         ids))))
 
-(defn- decoded-stream-definitions
+(defn- decoded-stream-instructions
   [events]
   (mapv (fn [{:keys [id pc bytes]}]
           (let [decoded (disassemble-bytes pc bytes)]
             (assoc decoded :id id :address pc)))
-        (:definitions events)))
+        (:instructions events)))
 
 (defn- sample-map
   [events sample]
   (zipmap (:sample-keys events) sample))
 
 (defn- stream-event-at
-  [events definitions definition-ids event-index]
-  (let [definition-id (aget ^ints definition-ids event-index)
-        definition (nth definitions definition-id)]
-    (merge (-> (select-keys definition
+  [events instructions instruction-ids event-index]
+  (let [instruction-id (aget ^ints instruction-ids event-index)
+        instruction (nth instructions instruction-id)]
+    (merge (-> (select-keys instruction
                             [:bytes :mnemonic :mode :operand :text])
-               (assoc :pc (:address definition)))
+               (assoc :pc (:address instruction)))
            (sample-map events (nth (:samples events) event-index)))))
 
 (defn- stream-writes
-  [events definitions definition-ids initial-memory]
+  [events instructions instruction-ids initial-memory]
   (let [memory (byte-array (map unchecked-byte initial-memory))
         samples (:samples events)
         event-count (:event-count events)]
@@ -1346,9 +1384,9 @@
            writes (transient [])]
       (if (= event-index event-count)
         (persistent! writes)
-        (let [definition-id (aget ^ints definition-ids event-index)
-              {:keys [address mnemonic] :as definition}
-              (nth definitions definition-id)]
+        (let [instruction-id (aget ^ints instruction-ids event-index)
+              {:keys [address mnemonic] :as instruction}
+              (nth instructions instruction-id)]
           (if (or (contains? direct-store-mnemonics mnemonic)
                   (contains? read-modify-write-mnemonics mnemonic))
             (let [entry (assoc (sample-map events (nth samples event-index))
@@ -1356,7 +1394,7 @@
                   next-entry (when (< (inc event-index) event-count)
                                (sample-map events (nth samples (inc event-index))))
                   duration-cycles (elapsed-cycles entry next-entry 63 312)
-                  write (inferred-write memory definition entry)
+                  write (inferred-write memory instruction entry)
                   write-event (when write
                                 (merge {:pc address
                                         :mnemonic mnemonic
@@ -1372,18 +1410,18 @@
             (recur (inc event-index) writes)))))))
 
 (defn- stream-node-versions
-  [definitions definition-ids]
+  [instructions instruction-ids]
   (let [address-state (java.util.HashMap.)
         versions (java.util.ArrayList.)]
-    (dotimes [event-index (alength ^ints definition-ids)]
-      (let [definition-id (aget ^ints definition-ids event-index)
-            address (:address (nth definitions definition-id))
+    (dotimes [event-index (alength ^ints instruction-ids)]
+      (let [instruction-id (aget ^ints instruction-ids event-index)
+            address (:address (nth instructions instruction-id))
             prior (.get address-state address)]
-        (if (and prior (= definition-id (aget ^ints prior 0)))
+        (if (and prior (= instruction-id (aget ^ints prior 0)))
           (aset-int ^ints prior 4 event-index)
           (let [node-id (.size versions)
                 version (if prior (inc (aget ^ints prior 2)) 0)
-                node (int-array [definition-id node-id version
+                node (int-array [instruction-id node-id version
                                  event-index event-index address])]
             (.add versions node)
             (.put address-state address node)))))
@@ -1391,13 +1429,13 @@
             {:id (aget node 1)
              :address (aget node 5)
              :version (aget node 2)
-             :definition-id (aget node 0)
+             :instruction-id (aget node 0)
              :first-event (aget node 3)
              :last-event (aget node 4)})
           versions)))
 
 (defn- stream-irq-data
-  [events definitions definition-ids initial-memory]
+  [events instructions instruction-ids initial-memory]
   (let [event-count (:event-count events)
         irq-target (memory-word initial-memory 0xfffe)
         starts (persistent!
@@ -1407,8 +1445,8 @@
                     (recur (inc index)
                            (if (= irq-target
                                   (:address
-                                   (nth definitions
-                                        (aget ^ints definition-ids index))))
+                                   (nth instructions
+                                        (aget ^ints instruction-ids index))))
                              (conj! result index)
                              result)))))
         ranges (mapv
@@ -1418,8 +1456,8 @@
                               (cond
                                 (= index limit) limit
                                 (= "RTI" (:mnemonic
-                                          (nth definitions
-                                               (aget ^ints definition-ids index))))
+                                          (nth instructions
+                                               (aget ^ints instruction-ids index))))
                                 (inc index)
                                 :else (recur (inc index))))]
                     [start end]))
@@ -1433,11 +1471,11 @@
                            (sample-map events (nth (:samples events) start))
                            [:raster-line :cpu-cycle])
                           :entry-pc (:address
-                                     (nth definitions
-                                          (aget ^ints definition-ids start)))
+                                     (nth instructions
+                                          (aget ^ints instruction-ids start)))
                           :return-pc (:address
-                                      (nth definitions
-                                           (aget ^ints definition-ids (dec end))))))))
+                                      (nth instructions
+                                           (aget ^ints instruction-ids (dec end))))))))
         irq-spans (->> ranges
                        (map (fn [[start end]] (span :irq start end)))
                        (sort-by (juxt (comp :raster-line :trigger)
@@ -1464,35 +1502,35 @@
      :spans spans}))
 
 (defn- first-stream-code-entry
-  [events definitions definition-ids spans kind]
+  [events instructions instruction-ids spans kind]
   (some (fn [{:keys [start-index end-index] :as span}]
           (when (= kind (:kind span))
             (loop [index start-index]
               (when (< index end-index)
                 (let [pc (:address
-                          (nth definitions
-                               (aget ^ints definition-ids index)))]
+                          (nth instructions
+                               (aget ^ints instruction-ids index)))]
                   (if (ram-code-pc? pc {})
                     {:span-kind kind
                      :index index
-                     :entry (stream-event-at events definitions
-                                             definition-ids index)}
+                     :entry (stream-event-at events instructions
+                                             instruction-ids index)}
                     (recur (inc index))))))))
         spans))
 
 (defn- streaming-pipeline-artifact
   [events initial-memory final-memory metadata]
-  (let [definitions (decoded-stream-definitions events)
-        definition-ids (stream-definition-id-array events)
-        writes (stream-writes events definitions definition-ids initial-memory)
-        irq-data (stream-irq-data events definitions definition-ids initial-memory)
+  (let [instructions (decoded-stream-instructions events)
+        instruction-ids (stream-instruction-id-array events)
+        writes (stream-writes events instructions instruction-ids initial-memory)
+        irq-data (stream-irq-data events instructions instruction-ids initial-memory)
         spans (:spans irq-data)
-        execution {:format :omkamra.vice/versioned-execution-v2
+        execution {:format :omkamra.vice/versioned-execution-v3
                    :event-count (:event-count events)
-                   :instruction-definitions definitions
-                   :node-versions (stream-node-versions definitions definition-ids)
-                   :sequences (:sequences events)
-                   :runs (:runs events)
+                   :instructions instructions
+                   :node-versions (stream-node-versions instructions instruction-ids)
+                   :blocks (:blocks events)
+                   :block-runs (:block-runs events)
                    :spans (mapv (fn [span]
                                   (assoc span
                                          :instruction-count
@@ -1500,10 +1538,10 @@
                                             (:start-index span))))
                                 spans)}
         frame-code {:first-ram-code
-                    (first-stream-code-entry events definitions definition-ids
+                    (first-stream-code-entry events instructions instruction-ids
                                              spans :non-irq)
                     :first-ram-irq-code
-                    (first-stream-code-entry events definitions definition-ids
+                    (first-stream-code-entry events instructions instruction-ids
                                              spans :irq)}
         vic (derive-vic initial-memory writes)]
     {:format :omkamra.vice/pipeline-v1
@@ -1538,13 +1576,13 @@
   the reader, and deletes the FIFO. VICE remains paused."
   [capture]
   (let [{:keys [conn fifo-path checkpoint-number initial-memory metadata state
-                stream-state reader-ref reader-thread prior-ignored-types]}
+                stream-state ingester reader-ref reader-thread prior-ignored-types]}
         capture]
     (if-let [artifact (:artifact @state)]
       artifact
       (try
         (swap! state assoc :status :stopping)
-        (swap! stream-state assoc :status :stopping)
+        (update-stream-state! stream-state assoc :status :stopping)
         (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
         (when-not (close-fifo-reader! reader-ref reader-thread 5000)
           (throw (ex-info "FIFO trace reader did not stop"
@@ -1554,7 +1592,8 @@
         (let [final-memory (mapv u8
                                  (:memory (bm/mem-get conn {:start 0
                                                             :end 65535})))
-              events (dictionary-event-stream stream-state)
+              _ (update-stream-state! stream-state (:complete ingester))
+              events (instruction-block-stream stream-state ingester)
               _ (swap! state assoc :status :finalizing
                        :instruction-count (:event-count events))
               artifact (streaming-pipeline-artifact
@@ -1577,8 +1616,8 @@
           (io/delete-file fifo-path true)
           (bm/drain-events conn)
           ;; The artifact now owns the canonical stream. Do not leave the
-          ;; ingestion atom holding its duplicate definitions/samples.
-          (release-stream-state! stream-state)
+          ;; ingestion state holding its duplicate samples or static tables.
+          (release-stream-state! stream-state ingester)
           (reset! reader-ref nil)
           (reset! checkpoint-number nil))))))
 

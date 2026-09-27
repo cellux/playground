@@ -3,8 +3,9 @@
 
   `start!` performs setup asynchronously and returns a session handle. The
   session owns the VICE process, binary-monitor connection, and FIFO-backed
-  decoder capture. `stop!` waits for setup if necessary, finalizes the capture,
-  writes EDN and assembly output, and tears down VICE.
+  decoder capture. `stop-async!` requests shutdown without waiting;
+  `stop!` waits for setup if necessary, finalizes the capture, writes EDN and
+  assembly output, and tears down VICE.
 
   Model-facing usage for a demo-capture request:
 
@@ -16,10 +17,12 @@
      loaded and, by default, execution has resumed with `:run-after-load?`
      set to true.
   3. Keep the session alive while the requested demo runs. When the user says
-     the capture is complete, call `stop!` exactly as the lifecycle boundary.
-  4. Return or report the `:edn-path` and `:assembly-path` from the result of
-     `stop!`. The EDN is the canonical artifact and the assembly is the
-     compact, deduplicated rendering.
+     the capture is complete, call `stop-async!` and poll `status` until the
+     session is `:stopped`, or call `stop!` when a synchronous result is
+     appropriate.
+  4. Return or report the `:edn-path` and `:assembly-path` from the stopped
+     status or result. The EDN is the canonical artifact and the assembly is
+     the compact, deduplicated rendering.
 
   If the user requests loading without execution, pass
   `:run-after-load? false` to `start!`; otherwise do not override the default."
@@ -198,7 +201,7 @@
      :edn-path edn-path
      :assembly-path assembly-path
      :stop-reason (:stop-reason @(:state session))
-     :artifact artifact}))
+     :capture-summary capture-summary}))
 
 (defn- finalize-once!
   [session capture]
@@ -418,9 +421,22 @@
                    (when (:error-message state)
                      {:error-message (:error-message state)}))
       capture-status (merge (select-keys capture-status
-                                         [:event-count :definition-count
-                                          :sequence-count :run-count
+                                         [:event-count :instruction-count
+                                          :block-count :block-run-count
                                           :reader-status :reader-alive?])))))
+
+(defn stop-async!
+  "Request capture shutdown without waiting for finalization.
+
+  Returns immediately with the lightweight session status. Poll `status` until
+  the session reaches `:stopped` or `:failed`; use `stop!` when the completed
+  result is needed synchronously. Calling this more than once is harmless."
+  [session]
+  (when-not (map? session)
+    (throw (IllegalArgumentException. "Session must be a map")))
+  (request-stop! session {:kind :explicit
+                          :message "Capture stopped by caller"})
+  (status session))
 
 (defn stop!
   "Stop a session, finalize its FIFO capture, and return output paths/results.
@@ -432,8 +448,7 @@
   [session]
   (when-not (map? session)
     (throw (IllegalArgumentException. "Session must be a map")))
-  (request-stop! session {:kind :explicit
-                          :message "Capture stopped by caller"})
+  (stop-async! session)
   (try
     (let [result @(:completion session)]
       (if (= :failed (:status result))
