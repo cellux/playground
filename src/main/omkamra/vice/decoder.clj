@@ -583,33 +583,42 @@
 (defn- basic-block-builder-xf
   "Group chronological instruction occurrences into dynamic basic blocks.
 
-  A block ends after every control-transfer instruction. Completion flushes a
-  final fall-through block, so a finite FIFO capture never loses its tail."
-  []
-  (fn [rf]
-    (let [block (volatile! nil)]
-      (fn
-        ([] (rf))
-        ([result]
-         (let [result (if-let [pending @block]
-                        (rf result pending)
-                        result)]
-           (vreset! block nil)
-           (rf result)))
-        ([result {:keys [event-index instruction-id instruction]}]
-         (let [pending (or @block
-                           {:start-index event-index
-                            :instruction-ids []})
-               pending (-> pending
-                           (update :instruction-ids conj instruction-id)
-                           (assoc :end-index (inc event-index)))]
-           (if (basic-block-terminator? instruction)
-             (do
-               (vreset! block nil)
-               (rf result pending))
-             (do
-               (vreset! block pending)
-               result))))))))
+  A block ends after every control-transfer instruction or explicit boundary.
+  Completion flushes a final fall-through block, so a finite FIFO capture never
+  loses its tail."
+  ([]
+   (basic-block-builder-xf (constantly false)))
+  ([boundary?]
+   (fn [rf]
+     (let [block (volatile! nil)]
+       (fn
+         ([] (rf))
+         ([result]
+          (let [result (if-let [pending @block]
+                         (rf result pending)
+                         result)]
+            (vreset! block nil)
+            (rf result)))
+         ([result occurrence]
+          (let [{:keys [event-index instruction-id instruction]} occurrence
+                result (if (and @block (boundary? occurrence))
+                         (let [result (rf result @block)]
+                           (vreset! block nil)
+                           result)
+                         result)
+                pending (or @block
+                            {:start-index event-index
+                             :instruction-ids []})
+                pending (-> pending
+                            (update :instruction-ids conj instruction-id)
+                            (assoc :end-index (inc event-index)))]
+            (if (basic-block-terminator? instruction)
+              (do
+                (vreset! block nil)
+                (rf result pending))
+              (do
+                (vreset! block pending)
+                result)))))))))
 
 (defn- deduplicate-basic-blocks-xf
   "Intern basic-block instruction-ID vectors and emit chronological block runs."
@@ -635,13 +644,15 @@
                                :iterations 1))))))))
 
 (defn- basic-block-execution
-  [occurrences]
-  (let [block-state (atom {:block-ids {} :blocks []})
-        block-runs (transduce (comp (basic-block-builder-xf)
-                                    (deduplicate-basic-blocks-xf block-state))
-                              conj [] occurrences)]
-    {:blocks (:blocks @block-state)
-     :block-runs block-runs}))
+  ([occurrences]
+   (basic-block-execution occurrences (constantly false)))
+  ([occurrences boundary?]
+   (let [block-state (atom {:block-ids {} :blocks []})
+         block-runs (transduce (comp (basic-block-builder-xf boundary?)
+                                     (deduplicate-basic-blocks-xf block-state))
+                               conj [] occurrences)]
+     {:blocks (:blocks @block-state)
+      :block-runs block-runs})))
 
 (defn versioned-execution
   "Build the canonical, lossless instruction/block execution representation.
@@ -654,6 +665,7 @@
    (versioned-execution instructions spans {}))
   ([executed-instructions spans _options]
    (let [executed-instructions (vec executed-instructions)
+         spans (vec (or spans []))
          {:keys [instructions node-versions instruction-ids-by-event]}
          (intern-instructions executed-instructions)
          occurrences (mapv (fn [event-index instruction-id instruction]
@@ -661,7 +673,10 @@
                               :instruction-id instruction-id
                               :instruction instruction})
                            (range) instruction-ids-by-event executed-instructions)
-         {:keys [blocks block-runs]} (basic-block-execution occurrences)]
+         boundary-starts (set (map :start-index spans))
+         {:keys [blocks block-runs]}
+         (basic-block-execution occurrences
+                                 #(contains? boundary-starts (:event-index %)))]
      {:format :omkamra.vice/versioned-execution-v3
       :event-count (count executed-instructions)
       :instructions instructions
@@ -685,13 +700,99 @@
        :end-index end
        :trace trace})))
 
+(def ^:private conditional-branch-mnemonics
+  #{"BCC" "BCS" "BEQ" "BMI" "BNE" "BPL" "BVC" "BVS"})
+
+(def ^:private dynamic-transfer-mnemonics
+  #{"RTS" "RTI" "KIL"})
+
+(defn- instruction-pc
+  [instruction]
+  (or (:pc instruction) (:address instruction)))
+
+(defn- instruction-width
+  [instruction]
+  (or (mode-width (:mode instruction))
+      (count (:bytes instruction))
+      1))
+
+(defn- absolute-operand
+  [instruction]
+  (let [bytes (:bytes instruction)]
+    (bit-or (u8 (nth bytes 1 0))
+            (bit-shift-left (u8 (nth bytes 2 0)) 8))))
+
+(defn- indirect-jump-target
+  [memory instruction]
+  (let [pointer (absolute-operand instruction)
+        high-address (bit-or (bit-and pointer 0xff00)
+                             (bit-and (inc pointer) 0xff))]
+    (bit-or (memory-byte memory pointer)
+            (bit-shift-left (memory-byte memory high-address) 8))))
+
+(defn- relative-target
+  [instruction]
+  (let [pc (instruction-pc instruction)
+        offset (u8 (nth (:bytes instruction) 1 0))]
+    (bit-and (+ pc 2 (if (< offset 128) offset (- offset 256))) 0xffff)))
+
+(defn- control-flow-successors
+  "Return statically knowable PCs that may follow `instruction`.
+
+  A nil result means that the instruction has a dynamic return target. Such
+  instructions are block terminators, but their successors cannot by
+  themselves distinguish a return from an asynchronous transfer."
+  [memory instruction]
+  (let [pc (instruction-pc instruction)
+        fall-through (bit-and (+ pc (instruction-width instruction)) 0xffff)
+        mnemonic (:mnemonic instruction)]
+    (cond
+      (contains? conditional-branch-mnemonics mnemonic)
+      #{fall-through (relative-target instruction)}
+
+      (= "JMP" mnemonic)
+      (case (:mode instruction)
+        :abs #{(absolute-operand instruction)}
+        :ind #{(indirect-jump-target memory instruction)}
+        #{})
+
+      (= "JSR" mnemonic)
+      #{(absolute-operand instruction)}
+
+      (= "BRK" mnemonic)
+      #{(memory-word memory 0xfffe)}
+
+      (contains? dynamic-transfer-mnemonics mnemonic)
+      nil
+
+      :else
+      #{fall-through})))
+
+(defn- unexpected-control-flow?
+  [memory previous current]
+  (let [successors (control-flow-successors memory previous)]
+    (and (seq successors)
+         (not (contains? successors (instruction-pc current))))))
+
+(defn- interrupt-entry-indices
+  "Find asynchronous-looking entries by comparing observed and legal PCs.
+
+  The monitor trace does not need to expose the IRQ vector read: a hardware
+  interrupt appears as a successor that is not explained by the preceding
+  instruction's control-flow semantics."
+  [instructions initial-memory]
+  (keep (fn [[index previous current]]
+          (when (unexpected-control-flow? initial-memory previous current)
+            index))
+        (map vector
+             (range 1 (count instructions))
+             instructions
+             (rest instructions))))
+
 (defn- irq-sections
   [instructions initial-memory]
   (let [instructions (vec instructions)
-        irq-target (memory-word initial-memory 0xfffe)
-        starts (keep-indexed (fn [index instruction]
-                               (when (= irq-target (:pc instruction)) index))
-                             instructions)
+        starts (vec (interrupt-entry-indices instructions initial-memory))
         ranges (mapv (fn [[start next-start]]
                        (let [end-limit (or next-start (count instructions))
                              rti-index (some (fn [index]
@@ -709,8 +810,8 @@
                           trigger (first trace)]
                       (assoc (code-span instructions :irq start end)
                              :trigger (select-keys trigger [:raster-line :cpu-cycle])
-                             :entry-pc (:pc trigger)
-                             :return-pc (:pc (last trace))))))
+                             :entry-pc (instruction-pc trigger)
+                             :return-pc (instruction-pc (last trace))))))
              ;; Present IRQ sections in scanline order while retaining original
              ;; instruction indices for wrap-around and reconstruction.
              (sort-by (juxt (comp :raster-line :trigger)
@@ -731,8 +832,7 @@
         spans (->> (concat irq-sections non-irq-sections)
                    (sort-by :start-index)
                    vec)]
-    {:vector-target irq-target
-     :prelude (or (:trace (first non-irq-sections)) [])
+    {:prelude (or (:trace (first non-irq-sections)) [])
      :sections irq-sections
      :irq-sections irq-sections
      :non-irq-sections non-irq-sections
@@ -868,7 +968,6 @@
               {:spans spans
                :irq-sections irq-spans
                :non-irq-sections non-irq-spans
-               :vector-target (:vector-target irq-data)
                :execution execution
                :frame-code (frame-code-start {:spans (:spans irq-data)})})))
 
@@ -995,20 +1094,42 @@
                         (update :event-count inc))]
          (rf result (assoc occurrence :event-index event-index)))))))
 
+(defn- mark-control-flow-boundaries-xf
+  [memory]
+  (fn [rf]
+    (let [previous (volatile! nil)]
+      (fn
+        ([] (rf))
+        ([result] (rf result))
+        ([result occurrence]
+         (let [boundary? (and @previous
+                              (unexpected-control-flow?
+                               memory
+                               (:instruction @previous)
+                               (:instruction occurrence)))]
+           (vreset! previous occurrence)
+           (rf result (assoc occurrence :boundary? boundary?))))))))
+
 (defn- make-stream-ingester
   "Create one fused transducer pipeline for a FIFO capture.
 
   Parsed records flow through instruction interning, sample collection, basic
-  block construction, and block interning. `:complete` must be called exactly
-  once after the FIFO reaches EOF so the basic-block transducer flushes its
-  pending fall-through block."
-  []
-  (let [instruction-state (atom {:instruction-ids {} :instructions []})
-        block-state (atom {:block-ids {} :blocks []})
-        xf (comp (intern-stream-instructions-xf instruction-state)
-                 (collect-stream-samples-xf)
-                 (basic-block-builder-xf)
-                 (deduplicate-basic-blocks-xf block-state))
+  block construction, and block interning. `:initial-memory` is used to
+  identify unexpected control-flow discontinuities, which are explicit basic
+  block boundaries because an IRQ can interrupt a fall-through block without
+  executing a terminator. `:complete` must be called exactly once after the
+  FIFO reaches EOF so the basic-block transducer flushes its pending
+  fall-through block."
+  ([]
+   (make-stream-ingester {}))
+  ([{:keys [initial-memory]}]
+   (let [instruction-state (atom {:instruction-ids {} :instructions []})
+         block-state (atom {:block-ids {} :blocks []})
+         xf (comp (intern-stream-instructions-xf instruction-state)
+                  (collect-stream-samples-xf)
+                  (mark-control-flow-boundaries-xf initial-memory)
+                  (basic-block-builder-xf :boundary?)
+                  (deduplicate-basic-blocks-xf block-state))
         reducer (xf (fn
                       ([] (empty-stream-state))
                       ([result] result)
@@ -1017,7 +1138,7 @@
     {:step (fn [state event] (reducer state event))
      :complete (fn [state] (reducer state))
      :instruction-state instruction-state
-     :block-state block-state}))
+     :block-state block-state})))
 
 (defn- instruction-block-stream
   [stream-state ingester]
@@ -1149,7 +1270,6 @@
                             (System/nanoTime) ".fifo"))
          state (atom {:status :starting :instruction-count 0})
          stream-state (atom (empty-stream-state))
-         ingester (make-stream-ingester)
          reader-ref (atom nil)
          reader-thread (atom nil)
          checkpoint-number (atom nil)
@@ -1158,43 +1278,44 @@
        (bm/drain-events conn)
        (bm/ping conn)
        (bm/drain-events conn)
-       (create-fifo! fifo-path)
-       (reset! reader-thread
-               (start-fifo-reader! fifo-path stream-state ingester reader-ref))
-       ;; A tracepoint also emits a binary CHECKPOINT_INFO event for every hit.
-       ;; Suppress those unsolicited bodies before decoding/queueing; requested
-       ;; checkpoint responses remain available.
-       (bm/ignore-unsolicited-types!
-        conn (conj prior-ignored-types bm/MON_RESPONSE_CHECKPOINT_INFO))
        (let [initial-memory (mapv u8
                                   (:memory (bm/mem-get conn {:start 0
                                                              :end 65535})))
-             checkpoint (bm/checkpoint-set
-                         conn {:start 0
-                               :end 0xffff
-                               :stop? false
-                               :enabled? true
-                               :op checkpoint-op
-                               :temporary? false})]
-         (reset! checkpoint-number (:number checkpoint))
-         (bm/resource-set conn {:name "MonitorLogFileName" :value fifo-path})
-         ;; fopen(3) on the writer pairs with the reader thread's blocking open.
-         (bm/resource-set conn {:name "MonitorLogEnabled" :value 1})
-         (reset! state {:status :running
-                        :instruction-count 0
-                        :transport :fifo})
-         {:kind :omkamra.vice/streaming-capture-v1
-          :conn conn
-          :fifo-path fifo-path
-          :checkpoint-number checkpoint-number
-          :initial-memory initial-memory
-          :metadata metadata
-          :state state
-          :stream-state stream-state
-          :ingester ingester
-          :reader-ref reader-ref
-          :reader-thread @reader-thread
-          :prior-ignored-types prior-ignored-types})
+             ingester (make-stream-ingester {:initial-memory initial-memory})]
+         (create-fifo! fifo-path)
+         (reset! reader-thread
+                 (start-fifo-reader! fifo-path stream-state ingester reader-ref))
+         ;; A tracepoint also emits a binary CHECKPOINT_INFO event for every hit.
+         ;; Suppress those unsolicited bodies before decoding/queueing; requested
+         ;; checkpoint responses remain available.
+         (bm/ignore-unsolicited-types!
+          conn (conj prior-ignored-types bm/MON_RESPONSE_CHECKPOINT_INFO))
+         (let [checkpoint (bm/checkpoint-set
+                           conn {:start 0
+                                 :end 0xffff
+                                 :stop? false
+                                 :enabled? true
+                                 :op checkpoint-op
+                                 :temporary? false})]
+           (reset! checkpoint-number (:number checkpoint))
+           (bm/resource-set conn {:name "MonitorLogFileName" :value fifo-path})
+           ;; fopen(3) on the writer pairs with the reader thread's blocking open.
+           (bm/resource-set conn {:name "MonitorLogEnabled" :value 1})
+           (reset! state {:status :running
+                          :instruction-count 0
+                          :transport :fifo})
+           {:kind :omkamra.vice/streaming-capture-v1
+            :conn conn
+            :fifo-path fifo-path
+            :checkpoint-number checkpoint-number
+            :initial-memory initial-memory
+            :metadata metadata
+            :state state
+            :stream-state stream-state
+            :ingester ingester
+            :reader-ref reader-ref
+            :reader-thread @reader-thread
+            :prior-ignored-types prior-ignored-types}))
        (catch Throwable error
          (try (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
               (catch Throwable _ nil))
@@ -1437,18 +1558,19 @@
 (defn- stream-irq-data
   [events instructions instruction-ids initial-memory]
   (let [event-count (:event-count events)
-        irq-target (memory-word initial-memory 0xfffe)
         starts (persistent!
-                (loop [index 0 result (transient [])]
+                (loop [index 1 result (transient [])]
                   (if (= index event-count)
                     result
-                    (recur (inc index)
-                           (if (= irq-target
-                                  (:address
-                                   (nth instructions
-                                        (aget ^ints instruction-ids index))))
-                             (conj! result index)
-                             result)))))
+                    (let [previous (nth instructions
+                                        (aget ^ints instruction-ids (dec index)))
+                          current (nth instructions
+                                       (aget ^ints instruction-ids index))]
+                      (recur (inc index)
+                             (if (unexpected-control-flow?
+                                  initial-memory previous current)
+                               (conj! result index)
+                               result))))))
         ranges (mapv
                 (fn [[start next-start]]
                   (let [limit (or next-start event-count)
@@ -1496,8 +1618,7 @@
         spans (->> (concat irq-spans non-irq-spans)
                    (sort-by :start-index)
                    vec)]
-    {:vector-target irq-target
-     :irq-sections irq-spans
+    {:irq-sections irq-spans
      :non-irq-sections non-irq-spans
      :spans spans}))
 
@@ -1557,7 +1678,6 @@
       :structure {:spans spans
                   :irq-sections (:irq-sections irq-data)
                   :non-irq-sections (:non-irq-sections irq-data)
-                  :vector-target (:vector-target irq-data)
                   :execution execution
                   :frame-code frame-code}
       :video {:vic (assoc vic :sprite-pointer-writes

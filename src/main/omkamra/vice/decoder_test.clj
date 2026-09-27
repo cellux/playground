@@ -150,6 +150,47 @@
                                   (:node-versions execution)))))
     (is (= [2] (:instruction-ids (second (:blocks execution)))))))
 
+(deftest separates-irq-handler-from-interrupted-caller-block
+  (let [instructions [{:pc 0xe5cd :bytes [0xa5 0xc6] :mnemonic "LDA"}
+                       {:pc 0xff48 :bytes [0x48] :mnemonic "PHA"}
+                       {:pc 0xff49 :bytes [0x8a] :mnemonic "TXA"}
+                       {:pc 0xff4a :bytes [0x48] :mnemonic "PHA"}
+                       {:pc 0xff4b :bytes [0x98] :mnemonic "TYA"}
+                       {:pc 0xff4c :bytes [0x48] :mnemonic "PHA"}
+                       {:pc 0xff4d :bytes [0xba] :mnemonic "TSX"}
+                       {:pc 0xff4e :bytes [0xbd 0x04 0x01] :mnemonic "LDA"}
+                       {:pc 0xff51 :bytes [0x29 0x10] :mnemonic "AND"}
+                       {:pc 0xff53 :bytes [0xf0 0x03] :mnemonic "BEQ"}]
+        irq-sections (var-get (ns-resolve 'omkamra.vice.decoder
+                                          'irq-sections))
+        spans (:spans (irq-sections instructions (byte-array 65536)))
+        execution (decoder/versioned-execution instructions spans)]
+    (is (= [[0] [1 2 3 4 5 6 7 8 9]]
+           (mapv :instruction-ids (:blocks execution))))
+    (is (= [[0 1] [1 10]]
+           (mapv (juxt :start-index :end-index)
+                 (:block-runs execution))))))
+
+(deftest streaming-ingestion-splits-at-control-flow-discontinuity
+  (let [empty-state (var-get (ns-resolve 'omkamra.vice.decoder
+                                          'empty-stream-state))
+        make-ingester (var-get (ns-resolve 'omkamra.vice.decoder
+                                            'make-stream-ingester))
+        finish-stream (var-get (ns-resolve 'omkamra.vice.decoder
+                                           'instruction-block-stream))
+        ingester (make-ingester {:initial-memory (byte-array 65536)})
+        events [{:operation :exec :pc 0xe5cd :bytes [0xa5 0xc6]
+                 :vice-text "LDA" :raster-line 1 :cpu-cycle 0}
+                {:operation :exec :pc 0xff48 :bytes [0x48]
+                 :vice-text "PHA" :raster-line 1 :cpu-cycle 2}
+                {:operation :exec :pc 0xff49 :bytes [0x8a]
+                 :vice-text "TXA" :raster-line 1 :cpu-cycle 4}]
+        state (atom (reduce (:step ingester) (empty-state) events))
+        _ (swap! state (:complete ingester))
+        stream (finish-stream state ingester)]
+    (is (= [[0] [1 2]]
+           (mapv :instruction-ids (:blocks stream))))))
+
 (deftest releases-stream-ingestion-state-after-finalization
   (let [release-stream-state (var-get (ns-resolve 'omkamra.vice.decoder
                                                    'release-stream-state!))
