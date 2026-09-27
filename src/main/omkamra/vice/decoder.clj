@@ -176,42 +176,6 @@
      :write-cycle-offset offset
      :instruction-cycles duration-cycles}))
 
-(defn- enrich-instructions
-  ([raw-instructions initial-memory]
-   (enrich-instructions raw-instructions initial-memory {}))
-  ([raw-instructions initial-memory {:keys [cycles-per-line raster-lines boundary-entry]
-                                    :or {cycles-per-line 63 raster-lines 312}}]
-   (let [memory (byte-array (map unchecked-byte initial-memory))
-         raw-instructions (vec raw-instructions)]
-     (reduce-kv
-      (fn [{:keys [instructions writes]} instruction-index entry]
-        (let [pc (:pc entry)
-              decoded (if (seq (:bytes entry))
-                        (asm/disassemble-bytes pc (:bytes entry))
-                        (asm/disassemble-bytes pc
-                                           (mapv #(memory-byte memory (+ pc %))
-                                                 (range 4))))
-              write (inferred-write memory decoded entry)
-              next-entry (or (nth raw-instructions (inc instruction-index) nil)
-                             boundary-entry)
-              duration-cycles (elapsed-cycles entry next-entry cycles-per-line raster-lines)
-              instruction (merge entry
-                                 (select-keys decoded [:bytes :mnemonic :mode :operand :text])
-                                 {:instruction-index instruction-index
-                                  :instruction-cycles duration-cycles})
-              write-event (when write
-                            (merge (select-keys entry [:pc])
-                                   (write-timing entry duration-cycles cycles-per-line)
-                                   write
-                                   {:instruction-index instruction-index
-                                    :mnemonic (:mnemonic decoded)}))]
-          (when write
-            (aset-byte memory (:address write) (unchecked-byte (:value write))))
-          {:instructions (conj instructions instruction)
-           :writes (cond-> writes write-event (conj write-event))}))
-      {:instructions [] :writes []}
-      raw-instructions))))
-
 (defn- vic-register-name
   [address]
   (keyword (format "%04x" address)))
@@ -338,71 +302,6 @@
        (map first)
        (mapv #(asset-sample initial-memory writes %))))
 
-(defn- static-instruction
-  [id instruction]
-  {:id id
-   :address (:pc instruction)
-   :bytes (vec (:bytes instruction))
-   :mnemonic (:mnemonic instruction)
-   :mode (:mode instruction)
-   :operand (:operand instruction)
-   :text (:text instruction)})
-
-(defn- instruction-key
-  [instruction]
-  [(:pc instruction) (vec (:bytes instruction))])
-
-(defn- intern-instructions
-  "Intern executed instruction images and record address-version intervals.
-
-  An instruction is the immutable executed image `[PC bytes]`. A node version
-  is an address's chronological incarnation: executing changed bytes at a
-  previously seen address starts a new version, including when bytes revert to
-  an older instruction. `:first-event` and `:last-event` describe observations
-  of that image, not an unobservable continuous memory-lifetime interval."
-  [executed-instructions]
-  (let [state (reduce (fn [{:keys [instruction-ids instructions address-state
-                                   node-versions instruction-ids-by-event]
-                            :as state}
-                           [event-index instruction]]
-                        (let [key (instruction-key instruction)
-                              instruction-id (or (get instruction-ids key)
-                                                 (count instructions))
-                              state (if (contains? instruction-ids key)
-                                      state
-                                      (-> state
-                                          (assoc-in [:instruction-ids key] instruction-id)
-                                          (update :instructions conj
-                                                  (static-instruction instruction-id instruction))))
-                              {:keys [node-id version] :as prior}
-                              (get-in state [:address-state (:pc instruction)])
-                              changed? (not= instruction-id (:instruction-id prior))
-                              state (if changed?
-                                      (let [next-node-id (count (:node-versions state))
-                                            next-version (if prior (inc version) 0)]
-                                        (cond-> state
-                                          true (update :node-versions conj
-                                                       {:id next-node-id
-                                                        :address (:pc instruction)
-                                                        :version next-version
-                                                        :instruction-id instruction-id
-                                                        :first-event event-index
-                                                        :last-event event-index})
-                                          true (assoc-in [:address-state (:pc instruction)]
-                                                         {:instruction-id instruction-id
-                                                          :node-id next-node-id
-                                                          :version next-version})))
-                                      (assoc-in state [:node-versions node-id :last-event]
-                                                event-index))]
-                          (update state :instruction-ids-by-event conj instruction-id)))
-                      {:instruction-ids {}
-                       :instructions []
-                       :address-state {}
-                       :node-versions []
-                       :instruction-ids-by-event []}
-                      (map-indexed vector executed-instructions))]
-    (select-keys state [:instructions :node-versions :instruction-ids-by-event])))
-
 (def ^:private basic-block-terminators
   #{"BRK" "JMP" "JSR" "RTI" "RTS" "KIL"
     "BCC" "BCS" "BEQ" "BMI" "BNE" "BPL" "BVC" "BVS"})
@@ -518,78 +417,6 @@
                  result
                  (map vector boundaries (rest boundaries))))))))
 
-(defn- basic-block-execution
-  ([occurrences]
-   (basic-block-execution occurrences (constantly false)))
-  ([occurrences boundary?]
-   (basic-block-execution occurrences boundary? nil nil))
-  ([occurrences boundary? instruction-by-id initial-memory]
-   (let [occurrences (vec occurrences)
-         instruction-by-id (or instruction-by-id
-                               (into {}
-                                     (map (juxt :instruction-id :instruction)
-                                          occurrences)))
-         block-state (atom {:block-ids {} :blocks []})
-         block-runs (transduce (comp (basic-block-builder-xf boundary?)
-                                     (split-block-at-control-flow-targets-xf
-                                      instruction-by-id initial-memory)
-                                     (deduplicate-basic-blocks-xf block-state))
-                               conj [] occurrences)]
-     {:blocks (:blocks @block-state)
-      :block-runs block-runs})))
-
-(defn versioned-execution
-  "Build the canonical, lossless instruction/block execution representation.
-
-  Static instruction images are interned in `:instructions`. Dynamic basic
-  blocks reference them by `:instruction-ids`, and chronological
-  `:block-runs` preserve every executed occurrence without retaining expanded
-  instruction maps."
-  ([instructions spans]
-   (versioned-execution instructions spans {}))
-  ([executed-instructions spans options]
-   (let [executed-instructions (vec executed-instructions)
-         spans (vec (or spans []))
-         options (or options {})
-         {:keys [instructions node-versions instruction-ids-by-event]}
-         (intern-instructions executed-instructions)
-         occurrences (mapv (fn [event-index instruction-id instruction]
-                             {:event-index event-index
-                              :instruction-id instruction-id
-                              :instruction instruction})
-                           (range) instruction-ids-by-event executed-instructions)
-         boundary-starts (set (map :start-index spans))
-         instruction-by-id (into {}
-                                (map (juxt :instruction-id :instruction)
-                                     occurrences))
-         {:keys [blocks block-runs]}
-         (basic-block-execution occurrences
-                                 #(contains? boundary-starts (:event-index %))
-                                 instruction-by-id
-                                 (:initial-memory options))]
-     {:format :omkamra.vice/versioned-execution-v3
-      :event-count (count executed-instructions)
-      :instructions instructions
-      :node-versions node-versions
-      :blocks blocks
-      :block-runs block-runs
-      :spans (mapv #(assoc (select-keys % [:kind :start-index :end-index :trigger
-                                            :entry-pc :return-pc :capture-index])
-                           :instruction-count
-                           (- (:end-index %) (:start-index %)))
-                   spans)})))
-
-(declare raw-artifact run-pipeline expand-raw-events)
-
-(defn- code-span
-  [instructions kind start end]
-  (when (< start end)
-    (let [trace (subvec (vec instructions) start end)]
-      {:kind kind
-       :start-index start
-       :end-index end
-       :trace trace})))
-
 (def ^:private conditional-branch-mnemonics
   #{"BCC" "BCS" "BEQ" "BMI" "BNE" "BPL" "BVC" "BVS"})
 
@@ -683,70 +510,6 @@
     (and (seq successors)
          (not (contains? successors (instruction-pc current))))))
 
-(defn- interrupt-entry-indices
-  "Find asynchronous-looking entries by comparing observed and legal PCs.
-
-  The monitor trace does not need to expose the IRQ vector read: a hardware
-  interrupt appears as a successor that is not explained by the preceding
-  instruction's control-flow semantics."
-  [instructions initial-memory]
-  (keep (fn [[index previous current]]
-          (when (unexpected-control-flow? initial-memory previous current)
-            index))
-        (map vector
-             (range 1 (count instructions))
-             instructions
-             (rest instructions))))
-
-(defn- irq-sections
-  [instructions initial-memory]
-  (let [instructions (vec instructions)
-        starts (vec (interrupt-entry-indices instructions initial-memory))
-        ranges (mapv (fn [[start next-start]]
-                       (let [end-limit (or next-start (count instructions))
-                             rti-index (some (fn [index]
-                                               (when (= "RTI"
-                                                        (:mnemonic (nth instructions index)))
-                                                 index))
-                                             (range start end-limit))
-                             end (if rti-index (inc rti-index) end-limit)]
-                         [start end]))
-                     (map vector starts (concat (rest starts) [nil])))
-        irq-sections
-        (->> ranges
-             (map (fn [[start end]]
-                    (let [trace (subvec instructions start end)
-                          trigger (first trace)]
-                      (assoc (code-span instructions :irq start end)
-                             :trigger (select-keys trigger [:raster-line :cpu-cycle])
-                             :entry-pc (instruction-pc trigger)
-                             :return-pc (instruction-pc (last trace))))))
-             ;; Present IRQ sections in scanline order while retaining original
-             ;; instruction indices for wrap-around and reconstruction.
-             (sort-by (juxt (comp :raster-line :trigger)
-                            (comp :cpu-cycle :trigger)
-                            :start-index))
-             vec)
-        non-irq-ranges
-        (if (empty? ranges)
-          [[0 (count instructions)]]
-          (let [gaps (concat [[0 (ffirst ranges)]]
-                             (map (fn [[[start end] [next-start _next-end]]]
-                                      [end next-start])
-                                  (partition 2 1 ranges))
-                             [[(second (last ranges)) (count instructions)]])]
-            (filter (fn [[start end]] (< start end)) gaps)))
-        non-irq-sections (mapv #(code-span instructions :non-irq (first %) (second %))
-                               non-irq-ranges)
-        spans (->> (concat irq-sections non-irq-sections)
-                   (sort-by :start-index)
-                   vec)]
-    {:prelude (or (:trace (first non-irq-sections)) [])
-     :sections irq-sections
-     :irq-sections irq-sections
-     :non-irq-sections non-irq-sections
-     :spans spans}))
-
 (defn- ram-code-pc?
   [pc {:keys [ram-start ram-end]
        :or {ram-start 0x0400
@@ -755,41 +518,11 @@
        (<= ram-start pc)
        (< pc ram-end)))
 
-(defn- first-code-entry
-  [spans kind options]
-  (some (fn [span]
-          (when (= kind (:kind span))
-            (some (fn [[offset entry]]
-                    (when (ram-code-pc? (:pc entry) options)
-                      {:span-kind kind
-                       :index (+ (:start-index span) offset)
-                       :entry entry}))
-                  (map-indexed vector (:trace span)))))
-        spans))
-
-(defn- frame-code-start
-  "Identify the first likely demo-code execution in structural spans.
-
-  `:first-ram-code` is the earliest instruction outside the usual KERNAL ROM
-  range. `:first-ram-irq-code` is the stronger raster/frame signal: the first
-  IRQ span containing an instruction in RAM. Both are heuristic and retain the
-  original trace entry for inspection."
-  ([capture]
-   (frame-code-start capture {}))
-  ([capture options]
-   (let [spans (:spans capture)]
-     {:first-ram-code (first-code-entry spans :non-irq options)
-      :first-ram-irq-code (first-code-entry spans :irq options)})))
-
 (def ^:private stream-events-format
   :omkamra.vice/instruction-block-stream-v3)
 
 (def ^:private stream-sample-keys
   [:raster-line :cpu-cycle :a :x :y :sp :flags :global-cycle])
-
-(defn- instruction-block-stream?
-  [events]
-  (= stream-events-format (:format events)))
 
 (defn- stream-instruction-ids
   [events]
@@ -799,144 +532,6 @@
                      (repeat iterations
                              (:instruction-ids (nth blocks block-id)))))
             (:block-runs events))))
-
-(defn- expand-raw-events
-  [events]
-  (if (instruction-block-stream? events)
-    (let [instructions (:instructions events)]
-      (mapv (fn [instruction-id sample]
-              (merge (dissoc (nth instructions instruction-id) :id)
-                     (zipmap (:sample-keys events) sample)))
-            (stream-instruction-ids events)
-            (:samples events)))
-    (vec events)))
-
-(defn raw-artifact
-  "Create the intentionally low-level input to the enrichment pipeline.
-
-  Events may be a direct vector or a lossless dictionary-coded event stream.
-  No semantic roles are assigned here. Memory/display snapshots and boundary
-  metadata remain available so every enrichment stage can be replayed."
-  ([events]
-   (raw-artifact events {}))
-  ([events {:keys [initial-memory final-memory boundary-entry display palette metadata]}]
-   {:format :omkamra.vice/raw-trace-v1
-    :raw {:events (if (instruction-block-stream? events) events (vec events))
-          :memory {:initial initial-memory :final final-memory}
-          :display display
-          :palette palette
-          :boundary-entry boundary-entry
-          :metadata metadata}
-    :stages {}}))
-
-(defn normalize-stage
-  "Assign the stable chronological event index without semantic analysis."
-  [artifact]
-  (assoc-in artifact [:stages :normalized-events]
-            (mapv (fn [event-index event]
-                    (assoc event :event-index event-index))
-                  (range)
-                  (expand-raw-events (get-in artifact [:raw :events])))))
-
-(defn decode-stage
-  "Decode normalized CPU events and infer instruction timing/writes."
-  [artifact]
-  (let [events (get-in artifact [:stages :normalized-events])
-        initial-memory (get-in artifact [:raw :memory :initial])
-        boundary-entry (get-in artifact [:raw :boundary-entry])
-        decode-options (get-in artifact [:raw :metadata :decode-options])
-        {:keys [instructions writes]} (enrich-instructions
-                                       events initial-memory
-                                       (assoc decode-options
-                                              :boundary-entry boundary-entry))]
-    (assoc-in artifact [:stages :decoded]
-              {:instructions instructions
-               :writes (mapv #(assoc % :event-index (:instruction-index %)) writes)})))
-
-(defn memory-stage
-  "Publish the memory timeline produced by decoded write effects."
-  [artifact]
-  (assoc-in artifact [:stages :memory]
-            {:initial (get-in artifact [:raw :memory :initial])
-             :final (get-in artifact [:raw :memory :final])
-             :writes (get-in artifact [:stages :decoded :writes])}))
-
-(defn structure-stage
-  "Derive structural IRQ/span/basic-block information, but no semantic roles."
-  [artifact]
-  (let [instructions (get-in artifact [:stages :decoded :instructions])
-        initial-memory (get-in artifact [:raw :memory :initial])
-        irq-data (irq-sections instructions initial-memory)
-        clean-span (fn [span]
-                     (dissoc span :trace :compressed))
-        spans (mapv clean-span (:spans irq-data))
-        irq-spans (mapv clean-span (:sections irq-data))
-        non-irq-spans (mapv clean-span (:non-irq-sections irq-data))
-        execution (versioned-execution instructions (:spans irq-data)
-                                        {:initial-memory initial-memory})]
-    (assoc-in artifact [:stages :structure]
-              {:spans spans
-               :irq-sections irq-spans
-               :non-irq-sections non-irq-spans
-               :execution execution
-               :frame-code (frame-code-start {:spans (:spans irq-data)})})))
-
-(defn video-stage
-  "Derive VIC configuration, inferred raster writes, and asset samples."
-  [artifact]
-  (let [initial-memory (get-in artifact [:raw :memory :initial])
-        writes (get-in artifact [:stages :decoded :writes])
-        vic (derive-vic initial-memory writes)
-        assets (asset-samples initial-memory writes (:configurations vic))]
-    (assoc-in artifact [:stages :video]
-              {:vic (assoc vic :sprite-pointer-writes
-                           (sprite-pointer-events initial-memory writes))
-               :assets assets})))
-
-(defn semantics-stage
-  "Reserved semantic stage.
-
-  It deliberately assigns no roles yet. Later classifiers can add evidence and
-  confidence without changing the raw, decoded, or structural layers."
-  [artifact]
-  (assoc-in artifact [:stages :semantics]
-            {:status :unclassified
-             :spans []}))
-
-(def ^:private pipeline-stages
-  {:normalize normalize-stage
-   :decode decode-stage
-   :memory memory-stage
-   :structure structure-stage
-   :video video-stage
-   :semantics semantics-stage})
-
-(defn run-pipeline
-  "Run enrichment stages over a raw artifact.
-
-  `:stages` defaults to all currently available stages. Stages are pure with
-  respect to VICE and can be rerun from the persisted raw artifact."
-  ([artifact]
-   (run-pipeline artifact {}))
-  ([artifact {:keys [stages compact?]
-              :or {stages [:normalize :decode :memory :structure :video
-                           :semantics]
-                   compact? false}}]
-   (reduce (fn [artifact stage]
-             (if-let [stage-fn (get pipeline-stages stage)]
-               (let [artifact (stage-fn artifact)]
-                 (if compact?
-                   (case stage
-                     :decode (update artifact :stages dissoc :normalized-events)
-                     :structure (update-in artifact [:stages :decoded]
-                                           dissoc :instructions)
-                     artifact)
-                   artifact))
-               (throw (ex-info "Unknown trace enrichment stage"
-                               {:stage stage
-                                :known-stages (keys pipeline-stages)}))))
-           artifact
-           stages)))
 
 (defn- empty-stream-state
   []
@@ -1171,8 +766,8 @@
   block-interning transducers. Only compact dynamic samples and interned static
   instructions/blocks are retained; no trace log is written to disk.
 
-  The returned recorder is consumed by `await-cpu-range`, `await-demo-part`,
-  and `stop-capture`. Options are `:fifo-path`, `:metadata`, and
+  The returned recorder is consumed by `capture-status` and `stop-capture`.
+  Options are `:fifo-path`, `:metadata`, and
   `:checkpoint-op` (default 4, execute)."
   ([conn]
    (start-capture conn {}))
@@ -1281,103 +876,6 @@
             :reader-status (:status stream)
             :reader-alive? (.isAlive ^Thread (:reader-thread capture))
             :reader-error (some-> (:error stream) .getMessage)})))
-
-(defn- first-pc-observation
-  [stream-state pred]
-  (->> (:first-by-pc @stream-state)
-       (keep (fn [[pc observation]]
-               (when (pred pc) observation)))
-       (sort-by :event-index)
-       first))
-
-(defn- await-stream-progress
-  [stream-state previous-count timeout-ms]
-  (let [deadline (+ (System/nanoTime) (* (long timeout-ms) 1000000))]
-    (loop []
-      (let [{:keys [event-count error]} @stream-state]
-        (when error (throw error))
-        (cond
-          (> event-count previous-count) event-count
-          (< (System/nanoTime) deadline)
-          (do (Thread/sleep 5) (recur))
-          :else event-count)))))
-
-(defn await-cpu-range
-  "Advance a streaming capture until the CPU executes inside `:pc-range`.
-
-  This is intended for synchronization with the KERNAL idle loop before
-  AUTOSTART. VICE remains paused at the end of each bounded advance. Options
-  are `:pc-range` as `[inclusive-start inclusive-end]`,
-  `:chunk-instructions` (default 10000), `:timeout-ms` (default 30000), and
-  `:advance-timeout-ms` (default 10000)."
-  [capture {:keys [pc-range chunk-instructions timeout-ms advance-timeout-ms]
-            :or {chunk-instructions 10000
-                 timeout-ms 30000
-                 advance-timeout-ms 10000}}]
-  (let [[start-pc end-pc] pc-range]
-    (when-not (and (integer? start-pc)
-                   (integer? end-pc)
-                   (<= 0 start-pc end-pc 0xffff))
-      (throw (IllegalArgumentException.
-              ":pc-range must be [start end] within the 16-bit address space")))
-    (let [conn (:conn capture)
-          stream-state (:stream-state capture)
-          deadline (+ (System/nanoTime) (* (long timeout-ms) 1000000))
-          matches? #(<= start-pc % end-pc)]
-      (loop [advanced 0]
-        (if-let [observation (first-pc-observation stream-state matches?)]
-          (let [marker (assoc observation
-                              :status :cpu-range
-                              :pc-range [start-pc end-pc]
-                              :advanced-instructions advanced)]
-            (swap! (:state capture) assoc
-                   :status :cpu-range
-                   :cpu-range marker
-                   :instruction-count (:event-count @stream-state))
-            marker)
-          (if (< (System/nanoTime) deadline)
-            (let [before (:event-count @stream-state)]
-              (bm/advance-and-wait conn {:count chunk-instructions
-                                         :timeout-ms advance-timeout-ms})
-              (await-stream-progress stream-state before 1000)
-              (recur (+ advanced chunk-instructions)))
-            (throw (ex-info "Timed out waiting for CPU PC range"
-                            {:pc-range [start-pc end-pc]
-                             :timeout-ms timeout-ms
-                             :advanced-instructions advanced
-                             :event-count (:event-count @stream-state)}))))))))
-
-(defn await-demo-part
-  "Wait for one of `:entry-pcs` in a running streaming capture.
-
-  The FIFO reader performs parsing and instruction interning concurrently, so
-  this function only polls the in-memory PC index and never rereads trace text.
-  Options are `:entry-pcs` (required), `:timeout-ms` (default 30000), and
-  `:poll-ms` (default 25)."
-  [capture {:keys [entry-pcs timeout-ms poll-ms]
-            :or {timeout-ms 30000 poll-ms 25}}]
-  (let [entry-pcs (set entry-pcs)
-        stream-state (:stream-state capture)]
-    (when (empty? entry-pcs)
-      (throw (IllegalArgumentException. ":entry-pcs must not be empty")))
-    (let [deadline (+ (System/nanoTime) (* (long timeout-ms) 1000000))]
-      (loop []
-        (let [{:keys [error event-count]} @stream-state]
-          (when error (throw error))
-          (if-let [observation
-                   (first-pc-observation stream-state entry-pcs)]
-            (let [marker (assoc observation :entry-pcs entry-pcs)]
-              (swap! (:state capture) assoc
-                     :status :demo-part
-                     :first-demo-part marker
-                     :instruction-count event-count)
-              marker)
-            (if (< (System/nanoTime) deadline)
-              (do (Thread/sleep (long poll-ms)) (recur))
-              (throw (ex-info "Timed out waiting for first demo part"
-                              {:entry-pcs entry-pcs
-                               :timeout-ms timeout-ms
-                               :event-count event-count})))))))))
 
 (defn- stream-instruction-id-array
   [events]
