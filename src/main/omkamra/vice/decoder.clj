@@ -173,8 +173,62 @@
      :instruction-cpu-cycle (:cpu-cycle entry)
      :raster-line (+ (:raster-line entry) (quot total cycles-per-line))
      :cpu-cycle (mod total cycles-per-line)
-     :write-cycle-offset offset
-     :instruction-cycles duration-cycles}))
+     :write-cycle-offset offset}))
+
+(def ^:private compact-write-keys
+  [:event-index :pc :address :value :old-value
+   :raster-line :cpu-cycle
+   :instruction-raster-line :instruction-cpu-cycle
+   :write-cycle-offset :mnemonic-id :kind-id])
+
+(defn- compact-write-data
+  [writes]
+  (let [mnemonics (->> writes (map :mnemonic) distinct vec)
+        kinds (->> writes (map :kind) distinct vec)
+        mnemonic-ids (zipmap mnemonics (range))
+        kind-ids (zipmap kinds (range))]
+    {:format :omkamra.vice/write-records-v1
+     :keys compact-write-keys
+     :mnemonics mnemonics
+     :kinds kinds
+     :writes (mapv (fn [write]
+                     [(:event-index write)
+                      (:pc write)
+                      (:address write)
+                      (:value write)
+                      (:old-value write)
+                      (:raster-line write)
+                      (:cpu-cycle write)
+                      (:instruction-raster-line write)
+                      (:instruction-cpu-cycle write)
+                      (:write-cycle-offset write)
+                      (get mnemonic-ids (:mnemonic write))
+                      (get kind-ids (:kind write))])
+                   writes)}))
+
+(defn expand-writes
+  "Expand compact artifact write records into analysis maps.
+
+  Captures persist writes as positional records to avoid repeating map keys
+  and mnemonic/kind values millions of times. Use this helper at an analysis
+  boundary when map-shaped records are more convenient."
+  [{:keys [mnemonics kinds writes]}]
+  (mapv (fn [[event-index pc address value old-value raster-line cpu-cycle
+             instruction-raster-line instruction-cpu-cycle write-cycle-offset
+             mnemonic-id kind-id]]
+          {:event-index event-index
+           :pc pc
+           :address address
+           :value value
+           :old-value old-value
+           :raster-line raster-line
+           :cpu-cycle cpu-cycle
+           :instruction-raster-line instruction-raster-line
+           :instruction-cpu-cycle instruction-cpu-cycle
+           :write-cycle-offset write-cycle-offset
+           :mnemonic (nth mnemonics mnemonic-id)
+           :kind (nth kinds kind-id)})
+        writes))
 
 (defn- vic-register-name
   [address]
@@ -223,7 +277,7 @@
                       :configurations
                       (if (contains? layout-register-addresses (:address write))
                         (conj configurations
-                              (merge (select-keys write [:instruction-index :pc
+                              (merge (select-keys write [:event-index :pc
                                                          :raster-line :cpu-cycle])
                                      (vic-configuration state)))
                         configurations)))
@@ -231,7 +285,7 @@
          {:state initial-state
           :events []
           :configurations [(assoc (vic-configuration initial-state)
-                                  :instruction-index -1)]}
+                                  :event-index -1)]}
          writes)]
     {:initial-state initial-state
      :final-state state
@@ -262,9 +316,9 @@
       writes))))
 
 (defn- memory-after-writes
-  [initial-memory writes instruction-index]
+  [initial-memory writes event-index]
   (let [memory (byte-array (map unchecked-byte initial-memory))]
-    (doseq [{:keys [address value]} (take-while #(<= (:instruction-index %) instruction-index)
+    (doseq [{:keys [address value]} (take-while #(<= (:event-index %) event-index)
                                                 writes)]
       (aset-byte memory address (unchecked-byte value)))
     memory))
@@ -275,7 +329,7 @@
 
 (defn- asset-sample
   [initial-memory writes configuration]
-  (let [memory (memory-after-writes initial-memory writes (:instruction-index configuration))
+  (let [memory (memory-after-writes initial-memory writes (:event-index configuration))
         {:keys [bank-base screen-base charset-base bitmap? bitmap-base]} configuration
         pointers (memory-range memory (+ screen-base 0x3f8) 8)]
     (merge configuration
@@ -519,7 +573,7 @@
        (< pc ram-end)))
 
 (def ^:private stream-events-format
-  :omkamra.vice/instruction-block-stream-v3)
+  :omkamra.vice/instruction-block-stream-v4)
 
 (def ^:private stream-sample-keys
   [:raster-line :cpu-cycle :a :x :y :sp :flags :global-cycle])
@@ -527,7 +581,7 @@
 (defn- stream-instruction-ids
   [events]
   (let [blocks (:blocks events)]
-    (mapcat (fn [{:keys [block-id iterations]}]
+    (mapcat (fn [[block-id iterations]]
               (apply concat
                      (repeat iterations
                              (:instruction-ids (nth blocks block-id)))))
@@ -537,8 +591,6 @@
   []
   {:status :starting
    :block-runs []
-   :samples []
-   :first-by-pc {}
    :event-count 0
    :error nil})
 
@@ -579,25 +631,83 @@
                      :instruction-id instruction-id
                      :instruction instruction}))))))
 
-(defn- collect-stream-samples-xf
-  "Append compact dynamic samples while passing occurrences to block stages."
-  []
+(defn- make-analysis-state
+  [initial-memory retain-samples?]
+  {:memory (byte-array (map unchecked-byte initial-memory))
+   :writes (java.util.ArrayList.)
+   :boundaries (java.util.ArrayList.)
+   :boundary-timings (java.util.HashMap.)
+   :pending nil
+   :retain-samples? retain-samples?
+   :samples (when retain-samples? (java.util.ArrayList.))})
+
+(defn- append-analysis-write!
+  [analysis pending next-event]
+  (let [event (:event pending)
+        instruction (:instruction pending)
+        memory (:memory @analysis)
+        duration-cycles (when (and next-event
+                                    (:raster-line event)
+                                    (:cpu-cycle event)
+                                    (:raster-line next-event)
+                                    (:cpu-cycle next-event))
+                           (elapsed-cycles event next-event 63 312))
+        write (inferred-write memory instruction event)]
+    (when write
+      (let [write-event (merge {:pc (:pc event)
+                                :mnemonic (:mnemonic instruction)
+                                :event-index (:event-index pending)}
+                               (if (and (:raster-line event) (:cpu-cycle event))
+                                 (write-timing event duration-cycles 63)
+                                 {})
+                               (dissoc write :inferred?))]
+        (.add ^java.util.ArrayList (:writes @analysis) write-event)
+        (aset-byte memory (:address write)
+                   (unchecked-byte (:value write)))))))
+
+(defn- analyze-stream-occurrence!
+  [analysis occurrence]
+  (locking analysis
+    (let [state @analysis
+          pending (:pending state)
+          event (:event occurrence)]
+      (when pending
+        (append-analysis-write! analysis pending event))
+      (when (:boundary? occurrence)
+        (.add ^java.util.ArrayList (:boundaries state)
+              (:event-index occurrence))
+        (.put ^java.util.HashMap (:boundary-timings state)
+              (:event-index occurrence)
+              [(:raster-line event) (:cpu-cycle event)]))
+      (when (:retain-samples? state)
+        (.add ^java.util.ArrayList (:samples state)
+              (mapv #(get event %) stream-sample-keys)))
+      (swap! analysis assoc :pending occurrence))))
+
+(defn- complete-analysis!
+  [analysis]
+  (locking analysis
+    (when-let [pending (:pending @analysis)]
+      (append-analysis-write! analysis pending nil)
+      (swap! analysis assoc :pending nil))))
+
+(defn- collect-stream-analysis-xf
+  "Collect compact analysis state; full per-event samples are opt-in forensic data."
+  [analysis]
   (fn [rf]
     (fn
       ([] (rf))
-      ([result] (rf result))
-      ([result {:keys [event] :as occurrence}]
+      ([result]
+       (complete-analysis! analysis)
+       (rf result))
+      ([result occurrence]
        (let [event-index (:event-count result)
-             pc (:pc event)
-             result (-> result
-                        (assoc :status :streaming)
-                        (update :samples conj
-                                (mapv #(get event %) stream-sample-keys))
-                        (assoc-in [:first-by-pc pc]
-                                  (or (get-in result [:first-by-pc pc])
-                                      {:event-index event-index :entry event}))
-                        (update :event-count inc))]
-         (rf result (assoc occurrence :event-index event-index)))))))
+             occurrence (assoc occurrence :event-index event-index)]
+         (analyze-stream-occurrence! analysis occurrence)
+         (rf (-> result
+                 (assoc :status :streaming)
+                 (update :event-count inc))
+             occurrence))))))
 
 (defn- mark-control-flow-boundaries-xf
   [memory]
@@ -615,24 +725,32 @@
            (vreset! previous occurrence)
            (rf result (assoc occurrence :boundary? boundary?))))))))
 
+(defn- append-block-run
+  [runs {:keys [block-id iterations]}]
+  (if (and (seq runs) (= block-id (first (peek runs))))
+    (let [index (dec (count runs))
+          [_ prior-iterations] (peek runs)]
+      (assoc runs index [block-id (+ prior-iterations iterations)]))
+    (conj runs [block-id iterations])))
+
 (defn- make-stream-ingester
   "Create one fused transducer pipeline for a FIFO capture.
 
-  Parsed records flow through instruction interning, sample collection, basic
-  block construction, and block interning. `:initial-memory` is used to
-  identify unexpected control-flow discontinuities, which are explicit basic
-  block boundaries because an IRQ can interrupt a fall-through block without
-  executing a terminator. `:complete` must be called exactly once after the
-  FIFO reaches EOF so the basic-block transducer flushes its pending
-  fall-through block."
+  Parsed records flow through instruction interning, compact write/timing
+  analysis, basic-block construction, and block interning. Full per-event
+  register samples are retained only when `:retain-samples?` is true."
   ([]
    (make-stream-ingester {}))
-  ([{:keys [initial-memory]}]
+  ([{:keys [initial-memory retain-samples?]
+     :or {initial-memory (byte-array 65536)
+          retain-samples? false}}]
    (let [instruction-state (atom {:instruction-ids {} :instructions []})
          block-state (atom {:block-ids {} :blocks []})
+         analysis-state (atom (make-analysis-state initial-memory
+                                                    retain-samples?))
          xf (comp (intern-stream-instructions-xf instruction-state)
-                  (collect-stream-samples-xf)
                   (mark-control-flow-boundaries-xf initial-memory)
+                  (collect-stream-analysis-xf analysis-state)
                   (basic-block-builder-xf :boundary?)
                   (split-block-at-control-flow-targets-xf
                    #(nth (:instructions @instruction-state) %)
@@ -642,24 +760,36 @@
                       ([] (empty-stream-state))
                       ([result] result)
                       ([result block-run]
-                       (update result :block-runs conj block-run))))]
+                       (update result :block-runs append-block-run block-run))))]
     {:step (fn [state event] (reducer state event))
      :complete (fn [state] (reducer state))
      :instruction-state instruction-state
-     :block-state block-state})))
+     :block-state block-state
+     :analysis-state analysis-state
+     :retain-samples? retain-samples?})))
+
+(defn- analysis-snapshot
+  [analysis]
+  (let [state @analysis]
+    {:writes (vec (.toArray ^java.util.ArrayList (:writes state)))
+     :boundaries (vec (.toArray ^java.util.ArrayList (:boundaries state)))
+     :boundary-timings (into {} (.entrySet ^java.util.HashMap
+                                           (:boundary-timings state)))}))
 
 (defn- instruction-block-stream
   [stream-state ingester]
-  (let [{:keys [block-runs samples event-count]} @stream-state
+  (let [{:keys [block-runs event-count]} @stream-state
         {:keys [instructions]} @(:instruction-state ingester)
-        {:keys [blocks]} @(:block-state ingester)]
-    {:format stream-events-format
-     :event-count event-count
-     :sample-keys stream-sample-keys
-     :instructions instructions
-     :blocks blocks
-     :block-runs block-runs
-     :samples samples}))
+        {:keys [blocks]} @(:block-state ingester)
+        analysis @(:analysis-state ingester)]
+    (cond-> {:format stream-events-format
+             :event-count event-count
+             :instructions instructions
+             :blocks blocks
+             :block-runs block-runs}
+      (:retain-samples? ingester)
+      (assoc :sample-keys stream-sample-keys
+             :samples (vec (.toArray ^java.util.ArrayList (:samples analysis)))))))
 
 (defn- create-fifo!
   [fifo-path]
@@ -767,12 +897,15 @@
   instructions/blocks are retained; no trace log is written to disk.
 
   The returned recorder is consumed by `capture-status` and `stop-capture`.
-  Options are `:fifo-path`, `:metadata`, and
-  `:checkpoint-op` (default 4, execute)."
+  Options are `:fifo-path`, `:metadata`, `:checkpoint-op` (default 4,
+  execute), and `:retain-samples?` (default false). The latter preserves the
+  full per-instruction register/timing sample stream for forensic analysis;
+  normal captures retain only compact write and control-flow timing data."
   ([conn]
    (start-capture conn {}))
-  ([conn {:keys [fifo-path metadata checkpoint-op]
-          :or {checkpoint-op 4}}]
+  ([conn {:keys [fifo-path metadata checkpoint-op retain-samples?]
+          :or {checkpoint-op 4
+               retain-samples? false}}]
    (let [fifo-path (or fifo-path
                        (str "/tmp/omkamra-vice/trace-"
                             (System/nanoTime) ".fifo"))
@@ -789,7 +922,8 @@
        (let [initial-memory (mapv u8
                                   (:memory (bm/mem-get conn {:start 0
                                                              :end 65535})))
-             ingester (make-stream-ingester {:initial-memory initial-memory})]
+             ingester (make-stream-ingester {:initial-memory initial-memory
+                                              :retain-samples? retain-samples?})]
          (create-fifo! fifo-path)
          (reset! reader-thread
                  (start-fifo-reader! fifo-path stream-state ingester reader-ref))
@@ -812,7 +946,7 @@
            (reset! state {:status :running
                           :instruction-count 0
                           :transport :fifo})
-           {:kind :omkamra.vice/streaming-capture-v1
+           {:kind :omkamra.vice/streaming-capture-v2
             :conn conn
             :fifo-path fifo-path
             :checkpoint-number checkpoint-number
@@ -855,7 +989,15 @@
                                    (count (:block-runs stream)))
               :error (:error stream)}))
     (reset! (:instruction-state ingester) {:instruction-ids {} :instructions []})
-    (reset! (:block-state ingester) {:block-ids {} :blocks []})))
+    (reset! (:block-state ingester) {:block-ids {} :blocks []})
+    (reset! (:analysis-state ingester)
+            {:writes (java.util.ArrayList.)
+             :boundaries (java.util.ArrayList.)
+             :boundary-timings (java.util.HashMap.)
+             :pending nil
+             :retain-samples? false
+             :samples nil
+             :memory nil})))
 
 (defn capture-status
   "Return lightweight progress for a streaming recorder without copying events."
@@ -899,47 +1041,17 @@
   (zipmap (:sample-keys events) sample))
 
 (defn- stream-event-at
-  [events instructions instruction-ids event-index]
+  [events instructions instruction-ids analysis event-index]
   (let [instruction-id (aget ^ints instruction-ids event-index)
-        instruction (nth instructions instruction-id)]
-    (merge (-> (select-keys instruction
-                            [:bytes :mnemonic :mode :operand :text])
-               (assoc :pc (:address instruction)))
-           (sample-map events (nth (:samples events) event-index)))))
-
-(defn- stream-writes
-  [events instructions instruction-ids initial-memory]
-  (let [memory (byte-array (map unchecked-byte initial-memory))
+        instruction (nth instructions instruction-id)
         samples (:samples events)
-        event-count (:event-count events)]
-    (loop [event-index 0
-           writes (transient [])]
-      (if (= event-index event-count)
-        (persistent! writes)
-        (let [instruction-id (aget ^ints instruction-ids event-index)
-              {:keys [address mnemonic] :as instruction}
-              (nth instructions instruction-id)]
-          (if (or (contains? direct-store-mnemonics mnemonic)
-                  (contains? read-modify-write-mnemonics mnemonic))
-            (let [entry (assoc (sample-map events (nth samples event-index))
-                               :pc address)
-                  next-entry (when (< (inc event-index) event-count)
-                               (sample-map events (nth samples (inc event-index))))
-                  duration-cycles (elapsed-cycles entry next-entry 63 312)
-                  write (inferred-write memory instruction entry)
-                  write-event (when write
-                                (merge {:pc address
-                                        :mnemonic mnemonic
-                                        :instruction-index event-index
-                                        :event-index event-index}
-                                       (write-timing entry duration-cycles 63)
-                                       write))]
-              (when write
-                (aset-byte memory (:address write)
-                           (unchecked-byte (:value write))))
-              (recur (inc event-index)
-                     (if write-event (conj! writes write-event) writes)))
-            (recur (inc event-index) writes)))))))
+        timing (get (:boundary-timings analysis) event-index)]
+    (cond-> (-> (select-keys instruction
+                             [:bytes :mnemonic :mode :operand :text])
+                (assoc :pc (:address instruction)))
+      samples (merge (sample-map events (nth samples event-index)))
+      timing (assoc :raster-line (first timing)
+                    :cpu-cycle (second timing)))))
 
 (defn- stream-node-versions
   [instructions instruction-ids]
@@ -967,21 +1079,9 @@
           versions)))
 
 (defn- stream-irq-data
-  [events instructions instruction-ids initial-memory]
+  [events instructions instruction-ids analysis]
   (let [event-count (:event-count events)
-        starts (persistent!
-                (loop [index 1 result (transient [])]
-                  (if (= index event-count)
-                    result
-                    (let [previous (nth instructions
-                                        (aget ^ints instruction-ids (dec index)))
-                          current (nth instructions
-                                       (aget ^ints instruction-ids index))]
-                      (recur (inc index)
-                             (if (unexpected-control-flow?
-                                  initial-memory previous current)
-                               (conj! result index)
-                               result))))))
+        starts (:boundaries analysis)
         ranges (mapv
                 (fn [[start next-start]]
                   (let [limit (or next-start event-count)
@@ -997,18 +1097,20 @@
                 (map vector starts (concat (rest starts) [nil])))
         span (fn [kind start end]
                (when (< start end)
-                 (cond-> {:kind kind :start-index start :end-index end}
-                   (= kind :irq)
-                   (assoc :trigger
-                          (select-keys
-                           (sample-map events (nth (:samples events) start))
-                           [:raster-line :cpu-cycle])
-                          :entry-pc (:address
-                                     (nth instructions
-                                          (aget ^ints instruction-ids start)))
-                          :return-pc (:address
-                                      (nth instructions
-                                           (aget ^ints instruction-ids (dec end))))))))
+                 (let [base {:kind kind :start-index start :end-index end}]
+                   (if (= kind :irq)
+                     (let [[raster-line cpu-cycle]
+                           (get (:boundary-timings analysis) start)]
+                       (assoc base
+                              :trigger {:raster-line raster-line
+                                        :cpu-cycle cpu-cycle}
+                              :entry-pc (:address
+                                         (nth instructions
+                                              (aget ^ints instruction-ids start)))
+                              :return-pc (:address
+                                          (nth instructions
+                                               (aget ^ints instruction-ids (dec end))))))
+                     base))))
         irq-spans (->> ranges
                        (map (fn [[start end]] (span :irq start end)))
                        (sort-by (juxt (comp :raster-line :trigger)
@@ -1029,12 +1131,10 @@
         spans (->> (concat irq-spans non-irq-spans)
                    (sort-by :start-index)
                    vec)]
-    {:irq-sections irq-spans
-     :non-irq-sections non-irq-spans
-     :spans spans}))
+    {:spans spans}))
 
 (defn- first-stream-code-entry
-  [events instructions instruction-ids spans kind]
+  [events instructions instruction-ids analysis spans kind]
   (some (fn [{:keys [start-index end-index] :as span}]
           (when (= kind (:kind span))
             (loop [index start-index]
@@ -1046,53 +1146,47 @@
                     {:span-kind kind
                      :index index
                      :entry (stream-event-at events instructions
-                                             instruction-ids index)}
+                                             instruction-ids analysis index)}
                     (recur (inc index))))))))
         spans))
 
 (defn- streaming-pipeline-artifact
-  [events initial-memory final-memory metadata]
+  [events initial-memory final-memory metadata analysis]
   (let [instructions (decoded-stream-instructions events)
         instruction-ids (stream-instruction-id-array events)
-        writes (stream-writes events instructions instruction-ids initial-memory)
-        irq-data (stream-irq-data events instructions instruction-ids initial-memory)
+        writes (:writes analysis)
+        irq-data (stream-irq-data events instructions instruction-ids analysis)
         spans (:spans irq-data)
-        execution {:format :omkamra.vice/versioned-execution-v3
+        execution {:format :omkamra.vice/versioned-execution-v4
                    :event-count (:event-count events)
                    :instructions instructions
                    :node-versions (stream-node-versions instructions instruction-ids)
                    :blocks (:blocks events)
-                   :block-runs (:block-runs events)
-                   :spans (mapv (fn [span]
-                                  (assoc span
-                                         :instruction-count
-                                         (- (:end-index span)
-                                            (:start-index span))))
-                                spans)}
+                   :block-runs (:block-runs events)}
         frame-code {:first-ram-code
                     (first-stream-code-entry events instructions instruction-ids
-                                             spans :non-irq)
+                                             analysis spans :non-irq)
                     :first-ram-irq-code
                     (first-stream-code-entry events instructions instruction-ids
-                                             spans :irq)}
-        vic (derive-vic initial-memory writes)]
-    {:format :omkamra.vice/pipeline-v1
-     :raw {:events events
-           :memory {:initial initial-memory :final final-memory}
-           :display nil
-           :palette nil
-           :boundary-entry nil
+                                             analysis spans :irq)}
+        vic (derive-vic initial-memory writes)
+        write-data (compact-write-data writes)
+        raw-events (cond-> (select-keys events [:format :event-count])
+                     (:samples events)
+                     (assoc :sample-keys (:sample-keys events)
+                            :samples (:samples events)))]
+    {:format :omkamra.vice/pipeline-v2
+     :raw {:events raw-events
            :metadata metadata}
      :stages
-     {:decoded {:writes writes}
-      :memory {:initial initial-memory :final final-memory :writes writes}
+     {:decoded {:write-count (count writes)}
+      :memory {:initial initial-memory :final final-memory :writes write-data}
       :structure {:spans spans
-                  :irq-sections (:irq-sections irq-data)
-                  :non-irq-sections (:non-irq-sections irq-data)
                   :execution execution
                   :frame-code frame-code}
-      :video {:vic (assoc vic :sprite-pointer-writes
-                          (sprite-pointer-events initial-memory writes))
+      :video {:vic (assoc (dissoc vic :writes)
+                           :sprite-pointer-writes
+                           (sprite-pointer-events initial-memory writes))
               :assets (asset-samples initial-memory writes
                                      (:configurations vic))}
       :semantics {:status :unclassified :spans []}}}))
@@ -1101,10 +1195,10 @@
   "Stop a FIFO-backed capture and return a compact canonical artifact.
 
   Logging is disabled first, closing VICE's FIFO writer. The reader drains to
-  EOF, then the raw dictionary stream is enriched. Temporary expanded decode
-  vectors are discarded after structural execution has been interned. Cleanup
-  always removes the checkpoint, restores unsolicited-event handling, closes
-  the reader, and deletes the FIFO. VICE remains paused."
+  EOF, then compact write and structural data are finalized. Full per-event
+  register samples are discarded unless explicitly requested. Cleanup always
+  removes the checkpoint, restores unsolicited-event handling, closes the
+  reader, and deletes the FIFO. VICE remains paused."
   [capture]
   (let [{:keys [conn fifo-path checkpoint-number initial-memory metadata state
                 stream-state ingester reader-ref reader-thread prior-ignored-types]}
@@ -1133,7 +1227,8 @@
                                {:capture-mode :continuous
                                 :trace-transport :fifo
                                 :first-demo-part (:first-demo-part @state)
-                                :cpu-range (:cpu-range @state)}))]
+                                :cpu-range (:cpu-range @state)})
+                        (analysis-snapshot (:analysis-state ingester)))]
           (swap! state assoc :status :stopped :artifact artifact)
           artifact)
         (finally

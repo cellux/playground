@@ -44,9 +44,10 @@
     (is (= 12 (:event-count stream)))
     (is (= 2 (count (:instructions stream))))
     (is (= [{:id 0 :instruction-ids [0 1]}] (:blocks stream)))
-    (is (= 6 (count (:block-runs stream))))
-    ;; Dynamic samples remain lossless, but no per-event PC/byte image remains.
-    (is (= 12 (count (:samples stream))))
+    ;; Consecutive occurrences of the same block are run-length encoded.
+    (is (= [[0 6]] (:block-runs stream)))
+    ;; Full register samples are opt-in rather than retained by default.
+    (is (nil? (:samples stream)))
     (is (nil? (:occurrences stream)))))
 
 (deftest streaming-splits-at-backward-control-flow-target
@@ -90,6 +91,35 @@
         stream (finish-stream state ingester)]
     (is (= [[0] [1 2]]
            (mapv :instruction-ids (:blocks stream))))))
+
+(deftest retains-full-samples-only-when-requested
+  (let [empty-state (var-get (ns-resolve 'omkamra.vice.decoder
+                                          'empty-stream-state))
+        make-ingester (var-get (ns-resolve 'omkamra.vice.decoder
+                                            'make-stream-ingester))
+        finish-stream (var-get (ns-resolve 'omkamra.vice.decoder
+                                           'instruction-block-stream))
+        ingester (make-ingester {:retain-samples? true})
+        events [{:operation :exec :pc 0x1000 :bytes [0xea]
+                 :vice-text "NOP" :raster-line 1 :cpu-cycle 0
+                 :a 1 :x 2 :y 3 :sp 4 :flags "........" :global-cycle 5}]
+        state (atom (reduce (:step ingester) (empty-state) events))]
+    (swap! state (:complete ingester))
+    (is (= [[1 0 1 2 3 4 "........" 5]]
+           (:samples (finish-stream state ingester))))))
+
+(deftest compact-write-records-round-trip
+  (let [compact-write (var-get (ns-resolve 'omkamra.vice.decoder
+                                           'compact-write-data))
+        writes [{:event-index 10 :pc 0x1000 :address 0xd018
+                 :value 3 :old-value 0 :raster-line 2 :cpu-cycle 5
+                 :instruction-raster-line 2 :instruction-cpu-cycle 2
+                 :write-cycle-offset 2 :mnemonic "STA" :kind :store}]
+        compact (compact-write writes)]
+    (is (= :omkamra.vice/write-records-v1 (:format compact)))
+    (is (= [[10 0x1000 0xd018 3 0 2 5 2 2 2 0 0]]
+           (:writes compact)))
+    (is (= writes (decoder/expand-writes compact)))))
 
 (deftest releases-stream-ingestion-state-after-finalization
   (let [release-stream-state (var-get (ns-resolve 'omkamra.vice.decoder

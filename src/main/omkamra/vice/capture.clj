@@ -314,7 +314,8 @@
         (let [capture (decoder/start-capture
                        conn
                        {:metadata {:capture-id (:capture-id session)
-                                   :input (:input session)}})]
+                                   :input (:input session)}
+                        :retain-samples? (boolean (:retain-samples? options))})]
           (reset! (:capture session) capture)
           (swap! (:state session) assoc :transport :fifo)
           (if (realized? (:stop-requested session))
@@ -355,9 +356,11 @@
 
   Optional options include `:capture-id`, `:executable`, `:address`, `:port`,
   `:extra-args`, `:connect-timeout-ms`, `:connect-retry-ms`,
-  `:autostart-timeout-ms`, and `:run-after-load?`. If `:port` is omitted (or
-  zero), an available local monitor port is selected. VICE remains windowed;
-  callers can provide additional VICE arguments through `:extra-args`.
+  `:autostart-timeout-ms`, `:run-after-load?`, and `:retain-samples?`.
+  Full per-instruction register/timing samples are disabled by default; enable
+  them only for forensic captures. If `:port` is omitted (or zero), an
+  available local monitor port is selected. VICE remains windowed; callers can
+  provide additional VICE arguments through `:extra-args`.
 
   Returns immediately with a session handle. VICE startup, monitor connection,
   FIFO setup, and autostart happen on the session's background worker.
