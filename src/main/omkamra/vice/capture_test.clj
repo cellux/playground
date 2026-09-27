@@ -94,7 +94,8 @@
                                        :capture-id "test-capture"
                                        :profile true
                                        :speed 200
-                                       :warp? true})]
+                                       :warp? true
+                                       :full-capture? true})]
           (loop [attempt 0]
             (when (and (< attempt 100)
                        (not= :running (:status @(:state session))))
@@ -160,7 +161,8 @@
                     asm/artifact->assembly (fn [_ options]
                                                  (:output-file options))]
         (let [session (capture/start! {:input (.getPath input)
-                                       :output-dir (.getPath directory)})
+                                       :output-dir (.getPath directory)
+                                       :full-capture? true})
               result @(:completion session)]
           (is (= :stopped (:status result)))
           (is (= :vice-exited (get-in result [:stop-reason :kind])))
@@ -192,13 +194,91 @@
                     decoder/write-artifact! (fn [_ _] nil)
                     asm/artifact->assembly (fn [_ _] nil)]
         (let [session (capture/start! {:input (.getPath input)
-                                       :output-dir (.getPath directory)})]
+                                       :output-dir (.getPath directory)
+                                       :full-capture? true})]
           (is (thrown-with-msg? clojure.lang.ExceptionInfo
                                   #"VICE capture failed"
                                   (capture/stop! session)))
           (is (= :failed (:status (capture/status session))))
           (is (some #{:close} @calls))
           (is (some #{:stop} @calls))))
+      (finally
+        (.delete input)
+        (.delete directory)))))
+
+(deftest default-capture-starts-at-loaded-program-entry
+  (let [directory (temp-directory)
+        input (io/file directory "program.prg")
+        calls (atom [])
+        instance {:pid 123
+                  :address "localhost"
+                  :port 6502
+                  :command ["x64sc"]
+                  :process nil}]
+    (spit input "")
+    (try
+      (with-redefs [vice/start (fn [_] instance)
+                    vice/connect (fn [_ _] {})
+                    vice/close (fn [_] (swap! calls conj [:close]))
+                    vice/stop (fn [_] (swap! calls conj [:stop]))
+                    bm/ping (fn [_] {})
+                    bm/checkpoint-set (fn [_ options]
+                                        (swap! calls conj [:checkpoint-set options])
+                                        {:number 17})
+                    bm/checkpoint-delete (fn [_ options]
+                                           (swap! calls conj [:checkpoint-delete options])
+                                           {})
+                    bm/autostart (fn [_ options]
+                                   (swap! calls conj [:autostart options])
+                                   {})
+                    bm/await-event (let [events (atom [{:response-type bm/MON_RESPONSE_CHECKPOINT_INFO
+                                                         :response {:number 17
+                                                                    :hit? true}}
+                                                        {:response-type bm/MON_RESPONSE_STOPPED
+                                                         :response {:pc 0xe144}}])]
+                                     (fn [_ _ _]
+                                       (swap! calls conj [:program-start])
+                                       (let [[prior _] (swap-vals! events rest)]
+                                         (first prior))))
+                    bm/resume (fn [_]
+                                (swap! calls conj [:resume])
+                                {})
+                    decoder/start-capture (fn [_ _]
+                                            (swap! calls conj [:capture-start])
+                                            {:stream-state (atom {})})
+                    decoder/stop-capture (fn [_]
+                                           (swap! calls conj [:capture-stop])
+                                           {:format :test/artifact})
+                    decoder/write-artifact! (fn [path _] path)
+                    asm/artifact->assembly (fn [_ options]
+                                             (:output-file options))]
+        (let [session (capture/start! {:input (.getPath input)
+                                       :output-dir (.getPath directory)
+                                       :capture-id "entry-capture"})]
+          (loop [attempt 0]
+            (when (and (< attempt 100)
+                       (not= :running (:status @(:state session))))
+              (Thread/sleep 5)
+              (recur (inc attempt))))
+          (is (= :running (:status @(:state session))))
+          (let [names (mapv first @calls)
+                checkpoint-options (second (first (filter #(= :checkpoint-set
+                                                          (first %))
+                                                        @calls)))]
+            (is (= 0xe144 (:start checkpoint-options)))
+            (is (= 0xe144 (:end checkpoint-options)))
+            (is (= bm/MON_CHECKPOINT_OP_EXECUTE (:op checkpoint-options)))
+            (is (< (.indexOf names :checkpoint-set)
+                   (.indexOf names :autostart)))
+            (is (< (.indexOf names :autostart)
+                   (.indexOf names :program-start)))
+            (is (< (.indexOf names :program-start)
+                   (.indexOf names :checkpoint-delete)))
+            (is (< (.indexOf names :checkpoint-delete)
+                   (.indexOf names :capture-start)))
+            (is (< (.indexOf names :capture-start)
+                   (.indexOf names :resume))))
+          (is (= :stopped (:status (capture/stop! session))))))
       (finally
         (.delete input)
         (.delete directory)))))

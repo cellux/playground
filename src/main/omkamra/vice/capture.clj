@@ -15,7 +15,9 @@
   2. Retain the returned session handle and use `status` for progress checks.
      The session is running once its status is `:running`; the input has been
      loaded and, by default, execution has resumed with `:run-after-load?`
-     set to true.
+     set to true. Unless `:full-capture?` is true, tracing begins at the
+     KERNAL's `$E144 JMP ($0014)` dispatch into the loaded program rather than
+     at boot.
   3. Keep the session alive while the requested demo runs. When the user says
      the capture is complete, call `stop-async!` and poll `status` until the
      session is `:stopped`, or call `stop!` when a synchronous result is
@@ -26,7 +28,8 @@
      and the profile EDN contains Clojure async-profiler stack samples.
 
   If the user requests loading without execution, pass
-  `:run-after-load? false` to `start!`; otherwise do not override the default."
+  `:run-after-load? false` together with `:full-capture? true` to `start!`;
+  otherwise do not override the default."
   (:require [clojure.java.io :as io]
             [omkamra.vice :as vice]
             [omkamra.vice.asm :as asm]
@@ -39,6 +42,8 @@
 (def ^:private default-connect-timeout-ms 30000)
 (def ^:private default-connect-retry-ms 100)
 (def ^:private default-autostart-timeout-ms 5000)
+(def ^:private default-program-start-timeout-ms 30000)
+(def ^:private program-entry-address 0xe144)
 (def ^:private terminal-statuses #{:stopped :failed})
 
 (defn- fail
@@ -334,6 +339,63 @@
                               :message "Capture worker was interrupted"})
       (:stop-reason @(:state session)))))
 
+(defn- autostart-options
+  [session options]
+  {:run-after-load? (if (contains? options :run-after-load?)
+                      (:run-after-load? options)
+                      true)
+   :file-index 0
+   :filename (:input session)
+   :timeout-ms (or (:autostart-timeout-ms options)
+                   default-autostart-timeout-ms)})
+
+(defn- set-program-start-checkpoint!
+  [conn]
+  ;; VICE autostart dispatches into the loaded PRG through the C64 KERNAL's
+  ;; $E144 JMP ($0014).  This is an EXEC-only checkpoint, so loader/BASIC
+  ;; reads and writes do not start the capture.
+  (bm/checkpoint-set
+   conn {:start program-entry-address
+         :end program-entry-address
+         :stop? true
+         :enabled? true
+         :op bm/MON_CHECKPOINT_OP_EXECUTE
+         :temporary? false}))
+
+(defn- wait-for-program-start!
+  [conn checkpoint-number timeout-ms]
+  ;; A stopping checkpoint emits CHECKPOINT_INFO with :hit? true, followed by
+  ;; the register/stopped events for the monitor transition.  Wait for both so
+  ;; capture setup cannot race the monitor opening at the checkpoint.  Match
+  ;; the stopped PC as well: VICE can leave an older STOPPED event queued from
+  ;; the autostart monitor transition.
+  (or (bm/await-event
+       conn
+       (fn [{:keys [response-type response]}]
+         (and (= bm/MON_RESPONSE_CHECKPOINT_INFO response-type)
+              (= checkpoint-number (:number response))
+              (:hit? response)))
+       timeout-ms)
+      (throw (ex-info "VICE did not reach the loaded program entry point"
+                      {:checkpoint-number checkpoint-number
+                       :entry-address program-entry-address
+                       :timeout-ms timeout-ms})))
+  (or (bm/await-event
+       conn
+       (fn [{:keys [response-type response]}]
+         (and (= bm/MON_RESPONSE_STOPPED response-type)
+              (= program-entry-address (:pc response))))
+       timeout-ms)
+      (throw (ex-info "VICE did not stop at the loaded program entry jump"
+                      {:checkpoint-number checkpoint-number
+                       :entry-address program-entry-address
+                       :timeout-ms timeout-ms}))))
+
+(defn- delete-program-start-checkpoint!
+  [conn checkpoint]
+  (when-let [number (:number checkpoint)]
+    (bm/checkpoint-delete conn {:number number})))
+
 (defn- run-session!
   [session options]
   (try
@@ -353,29 +415,53 @@
                    :retry-ms (or (:connect-retry-ms options)
                                  default-connect-retry-ms)})]
         (reset! (:conn session) conn)
-        (let [capture (decoder/start-capture
-                       conn
-                       {:metadata {:capture-id (:capture-id session)
-                                   :input (:input session)}
-                        :retain-samples? (boolean (:retain-samples? options))})]
-          (reset! (:capture session) capture)
-          (swap! (:state session) assoc :transport :fifo)
-          (if (realized? (:stop-requested session))
-            (finalize-once! session capture)
-            (do
-              (bm/autostart
+        (let [full-capture? (true? (:full-capture? options))
+              program-start-checkpoint (atom nil)]
+          (try
+            ;; A normal capture should not trace the disk loader, BASIC, or
+            ;; the KERNAL startup path.  VICE autostart resumes emulation
+            ;; before the file has necessarily reached its entry point, so
+            ;; stop on the first execution in the loaded program area before
+            ;; installing the streaming trace checkpoint.
+            (when-not full-capture?
+              (when (false? (:run-after-load? options))
+                (fail ":run-after-load? false requires :full-capture? true"
+                      {:run-after-load? false
+                       :full-capture? false}))
+              (reset! program-start-checkpoint
+                      (set-program-start-checkpoint! conn))
+              (bm/autostart conn (autostart-options session options))
+              (wait-for-program-start!
                conn
-               {:run-after-load? (if (contains? options :run-after-load?)
-                                   (:run-after-load? options)
-                                   true)
-                :file-index 0
-                :filename (:input session)
-                :timeout-ms (or (:autostart-timeout-ms options)
-                                default-autostart-timeout-ms)})
-              (start-profiler! session options)
-              (update-status! session :running)
-              (wait-for-stop! session instance capture)
-              (finalize-once! session capture))))))
+               (:number @program-start-checkpoint)
+               (or (:program-start-timeout-ms options)
+                   default-program-start-timeout-ms))
+              (delete-program-start-checkpoint!
+               conn @program-start-checkpoint)
+              (reset! program-start-checkpoint nil))
+            (let [capture (decoder/start-capture
+                           conn
+                           {:metadata {:capture-id (:capture-id session)
+                                       :input (:input session)}
+                            :retain-samples?
+                            (boolean (:retain-samples? options))})]
+              (reset! (:capture session) capture)
+              (swap! (:state session) assoc :transport :fifo)
+              (if (realized? (:stop-requested session))
+                (finalize-once! session capture)
+                (do
+                  (if full-capture?
+                    (bm/autostart conn (autostart-options session options))
+                    (bm/resume conn))
+                  (start-profiler! session options)
+                  (update-status! session :running)
+                  (wait-for-stop! session instance capture)
+                  (finalize-once! session capture))))
+            (finally
+              (when-let [checkpoint @program-start-checkpoint]
+                (try
+                  (delete-program-start-checkpoint! conn checkpoint)
+                  (catch Throwable _ nil))))))))
     (catch Throwable error
       (try
         (stop-profiler! session)
@@ -405,8 +491,11 @@
 
   Optional options include `:capture-id`, `:executable`, `:address`, `:port`,
   `:extra-args`, `:speed`, `:warp?`, `:connect-timeout-ms`,
-  `:connect-retry-ms`, `:autostart-timeout-ms`, `:run-after-load?`,
-  `:retain-samples?`, and `:profile`. Set `:speed` to a non-negative integer
+  `:connect-retry-ms`, `:autostart-timeout-ms`, `:program-start-timeout-ms`,
+  `:run-after-load?`, `:full-capture?`, `:retain-samples?`, and `:profile`.
+  By default, `:full-capture?` is false and the trace starts at the C64
+  KERNAL's `$E144 JMP ($0014)` dispatch into the loaded program; set it true
+  to trace the complete boot/load sequence. Set `:speed` to a non-negative integer
   percentage such as `200` to pass VICE's `-speed 200` option. `:speed 0`
   removes the speed limit while retaining normal video and sound behavior.
   Set `:warp?` true to pass VICE's `-warp` option, which also changes video
