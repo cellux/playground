@@ -34,6 +34,15 @@
     (is (nil? (:samples stream)))
     (is (nil? (:occurrences stream)))))
 
+(deftest conditional-branch-to-fall-through-is-deduplicated
+  (let [control-flow-successors (var-get (ns-resolve 'omkamra.vice.decoder
+                                                      'control-flow-successors))
+        branch {:pc 0xc000
+                :bytes [0xd0 0x00]
+                :mnemonic "BNE"}]
+    (is (= #{0xc002}
+           (control-flow-successors nil branch)))))
+
 (deftest streaming-splits-at-backward-control-flow-target
   (let [empty-state (var-get (ns-resolve 'omkamra.vice.decoder
                                           'empty-stream-state))

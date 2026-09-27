@@ -506,7 +506,10 @@
         mnemonic (:mnemonic instruction)]
     (cond
       (contains? conditional-branch-mnemonics mnemonic)
-      #{fall-through (relative-target instruction)}
+      ;; A branch can target its own fall-through address (for example a
+      ;; zero-offset branch).  Build this set dynamically so duplicate
+      ;; successors are deduplicated instead of throwing.
+      (set [fall-through (relative-target instruction)])
 
       (= "JMP" mnemonic)
       (case (:mode instruction)
