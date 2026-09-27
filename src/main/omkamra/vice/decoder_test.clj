@@ -51,6 +51,61 @@
       (finally
         (.delete output-file)))))
 
+(deftest assembly-deduplicates-operand-variants
+  (let [execution {:format :omkamra.vice/versioned-execution-v3
+                   :instructions
+                   [{:id 0 :address 0x0079 :bytes [0xad 0x04 0x02]
+                     :mnemonic "LDA" :mode :abs :operand "$0204"
+                     :text "LDA $0204"}
+                    {:id 1 :address 0x007c :bytes [0xc9 0x3a]
+                     :mnemonic "CMP" :mode :imm :operand "#$3A"
+                     :text "CMP #$3A"}
+                    {:id 2 :address 0x007e :bytes [0xb0 0x0a]
+                     :mnemonic "BCS" :mode :rel :operand "$008A"
+                     :text "BCS $008A"}
+                    {:id 3 :address 0x0079 :bytes [0xad 0x18 0x03]
+                     :mnemonic "LDA" :mode :abs :operand "$0318"
+                     :text "LDA $0318"}]
+                   :blocks [{:id 0 :instruction-ids [0 1 2]}
+                            {:id 1 :instruction-ids [3 1 2]}]
+                   :block-runs [{:start-index 0 :end-index 3
+                                 :block-id 0 :iterations 1}
+                                {:start-index 3 :end-index 6
+                                 :block-id 1 :iterations 1}]
+                   :spans [{:kind :non-irq :start-index 0 :end-index 6}]}
+        artifact {:format :omkamra.vice/pipeline-v1
+                  :stages {:structure {:execution execution}}}
+        assembly (decoder/artifact->assembly artifact)]
+    ;; The exact execution model remains variant-aware.
+    (is (= 2 (count (:blocks execution))))
+    ;; The assembly projection emits one structural block and masks the
+    ;; changing absolute operand instead of printing both code images.
+    (is (= 1 (count (re-seq #"(?m)^; block " assembly))))
+    (is (.contains assembly "; block 0, 3 instructions, 2 code-image variants"))
+    (is (.contains assembly "$0079  AD ?? ?? LDA $????"))
+    (is (= 2 (count (re-seq #"; block-run events" assembly))))))
+
+(deftest assembly-masks-varying-immediate-operands
+  (let [execution {:format :omkamra.vice/versioned-execution-v3
+                   :instructions [{:id 0 :address 0xd012 :bytes [0xa9 0x07]
+                                   :mnemonic "LDA" :mode :imm :operand "#$07"
+                                   :text "LDA #$07"}
+                                  {:id 1 :address 0xd012 :bytes [0xa9 0x0f]
+                                   :mnemonic "LDA" :mode :imm :operand "#$0F"
+                                   :text "LDA #$0F"}]
+                   :blocks [{:id 0 :instruction-ids [0]}
+                            {:id 1 :instruction-ids [1]}]
+                   :block-runs [{:start-index 0 :end-index 1
+                                 :block-id 0 :iterations 1}
+                                {:start-index 1 :end-index 2
+                                 :block-id 1 :iterations 1}]
+                   :spans [{:kind :irq :start-index 0 :end-index 2}]}
+        artifact {:format :omkamra.vice/pipeline-v1
+                  :stages {:structure {:execution execution}}}
+        assembly (decoder/artifact->assembly artifact)]
+    (is (= 1 (count (re-seq #"(?m)^; block " assembly))))
+    (is (.contains assembly "$D012  A9 ??    LDA #$??"))))
+
 (deftest parser-transducer-emits-only-execution-trace-records
   (let [parser (var-get (ns-resolve 'omkamra.vice.decoder
                                     'monitor-trace-records-xf))

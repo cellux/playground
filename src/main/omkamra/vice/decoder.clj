@@ -124,6 +124,12 @@
       (throw (ex-info "Artifact has no structural execution stage"
                       {:format (:format artifact)}))))
 
+(defn- format-assembly-byte
+  [byte]
+  (if (nil? byte)
+    "??"
+    (format "%02X" (u8 byte))))
+
 (defn- write-static-instruction!
   [writer instruction]
   (let [decoded (if (:text instruction)
@@ -132,23 +138,146 @@
     (.write writer
             (format "$%04X  %-8s %s\n"
                     (:address decoded)
-                    (str/join " " (map #(format "%02X" %) (:bytes decoded)))
+                    (str/join " " (map format-assembly-byte (:bytes decoded)))
                     (:text decoded)))))
+
+(defn- instruction-shape-key
+  "Return the assembly-level identity of an instruction.
+
+  The exact execution model keys instructions by all bytes. Assembly output is
+  intentionally less specific: the opcode determines the addressing mode and
+  instruction width, while operand bytes may be runtime parameters (for
+  example, a color value in a raster interrupt)."
+  [instruction]
+  [(:address instruction) (first (:bytes instruction))])
+
+(defn- assembly-operand-byte
+  [instruction position varying-positions]
+  (if (contains? varying-positions position)
+    "??"
+    (format "%02X" (u8 (nth (:bytes instruction) position 0)))))
+
+(defn- assembly-operand-text
+  [instruction varying-positions]
+  (if (empty? varying-positions)
+    (:operand instruction)
+    (let [byte-token #(assembly-operand-byte instruction % varying-positions)
+          mode (:mode instruction)]
+      (case mode
+        :imp ""
+        :acc "A"
+        :imm (str "#$" (byte-token 1))
+        :zp (str "$" (byte-token 1))
+        :zpx (str "$" (byte-token 1) ",X")
+        :zpy (str "$" (byte-token 1) ",Y")
+        :abs (str "$" (byte-token 2) (byte-token 1))
+        :absx (str "$" (byte-token 2) (byte-token 1) ",X")
+        :absy (str "$" (byte-token 2) (byte-token 1) ",Y")
+        :ind (str "($" (byte-token 2) (byte-token 1) ")")
+        :indx (str "($" (byte-token 1) ",X)")
+        :indy (str "($" (byte-token 1) "),Y")
+        ;; A relative operand is displayed as a target address when stable.
+        ;; Once it varies, displaying the raw displacement would be
+        ;; misleading because the target is the semantically relevant value.
+        :rel "$????"
+        (:operand instruction)))))
+
+(defn- assembly-instruction-template
+  [instructions instruction-ids]
+  (let [variants (->> instruction-ids distinct (mapv #(nth instructions %)))
+        representative (let [instruction (first variants)]
+                         (if (:text instruction)
+                           instruction
+                           (merge instruction
+                                  (disassemble-bytes (:address instruction)
+                                                     (:bytes instruction)))))
+        byte-count (count (:bytes representative))
+        varying-positions
+        (->> (range 1 byte-count)
+             (filter (fn [position]
+                       (> (count (distinct (map #(nth (:bytes %) position 0)
+                                                 variants)))
+                          1)))
+             set)
+        operand (assembly-operand-text representative varying-positions)]
+    (assoc representative
+           :bytes (mapv (fn [position]
+                          (when-not (contains? varying-positions position)
+                            (nth (:bytes representative) position 0)))
+                        (range byte-count))
+           :operand operand
+           :text (str (:mnemonic representative)
+                      (when (seq operand) (str " " operand))))))
+
+(defn- assembly-dictionary
+  "Project exact execution blocks onto compact structural block templates.
+
+  The persisted execution model remains lossless. This projection merges
+  blocks whose instructions have the same addresses and opcodes, retaining
+  operand variation only in the rendered instruction templates and variant
+  counts."
+  [execution]
+  (let [instructions (:instructions execution)
+        exact-blocks (:blocks execution)
+        {:keys [shape-blocks shape-key-to-id block-to-shape]}
+        (reduce
+         (fn [{:keys [shape-blocks shape-key-to-id block-to-shape] :as state}
+              block]
+           (let [shape-key (mapv #(instruction-shape-key (nth instructions %))
+                                 (:instruction-ids block))
+                 existing-shape-id (get shape-key-to-id shape-key)
+                 shape-id (if (nil? existing-shape-id)
+                            (count shape-blocks)
+                            existing-shape-id)]
+             (if (nil? existing-shape-id)
+               (-> state
+                   (assoc-in [:shape-key-to-id shape-key] shape-id)
+                   (assoc-in [:block-to-shape (:id block)] shape-id)
+                   (update :shape-blocks conj
+                           {:id shape-id
+                            :shape-key shape-key
+                            :exact-block-ids [(:id block)]}))
+               (-> state
+                   (assoc-in [:block-to-shape (:id block)] shape-id)
+                   (update-in [:shape-blocks shape-id :exact-block-ids]
+                              conj (:id block))))))
+         {:shape-blocks [] :shape-key-to-id {} :block-to-shape {}}
+         exact-blocks)
+        exact-block-by-id (into {} (map (juxt :id identity) exact-blocks))
+        shape-blocks
+        (mapv (fn [{:keys [id shape-key exact-block-ids]}]
+                (let [exact-blocks (mapv exact-block-by-id exact-block-ids)
+                      instruction-id-groups
+                      (mapv (fn [position]
+                              (mapv #(nth (:instruction-ids %) position)
+                                    exact-blocks))
+                            (range (count shape-key)))]
+                  {:id id
+                   :instruction-id-groups instruction-id-groups
+                   :instructions
+                   (mapv #(assembly-instruction-template instructions %)
+                         instruction-id-groups)
+                   :variant-count (count exact-block-ids)}))
+              shape-blocks)]
+    {:blocks shape-blocks
+     :block-runs (mapv #(update % :block-id block-to-shape) (:block-runs execution))}))
 
 (defn- write-compressed-assembly!
   [writer artifact]
   (let [execution (require-execution artifact)
-        instructions (:instructions execution)
-        blocks (:blocks execution)
-        spans (sort-by :start-index (:spans execution))
-        block-runs (vec (:block-runs execution))]
-    (.write writer "; interned basic-block dictionary\n")
-    (doseq [{:keys [id instruction-ids]} blocks]
+        {:keys [blocks block-runs]} (assembly-dictionary execution)
+        spans (sort-by :start-index (:spans execution))]
+    (.write writer "; structural basic-block template dictionary\n")
+    (doseq [{:keys [id instructions variant-count]} blocks]
       (.write writer
-              (format "\n; block %d, %d instructions\n"
-                      id (count instruction-ids)))
-      (doseq [instruction-id instruction-ids]
-        (write-static-instruction! writer (nth instructions instruction-id))))
+              (format "\n; block %d, %d instructions%s\n"
+                      id
+                      (count instructions)
+                      (if (> variant-count 1)
+                        (format ", %d code-image variants" variant-count)
+                        "")))
+      (doseq [instruction instructions]
+        (write-static-instruction! writer instruction)))
     (.write writer "\n; chronological span/block timeline\n")
     (loop [remaining-spans (seq spans)
            run-index 0]
@@ -195,11 +324,13 @@
 (defn artifact->assembly
   "Render a pipeline artifact using the canonical assembly renderer.
 
-  Dictionary-coded captures default to a deduplicated report: each interned
-  basic block is emitted once and the chronological span/block timeline refers
-  to it by block ID. Without `:output-file`, this returns a string; with an
-  output file, rendering is streamed and the file is returned. Both paths use
-  the same renderer.
+  Dictionary-coded captures default to a deduplicated report: each
+  structural basic-block template is emitted once and the chronological
+  span/block timeline refers to it by block ID. Operand bytes that vary across
+  exact code images are rendered as wildcards; the exact variants remain in
+  the artifact. Without `:output-file`, this returns a string; with an output
+  file, rendering is streamed and the file is returned. Both paths use the
+  same renderer.
 
   Options:
   * `:output-file` - stream the result to this file instead of returning text."
