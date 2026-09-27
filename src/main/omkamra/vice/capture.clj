@@ -20,9 +20,10 @@
      the capture is complete, call `stop-async!` and poll `status` until the
      session is `:stopped`, or call `stop!` when a synchronous result is
      appropriate.
-  4. Return or report the `:edn-path` and `:assembly-path` from the stopped
-     status or result. The EDN is the canonical artifact and the assembly is
-     the compact, deduplicated rendering.
+  4. Return or report the `:edn-path`, `:assembly-path`, and, when requested,
+     `:profile-edn-path` from the stopped status or result. The EDN is the
+     canonical artifact, the assembly is the compact, deduplicated rendering,
+     and the profile EDN contains Clojure async-profiler stack samples.
 
   If the user requests loading without execution, pass
   `:run-after-load? false` to `start!`; otherwise do not override the default."
@@ -30,6 +31,7 @@
             [omkamra.vice :as vice]
             [omkamra.vice.asm :as asm]
             [omkamra.vice.binary-monitor :as bm]
+            [omkamra.vice.profile :as profile]
             [omkamra.vice.decoder :as decoder])
   (:import [java.net ServerSocket]
            [java.util UUID]))
@@ -170,6 +172,24 @@
           (deliver (:stop-requested session) reason)))))
   @(:state session))
 
+(defn- start-profiler!
+  [session options]
+  (when-let [profile-options (profile/options options)]
+    (reset! (:profiler session) (profile/start! profile-options))
+    (swap! (:state session) assoc :profiling :running)
+    nil))
+
+(defn- stop-profiler!
+  [session]
+  (when-let [profiler @(:profiler session)]
+    (let [result (profile/stop!
+                  profiler
+                  {:output-file (:profile-edn-path session)
+                   :capture-id (:capture-id session)
+                   :input (:input session)})]
+      (swap! (:state session) assoc :profiling :stopped)
+      result)))
+
 (defn- cleanup-capture!
   [session]
   (when-let [capture @(:capture session)]
@@ -184,6 +204,9 @@
 (defn- finalize-capture!
   [session capture]
   (update-status! session :finalizing)
+  ;; Stop sampling before finalizing the FIFO so the profile describes the
+  ;; steady-state Clojure capture rather than shutdown and artifact rendering.
+  (stop-profiler! session)
   (let [artifact (decoder/stop-capture capture)
         capture-summary (try
                           (decoder/capture-status capture)
@@ -192,17 +215,19 @@
                  :capture-summary capture-summary)
         _ (reset! (:capture session) nil)
         edn-path (:edn-path session)
-        assembly-path (:assembly-path session)]
+        assembly-path (:assembly-path session)
+        profile-edn-path (:profile-edn-path session)]
     (decoder/write-artifact! edn-path artifact)
     (asm/artifact->assembly artifact {:output-file assembly-path})
     (swap! (:state session) assoc :status :stopped)
-    {:status :stopped
-     :capture-id (:capture-id session)
-     :input (:input session)
-     :edn-path edn-path
-     :assembly-path assembly-path
-     :stop-reason (:stop-reason @(:state session))
-     :capture-summary capture-summary}))
+    (cond-> {:status :stopped
+             :capture-id (:capture-id session)
+             :input (:input session)
+             :edn-path edn-path
+             :assembly-path assembly-path
+             :stop-reason (:stop-reason @(:state session))
+             :capture-summary capture-summary}
+      profile-edn-path (assoc :profile-edn-path profile-edn-path))))
 
 (defn- finalize-once!
   [session capture]
@@ -330,10 +355,16 @@
                 :filename (:input session)
                 :timeout-ms (or (:autostart-timeout-ms options)
                                 default-autostart-timeout-ms)})
+              (start-profiler! session options)
               (update-status! session :running)
               (wait-for-stop! session instance capture)
               (finalize-once! session capture))))))
     (catch Throwable error
+      (try
+        (stop-profiler! session)
+        (catch Throwable profile-error
+          (swap! (:state session) assoc
+                 :profiling-cleanup-error (.getMessage profile-error))))
       (cleanup-capture! session)
       (swap! (:state session) assoc
              :status :failed
@@ -341,6 +372,7 @@
       {:status :failed
        :capture-id (:capture-id session)
        :input (:input session)
+       :profile-edn-path (:profile-edn-path session)
        :stop-reason (:stop-reason @(:state session))
        :error error})
     (finally
@@ -356,9 +388,14 @@
 
   Optional options include `:capture-id`, `:executable`, `:address`, `:port`,
   `:extra-args`, `:connect-timeout-ms`, `:connect-retry-ms`,
-  `:autostart-timeout-ms`, `:run-after-load?`, and `:retain-samples?`.
-  Full per-instruction register/timing samples are disabled by default; enable
-  them only for forensic captures. If `:port` is omitted (or zero), an
+  `:autostart-timeout-ms`, `:run-after-load?`, `:retain-samples?`, and
+  `:profile`. Set `:profile true` to write `<capture-id>.profile.edn`, or
+  provide an async-profiler option map such as
+  `{:event :cpu :interval 1000000 :threads true}`. Profiling always targets
+  this Clojure JVM, never the external VICE process, and starts once the
+  capture is running. The default profile uses 1 ms CPU samples with per-thread
+  stacks. Full per-instruction register/timing samples are disabled by default;
+  enable them only for forensic captures. If `:port` is omitted (or zero), an
   available local monitor port is selected. VICE remains windowed; callers can
   provide additional VICE arguments through `:extra-args`.
 
@@ -372,12 +409,17 @@
         monitor-port (monitor-port port)
         edn-path (.getPath (io/file output-dir (str capture-id ".edn")))
         assembly-path (.getPath (io/file output-dir (str capture-id ".asm")))
+        profile-edn-path (when (profile/options options)
+                           (.getPath (io/file output-dir
+                                              (str capture-id ".profile.edn"))))
         session {:capture-id capture-id
                  :input input
                  :output-dir output-dir
                  :monitor-port monitor-port
                  :edn-path edn-path
                  :assembly-path assembly-path
+                 :profile-edn-path profile-edn-path
+                 :profiler (atom nil)
                  :state (atom {:status :starting
                                :capture-id capture-id
                                :input input
@@ -400,6 +442,7 @@
                                   {:status :failed
                                    :capture-id (:capture-id session)
                                    :input (:input session)
+                                   :profile-edn-path (:profile-edn-path session)
                                    :error error}))]
                    (deliver (:completion session) result)
                    ;; The session's completion promise is the result owner;
@@ -424,6 +467,8 @@
                    (dissoc state :error-message)
                    (when (:error-message state)
                      {:error-message (:error-message state)}))
+      (:profile-edn-path session) (assoc :profile-edn-path
+                                          (:profile-edn-path session))
       capture-status (merge (select-keys capture-status
                                          [:event-count :instruction-count
                                           :block-count :block-run-count

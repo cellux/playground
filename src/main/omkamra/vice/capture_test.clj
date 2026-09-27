@@ -5,7 +5,8 @@
             [omkamra.vice.asm :as asm]
             [omkamra.vice.binary-monitor :as bm]
             [omkamra.vice.capture :as capture]
-            [omkamra.vice.decoder :as decoder]))
+            [omkamra.vice.decoder :as decoder]
+            [omkamra.vice.profile :as profile]))
 
 (defn- temp-directory
   []
@@ -70,13 +71,20 @@
                     decoder/write-artifact! (fn [path value]
                                               (swap! calls conj [:write-edn path value])
                                               path)
+                    profile/start! (fn [options]
+                                     (swap! calls conj [:profile-start options])
+                                     {:profile-session true})
+                    profile/stop! (fn [profiler options]
+                                    (swap! calls conj [:profile-stop profiler options])
+                                    {:format :omkamra.vice/profile-v1})
                     asm/artifact->assembly (fn [value options]
                                                  (swap! calls conj
                                                         [:write-assembly value options])
                                                  (:output-file options))]
         (let [session (capture/start! {:input (.getPath input)
                                        :output-dir (.getPath directory)
-                                       :capture-id "test-capture"})]
+                                       :capture-id "test-capture"
+                                       :profile true})]
           (loop [attempt 0]
             (when (and (< attempt 100)
                        (not= :running (:status @(:state session))))
@@ -97,6 +105,10 @@
                    (:edn-path result)))
             (is (= (.getPath (io/file directory "test-capture.asm"))
                    (:assembly-path result)))
+            (is (= (.getPath (io/file directory "test-capture.profile.edn"))
+                   (:profile-edn-path result)))
+            (is (some #(= :profile-start (first %)) @calls))
+            (is (some #(= :profile-stop (first %)) @calls))
             (is (= [:capture-stop]
                    (last (filter #(= :capture-stop (first %)) @calls))))
             (is (some #(= :autostart (first %)) @calls))
