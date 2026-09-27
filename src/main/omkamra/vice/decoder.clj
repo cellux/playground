@@ -6,41 +6,154 @@
    [omkamra.vice.binary-monitor :as bm]
    [omkamra.vice.asm :as asm]))
 
+;; FIFO ingestion keeps trace records as compact vectors.  These ten values are
+;; needed while decoding; maps are materialized only in final artifacts.
+(def ^:private trace-pc 0)
+(def ^:private trace-bytes 1)
+(def ^:private trace-raster-line 2)
+(def ^:private trace-cpu-cycle 3)
+(def ^:private trace-a 4)
+(def ^:private trace-x 5)
+(def ^:private trace-y 6)
+(def ^:private trace-sp 7)
+(def ^:private trace-flags 8)
+(def ^:private trace-global-cycle 9)
+
+(def ^:private header-operation 0)
+(def ^:private header-raster-line 2)
+(def ^:private header-cpu-cycle 3)
+
+;; [trace-event instruction-id instruction boundary? event-index]
+(def ^:private occurrence-event 0)
+(def ^:private occurrence-instruction-id 1)
+(def ^:private occurrence-instruction 2)
+(def ^:private occurrence-boundary? 3)
+(def ^:private occurrence-event-index 4)
+
+(defn- skip-whitespace
+  [^String line ^long start ^long end]
+  (loop [index start]
+    (if (and (< index end)
+             (Character/isWhitespace (int (.charAt line index))))
+      (recur (inc index))
+      index)))
+
+(defn- token-end
+  [^String line ^long start ^long end]
+  (loop [index start]
+    (if (and (< index end)
+             (not (Character/isWhitespace (int (.charAt line index)))))
+      (recur (inc index))
+      index)))
+
+(defn- parse-number-range
+  [^String line ^long start ^long end ^long radix]
+  (when (< start end)
+    (loop [index start
+           value 0]
+      (if (= index end)
+        value
+        (let [digit (Character/digit (int (.charAt line index)) (int radix))]
+          (when-not (neg? digit)
+            (recur (inc index) (+ (* value radix) digit))))))))
+
+(defn- hex-token?
+  [^String line ^long start ^long end]
+  (and (= 2 (- end start))
+       (not (neg? (Character/digit (int (.charAt line start)) 16)))
+       (not (neg? (Character/digit (int (.charAt line (inc start))) 16)))))
+
 (defn- parse-monitor-header
   [line]
-  (when-let [[_ operation pc raster-line cpu-cycle]
-             (re-matches
-              #"#\d+ \(Trace\s+(\w+)\s+([0-9A-Fa-f]+)\)\s+(\d+)/\$[0-9A-Fa-f]+,\s+(\d+)/\$[0-9A-Fa-f]+"
-              (str/trim line))]
-    {:operation (keyword (str/lower-case operation))
-     :pc (Integer/parseInt pc 16)
-     :raster-line (Integer/parseInt raster-line)
-     :cpu-cycle (Integer/parseInt cpu-cycle)}))
+  (let [line (str/trim ^String line)
+        length (.length ^String line)
+        trace-start (.indexOf ^String line "(Trace ")]
+    (when (and (pos? length)
+               (= \# (.charAt ^String line 0))
+               (pos? trace-start))
+      (let [operation-start (skip-whitespace line (+ trace-start 7) length)
+            operation-end (token-end line operation-start length)
+            pc-start (skip-whitespace line operation-end length)
+            pc-end (.indexOf ^String line (int \)) (int pc-start))
+            raster-start (skip-whitespace line (inc pc-end) length)
+            raster-end (.indexOf ^String line (int \/) (int raster-start))
+            cycle-start (.indexOf ^String line (int \space) (int raster-end))
+            cycle-start (skip-whitespace line cycle-start length)
+            cycle-end (.indexOf ^String line (int \/) (int cycle-start))]
+        (when (and (< operation-start operation-end)
+                   (< pc-start pc-end)
+                   (<= 0 raster-start raster-end)
+                   (<= 0 cycle-start cycle-end))
+          [(keyword (str/lower-case
+                     (.substring ^String line operation-start operation-end)))
+           (parse-number-range line pc-start pc-end 16)
+           (parse-number-range line raster-start raster-end 10)
+           (parse-number-range line cycle-start cycle-end 10)])))))
+
+(defn- parse-register-state
+  [^String line ^long marker-start ^long length]
+  ;; The VICE state suffix has a fixed token layout:
+  ;; `A:00 X:00 Y:00 SP:FF FLAGS GLOBAL-CYCLE`.
+  (let [a-start (+ marker-start 3)
+        a-end (token-end line a-start length)
+        x-start (skip-whitespace line a-end length)
+        x-end (token-end line x-start length)
+        y-start (skip-whitespace line x-end length)
+        y-end (token-end line y-start length)
+        sp-start (skip-whitespace line y-end length)
+        sp-end (token-end line sp-start length)
+        flags-start (skip-whitespace line sp-end length)
+        flags-end (token-end line flags-start length)
+        cycle-start (skip-whitespace line flags-end length)
+        cycle-end (token-end line cycle-start length)]
+    (when (and (.startsWith ^String line "A:" a-start)
+               (.startsWith ^String line "X:" x-start)
+               (.startsWith ^String line "Y:" y-start)
+               (.startsWith ^String line "SP:" sp-start)
+               (< (+ a-start 2) a-end)
+               (< (+ x-start 2) x-end)
+               (< (+ y-start 2) y-end)
+               (< (+ sp-start 3) sp-end)
+               (< flags-start flags-end)
+               (< cycle-start cycle-end))
+      [(parse-number-range line (+ a-start 2) a-end 16)
+       (parse-number-range line (+ x-start 2) x-end 16)
+       (parse-number-range line (+ y-start 2) y-end 16)
+       (parse-number-range line (+ sp-start 3) sp-end 16)
+       (.substring ^String line flags-start flags-end)
+       (parse-number-range line cycle-start cycle-end 10)])))
 
 (defn- parse-monitor-instruction
   [line header]
-  (when-let [[_ pc body] (re-matches #"^\.C:([0-9A-Fa-f]+)\s+(.*)$" line)]
-    (let [[instruction-state state] (str/split body #"\s+- A:" 2)
-          tokens (str/split (str/trim instruction-state) #"\s+")
-          [byte-tokens text-tokens] (split-with #(re-matches #"[0-9A-Fa-f]{2}" %) tokens)
-          bytes (mapv #(Integer/parseInt % 16) byte-tokens)
-          text (str/join " " text-tokens)
-          [_ a x y sp flags global-cycle]
-          (when state
-            (re-matches
-             #"([0-9A-Fa-f]{2}) X:([0-9A-Fa-f]{2}) Y:([0-9A-Fa-f]{2}) SP:([0-9A-Fa-f]{2})\s+(\S+)\s+(\d+)"
-             state))]
-      (merge header
-             {:pc (Integer/parseInt pc 16)
-              :bytes bytes
-              :vice-text text}
-             (when a
-               {:a (Integer/parseInt a 16)
-                :x (Integer/parseInt x 16)
-                :y (Integer/parseInt y 16)
-                :sp (Integer/parseInt sp 16)
-                :flags flags
-                :global-cycle (Long/parseLong global-cycle)})))))
+  (let [line (str/trim ^String line)
+        length (.length ^String line)
+        pc-start 3
+        pc-end (token-end line pc-start length)
+        instruction-start (skip-whitespace line pc-end length)
+        state-marker (.indexOf ^String line " - A:" (int instruction-start))
+        instruction-end (if (neg? state-marker) length state-marker)]
+    (when (and (>= length 4)
+               (.startsWith ^String line ".C:")
+               (< pc-start pc-end)
+               (< instruction-start instruction-end))
+      (let [bytes (loop [index instruction-start
+                         bytes (transient [])]
+                    (let [token-start (skip-whitespace line index instruction-end)
+                          token-end (token-end line token-start instruction-end)]
+                      (if (and (< token-start instruction-end)
+                               (hex-token? line token-start token-end))
+                        (recur token-end
+                               (conj! bytes
+                                      (parse-number-range line token-start token-end 16)))
+                        (persistent! bytes))))
+            [a x y sp flags global-cycle]
+            (when-not (neg? state-marker)
+              (parse-register-state line state-marker length))]
+        [(parse-number-range line pc-start pc-end 16)
+         bytes
+         (nth header header-raster-line)
+         (nth header header-cpu-cycle)
+         a x y sp flags global-cycle]))))
 
 (defn- u8
   [x]
@@ -69,17 +182,18 @@
   (u8 (nth memory (bit-and address 0xffff))))
 
 (defn- carry-set?
-  [{:keys [flags]}]
-  (and flags (str/ends-with? flags "C")))
+  [event]
+  (let [flags (nth event trace-flags)]
+    (and flags (str/ends-with? flags "C"))))
 
 (defn- effective-address
   "Resolve the effective address of a memory-addressed instruction from its
   pre-instruction register state and the memory image at that instant."
-  [memory {:keys [mode bytes]} {:keys [x y]}]
+  [memory {:keys [mode bytes]} event]
   (let [operand (u8 (nth bytes 1 0))
         word (bit-or operand (bit-shift-left (u8 (nth bytes 2 0)) 8))
-        x (or x 0)
-        y (or y 0)
+        x (or (nth event trace-x) 0)
+        y (or (nth event trace-y) 0)
         zp-word (fn [address]
                   (bit-or (memory-byte memory address)
                           (bit-shift-left (memory-byte memory
@@ -104,11 +218,11 @@
     "SLO" "RLA" "SRE" "RRA" "DCP" "ISC"})
 
 (defn- store-value
-  [mnemonic old-value address {:keys [a x y] :as entry}]
-  (let [a (or a 0)
-        x (or x 0)
-        y (or y 0)
-        carry (if (carry-set? entry) 1 0)
+  [mnemonic old-value address event]
+  (let [a (or (nth event trace-a) 0)
+        x (or (nth event trace-x) 0)
+        y (or (nth event trace-y) 0)
+        carry (if (carry-set? event) 1 0)
         high-byte-plus-one (bit-and (inc (bit-shift-right address 8)) 0xff)]
     (u8
      (case mnemonic
@@ -154,24 +268,28 @@
            :inferred? true})))))
 
 (defn- elapsed-cycles
-  [entry next-entry cycles-per-line raster-lines]
-  (when next-entry
-    (let [line-delta (- (:raster-line next-entry) (:raster-line entry))
+  [event next-event cycles-per-line raster-lines]
+  (when next-event
+    (let [line-delta (- (nth next-event trace-raster-line)
+                        (nth event trace-raster-line))
           line-delta (if (neg? line-delta) (+ line-delta raster-lines) line-delta)
           elapsed (+ (* line-delta cycles-per-line)
-                     (- (:cpu-cycle next-entry) (:cpu-cycle entry)))]
+                     (- (nth next-event trace-cpu-cycle)
+                        (nth event trace-cpu-cycle)))]
       ;; A sample at exactly the same timing state is the next frame boundary.
       (if (pos? elapsed) elapsed (* cycles-per-line raster-lines)))))
 
 (defn- write-timing
-  [entry duration-cycles cycles-per-line]
+  [event duration-cycles cycles-per-line]
   ;; A 6510 store commits on its final bus cycle.  The sampled timing is the
   ;; beginning of the instruction, so retain both timings in the event.
   (let [offset (max 0 (dec (or duration-cycles 1)))
-        total (+ (:cpu-cycle entry) offset)]
-    {:instruction-raster-line (:raster-line entry)
-     :instruction-cpu-cycle (:cpu-cycle entry)
-     :raster-line (+ (:raster-line entry) (quot total cycles-per-line))
+        instruction-raster-line (nth event trace-raster-line)
+        instruction-cpu-cycle (nth event trace-cpu-cycle)
+        total (+ instruction-cpu-cycle offset)]
+    {:instruction-raster-line instruction-raster-line
+     :instruction-cpu-cycle instruction-cpu-cycle
+     :raster-line (+ instruction-raster-line (quot total cycles-per-line))
      :cpu-cycle (mod total cycles-per-line)
      :write-cycle-offset offset}))
 
@@ -384,7 +502,9 @@
             (vreset! block nil)
             (rf result)))
          ([result occurrence]
-          (let [{:keys [event-index instruction-id instruction]} occurrence
+          (let [event-index (nth occurrence occurrence-event-index)
+                instruction-id (nth occurrence occurrence-instruction-id)
+                instruction (nth occurrence occurrence-instruction)
                 result (if (and @block (boundary? occurrence))
                          (let [result (rf result @block)]
                            (vreset! block nil)
@@ -578,6 +698,9 @@
 (def ^:private stream-sample-keys
   [:raster-line :cpu-cycle :a :x :y :sp :flags :global-cycle])
 
+;; Occurrence layout is declared with the trace layout above because the
+;; basic-block transducers consume it before the stream ingester is defined.
+
 (defn- stream-instruction-ids
   [events]
   (let [blocks (:blocks events)]
@@ -605,18 +728,16 @@
       ([] (rf))
       ([result] (rf result))
       ([result event]
-       (let [pc (:pc event)
-             bytes (vec (:bytes event))
+       (let [pc (nth event trace-pc)
+             bytes (nth event trace-bytes)
              key [pc bytes]
              {:keys [instruction-ids instructions]} @instruction-state
              instruction-id (or (get instruction-ids key) (count instructions))
              instruction (or (nth instructions instruction-id nil)
                              (let [decoded (asm/disassemble-bytes pc bytes)]
                                {:id instruction-id
-                                :operation (:operation event)
                                 :pc pc
                                 :bytes bytes
-                                :vice-text (:vice-text event)
                                 :mnemonic (:mnemonic decoded)
                                 :mode (:mode decoded)
                                 :operand (:operand decoded)
@@ -627,9 +748,7 @@
                     (-> state
                         (assoc-in [:instruction-ids key] instruction-id)
                         (update :instructions conj instruction)))))
-         (rf result {:event event
-                     :instruction-id instruction-id
-                     :instruction instruction}))))))
+         (rf result [event instruction-id instruction false nil]))))))
 
 (defn- make-analysis-state
   [initial-memory retain-samples?]
@@ -643,21 +762,22 @@
 
 (defn- append-analysis-write!
   [analysis pending next-event]
-  (let [event (:event pending)
-        instruction (:instruction pending)
+  (let [event (nth pending occurrence-event)
+        instruction (nth pending occurrence-instruction)
         memory (:memory @analysis)
         duration-cycles (when (and next-event
-                                    (:raster-line event)
-                                    (:cpu-cycle event)
-                                    (:raster-line next-event)
-                                    (:cpu-cycle next-event))
+                                    (nth event trace-raster-line)
+                                    (nth event trace-cpu-cycle)
+                                    (nth next-event trace-raster-line)
+                                    (nth next-event trace-cpu-cycle))
                            (elapsed-cycles event next-event 63 312))
         write (inferred-write memory instruction event)]
     (when write
-      (let [write-event (merge {:pc (:pc event)
+      (let [write-event (merge {:pc (nth event trace-pc)
                                 :mnemonic (:mnemonic instruction)
-                                :event-index (:event-index pending)}
-                               (if (and (:raster-line event) (:cpu-cycle event))
+                                :event-index (nth pending occurrence-event-index)}
+                               (if (and (nth event trace-raster-line)
+                                        (nth event trace-cpu-cycle))
                                  (write-timing event duration-cycles 63)
                                  {})
                                (dissoc write :inferred?))]
@@ -670,18 +790,18 @@
   (locking analysis
     (let [state @analysis
           pending (:pending state)
-          event (:event occurrence)]
+          event (nth occurrence occurrence-event)]
       (when pending
         (append-analysis-write! analysis pending event))
-      (when (:boundary? occurrence)
+      (when (nth occurrence occurrence-boundary?)
         (.add ^java.util.ArrayList (:boundaries state)
-              (:event-index occurrence))
+              (nth occurrence occurrence-event-index))
         (.put ^java.util.HashMap (:boundary-timings state)
-              (:event-index occurrence)
-              [(:raster-line event) (:cpu-cycle event)]))
+              (nth occurrence occurrence-event-index)
+              [(nth event trace-raster-line) (nth event trace-cpu-cycle)]))
       (when (:retain-samples? state)
         (.add ^java.util.ArrayList (:samples state)
-              (mapv #(get event %) stream-sample-keys)))
+              (subvec event trace-raster-line)))
       (swap! analysis assoc :pending occurrence))))
 
 (defn- complete-analysis!
@@ -691,8 +811,20 @@
       (append-analysis-write! analysis pending nil)
       (swap! analysis assoc :pending nil))))
 
+(defn- assign-event-index-xf
+  "Add chronological event indexes without changing reducer state."
+  [event-count]
+  (fn [rf]
+    (fn
+      ([] (rf))
+      ([result] (rf result))
+      ([result occurrence]
+       (let [indexed (assoc occurrence occurrence-event-index @event-count)]
+         (vswap! event-count inc)
+         (rf result indexed))))))
+
 (defn- collect-stream-analysis-xf
-  "Collect compact analysis state; full per-event samples are opt-in forensic data."
+  "Collect compact analysis state without updating a persistent map per event."
   [analysis]
   (fn [rf]
     (fn
@@ -701,13 +833,8 @@
        (complete-analysis! analysis)
        (rf result))
       ([result occurrence]
-       (let [event-index (:event-count result)
-             occurrence (assoc occurrence :event-index event-index)]
-         (analyze-stream-occurrence! analysis occurrence)
-         (rf (-> result
-                 (assoc :status :streaming)
-                 (update :event-count inc))
-             occurrence))))))
+       (analyze-stream-occurrence! analysis occurrence)
+       (rf result occurrence)))))
 
 (defn- mark-control-flow-boundaries-xf
   [memory]
@@ -720,10 +847,10 @@
          (let [boundary? (and @previous
                               (unexpected-control-flow?
                                memory
-                               (:instruction @previous)
-                               (:instruction occurrence)))]
+                               (nth @previous occurrence-instruction)
+                               (nth occurrence occurrence-instruction)))]
            (vreset! previous occurrence)
-           (rf result (assoc occurrence :boundary? boundary?))))))))
+           (rf result (assoc occurrence occurrence-boundary? boundary?))))))))
 
 (defn- append-block-run
   [runs {:keys [block-id iterations]}]
@@ -736,9 +863,11 @@
 (defn- make-stream-ingester
   "Create one fused transducer pipeline for a FIFO capture.
 
-  Parsed records flow through instruction interning, compact write/timing
-  analysis, basic-block construction, and block interning. Full per-event
-  register samples are retained only when `:retain-samples?` is true."
+  Parsed records flow through clearly separated stages: instruction interning,
+  event indexing, control-flow boundary marking, compact write/timing
+  analysis, basic-block construction, target splitting, and block interning.
+  Full per-event register samples are retained only when `:retain-samples?` is
+  true."
   ([]
    (make-stream-ingester {}))
   ([{:keys [initial-memory retain-samples?]
@@ -748,10 +877,12 @@
          block-state (atom {:block-ids {} :blocks []})
          analysis-state (atom (make-analysis-state initial-memory
                                                     retain-samples?))
+         event-count (volatile! 0)
          xf (comp (intern-stream-instructions-xf instruction-state)
+                  (assign-event-index-xf event-count)
                   (mark-control-flow-boundaries-xf initial-memory)
                   (collect-stream-analysis-xf analysis-state)
-                  (basic-block-builder-xf :boundary?)
+                  (basic-block-builder-xf #(nth % occurrence-boundary?))
                   (split-block-at-control-flow-targets-xf
                    #(nth (:instructions @instruction-state) %)
                    initial-memory)
@@ -766,6 +897,7 @@
      :instruction-state instruction-state
      :block-state block-state
      :analysis-state analysis-state
+     :event-count event-count
      :retain-samples? retain-samples?})))
 
 (defn- analysis-snapshot
@@ -778,7 +910,8 @@
 
 (defn- instruction-block-stream
   [stream-state ingester]
-  (let [{:keys [block-runs event-count]} @stream-state
+  (let [{:keys [block-runs]} @stream-state
+        event-count @(:event-count ingester)
         {:keys [instructions]} @(:instruction-state ingester)
         {:keys [blocks]} @(:block-state ingester)
         analysis @(:analysis-state ingester)]
@@ -818,10 +951,12 @@
          (if-let [next-header (parse-monitor-header line)]
            (do (vreset! header next-header) result)
            (if (and @header (str/starts-with? line ".C:"))
-             (let [entry (parse-monitor-instruction line @header)]
+             (let [trace-header @header]
                (vreset! header nil)
-               (if (= :exec (:operation entry))
-                 (rf result entry)
+               (if (= :exec (nth trace-header header-operation))
+                 (if-let [event (parse-monitor-instruction line trace-header)]
+                   (rf result event)
+                   result)
                  result))
              result)))))))
 
@@ -842,6 +977,8 @@
              nil
              (line-seq reader)))
 
+(def ^:private fifo-state-batch-size 512)
+
 (defn- update-stream-state!
   "Apply a stream update while excluding concurrent lifecycle updates.
 
@@ -852,6 +989,22 @@
   (locking stream-state
     (apply swap! stream-state f args)))
 
+(defn- ingest-stream-batch!
+  "Apply a FIFO record batch and publish its stream state once.
+
+  The reducer has side effects in the instruction, block, and analysis state,
+  so use `reset!` rather than `swap!`: a CAS retry could repeat those effects.
+  The lifecycle lock prevents status updates from interleaving with the
+  batch, while reducing the batch under one lock avoids one atom update per
+  instruction."
+  [stream-state ingester records]
+  (locking stream-state
+    (let [state (reduce (:step ingester) @stream-state records)
+          event-count (if-let [counter (:event-count ingester)]
+                        @counter
+                        (:event-count state))]
+      (reset! stream-state (assoc state :event-count event-count)))))
+
 (defn- start-fifo-reader!
   [fifo-path stream-state ingester reader-ref]
   (let [thread
@@ -861,9 +1014,29 @@
              (with-open [reader (io/reader fifo-path)]
                (reset! reader-ref reader)
                (update-stream-state! stream-state assoc :status :streaming)
-               (reduce-fifo-trace-records!
-                reader
-                #(update-stream-state! stream-state (:step ingester) %))
+               (let [batch (volatile! (transient []))
+                     flush-batch!
+                     (fn []
+                       (let [records (persistent! @batch)]
+                         (vreset! batch (transient []))
+                         (when (seq records)
+                           (ingest-stream-batch! stream-state ingester records))))
+                     consume!
+                     (fn [record]
+                       (let [next-batch (conj! @batch record)]
+                         (if (= fifo-state-batch-size (count next-batch))
+                           (do
+                             (vreset! batch (transient []))
+                             (ingest-stream-batch!
+                              stream-state ingester (persistent! next-batch)))
+                           (vreset! batch next-batch))))]
+                 ;; Flush in a finally block so records already read are not
+                 ;; lost if closing the FIFO interrupts line-seq with an I/O
+                 ;; exception during shutdown.
+                 (try
+                   (reduce-fifo-trace-records! reader consume!)
+                   (finally
+                     (flush-batch!))))
                (update-stream-state! stream-state assoc :status :eof))
              (catch java.io.IOException error
                ;; Closing the reader is the emergency unblock path during

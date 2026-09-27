@@ -2,7 +2,7 @@
   (:require [clojure.java.io :as io])
   (:import
    [java.awt.image BufferedImage]
-   [java.io ByteArrayInputStream InputStream OutputStream]
+   [java.io BufferedInputStream ByteArrayInputStream InputStream OutputStream]
    [java.net Socket SocketException]
    [java.nio.charset StandardCharsets]
    [java.util.concurrent LinkedBlockingQueue TimeUnit]
@@ -12,6 +12,8 @@
 
 (def default-host "localhost")
 (def default-port 6502)
+
+(def ^:private input-buffer-size 65536)
 
 ;; monitor commands
 
@@ -171,7 +173,9 @@
   ([host port handle-event {:keys [ignored-unsolicited-types]
                             :or {ignored-unsolicited-types #{}}}]
   (let [socket (Socket. host port)
-        in (.getInputStream socket)
+        ;; Monitor responses are decoded one byte at a time. Buffer the socket
+        ;; stream so those reads do not each cross the socket/native boundary.
+        in (BufferedInputStream. (.getInputStream socket) input-buffer-size)
         out (.getOutputStream socket)
         pending-requests (atom {})
         write-lock (Object.)
