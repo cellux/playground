@@ -286,6 +286,23 @@
                  :vice :stopped
                  :cleanup-complete true))))))
 
+(defn- speed-extra-args
+  [options]
+  (if (nil? (:speed options))
+    []
+    (let [speed (:speed options)]
+      (when-not (and (integer? speed) (<= 0 speed))
+        (fail "Capture :speed must be a non-negative integer percentage"
+              {:speed speed}))
+      ["-speed" (str speed)])))
+
+(defn- vice-extra-args
+  "Build VICE arguments, optionally setting speed and warp mode."
+  [options]
+  (cond-> (into (vec (or (:extra-args options) []))
+                (speed-extra-args options))
+    (true? (:warp? options)) (conj "-warp")))
+
 (defn- wait-for-stop!
   [session instance capture]
   (try
@@ -324,7 +341,7 @@
                                                  vice/default-executable)
                                 :address (:address options)
                                 :port (:monitor-port session)
-                                :extra-args (vec (or (:extra-args options) []))})]
+                                :extra-args (vice-extra-args options)})]
       (reset! (:instance session) instance)
       (swap! (:state session) assoc
              :pid (:pid instance)
@@ -387,9 +404,15 @@
   * `:output-dir` - directory for `<capture-id>.edn` and `.asm`
 
   Optional options include `:capture-id`, `:executable`, `:address`, `:port`,
-  `:extra-args`, `:connect-timeout-ms`, `:connect-retry-ms`,
-  `:autostart-timeout-ms`, `:run-after-load?`, `:retain-samples?`, and
-  `:profile`. Set `:profile true` to write `<capture-id>.profile.edn`, or
+  `:extra-args`, `:speed`, `:warp?`, `:connect-timeout-ms`,
+  `:connect-retry-ms`, `:autostart-timeout-ms`, `:run-after-load?`,
+  `:retain-samples?`, and `:profile`. Set `:speed` to a non-negative integer
+  percentage such as `200` to pass VICE's `-speed 200` option. `:speed 0`
+  removes the speed limit while retaining normal video and sound behavior.
+  Set `:warp?` true to pass VICE's `-warp` option, which also changes video
+  refresh and sound behavior for maximum available speed. If both are set,
+  warp mode takes precedence. Set `:profile true`
+  to write `<capture-id>.profile.edn`, or
   provide an async-profiler option map such as
   `{:event :cpu :interval 1000000 :threads true}`. Profiling always targets
   this Clojure JVM, never the external VICE process, and starts once the
@@ -403,7 +426,8 @@
   FIFO setup, and autostart happen on the session's background worker.
   "
   [{:keys [input output-dir capture-id port] :as options}]
-  (let [input (validate-input! input)
+  (let [_ (speed-extra-args options)
+        input (validate-input! input)
         output-dir (prepare-output-dir! output-dir)
         capture-id (make-capture-id capture-id)
         monitor-port (monitor-port port)

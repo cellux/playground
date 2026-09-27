@@ -33,6 +33,14 @@
         (.delete txt)
         (.delete directory)))))
 
+(deftest speed-zero-is-distinct-from-warp
+  (let [vice-extra-args (var-get (ns-resolve 'omkamra.vice.capture
+                                              'vice-extra-args))]
+    (is (= ["-speed" "0"]
+           (vice-extra-args {:speed 0})))
+    (is (= ["-speed" "0" "-warp"]
+           (vice-extra-args {:speed 0 :warp? true})))))
+
 (deftest runs-non-gui-lifecycle-and-writes-results
   (let [directory (temp-directory)
         input (io/file directory "program.prg")
@@ -84,7 +92,9 @@
         (let [session (capture/start! {:input (.getPath input)
                                        :output-dir (.getPath directory)
                                        :capture-id "test-capture"
-                                       :profile true})]
+                                       :profile true
+                                       :speed 200
+                                       :warp? true})]
           (loop [attempt 0]
             (when (and (< attempt 100)
                        (not= :running (:status @(:state session))))
@@ -99,6 +109,9 @@
                     :message "Capture stopped by caller"}
                    (:stop-reason requested)))
             (is (= result repeated-result))
+            (is (= ["-speed" "200" "-warp"]
+                   (:extra-args (second (first (filter #(= :start (first %))
+                                                      @calls))))))
             (is (= :stopped (:status result)))
             (is (not (contains? result :artifact)))
             (is (= (.getPath (io/file directory "test-capture.edn"))
