@@ -2,6 +2,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.java.io :as io]
             [omkamra.vice :as vice]
+            [omkamra.vice.asm :as asm]
             [omkamra.vice.binary-monitor :as bm]
             [omkamra.vice.capture :as capture]
             [omkamra.vice.decoder :as decoder]))
@@ -69,7 +70,7 @@
                     decoder/write-artifact! (fn [path value]
                                               (swap! calls conj [:write-edn path value])
                                               path)
-                    decoder/artifact->assembly (fn [value options]
+                    asm/artifact->assembly (fn [value options]
                                                  (swap! calls conj
                                                         [:write-assembly value options])
                                                  (:output-file options))]
@@ -131,7 +132,7 @@
                                            (swap! calls conj :capture-stop)
                                            {:format :test/artifact})
                     decoder/write-artifact! (fn [path _] path)
-                    decoder/artifact->assembly (fn [_ options]
+                    asm/artifact->assembly (fn [_ options]
                                                  (:output-file options))]
         (let [session (capture/start! {:input (.getPath input)
                                        :output-dir (.getPath directory)})
@@ -164,7 +165,7 @@
                                            (swap! calls conj :capture-stop)
                                            (throw (ex-info "finalization failed" {})))
                     decoder/write-artifact! (fn [_ _] nil)
-                    decoder/artifact->assembly (fn [_ _] nil)]
+                    asm/artifact->assembly (fn [_ _] nil)]
         (let [session (capture/start! {:input (.getPath input)
                                        :output-dir (.getPath directory)})]
           (is (thrown-with-msg? clojure.lang.ExceptionInfo

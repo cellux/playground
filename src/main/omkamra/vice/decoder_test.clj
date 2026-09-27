@@ -1,5 +1,6 @@
 (ns omkamra.vice.decoder-test
   (:require [clojure.test :refer [deftest is]]
+            [omkamra.vice.asm :as asm]
             [omkamra.vice.decoder :as decoder]))
 
 (deftest disassembles-mos-6510-addressing-modes
@@ -11,9 +12,9 @@
     (aset-byte memory 0x1004 (unchecked-byte 0x4c)) ; JMP $1234
     (aset-byte memory 0x1005 (unchecked-byte 0x34))
     (aset-byte memory 0x1006 (unchecked-byte 0x12))
-    (is (= "LDA #$42" (:text (decoder/disassemble memory 0x1000))))
-    (is (= "BNE $1000" (:text (decoder/disassemble memory 0x1002))))
-    (is (= "JMP $1234" (:text (decoder/disassemble memory 0x1004))))))
+    (is (= "LDA #$42" (:text (asm/disassemble memory 0x1000))))
+    (is (= "BNE $1000" (:text (asm/disassemble memory 0x1002))))
+    (is (= "JMP $1234" (:text (asm/disassemble memory 0x1004))))))
 
 (deftest artifact-assembly-renders-interned-blocks
   (let [instructions [{:pc 0x1000 :bytes [0xea]
@@ -24,7 +25,7 @@
                    instructions [{:kind :non-irq :start-index 0 :end-index 2}])
         artifact {:format :omkamra.vice/pipeline-v1
                   :stages {:structure {:execution execution}}}
-        assembly (decoder/artifact->assembly artifact)]
+        assembly (asm/artifact->assembly artifact)]
     (is (.contains assembly "$1000  EA       NOP"))
     (is (.contains assembly "$1001  4C 00 10 JMP $1000"))))
 
@@ -39,11 +40,11 @@
                    :spans [{:kind :non-irq :start-index 0 :end-index 2}]}
         artifact {:format :omkamra.vice/pipeline-v1
                   :stages {:structure {:execution execution}}}
-        assembly (decoder/artifact->assembly artifact)
+        assembly (asm/artifact->assembly artifact)
         output-file (java.io.File/createTempFile "omkamra-assembly-" ".asm")]
     (try
       (is (= assembly
-             (slurp (decoder/artifact->assembly
+             (slurp (asm/artifact->assembly
                      artifact {:output-file output-file}))))
       (is (= 1 (count (re-seq #"\$2000  EA" assembly))))
       (is (not (.contains assembly "; chronological span/block timeline")))
@@ -74,7 +75,7 @@
                    :spans [{:kind :non-irq :start-index 0 :end-index 6}]}
         artifact {:format :omkamra.vice/pipeline-v1
                   :stages {:structure {:execution execution}}}
-        assembly (decoder/artifact->assembly artifact)]
+        assembly (asm/artifact->assembly artifact)]
     ;; The exact execution model remains variant-aware.
     (is (= 2 (count (:blocks execution))))
     ;; The assembly projection emits one structural block and masks the
@@ -101,7 +102,7 @@
                    :spans [{:kind :irq :start-index 0 :end-index 2}]}
         artifact {:format :omkamra.vice/pipeline-v1
                   :stages {:structure {:execution execution}}}
-        assembly (decoder/artifact->assembly artifact)]
+        assembly (asm/artifact->assembly artifact)]
     (is (= 1 (count (re-seq #"(?m)^; block " assembly))))
     (is (.contains assembly "$D012  A9 ??    LDA #$??"))))
 

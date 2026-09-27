@@ -28,6 +28,7 @@
   `:run-after-load? false` to `start!`; otherwise do not override the default."
   (:require [clojure.java.io :as io]
             [omkamra.vice :as vice]
+            [omkamra.vice.asm :as asm]
             [omkamra.vice.binary-monitor :as bm]
             [omkamra.vice.decoder :as decoder])
   (:import [java.net ServerSocket]
@@ -193,7 +194,7 @@
         edn-path (:edn-path session)
         assembly-path (:assembly-path session)]
     (decoder/write-artifact! edn-path artifact)
-    (decoder/artifact->assembly artifact {:output-file assembly-path})
+    (asm/artifact->assembly artifact {:output-file assembly-path})
     (swap! (:state session) assoc :status :stopped)
     {:status :stopped
      :capture-id (:capture-id session)
