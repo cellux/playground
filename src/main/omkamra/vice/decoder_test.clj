@@ -6,26 +6,6 @@
   [{:keys [pc bytes raster-line cpu-cycle a x y sp flags global-cycle]}]
   [pc bytes raster-line cpu-cycle a x y sp flags global-cycle])
 
-(deftest parser-transducer-emits-only-execution-trace-records
-  (let [parser (var-get (ns-resolve 'omkamra.vice.decoder
-                                    'monitor-trace-records-xf))
-        records (into [] (parser)
-                     ["#1 (Trace EXEC 1000) 1/$01, 2/$02"
-                      ".C:1000 EA NOP - A:00 X:00 Y:00 SP:FF ........ 42"
-                      "#2 (Trace LOAD 1001) 1/$01, 3/$03"
-                      ".C:1001 EA NOP - A:00 X:00 Y:00 SP:FF ........ 43"])]
-    (is (= [[0x1000 [0xea] 1 2 0 0 0 255 "........" 42]]
-           records))))
-
-(deftest parser-accepts-vice-trace-spacing
-  (let [parser (var-get (ns-resolve 'omkamra.vice.decoder
-                                    'monitor-trace-records-xf))
-        records (into [] (parser)
-                     ["#1 (Trace  exec fce4)    0/$000,   8/$08"
-                      ".C:fce4  78          SEI            - A:55 X:FF Y:A7 SP:fd N.-..I.C          8"])]
-    (is (= [[0xfce4 [0x78] 0 8 0x55 0xff 0xa7 0xfd "N.-..I.C" 8]]
-           records))))
-
 (deftest streaming-transducers-intern-instructions-and-basic-blocks
   (let [empty-state (var-get (ns-resolve 'omkamra.vice.decoder
                                           'empty-stream-state))

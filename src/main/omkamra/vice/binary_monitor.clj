@@ -14,6 +14,7 @@
 (def default-port 6502)
 
 (def ^:private input-buffer-size 65536)
+(def ^:private discard-buffer-size 8192)
 
 ;; monitor commands
 
@@ -147,17 +148,29 @@
           (recur (+ offset read)))))
     buf))
 
+(defn- discard-bytes
+  "Read and discard exactly `length` bytes without allocating a body array."
+  [^InputStream in ^bytes buffer length]
+  (loop [remaining length]
+    (when (pos? remaining)
+      (let [read (.read in buffer 0 (min remaining (alength buffer)))]
+        (when (neg? read)
+          (throw (ex-info "Unexpected end of VICE monitor stream"
+                          {:expected length
+                           :read (- length remaining)})))
+        (recur (- remaining read))))))
+
 (defn write-byte
-  [^OutputStream out val]
-  (.write out val))
+  [^OutputStream out ^long val]
+  (.write out (int val)))
 
 (defn write-short
-  [out val]
-  (.write out (bit-and val 0xff))
-  (.write out (bit-and (bit-shift-right val 8) 0xff)))
+  [^OutputStream out ^long val]
+  (.write out (int (bit-and val 0xff)))
+  (.write out (int (bit-and (bit-shift-right val 8) 0xff))))
 
 (defn write-int
-  [out val]
+  [^OutputStream out ^long val]
   (write-short out (bit-and val 0xffff))
   (write-short out (bit-and (bit-shift-right val 16) 0xffff)))
 
@@ -168,15 +181,16 @@
   types before body decoding and queueing. Request responses of the same type
   are never suppressed. The set can be changed through
   `ignore-unsolicited-types!` on the returned connection."
-  ([host port handle-event]
+  ([^String host ^long port handle-event]
    (connect host port handle-event {}))
-  ([host port handle-event {:keys [ignored-unsolicited-types]
+  ([^String host ^long port handle-event {:keys [ignored-unsolicited-types]
                             :or {ignored-unsolicited-types #{}}}]
-  (let [socket (Socket. host port)
+  (let [socket (Socket. host (int port))
         ;; Monitor responses are decoded one byte at a time. Buffer the socket
         ;; stream so those reads do not each cross the socket/native boundary.
         in (BufferedInputStream. (.getInputStream socket) input-buffer-size)
         out (.getOutputStream socket)
+        discard-buffer (byte-array discard-buffer-size)
         pending-requests (atom {})
         write-lock (Object.)
         events (LinkedBlockingQueue.)
@@ -193,11 +207,16 @@
                     error-code (read-byte in)
                     request-id (read-int in)
                     ;; _ (println (format "request_id: %x got response of type: %02x length: %d" request-id response-type len))
-                    body (read-bytes in len)
                     unsolicited? (= request-id 0xffffffff)
                     ignored? (and unsolicited?
                                   (contains? @ignored-unsolicited-types
-                                             response-type))]
+                                             response-type))
+                    ;; Ignored unsolicited responses still need to be drained
+                    ;; from the stream, but their bodies are never decoded.
+                    body (if ignored?
+                           (do (discard-bytes in discard-buffer len)
+                               nil)
+                           (read-bytes in len))]
                 (when-not ignored?
                   (let [response (if (zero? error-code)
                                    (read-response response-type
@@ -247,10 +266,11 @@
 
 (defn close
   [conn]
-  (.close (:socket conn))
+  (.close ^Socket (:socket conn))
   (reset! (:pending-requests conn) {})
   (reset! (:next-request-id conn) 0)
-  (some-> (:events conn) .clear)
+  (when-let [^LinkedBlockingQueue events (:events conn)]
+    (.clear events))
   nil)
 
 (defn await-event
@@ -310,7 +330,8 @@
    (send-request conn cmd body-sig body-args 1000))
   ([conn cmd body-sig body-args response-timeout-ms]
    (assert (= (count body-sig) (count body-args)))
-   (let [{:keys [out next-request-id pending-requests write-lock]} conn
+   (let [{:keys [next-request-id pending-requests write-lock]} conn
+        ^OutputStream out (:out conn)
         request-id (swap! next-request-id (comp #(mod % 0x100000000) inc))
         request-promise (promise)]
     (swap! pending-requests assoc request-id request-promise)
@@ -327,8 +348,8 @@
                                    :else arg))
           \2 (write-short out arg)
           \4 (write-int out arg)
-          \b (.write out arg 0 (alength ^bytes arg))))
-      (.flush out))
+          \b (.write ^OutputStream out arg 0 (alength ^bytes arg))))
+      (.flush ^OutputStream out))
     (let [rv (deref request-promise response-timeout-ms nil)]
       (when (nil? rv)
         (swap! pending-requests dissoc request-id))
@@ -463,7 +484,7 @@
   [x]
   (if (bytes? x)
     x
-    (.getBytes x StandardCharsets/US_ASCII)))
+    (.getBytes ^String x StandardCharsets/US_ASCII)))
 
 (defn condition-set
   [conn {:keys [number condition-str]}]
@@ -573,22 +594,22 @@
 
 (defn read-sized-string
   [in]
-  (String. (read-sized-bytes in) StandardCharsets/US_ASCII))
+  (String. ^bytes (read-sized-bytes in) StandardCharsets/US_ASCII))
 
 (defn read-sized-integer
   [in]
   (let [length (read-byte in)]
-    (case length
-      1 (read-byte in)
-      2 (read-short in)
-      4 (read-int in))))
+    (cond
+      (= length 1) (read-byte in)
+      (= length 2) (read-short in)
+      (= length 4) (read-int in))))
 
 (defmethod read-response MON_RESPONSE_RESOURCE_GET
   [_ in]
   (let [type (read-byte in)]
-    (case type
-      0 {:value (read-sized-string in)}
-      1 {:value (read-sized-integer in)})))
+    (cond
+      (= type 0) {:value (read-sized-string in)}
+      (= type 1) {:value (read-sized-integer in)})))
 
 (defn advance-instructions
   [conn {:keys [step-over? count]}]
@@ -673,7 +694,7 @@
   (send-request conn MON_CMD_DISPLAY_GET "11" [use-vic-ii? format]))
 
 (defmethod read-response MON_RESPONSE_DISPLAY_GET
-  [_ in]
+  [_ ^InputStream in]
   (let [header-length (read-int in)
         debug-width (read-short in)
         debug-height (read-short in)
@@ -683,7 +704,7 @@
         inner-height (read-short in)
         bpp (read-byte in)
         buffer-length (read-int in)
-        available (.available in)
+        available (.available ^InputStream in)
         raw-buffer (read-bytes in available)
         buffer (byte-array buffer-length)]
     (System/arraycopy raw-buffer 0 buffer 0

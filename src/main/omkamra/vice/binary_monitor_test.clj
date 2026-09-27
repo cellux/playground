@@ -13,6 +13,23 @@
                          (java.io.ByteArrayInputStream. (byte-array [1]))
                          2))))
 
+(deftest discards-complete-byte-sequences
+  (let [discard-bytes (var-get (ns-resolve 'omkamra.vice.binary-monitor
+                                           'discard-bytes))
+        buffer (byte-array 2)]
+    (is (nil? (discard-bytes
+               (java.io.ByteArrayInputStream. (byte-array [1 2 3 4 5]))
+               buffer
+               5)))
+    (is (= [5 4]
+           (mapv #(bit-and (int %) 0xff) buffer)))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"Unexpected end"
+                          (discard-bytes
+                           (java.io.ByteArrayInputStream. (byte-array [1]))
+                           buffer
+                           2)))))
+
 (deftest configures-ignored-unsolicited-response-types
   (let [conn {:ignored-unsolicited-types (atom #{})}]
     (is (= #{bm/MON_RESPONSE_CHECKPOINT_INFO}

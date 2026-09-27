@@ -4,7 +4,9 @@
    [clojure.java.io :as io]
    [clojure.string :as str]
    [omkamra.vice.binary-monitor :as bm]
-   [omkamra.vice.asm :as asm]))
+   [omkamra.vice.asm :as asm]
+   [omkamra.vice.trace :as trace])
+  (:import [java.io FileReader]))
 
 ;; FIFO ingestion keeps trace records as compact vectors.  These ten values are
 ;; needed while decoding; maps are materialized only in final artifacts.
@@ -19,141 +21,12 @@
 (def ^:private trace-flags 8)
 (def ^:private trace-global-cycle 9)
 
-(def ^:private header-operation 0)
-(def ^:private header-raster-line 2)
-(def ^:private header-cpu-cycle 3)
-
 ;; [trace-event instruction-id instruction boundary? event-index]
 (def ^:private occurrence-event 0)
 (def ^:private occurrence-instruction-id 1)
 (def ^:private occurrence-instruction 2)
 (def ^:private occurrence-boundary? 3)
 (def ^:private occurrence-event-index 4)
-
-(defn- skip-whitespace
-  [^String line ^long start ^long end]
-  (loop [index start]
-    (if (and (< index end)
-             (Character/isWhitespace (int (.charAt line index))))
-      (recur (inc index))
-      index)))
-
-(defn- token-end
-  [^String line ^long start ^long end]
-  (loop [index start]
-    (if (and (< index end)
-             (not (Character/isWhitespace (int (.charAt line index)))))
-      (recur (inc index))
-      index)))
-
-(defn- parse-number-range
-  [^String line ^long start ^long end ^long radix]
-  (when (< start end)
-    (loop [index start
-           value 0]
-      (if (= index end)
-        value
-        (let [digit (Character/digit (int (.charAt line index)) (int radix))]
-          (when-not (neg? digit)
-            (recur (inc index) (+ (* value radix) digit))))))))
-
-(defn- hex-token?
-  [^String line ^long start ^long end]
-  (and (= 2 (- end start))
-       (not (neg? (Character/digit (int (.charAt line start)) 16)))
-       (not (neg? (Character/digit (int (.charAt line (inc start))) 16)))))
-
-(defn- parse-monitor-header
-  [line]
-  (let [line (str/trim ^String line)
-        length (.length ^String line)
-        trace-start (.indexOf ^String line "(Trace ")]
-    (when (and (pos? length)
-               (= \# (.charAt ^String line 0))
-               (pos? trace-start))
-      (let [operation-start (skip-whitespace line (+ trace-start 7) length)
-            operation-end (token-end line operation-start length)
-            pc-start (skip-whitespace line operation-end length)
-            pc-end (.indexOf ^String line (int \)) (int pc-start))
-            raster-start (skip-whitespace line (inc pc-end) length)
-            raster-end (.indexOf ^String line (int \/) (int raster-start))
-            cycle-start (.indexOf ^String line (int \space) (int raster-end))
-            cycle-start (skip-whitespace line cycle-start length)
-            cycle-end (.indexOf ^String line (int \/) (int cycle-start))]
-        (when (and (< operation-start operation-end)
-                   (< pc-start pc-end)
-                   (<= 0 raster-start raster-end)
-                   (<= 0 cycle-start cycle-end))
-          [(keyword (str/lower-case
-                     (.substring ^String line operation-start operation-end)))
-           (parse-number-range line pc-start pc-end 16)
-           (parse-number-range line raster-start raster-end 10)
-           (parse-number-range line cycle-start cycle-end 10)])))))
-
-(defn- parse-register-state
-  [^String line ^long marker-start ^long length]
-  ;; The VICE state suffix has a fixed token layout:
-  ;; `A:00 X:00 Y:00 SP:FF FLAGS GLOBAL-CYCLE`.
-  (let [a-start (+ marker-start 3)
-        a-end (token-end line a-start length)
-        x-start (skip-whitespace line a-end length)
-        x-end (token-end line x-start length)
-        y-start (skip-whitespace line x-end length)
-        y-end (token-end line y-start length)
-        sp-start (skip-whitespace line y-end length)
-        sp-end (token-end line sp-start length)
-        flags-start (skip-whitespace line sp-end length)
-        flags-end (token-end line flags-start length)
-        cycle-start (skip-whitespace line flags-end length)
-        cycle-end (token-end line cycle-start length)]
-    (when (and (.startsWith ^String line "A:" a-start)
-               (.startsWith ^String line "X:" x-start)
-               (.startsWith ^String line "Y:" y-start)
-               (.startsWith ^String line "SP:" sp-start)
-               (< (+ a-start 2) a-end)
-               (< (+ x-start 2) x-end)
-               (< (+ y-start 2) y-end)
-               (< (+ sp-start 3) sp-end)
-               (< flags-start flags-end)
-               (< cycle-start cycle-end))
-      [(parse-number-range line (+ a-start 2) a-end 16)
-       (parse-number-range line (+ x-start 2) x-end 16)
-       (parse-number-range line (+ y-start 2) y-end 16)
-       (parse-number-range line (+ sp-start 3) sp-end 16)
-       (.substring ^String line flags-start flags-end)
-       (parse-number-range line cycle-start cycle-end 10)])))
-
-(defn- parse-monitor-instruction
-  [line header]
-  (let [line (str/trim ^String line)
-        length (.length ^String line)
-        pc-start 3
-        pc-end (token-end line pc-start length)
-        instruction-start (skip-whitespace line pc-end length)
-        state-marker (.indexOf ^String line " - A:" (int instruction-start))
-        instruction-end (if (neg? state-marker) length state-marker)]
-    (when (and (>= length 4)
-               (.startsWith ^String line ".C:")
-               (< pc-start pc-end)
-               (< instruction-start instruction-end))
-      (let [bytes (loop [index instruction-start
-                         bytes (transient [])]
-                    (let [token-start (skip-whitespace line index instruction-end)
-                          token-end (token-end line token-start instruction-end)]
-                      (if (and (< token-start instruction-end)
-                               (hex-token? line token-start token-end))
-                        (recur token-end
-                               (conj! bytes
-                                      (parse-number-range line token-start token-end 16)))
-                        (persistent! bytes))))
-            [a x y sp flags global-cycle]
-            (when-not (neg? state-marker)
-              (parse-register-state line state-marker length))]
-        [(parse-number-range line pc-start pc-end 16)
-         bytes
-         (nth header header-raster-line)
-         (nth header header-cpu-cycle)
-         a x y sp flags global-cycle]))))
 
 (defn- u8
   [x]
@@ -925,10 +798,11 @@
              :samples (vec (.toArray ^java.util.ArrayList (:samples analysis)))))))
 
 (defn- create-fifo!
-  [fifo-path]
+  [^String fifo-path]
   (.mkdirs (.getParentFile (io/file fifo-path)))
   (io/delete-file fifo-path true)
-  (let [process (.start (ProcessBuilder. ^java.util.List ["mkfifo" fifo-path]))]
+  (let [^java.util.List command ["mkfifo" fifo-path]
+        process (.start (ProcessBuilder. command))]
     (when-not (.waitFor process 5 java.util.concurrent.TimeUnit/SECONDS)
       (.destroyForcibly process)
       (throw (ex-info "Timed out creating monitor trace FIFO"
@@ -938,44 +812,6 @@
                       {:fifo-path fifo-path
                        :exit-code (.exitValue process)}))))
   fifo-path)
-
-(defn- monitor-trace-records-xf
-  "Turn the FIFO's lazy line stream into parsed execution trace records."
-  []
-  (fn [rf]
-    (let [header (volatile! nil)]
-      (fn
-        ([] (rf))
-        ([result] (rf result))
-        ([result line]
-         (if-let [next-header (parse-monitor-header line)]
-           (do (vreset! header next-header) result)
-           (if (and @header (str/starts-with? line ".C:"))
-             (let [trace-header @header]
-               (vreset! header nil)
-               (if (= :exec (nth trace-header header-operation))
-                 (if-let [event (parse-monitor-instruction line trace-header)]
-                   (rf result event)
-                   result)
-                 result))
-             result)))))))
-
-(defn- reduce-fifo-trace-records!
-  "Reduce the FIFO-backed lazy line stream through the parser transducer.
-
-  The reader remains owned by the calling `with-open`; reducing it eagerly on
-  the reader thread avoids the leaked-resource and arbitrary-thread behaviour
-  of exposing a lazy sequence to callers."
-  [reader consume!]
-  (transduce (monitor-trace-records-xf)
-             (fn
-               ([] nil)
-               ([result] result)
-               ([result record]
-                (consume! record)
-                result))
-             nil
-             (line-seq reader)))
 
 (def ^:private fifo-state-batch-size 512)
 
@@ -1006,12 +842,14 @@
       (reset! stream-state (assoc state :event-count event-count)))))
 
 (defn- start-fifo-reader!
-  [fifo-path stream-state ingester reader-ref]
+  [^String fifo-path stream-state ingester reader-ref]
   (let [thread
         (Thread.
          (fn []
            (try
-             (with-open [reader (io/reader fifo-path)]
+             ;; The trace scanner owns buffering; a FileReader avoids a second
+             ;; BufferedReader layer and its per-line String allocation.
+             (with-open [reader (FileReader. fifo-path)]
                (reset! reader-ref reader)
                (update-stream-state! stream-state assoc :status :streaming)
                (let [batch (volatile! (transient []))
@@ -1031,10 +869,11 @@
                               stream-state ingester (persistent! next-batch)))
                            (vreset! batch next-batch))))]
                  ;; Flush in a finally block so records already read are not
-                 ;; lost if closing the FIFO interrupts line-seq with an I/O
-                 ;; exception during shutdown.
+                 ;; lost if closing the FIFO interrupts the character scanner
+                 ;; with an I/O exception during shutdown.
                  (try
-                   (reduce-fifo-trace-records! reader consume!)
+                   (trace/reduce-records!
+                    reader consume! (:retain-samples? ingester))
                    (finally
                      (flush-batch!))))
                (update-stream-state! stream-state assoc :status :eof))
@@ -1190,7 +1029,8 @@
                                  (count (:block-runs stream)))
             :reader-status (:status stream)
             :reader-alive? (.isAlive ^Thread (:reader-thread capture))
-            :reader-error (some-> (:error stream) .getMessage)})))
+            :reader-error (when-let [error (:error stream)]
+                            (.getMessage ^Throwable error))})))
 
 (defn- stream-instruction-id-array
   [events]
