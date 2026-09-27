@@ -34,6 +34,20 @@ The project source directory is `src/main`. Initialize it once per nREPL session
 by the nREPL client. Discard the `init` return value, but preserve the small
 reload summary described below.
 
+**Initialize before editing.** `init` establishes the file-modification
+baseline. If it is run after source changes, those changes become the new
+baseline and the first `reload/reload` can correctly report that nothing
+changed. Initialize once after starting the nREPL, then edit files and reload.
+If this ordering was missed, do not use the empty reload result as evidence
+that the edits were loaded; use an explicit focused recovery reload or restart
+the nREPL to establish a clean baseline.
+
+For focused work, prefer a narrow source directory when the project contains
+unrelated native/UI namespaces. For example, work on VICE can initialize with
+`{:dirs ["src/main/omkamra/vice"]}` instead of scanning every namespace under
+`src/main`. Include any additional source roots whose downstream namespaces
+must participate in the reload.
+
 Do not start another development server just to reload code. Use `clojure_eval` against the already-running nREPL.
 
 ## Normal reload loop
@@ -45,18 +59,19 @@ After editing source files, run:
   (select-keys result [:unloaded :loaded]))
 ```
 
-For a full reload:
-
-```clojure
-(let [result (reload/reload {:only :all})]
-  (select-keys result [:unloaded :loaded]))
-```
-
 Use an allowlist rather than returning the complete result: reload internals
 may contain large scan or dependency structures, while `:unloaded` and
 `:loaded` provide a useful small summary of the work performed.
 
 The default `:only :changed` behavior is preferred. It reloads changed namespaces that are already loaded and their downstream dependents, while leaving unrelated or experimental namespaces alone.
+
+Do **not** use `{:only :all}` as a routine verification step. It loads every
+namespace found under the configured directories, including unrelated
+experimental, GUI, or native namespaces. Such a namespace can fail because a
+sandbox lacks a shared library (for example `liblwjgl.so`) even when the
+edited code is valid. A broad reload can also leave a broken loaded namespace
+in clj-reload's state, causing later reload attempts to fail before they reach
+the requested namespace.
 
 The return value identifies the work performed:
 
@@ -72,20 +87,23 @@ After reloading, run the relevant tests or evaluate a focused smoke check.
 Use these only when needed:
 
 ```clojure
-(reload/reload {:only :loaded}) ; reload every currently loaded project namespace
-(reload/reload {:only :all})    ; reload everything found under configured dirs
-(reload/reload {:only #".*-test$"}) ; load/reload matching test namespaces
+(reload/reload {:only :loaded})       ; reload every currently loaded project ns
+(reload/reload {:only :all})          ; dangerous: load every configured ns
+(reload/reload {:only #".*-test$"})   ; focused matching namespaces
 ```
 
-Prefer the default mode for normal edits. Use `:only :loaded` after broad shared infrastructure changes. Use `:only :all` sparingly because unrelated broken files can then block development.
+Prefer the default mode for normal edits. Use `:only :loaded` only after a
+deliberate broad shared-infrastructure change, and use `:only :all` only
+when you intentionally want to load every configured namespace and have
+verified that native/UI dependencies are available.
 
-If a reload fails, fix the source and call `reload/reload` again. If a partially loaded state is obstructing recovery:
-
-```clojure
-(reload/unload)
-```
-
-Then fix the error and call `reload/reload`.
+If a reload fails, first inspect the exception's `:failed` namespace. Fix the
+source and call the default `reload/reload` again. If the failure is an
+unrelated native/UI namespace, do not retry `:only :all`; narrow the configured
+`:dirs` or restart the nREPL if the failed namespace remains in clj-reload's
+loaded/broken state. `reload/unload` is useful for ordinary partial reloads,
+but it may itself encounter the recorded broken namespace after a failed broad
+load.
 
 For debugging, temporarily use:
 
@@ -143,10 +161,14 @@ Use the project's test namespaces rather than an unmanaged `:llvm-server` proces
 
 ## Recommended agent workflow
 
-1. Edit the source.
-2. Ensure the nREPL development process is running; do not start a second one.
-3. Initialize `clj-reload` once if needed.
-4. Run `(reload/reload)` through `clojure_eval`.
-5. Inspect the reload result and fix any load error.
-6. Run focused tests or a smoke check.
-7. Use a full development-server restart only for unrecoverable global/native state or a deliberately clean-state verification.
+1. Ensure the nREPL development process is running; do not start a second one.
+2. Initialize `clj-reload` **before editing**, using a narrow `:dirs` set when
+   unrelated native/UI namespaces exist.
+3. Edit the source.
+4. Run the default `(reload/reload)` through `clojure_eval`.
+5. Inspect only `:unloaded` and `:loaded`, then run focused tests or a smoke
+   check.
+6. If the reload fails, fix the reported namespace and retry the default
+   reload; do not escalate immediately to `:only :all`.
+7. Restart the nREPL only when a failed broad/native load has poisoned the
+   reload state or when unrecoverable global/native state requires it.
