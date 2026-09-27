@@ -10,7 +10,7 @@
   ["-remotemonitor"
    "-binarymonitor"
    "-sounddev"
-   "alsa"])
+   "dummy"])
 
 (defn- validate-instance
   [instance]
@@ -52,8 +52,9 @@
   executable defaults to `x64sc`; `:extra-args` (or `:options`) supplies
   additional VICE command-line arguments. The binary monitor is enabled by
   default and configured using `:address` and `:port`, which default to
-  localhost and 6502. ALSA is selected as the default sound device; pass a
-  different `-sounddev` option through `:extra-args` to override it.
+  localhost and 6502. The dummy sound device is selected by default for
+  captures; pass a different `-sounddev` option through `:extra-args` to
+  override it.
 
   Returns a VICE instance descriptor suitable for `connect` and `stop`."
   ([]
