@@ -774,12 +774,65 @@
                         (assoc :block-id block-id
                                :iterations 1))))))))
 
+(declare control-flow-targets)
+
+(defn- split-block-at-control-flow-targets-xf
+  "Split provisional blocks at backward control-flow targets.
+
+  The ordinary block builder cannot know that a fall-through address is a
+  target until it later sees the branch instruction. It retains the complete
+  provisional block until its terminator, so this transducer can split that
+  block retroactively before it is interned."
+  [instruction-by-id initial-memory]
+  (fn [rf]
+    (fn
+      ([] (rf))
+      ([result] (rf result))
+      ([result {:keys [instruction-ids] :as block}]
+       (let [instruction-ids (vec instruction-ids)
+             instructions (mapv instruction-by-id instruction-ids)
+             targets (->> instructions
+                          (mapcat #(or (control-flow-targets
+                                        initial-memory %)
+                                       #{}))
+                          set)
+             split-indices (->> instructions
+                                (map-indexed vector)
+                                (keep (fn [[index instruction]]
+                                        (when (and (pos? index)
+                                                   (contains?
+                                                    targets
+                                                    (or (:pc instruction)
+                                                        (:address instruction))))
+                                          index)))
+                                vec)
+             boundaries (concat [0] split-indices [(count instruction-ids)])]
+         (reduce (fn [result [start end]]
+                   (if (< start end)
+                     (rf result
+                         (assoc block
+                                :start-index (+ (:start-index block) start)
+                                :end-index (+ (:start-index block) end)
+                                :instruction-ids (subvec instruction-ids start end)))
+                     result))
+                 result
+                 (map vector boundaries (rest boundaries))))))))
+
 (defn- basic-block-execution
   ([occurrences]
    (basic-block-execution occurrences (constantly false)))
   ([occurrences boundary?]
-   (let [block-state (atom {:block-ids {} :blocks []})
+   (basic-block-execution occurrences boundary? nil nil))
+  ([occurrences boundary? instruction-by-id initial-memory]
+   (let [occurrences (vec occurrences)
+         instruction-by-id (or instruction-by-id
+                               (into {}
+                                     (map (juxt :instruction-id :instruction)
+                                          occurrences)))
+         block-state (atom {:block-ids {} :blocks []})
          block-runs (transduce (comp (basic-block-builder-xf boundary?)
+                                     (split-block-at-control-flow-targets-xf
+                                      instruction-by-id initial-memory)
                                      (deduplicate-basic-blocks-xf block-state))
                                conj [] occurrences)]
      {:blocks (:blocks @block-state)
@@ -794,9 +847,10 @@
   instruction maps."
   ([instructions spans]
    (versioned-execution instructions spans {}))
-  ([executed-instructions spans _options]
+  ([executed-instructions spans options]
    (let [executed-instructions (vec executed-instructions)
          spans (vec (or spans []))
+         options (or options {})
          {:keys [instructions node-versions instruction-ids-by-event]}
          (intern-instructions executed-instructions)
          occurrences (mapv (fn [event-index instruction-id instruction]
@@ -805,9 +859,14 @@
                               :instruction instruction})
                            (range) instruction-ids-by-event executed-instructions)
          boundary-starts (set (map :start-index spans))
+         instruction-by-id (into {}
+                                (map (juxt :instruction-id :instruction)
+                                     occurrences))
          {:keys [blocks block-runs]}
          (basic-block-execution occurrences
-                                 #(contains? boundary-starts (:event-index %)))]
+                                 #(contains? boundary-starts (:event-index %))
+                                 instruction-by-id
+                                 (:initial-memory options))]
      {:format :omkamra.vice/versioned-execution-v3
       :event-count (count executed-instructions)
       :instructions instructions
@@ -898,6 +957,31 @@
 
       :else
       #{fall-through})))
+
+(defn- control-flow-targets
+  "Return non-fall-through targets introduced by `instruction`."
+  [memory instruction]
+  (let [mnemonic (:mnemonic instruction)]
+    (cond
+      (contains? conditional-branch-mnemonics mnemonic)
+      #{(relative-target instruction)}
+
+      (= "JMP" mnemonic)
+      (case (:mode instruction)
+        :abs #{(absolute-operand instruction)}
+        :ind (if memory
+               #{(indirect-jump-target memory instruction)}
+               #{})
+        #{})
+
+      (= "JSR" mnemonic)
+      #{(absolute-operand instruction)}
+
+      (= "BRK" mnemonic)
+      (if memory #{(memory-word memory 0xfffe)} #{})
+
+      :else
+      #{})))
 
 (defn- unexpected-control-flow?
   [memory previous current]
@@ -1094,7 +1178,8 @@
         spans (mapv clean-span (:spans irq-data))
         irq-spans (mapv clean-span (:sections irq-data))
         non-irq-spans (mapv clean-span (:non-irq-sections irq-data))
-        execution (versioned-execution instructions (:spans irq-data))]
+        execution (versioned-execution instructions (:spans irq-data)
+                                        {:initial-memory initial-memory})]
     (assoc-in artifact [:stages :structure]
               {:spans spans
                :irq-sections irq-spans
@@ -1260,6 +1345,9 @@
                   (collect-stream-samples-xf)
                   (mark-control-flow-boundaries-xf initial-memory)
                   (basic-block-builder-xf :boundary?)
+                  (split-block-at-control-flow-targets-xf
+                   #(nth (:instructions @instruction-state) %)
+                   initial-memory)
                   (deduplicate-basic-blocks-xf block-state))
         reducer (xf (fn
                       ([] (empty-stream-state))

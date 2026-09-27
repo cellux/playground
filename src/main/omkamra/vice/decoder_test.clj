@@ -205,6 +205,45 @@
                                   (:node-versions execution)))))
     (is (= [2] (:instruction-ids (second (:blocks execution)))))))
 
+(deftest splits-block-at-backward-control-flow-target
+  (let [instructions [{:pc 0xc000 :bytes [0xa2 0x00] :mnemonic "LDX"
+                       :mode :imm :operand "#$00" :text "LDX #$00"}
+                      {:pc 0xc002 :bytes [0xea] :mnemonic "NOP"
+                       :mode :imp :operand "" :text "NOP"}
+                      {:pc 0xc003 :bytes [0xe8] :mnemonic "INX"
+                       :mode :imp :operand "" :text "INX"}
+                      {:pc 0xc004 :bytes [0xd0 0xfc] :mnemonic "BNE"
+                       :mode :rel :operand "$C002" :text "BNE $C002"}]
+        execution (decoder/versioned-execution
+                   instructions [{:kind :non-irq :start-index 0 :end-index 4}])]
+    (is (= [[0] [1 2 3]]
+           (mapv :instruction-ids (:blocks execution))))
+    (is (= [[0 1] [1 4]]
+           (mapv (juxt :start-index :end-index)
+                 (:block-runs execution))))))
+
+(deftest streaming-splits-at-backward-control-flow-target
+  (let [empty-state (var-get (ns-resolve 'omkamra.vice.decoder
+                                          'empty-stream-state))
+        make-ingester (var-get (ns-resolve 'omkamra.vice.decoder
+                                            'make-stream-ingester))
+        finish-stream (var-get (ns-resolve 'omkamra.vice.decoder
+                                           'instruction-block-stream))
+        ingester (make-ingester {:initial-memory (byte-array 65536)})
+        events [{:operation :exec :pc 0xc000 :bytes [0xa2 0x00]
+                 :vice-text "LDX"}
+                {:operation :exec :pc 0xc002 :bytes [0xea]
+                 :vice-text "NOP"}
+                {:operation :exec :pc 0xc003 :bytes [0xe8]
+                 :vice-text "INX"}
+                {:operation :exec :pc 0xc004 :bytes [0xd0 0xfc]
+                 :vice-text "BNE"}]
+        state (atom (reduce (:step ingester) (empty-state) events))
+        _ (swap! state (:complete ingester))
+        stream (finish-stream state ingester)]
+    (is (= [[0] [1 2 3]]
+           (mapv :instruction-ids (:blocks stream))))))
+
 (deftest separates-irq-handler-from-interrupted-caller-block
   (let [instructions [{:pc 0xe5cd :bytes [0xa5 0xc6] :mnemonic "LDA"}
                        {:pc 0xff48 :bytes [0x48] :mnemonic "PHA"}
