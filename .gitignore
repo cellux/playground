@@ -1,3 +1,5 @@
+/.clj-kondo/.cache/
+/captures/
 /classes/
 /.cpcache/
 /.nrepl-port

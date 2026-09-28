@@ -1,0 +1,2 @@
+{:hooks {:analyze-call {omkamra.cgen.core/defn hooks.cgen/defn
+                         omkamra.cgen.core/fn hooks.cgen/anonymous-fn}}}
