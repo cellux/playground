@@ -125,7 +125,6 @@
                 cider/cider-nrepl {:mvn/version "0.62.2"}
                 refactor-nrepl/refactor-nrepl {:mvn/version "3.14.0"}
                 clj-commons/pomegranate {:mvn/version "1.3.27"}
-                org.clojure/clojurescript {:mvn/version "1.12.42"}
                 integrant/repl {:mvn/version "0.4.0"}
                 midje/midje {:mvn/version "1.10.10"}
                 lambdaisland/kaocha {:mvn/version "1.91.1392"}

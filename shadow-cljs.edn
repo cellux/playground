@@ -1,0 +1,10 @@
+{:source-paths ["src/main"]
+
+ :builds
+ {:rb.explores.dev.cljs
+  {:target :browser
+   :output-dir ".dev/cljs/rb/explores/dev/cljs"
+   :asset-path "/rb/explores/dev/cljs"
+   :modules
+   {:main
+    {:init-fn rb.explores.dev.cljs/init}}}}}

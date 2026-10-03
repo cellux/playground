@@ -3,6 +3,8 @@
 /classes/
 /.cpcache/
 /.nrepl-port
+/.shadow-cljs/
+/.dev/
 *.log
 *.class
 *.java

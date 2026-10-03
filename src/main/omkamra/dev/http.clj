@@ -2,12 +2,15 @@
   "A convention-based Ring HTTP server for playground namespaces."
   (:require [clojure.string :as str]
             [integrant.core :as ig]
+            [omkamra.dev.cljs :as cljs]
             [org.httpkit.server :as http-kit]))
 
 (def system
   "Portable Integrant configuration for the development HTTP server."
-  {:omkamra.dev.http/server
-   {:host "127.0.0.1"
+  {:omkamra.dev.cljs/compiler {}
+   :omkamra.dev.http/server
+   {:compiler (ig/ref :omkamra.dev.cljs/compiler)
+    :host "127.0.0.1"
     :port 8080}})
 
 (def ^:private valid-path-segment
@@ -57,22 +60,31 @@
    :headers {"content-type" "text/plain; charset=utf-8"}
    :body "Not found"})
 
+(defn- page-namespace
+  [uri]
+  ;; The second handler candidate for /a/b/c is a.b.c/index, so its namespace
+  ;; is the browser app's page namespace.
+  (some-> (endpoint-symbols uri) second first))
+
 (defn- handler
-  "A Ring handler mapping `/a/b/c/x` to the public Var `a.b.c/x`."
-  [request]
-  (if-let [handler (resolve-handler (:uri request))]
-    (@handler request)
-    (not-found request)))
+  "Serve generated CLJS assets, Ring handlers, then registered CLJS pages."
+  [compiler request]
+  (or (cljs/asset-response compiler (:uri request))
+      (when-let [ring-handler (resolve-handler (:uri request))]
+        (@ring-handler request))
+      (when-let [namespace-name (page-namespace (:uri request))]
+        (cljs/page-response compiler namespace-name))
+      (not-found request)))
 
 (defmethod ig/init-key :omkamra.dev.http/server
-  [_ options]
+  [_ {:keys [compiler] :as options}]
   (let [options (merge {:host "127.0.0.1"
                         :port 8080}
                        options)
         options (-> options
                     (assoc :ip (:host options))
-                    (dissoc :host))]
-    (http-kit/run-server handler options)))
+                    (dissoc :host :compiler))]
+    (http-kit/run-server (partial handler compiler) options)))
 
 (defmethod ig/halt-key! :omkamra.dev.http/server
   [_ server]
