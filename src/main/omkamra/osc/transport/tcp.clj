@@ -2,11 +2,10 @@
   (:require [omkamra.osc.transport :as transport :refer [Transport]])
   (:import
    (java.net InetSocketAddress)
-   (java.nio ByteOrder ByteBuffer)
+   (java.nio ByteBuffer)
    (java.nio.channels SocketChannel
                       ClosedByInterruptException
-                      AsynchronousCloseException)
-   (com.github.pbbl.heap ByteBufferPool)))
+                      AsynchronousCloseException)))
 
 (defn read-into
   [buf channel size]
@@ -54,27 +53,21 @@
         (println t)))))
 
 (defrecord TcpTransport [^SocketChannel channel
-                         ^ByteBufferPool bufpool
                          callbacks
                          receiver]
   Transport
   (send [_ osc-packet]
-    (let [size-buf (.take bufpool 4)]
-      (try
-        (.putInt size-buf 0 (.limit osc-packet))
-        (.write channel size-buf)
-        (.write channel osc-packet)
-        (finally
-          (.give bufpool size-buf)))))
+    (let [size-buf (ByteBuffer/allocate 4)]
+      (.putInt size-buf (.limit osc-packet))
+      (.rewind size-buf)
+      (.write channel size-buf)
+      (.write channel osc-packet)))
   (recv [_]
-    (let [size-buf (.take bufpool 4)]
-      (try
-        (read-into size-buf channel 4)
-        (let [packet-size (.getInt size-buf 0)
-              packet-buf (ByteBuffer/allocate packet-size)]
-          (read-into packet-buf channel packet-size))
-        (finally
-          (.give bufpool size-buf)))))
+    (let [size-buf (ByteBuffer/allocate 4)]
+      (read-into size-buf channel 4)
+      (let [packet-size (.getInt size-buf 0)
+            packet-buf (ByteBuffer/allocate packet-size)]
+        (read-into packet-buf channel packet-size))))
   (add-recv-callback [this callback]
     (swap! callbacks update :new conj callback)
     (swap! receiver #(or % (start-receiver this))))
@@ -83,11 +76,9 @@
 (defn connect
   ([^InetSocketAddress address]
    (let [channel (SocketChannel/open address)
-         bufpool (ByteBufferPool.)
          callbacks (atom {:active []})
          receiver (atom nil)]
      (->TcpTransport channel
-                     bufpool
                      callbacks
                      receiver)))
   ([host port]
