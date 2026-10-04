@@ -1,4 +1,4 @@
-{:source-paths ["src/main"]
+{:source-paths ["src"]
 
  :builds
  {:rb.explores.dev.cljs

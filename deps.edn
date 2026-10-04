@@ -1,5 +1,5 @@
 {:paths
- ["src/main" "resources"]
+ ["src" "resources"]
 
  :deps
  {org.clojure/core.async {:mvn/version "1.9.865"}

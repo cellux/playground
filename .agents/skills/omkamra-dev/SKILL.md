@@ -15,7 +15,7 @@ After starting the dev nREPL, initialize `clj-reload` before editing project sou
 
 ```clojure
 (require '[clj-reload.core :as reload])
-(reload/init {:dirs ["src/main"] :output :quiet})
+(reload/init {:dirs ["src"] :output :quiet})
 ```
 
 After source changes, use `clj-reload` to reload changed namespaces and their
