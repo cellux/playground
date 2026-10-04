@@ -7,4 +7,12 @@
    :asset-path "/rb/explores/dev/cljs"
    :modules
    {:main
-    {:init-fn rb.explores.dev.cljs/init}}}}}
+    {:init-fn rb.explores.dev.cljs/init}}}
+
+  :rb.explores.threejs.earth
+  {:target :browser
+   :output-dir ".dev/cljs/rb/explores/threejs/earth"
+   :asset-path "/rb/explores/threejs/earth"
+   :modules
+   {:main
+    {:init-fn rb.explores.threejs.earth/init}}}}}

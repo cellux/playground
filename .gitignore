@@ -5,6 +5,7 @@
 /.nrepl-port
 /.shadow-cljs/
 /.dev/
+/node_modules/
 *.log
 *.class
 *.java
