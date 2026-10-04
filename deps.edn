@@ -143,20 +143,4 @@
                 org.lwjgl/lwjgl-glfw$natives-linux {:mvn/version "3.3.6"}
                 org.lwjgl/lwjgl-opengl$natives-linux {:mvn/version "3.3.6"}
                 org.lwjgl/lwjgl-opengles$natives-linux {:mvn/version "3.3.6"}
-                org.lwjgl/lwjgl-stb$natives-linux {:mvn/version "3.3.6"}}}
-
-  :cljs
-  {:extra-deps {org.clojure/clojurescript {:mvn/version "1.12.42"}}}
-
-  :cljs-dev
-  {:main-opts ["--main" "cljs.main"
-               "--compile-opts" "cljs-compile-opts.edn"
-               "--watch" "src/main"
-               "--optimizations" "none"
-               "--compile" "rb.explores.clojurescript"]}
-
-  :cljs-release
-  {:main-opts ["--main" "cljs.main"
-               "--compile-opts" "cljs-compile-opts.edn"
-               "--optimizations" "advanced"
-               "--compile" "rb.explores.clojurescript"]}}}
+                org.lwjgl/lwjgl-stb$natives-linux {:mvn/version "3.3.6"}}}}}
