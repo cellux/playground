@@ -9,6 +9,27 @@ This project keeps named links to portable Integrant configurations under `:syst
 
 Use the project's live nREPL and `clojure_eval` to operate them. Prefer the `omkamra.dev` control-plane API over `integrant.repl` functions such as `go`, `halt`, or `reset`.
 
+## Reload project namespaces
+
+After starting the dev nREPL, initialize `clj-reload` before editing project source:
+
+```clojure
+(require '[clj-reload.core :as reload])
+(reload/init {:dirs ["src/main"] :output :quiet})
+```
+
+After source changes, use `clj-reload` to reload changed namespaces and their
+transitive dependents rather than manually issuing `require ... :reload` for
+each namespace:
+
+```clojure
+(select-keys (reload/reload) [:unloaded :loaded])
+```
+
+This is particularly important after changing macros, protocols, or compiler
+infrastructure. Initialize once per nREPL session, and do so before the first
+edit so changes are detected.
+
 ## Inspect systems
 
 Start by evaluating:
