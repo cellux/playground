@@ -79,7 +79,20 @@ After starting it, report the configured port and, when useful, verify the endpo
 
 `shadow-cljs.edn` registers browser pages as standard Shadow `:browser` builds. A build id must be the dotted, unqualified keyword corresponding to its page namespace, for example `:a.b.c` for `/a/b/c`. It must have an `:output-dir`, an `:asset-path` of `/a/b/c`, and one module (normally `:main`).
 
-When no Ring handler resolves a page URL, the HTTP server starts watching its registered browser build on the first request in that server lifecycle, returns generated HTML loading the module, and serves generated assets from its configured output directory. Shadow then recompiles automatically when sources change. Development build output belongs below `.dev/` and should be ignored by Git. Release output may use `resources/`. Restart the `:http` system to stop the workers and clear the watch state.
+When no Ring handler resolves a page URL, the HTTP server starts watching its registered browser build on the first request in that server lifecycle, returns generated HTML loading the module, and serves generated assets from its configured output directory. Shadow then recompiles automatically when sources change. Do not start a separate Shadow watch process for these pages. To verify the build and browser connection, use:
+
+```clojure
+(shadow/worker-running? :my.page)
+(shadow/repl-runtimes :my.page)
+```
+
+After source edits, use `shadow/watch-compile!` when an explicit synchronous rebuild is needed:
+
+```clojure
+(shadow/watch-compile! :my.page) ; => :ok
+```
+
+The HTTP-managed watch process handles the initial compilation; do not use `Thread/sleep` to wait for it. A connected browser runtime is still required before `shadow/cljs-eval` can run. Development build output belongs below `.dev/` and should be ignored by Git. Release output may use `resources/`. Restart the `:http` system to stop the workers and clear the watch state.
 
 ## Evaluate CLJS in a connected browser
 
