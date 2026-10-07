@@ -227,9 +227,13 @@
              [[(real-local-load-op) (get slots (:name expression))]]
              [[:iload (get slots (:name expression))]])
     :state-load (let [{:keys [slot index type]} (get (:state-layout slots)
-                                                     (:index expression))]
-                  [[:aload slot] [:ldc index]
-                   [(if (= :float type) (real-load-op) :iaload)]])
+                                                     (:index expression))
+                      element-index (:element-index expression)]
+                  (vec (concat [[:aload slot] [:ldc index]]
+                               (when element-index
+                                 (concat (expression-instructions element-index slots labels)
+                                         [[:iadd]]))
+                               [[(if (= :float type) (real-load-op) :iaload)]])))
     :frame [[:iload (:frame slots)]]
     :frames [[:iload (:frames slots)]]
     :sample-rate [[(real-local-load-op) (:sample-rate slots)]]
@@ -292,8 +296,12 @@
                         (expression-instructions (:value statement) slots labels)
                         [[(real-store-op)]]))
     :state-store (let [{:keys [slot index type]} (get (:state-layout slots)
-                                                      (:index statement))]
+                                                      (:index statement))
+                       element-index (:element-index statement)]
                    (vec (concat [[:aload slot] [:ldc index]]
+                                (when element-index
+                                  (concat (expression-instructions element-index slots labels)
+                                          [[:iadd]]))
                                 (expression-instructions (:value statement) slots labels)
                                 [[(if (= :float type) (real-store-op) :iastore)]])))
     :if (let [then-label (next-label labels "if-then")
@@ -352,16 +360,19 @@
 (defn- state-layout
   [state]
   (reduce (fn [{:keys [entries float-count int-count] :as layout}
-               [state-index {:keys [type]}]]
+               [position {:keys [index type size]}]]
             (let [storage (if (= :float type) :float :int)
+                  size (or size 1)
+                  logical-index (or index position)
                   physical-index (if (= storage :float) float-count int-count)
-                  entry {:state-index state-index
+                  entry {:state-index logical-index
                          :type type
+                         :size size
                          :storage storage
                          :index physical-index}]
               (cond-> (assoc layout :entries (conj entries entry))
-                (= storage :float) (update :float-count inc)
-                (= storage :int) (update :int-count inc))))
+                (= storage :float) (update :float-count + size)
+                (= storage :int) (update :int-count + size))))
           {:entries [] :float-count 0 :int-count 0}
           (map-indexed vector state)))
 
@@ -461,13 +472,18 @@
 (defn- reset-state!
   [ir layout state]
   (check-state! layout state)
-  (doseq [[{:keys [storage index type]} {:keys [init]}]
-          (map vector (:entries layout) (:state ir))]
-    (if (= storage :float)
-      (if (f64?)
-        (aset-double ^doubles (:float state) index (double init))
-        (aset-float ^floats (:float state) index (float init)))
-      (aset-int ^ints (:int state) index (control-value type init))))
+  (doseq [{:keys [index state-index storage type]} (:entries layout)
+          :let [state-description (some #(when (= (:index %) state-index) %) (:state ir))]
+          [element-index value] (map-indexed vector
+                                             (if (= 1 (or (:size state-description) 1))
+                                               [(:init state-description)]
+                                               (:init state-description)))]
+    (let [index (+ index element-index)]
+      (if (= storage :float)
+        (if (f64?)
+          (aset-double ^doubles (:float state) index (double value))
+          (aset-float ^floats (:float state) index (float value)))
+        (aset-int ^ints (:int state) index (control-value type value)))))
   nil)
 
 (defn- check-controls!
@@ -652,9 +668,12 @@
             [local-slots next-slot] (slot-layout (:locals ir) next-slot)
             channel-slot (when multi-channel? next-slot)
             frame-slot (if multi-channel? (inc channel-slot) next-slot)
-            state-slots (mapv #(assoc % :slot (if (= :float (:storage %))
-                                                float-state-slot int-state-slot))
-                              (:entries state-layout))
+            state-slots (into {}
+                              (map (fn [entry]
+                                     [(:state-index entry)
+                                      (assoc entry :slot (if (= :float (:storage entry))
+                                                           float-state-slot int-state-slot))])
+                                   (:entries state-layout)))
             slots (merge {:input 1 :output 2 :frames 3 :sample-rate sample-rate-slot
                           :frame frame-slot :multi-channel? multi-channel?
                           :state-layout state-slots}

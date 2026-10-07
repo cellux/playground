@@ -1053,7 +1053,7 @@
             :channel-stride 4096
             :input-offset 0
             :output-offset 4096
-            :required-bytes 8192}
+            :required-bytes 8196}
            (select-keys memory [:page-size :initial-pages :element-type
                                 :element-bytes :alignment :frame-capacity
                                 :channel-stride :input-offset :output-offset
@@ -1061,14 +1061,14 @@
     (is (= {:offset 0 :channels 1 :frame-capacity 1024 :bytes 4096
             :storage :linear-memory}
            (get-in memory [:regions :input])))
-    (is (= {:storage :globals :count 1}
+    (is (= {:storage :linear-memory :offset 8192 :bytes 4 :count 1}
            (get-in memory [:regions :state])))
     (is (= :wasm-process (get-in artifact [:wasm-abi :kind])))
     (is (str/starts-with? wat "(module "))
     (is (str/includes? wat "(export \"init\")"))
     (is (str/includes? wat "(export \"reset\")"))
     (is (str/includes? wat "(export \"process\")"))
-    (is (str/includes? wat "(global $state_0"))))
+    (is (str/includes? wat "(f32.store (i32.const 8192)"))))
 
 (deftest wasm-f64-artifact-emits-physical-layout
   (let [artifact (dsp/compile one-pole {:target :wasm
@@ -1318,9 +1318,49 @@
         wasm (dsp/compile definition {:target :wasm :entry :process})]
     (is (str/includes? (:source javascript) "sampleRate"))
     (is (str/includes? (:source javascript) "state[0] | 0"))
-    (is (str/includes? (:wat wasm) "(global $state_0 (mut i32)"))
+    (is (str/includes? (:wat wasm) "(i32.store (i32.const 8192)"))
     (is (= false (get-in javascript [:realtime :allocations?])))
     (is (= false (get-in wasm [:realtime :allocations?])))))
+
+(deftest fixed-size-state-tables-work-across-backends
+  (let [definition {:dsp/kind :function
+                    :name 'table-tap
+                    :params [{:name 'sample :type :float}
+                             {:name 'slot :type :int}]
+                    :state [{:name 'table :type :float :size 4
+                             :init [0.0 0.0 0.0 0.0]}]
+                    :process {:input :sample :controls ['slot]}
+                    :body ['(let [previous (state-load table slot)]
+                              (do
+                                (state-store table slot sample)
+                                previous))]}
+        render (fn [target]
+                 (let [artifact (dsp/compile definition {:target target :entry :process})
+                       input (float-array [2.0 3.0])
+                       output (float-array 2)]
+                   (dsp/invoke artifact input output 2 2)
+                   (vec output)))
+        js (dsp/compile definition {:target :js :entry :process})
+        wasm (dsp/compile definition {:target :wasm :entry :process})]
+    (is (= [0.0 2.0] (render :interpreter)))
+    (is (= [0.0 2.0] (render :jvm)))
+    (is (str/includes? (:source js) "new Float32Array"))
+    (is (str/includes? (:source js) "state[0 + (slot | 0)]"))
+    (is (= :linear-memory (get-in wasm [:wasm-abi :state-storage])))
+    (is (= {:storage :linear-memory :offset 8192 :bytes 16 :count 4}
+           (get-in wasm [:memory :regions :state])))
+    (is (str/includes? (:wat wasm) "(i32.mul (local.get $slot) (i32.const 4))"))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"outside the declared range"
+         (dsp/compile (assoc-in definition [:body 0]
+                                '(state-load table 4))
+                      {:entry :process})))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"explicit state-store"
+         (dsp/compile (assoc-in definition [:state 0 :next] 0.0)
+                      {:entry :process})))))
 
 (deftest dynamic-memory-access-and-checks
   (let [definition {:dsp/kind :function

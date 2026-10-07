@@ -181,14 +181,16 @@ statement IR. The implemented language includes:
 - `if`, `let`, `do`, and returns;
 - `while`, optional iteration bounds, `break`, and `continue`;
 - resolved function calls;
-- persistent typed state;
-- explicit buffer loads and stores;
+- persistent typed scalar state and fixed-size typed state arrays;
+- explicit buffer loads/stores and indexed `state-load`/`state-store` operations;
 - frame, channel, frame-count, and sample-rate values.
 
 Process IR is lowered directly from process metadata. It contains canonical
 buffer descriptors, controls, state slots, a per-frame body, lifecycle flags,
-memory requirements, effects, and diagnostics. State transitions are computed
-before stores so updates within a frame are simultaneous.
+memory requirements, effects, and diagnostics. Scalar state transitions are
+computed before stores so updates within a frame are simultaneous. Fixed-size
+aggregate state uses explicit ordered loads and stores, making feedback and
+delay update order visible in source and IR.
 
 IR nodes identify state and memory effects explicitly. Function and process
 roots contain aggregate effect sets. The runtime-policy validator rejects
@@ -302,10 +304,10 @@ A Wasm process artifact contains:
 - process and lifecycle ABI metadata;
 - a binary descriptor whose `:bytes` value is currently `nil`.
 
-Input and output buffers use linear memory. Persistent state currently uses
-mutable Wasm globals, and controls are process parameters. The preferred final
-ABI places state in linear memory so hosts can inspect, serialize, and manage
-instances consistently.
+Input, output, and persistent state use linear memory. State regions have
+explicit offsets, alignment, element widths, and initialized contents; controls
+remain process parameters. Reusable independent instance regions are still not
+part of the ABI.
 
 Wasm is not itself an AudioWorklet; it is the numeric module invoked by a
 worklet wrapper. The Wasm AudioWorklet adapter validates required exports,
@@ -344,7 +346,7 @@ Process artifacts expose ABI version 1 metadata for:
 
 Interpreter and JVM artifacts own one persistent state instance and expose host
 lifecycle operations. JavaScript kernels create independent instances through
-`createKernel`. Wasm state is module-instance state held in globals.
+`createKernel`. Wasm state is module-instance state held in linear memory.
 
 The final target-neutral lifecycle model should support explicit instance
 creation, reset, and destruction without changing portable process IR.
@@ -372,9 +374,13 @@ The language must provide:
 - mixed physical numeric types when needed, such as integer phase with f32 audio;
 - complex or interleaved data layouts sufficient for FFT/IFFT and spectral work.
 
-The current scalar-only state model is not sufficient for these requirements.
-Arrays and aggregate state should be added to the portable language before
-adding target-specific FFT or filter implementations.
+The first aggregate-state slice is implemented: a state declaration may supply
+`:size` and a same-length typed initializer vector, and process bodies use
+`(state-load name index)` and `(state-store name index value)`. It lowers and
+executes on the interpreter, JVM, JavaScript, and Wasm backends. Local arrays,
+aggregate records, circular-buffer helpers, complex/interleaved layouts, and
+generated initialization-time tables remain to be designed before
+backend-specific FFT or filter implementations.
 
 ### Math and DSP library
 
@@ -474,7 +480,7 @@ allocation after initialization.
 
 ### Clojure/JVM suite
 
-The current Clojure suite has 56 tests and 431 assertions, all passing. It
+The current Clojure suite has 57 tests and 440 assertions, all passing. It
 covers descriptor validation, linking, IR lowering, interpreter behavior, JVM
 bytecode, artifacts, process ABIs, typed controls/state, precision variants,
 loops, calls, lifecycle behavior, multichannel buffers, and malformed programs.
@@ -523,8 +529,9 @@ automated CI browser job. There is no separate Node conformance runner.
 - Stateful multichannel process definitions are rejected.
 - Process input/output buffers are currently float buffers with a fixed overall
   channel count.
-- State is scalar-only; arrays, tables, complex layouts, and circular buffers
-  are not yet part of the language.
+- Fixed-size state arrays/tables are available, but local arrays, aggregate
+  records, complex/interleaved layouts, circular-buffer helpers, and generated
+  initialization-time tables are not yet part of the language.
 - Dynamic buffer indices are not statically proven safe.
 - Sample-accurate automation, timestamped musical events, and voice management
   are not yet part of the process ABI.
@@ -537,7 +544,8 @@ automated CI browser job. There is no separate Node conformance runner.
 
 - Interpreter and JVM process artifacts own one state instance rather than a
   reusable factory for independent instances.
-- Wasm state is stored in globals instead of linear-memory instance regions.
+- Wasm state is in module-instance linear memory, but artifacts do not yet
+  expose reusable independent instance regions or host-managed state handles.
 - Wasm artifacts expose WAT but do not contain compiled binary bytes.
 - Wasm channel stride is currently a fixed 4096 bytes.
 - JS/Wasm worklet setup still depends on testbed-assembled metadata.
@@ -561,11 +569,13 @@ automated CI browser job. There is no separate Node conformance runner.
 
 ### 1. Extend the language for synth DSP
 
-Add fixed-size arrays, tables, circular buffers, aggregate state, mixed numeric
-representations, bit operations, complex/interleaved data, and the math/DSP
-library needed for oscillators, envelopes, filters, modulation, resampling, and
-FFT/IFFT. Implement these in the portable language and IR before introducing
-backend-specific kernels.
+The first vertical slice—fixed-size typed state arrays/tables with explicit
+indexed loads and stores—is complete across the interpreter, JVM, JavaScript,
+and Wasm. Next add local arrays, circular-buffer/delay helpers, aggregate state
+records, mixed numeric representations, bit operations, complex/interleaved
+data, and the math/DSP library needed for oscillators, envelopes, filters,
+modulation, resampling, and FFT/IFFT. Keep this work in the portable language
+and IR before introducing backend-specific kernels.
 
 Add stateful module composition with explicit ownership, feedback boundaries,
 multiple ports, and update ordering. Keep native intrinsics limited to measured

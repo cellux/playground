@@ -22,7 +22,10 @@
   (case (:op expression)
     :const {:op :constant :value (:value expression) :type (:type expression)}
     :local {:op :local :name (:name expression) :type (:type expression)}
-    :state-load {:op :state-load :index (:index expression) :type (:type expression)}
+    :state-load (cond-> {:op :state-load :index (:index expression) :type (:type expression)}
+                  (:element-index expression)
+                  (assoc :element-index (lower-expression (:element-index expression)
+                                                          channels)))
     :frame {:op :frame :type :int}
     :frames {:op :frames :type :int}
     :sample-rate {:op :sample-rate :type :float}
@@ -78,10 +81,13 @@
                    :channels channels
                    :index (lower-expression (:index statement) channels)
                    :value (lower-expression (:value statement) channels)}
-    :state-store {:op :state-store
-                  :index (:index statement)
-                  :type (:type statement)
-                  :value (lower-expression (:value statement) channels)}
+    :state-store (cond-> {:op :state-store
+                          :index (:index statement)
+                          :type (:type statement)
+                          :value (lower-expression (:value statement) channels)}
+                   (:element-index statement)
+                   (assoc :element-index (lower-expression (:element-index statement)
+                                                           channels)))
     (:break :continue) statement
     (throw (ex-info "unsupported statement in JS lowering"
                     {:statement statement}))))
@@ -152,7 +158,10 @@
     :constant (value-source expression)
     :local (coerce-source (:type expression) (identifier (:name expression)))
     :state-load (coerce-source (:type expression)
-                               (str "state[" (:index expression) "]"))
+                               (str "state[" (:index expression)
+                                    (when-let [element-index (:element-index expression)]
+                                      (str " + " (emit-expression element-index)))
+                                    "]"))
     :frame "frame"
     :frames "frames"
     :sample-rate "sampleRate"
@@ -231,7 +240,10 @@
                                 (coerce-source :float
                                                (emit-expression (:value statement))) ";"))]
     :state-store [(indent level
-                          (str "state[" (:index statement) "] = "
+                          (str "state[" (:index statement)
+                               (when-let [element-index (:element-index statement)]
+                                 (str " + " (emit-expression element-index)))
+                               "] = "
                                (coerce-source (:type statement)
                                               (emit-expression (:value statement))) ";"))]))
 
@@ -254,10 +266,13 @@
 (defn- emit-lifecycle-lines
   [state]
   (concat ["  function init() {"]
-          (map-indexed (fn [index {:keys [init type]}]
-                         (str "    state[" index "] = "
-                              (coerce-source type (value-source {:type type :value init})) ";"))
-                       state)
+          (mapcat (fn [{:keys [index init type size]}]
+                    (map-indexed (fn [element-index value]
+                                   (str "    state[" (+ index element-index) "] = "
+                                        (coerce-source type
+                                                       (value-source {:type type :value value})) ";"))
+                                 (if (= 1 (or size 1)) [init] init)))
+                  state)
           ["  }"
            "  function reset() {"
            "    init();"
@@ -267,8 +282,10 @@
   [{:keys [channels controls state frame-body]}]
   (let [control-params (map #(identifier (:name %)) controls)
         state-init (str "[" (str/join ", "
-                                      (map #(value-source {:type (:type %) :value (:init %)})
-                                           state)) "]")
+                                      (mapcat (fn [{:keys [type init size]}]
+                                                (map #(value-source {:type type :value %})
+                                                     (if (= 1 (or size 1)) [init] init)))
+                                              state)) "]")
         state-decl (if (homogeneous-float-state? state)
                      (str "  const state = new " (if (f64?) "Float64Array" "Float32Array")
                           "(" state-init ");")

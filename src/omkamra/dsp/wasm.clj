@@ -5,6 +5,7 @@
 (def ^:private page-size 65536)
 (def ^:private channel-stride-bytes 4096)
 (def ^:dynamic *precision* nil)
+(def ^:dynamic *state-layout* nil)
 
 (defn- f64?
   []
@@ -26,7 +27,6 @@
     (if (re-matches #"^[0-9].*" name) (str "_" name) name)))
 
 (defn- local-name [name] (wat-symbol (str "$" (identifier name))))
-(defn- state-name [index] (wat-symbol (str "$state_" index)))
 (defn- loop-counter-name [index] (wat-symbol (str "$source-loop-count-" index)))
 
 (defn- wat-number
@@ -43,6 +43,28 @@
                           (Double/toString value)
                           (Float/toString (float value)))))))
 
+(defn- align
+  [offset alignment]
+  (* alignment (long (Math/ceil (/ (double offset) alignment)))))
+
+(defn- state-memory-layout
+  [states start]
+  (reduce (fn [{:keys [next entries] :as layout} {:keys [index type size]}]
+            (let [element-bytes (if (= type :float) (float-bytes) 4)
+                  size (or size 1)
+                  offset (align next element-bytes)
+                  entry {:index index
+                         :offset offset
+                         :type type
+                         :size size
+                         :element-bytes element-bytes
+                         :alignment element-bytes}]
+              (assoc layout
+                     :next (+ offset (* size element-bytes))
+                     :entries (assoc entries index entry))))
+          {:next start :entries {}}
+          states))
+
 (defn- memory-layout
   [ir]
   (let [channels (:channels ir)
@@ -51,7 +73,8 @@
         input-bytes (* channels channel-stride-bytes)
         output-offset input-bytes
         output-bytes input-bytes
-        required-bytes (+ output-offset output-bytes)]
+        state-layout (state-memory-layout (:state ir) (+ output-offset output-bytes))
+        required-bytes (:next state-layout)]
     {:page-size page-size
      :element-type (keyword (float-type))
      :element-bytes element-bytes
@@ -61,6 +84,7 @@
      :required-bytes required-bytes
      :initial-pages (max 1 (long (Math/ceil (/ (double required-bytes)
                                                page-size))))
+     :state-layout (:entries state-layout)
      :regions {:input {:offset 0
                        :channels channels
                        :frame-capacity frame-capacity
@@ -71,10 +95,10 @@
                         :frame-capacity frame-capacity
                         :bytes output-bytes
                         :storage :linear-memory}
-               ;; Process state currently uses Wasm globals. Keep this explicit
-               ;; in the ABI until state is moved into linear memory.
-               :state {:storage :globals
-                       :count (count (:state ir))}
+               :state {:storage :linear-memory
+                       :offset (+ output-offset output-bytes)
+                       :bytes (- required-bytes (+ output-offset output-bytes))
+                       :count (reduce + 0 (map #(or (:size %) 1) (:state ir)))}
                :controls {:storage :parameters
                           :count (count (:controls ir))}}}))
 
@@ -119,6 +143,23 @@
   [type]
   (if (= :float type) (float-type) "i32"))
 
+(defn- state-entry
+  [operation]
+  (or (get *state-layout* (:index operation))
+      (throw (ex-info "Wasm state operation refers to an unknown state slot"
+                      {:operation operation :state-layout *state-layout*}))))
+
+(defn- emit-state-address
+  [operation]
+  (let [{:keys [offset element-bytes]} (state-entry operation)
+        element-index (:element-index operation)]
+    (if element-index
+      (wat-form "i32.add"
+                (wat-form "i32.const" offset)
+                (wat-form "i32.mul" (emit-expression element-index)
+                          (wat-form "i32.const" element-bytes)))
+      (wat-form "i32.const" offset))))
+
 (defn- emit-expression
   [expression]
   (case (:op expression)
@@ -128,7 +169,8 @@
                                      (if (:value expression) 1 0)
                                      (int (:value expression)))))
     :local (wat-form "local.get" (local-name (:name expression)))
-    :state-load (wat-form "global.get" (state-name (:index expression)))
+    :state-load (wat-form (str (wasm-type (:type expression)) ".load")
+                          (emit-state-address expression))
     :frame (wat-form "local.get" (wat-symbol "$frame"))
     :frames (wat-form "local.get" (wat-symbol "$frames"))
     :sample-rate (wat-form "local.get" (wat-symbol "$sampleRate"))
@@ -200,7 +242,8 @@
      :buffer-store (wat-form (str (float-type) ".store")
                              (emit-buffer-address statement)
                              (emit-expression (:value statement)))
-     :state-store (wat-form "global.set" (state-name (:index statement))
+     :state-store (wat-form (str (wasm-type (:type statement)) ".store")
+                            (emit-state-address statement)
                             (emit-expression (:value statement)))
      :if (apply wat-form "if"
                 (concat [(emit-expression (:condition statement))]
@@ -248,34 +291,30 @@
   [forms]
   (mapcat #(if (vector? %) % [%]) (remove nil? forms)))
 
-(defn- emit-state-globals
-  [state]
-  (map-indexed
-   (fn [index {:keys [init type]}]
-     (wat-form "global" (state-name index)
-               (wat-form "mut" (wat-symbol (wasm-type type)))
-               (if (= :float type)
-                 (wat-form (str (float-type) ".const") (wat-number init))
-                 (wat-form "i32.const" (if (= :boolean type)
-                                         (if init 1 0)
-                                         (int init))))))
-   state))
+(defn- state-constant
+  [type value]
+  (if (= :float type)
+    (wat-form (str (float-type) ".const") (wat-number value))
+    (wat-form "i32.const" (if (= :boolean type)
+                            (if value 1 0)
+                            (int value)))))
 
 (defn- emit-init
   [state]
   (apply list
          (concat [(wat-symbol "func") (wat-symbol "$init")
                   (wat-form "export" "init")]
-                 (map-indexed
-                  (fn [index {:keys [init type]}]
-                    (wat-form "global.set" (state-name index)
-                              (if (= :float type)
-                                (wat-form (str (float-type) ".const")
-                                          (wat-number init))
-                                (wat-form "i32.const"
-                                          (if (= :boolean type)
-                                            (if init 1 0)
-                                            (int init))))))
+                 (mapcat
+                  (fn [{:keys [index init type size]}]
+                    (let [{:keys [offset element-bytes]} (get *state-layout* index)
+                          values (if (= 1 (or size 1)) [init] init)]
+                      (map-indexed
+                       (fn [element-index value]
+                         (wat-form (str (wasm-type type) ".store")
+                                   (wat-form "i32.const"
+                                             (+ offset (* element-index element-bytes)))
+                                   (state-constant type value)))
+                       values)))
                   state))))
 
 (defn- emit-reset
@@ -365,12 +404,12 @@
   (when-not (= :process (:op ir))
     (throw (ex-info "Wasm emission requires process IR" {:ir ir})))
   (let [memory (memory-layout ir)]
-    (apply list
-           (concat [(wat-symbol "module")
-                    (wat-form "memory" (wat-form "export" "memory")
-                              (initial-pages memory))]
-                   (emit-state-globals (:state ir))
-                   [(emit-init (:state ir)) (emit-reset) (emit-process ir)]))))
+    (binding [*state-layout* (:state-layout memory)]
+      (apply list
+             (concat [(wat-symbol "module")
+                      (wat-form "memory" (wat-form "export" "memory")
+                                (initial-pages memory))]
+                     [(emit-init (:state ir)) (emit-reset) (emit-process ir)])))))
 
 (defn emit-module [ir]
   (binding [*precision* (:precision ir)]
@@ -390,5 +429,5 @@
        :abi {:kind :wasm-process
              :exports exports
              :memory memory
-             :state-storage :globals
+             :state-storage :linear-memory
              :control-storage :parameters}})))

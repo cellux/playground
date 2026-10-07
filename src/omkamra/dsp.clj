@@ -205,7 +205,7 @@
         inputs (filterv #(= :input (:direction %)) buffers)
         outputs (filterv #(= :output (:direction %)) buffers)
         controls (mapv #(select-keys % [:name :type :default]) (:controls ir))
-        state (mapv #(select-keys % [:name :type :init]) (:state ir))
+        state (mapv #(select-keys % [:name :type :size :init]) (:state ir))
         state-values (mapv (fn [index value]
                              (assoc value
                                     :index index

@@ -94,6 +94,18 @@
                                :frames frames :required-length required-length
                                :length (alength buffer)})))))))))
 
+(defn- state-size
+  [state]
+  (or (:size state) 1))
+
+(defn- state-elements
+  [states]
+  (mapcat (fn [{:keys [init] :as state}]
+            (if (= 1 (state-size state))
+              [init]
+              init))
+          states))
+
 (defn- float-state?
   [ir]
   (every? #(= :float (:type %)) (:state ir)))
@@ -105,11 +117,12 @@
       (throw (ex-info "DSP process state has the wrong representation"
                       {:expected (if (float-state? ir) :float-array :object-array)
                        :value state :name (:name ir)})))
-    (when-not (= (count (:state ir)) (alength state))
-      (throw (ex-info "DSP process state has the wrong size"
-                      {:expected (count (:state ir))
-                       :actual (alength state)
-                       :name (:name ir)})))
+    (let [expected (reduce + 0 (map state-size (:state ir)))]
+      (when-not (= expected (alength state))
+        (throw (ex-info "DSP process state has the wrong size"
+                        {:expected expected
+                         :actual (alength state)
+                         :name (:name ir)}))))
     state))
 
 (defn- state-value
@@ -144,18 +157,24 @@
   (binding [*precision* (precision! ir)]
     (if (float-state? ir)
       (if (f64?)
-        (double-array (map :init (:state ir)))
-        (float-array (map :init (:state ir))))
-      (object-array (map (fn [{:keys [type init]}]
-                           (coerce-value type init))
-                         (:state ir))))))
+        (double-array (state-elements (:state ir)))
+        (float-array (state-elements (:state ir))))
+      (object-array (mapcat (fn [{:keys [type] :as state}]
+                              (map #(coerce-value type %) (if (= 1 (state-size state))
+                                                            [(:init state)]
+                                                            (:init state))))
+                            (:state ir))))))
 
 (defn reset-state!
   [ir state]
   (binding [*precision* (precision! ir)]
     (check-state! ir state)
-    (doseq [[index {:keys [type init]}] (map-indexed vector (:state ir))]
-      (set-state-value! state index type init))
+    (doseq [{:keys [index type init] :as state-description} (:state ir)
+            [element-index value] (map-indexed vector
+                                               (if (= 1 (state-size state-description))
+                                                 [init]
+                                                 init))]
+      (set-state-value! state (+ index element-index) type value))
     nil))
 
 (defn- evaluate-binary
@@ -188,6 +207,18 @@
     :>= (>= left right)))
 
 (declare evaluate-expression execute-statement)
+
+(defn- state-element-index
+  [expression locals context]
+  (let [element-index (if-let [index (:element-index expression)]
+                        (logical-int (evaluate-expression index locals context))
+                        0)
+        size (or (:size expression) 1)]
+    (when (or (neg? element-index) (>= element-index size))
+      (throw (ex-info "DSP aggregate state index is out of bounds"
+                      {:state-id (:state-id expression)
+                       :index element-index :size size})))
+    (+ (:index expression) element-index)))
 
 (defn- buffer-index
   [expr locals context]
@@ -252,7 +283,8 @@
     :const (:value expression)
     :local (get @locals (:name expression))
     :state-load (coerce-value (:type expression)
-                              (state-value (:state context) (:index expression)))
+                              (state-value (:state context)
+                                           (state-element-index expression locals context)))
     :frame (:frame context)
     :frames (:frames context)
     :sample-rate (:sample-rate context)
@@ -343,7 +375,8 @@
                       (aset-float ^floats buffer index value))
                     nil)
     :state-store (do
-                   (set-state-value! (:state context) (:index statement)
+                   (set-state-value! (:state context)
+                                     (state-element-index statement locals context)
                                      (:type statement)
                                      (evaluate-expression (:value statement)
                                                           locals context))

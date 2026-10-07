@@ -88,6 +88,10 @@
    [:map {:closed true}
     [:name Name]
     [:type {:optional true} ValueType]
+    ;; A `:size` greater than one declares fixed-size persistent state.  Its
+    ;; elements retain the declared logical `:type`; it is not a new physical
+    ;; host-array type.
+    [:size {:optional true} pos-int?]
     [:init {:optional true} any?]
     [:next {:optional true} any?]]])
 
@@ -259,15 +263,35 @@
   [state source path]
   (let [state (if (symbol? state) {:name state} state)
         type (or (:type state) :float)
-        init (if (contains? state :init)
+        size (or (:size state) 1)
+        supplied-init? (contains? state :init)
+        init (if supplied-init?
                (:init state)
-               (default-value type))]
+               (if (= 1 size)
+                 (default-value type)
+                 (vec (repeat size (default-value type)))))]
     (when (contains? state :next)
       (validate-source-form! (:next state) source (conj path :next)))
-    {:name (:name state)
-     :type type
-     :init (normalize-initializer init type source (conj path :init))
-     :next (:next state)}))
+    (when (and (> size 1) (contains? state :next))
+      (fail "DSP aggregate state uses explicit state-store, not :next"
+            source (conj path :next)
+            {:state (:name state) :size size}))
+    (let [init (if (= 1 size)
+                 (normalize-initializer init type source (conj path :init))
+                 (do
+                   (when-not (and (vector? init) (= size (count init)))
+                     (fail "DSP aggregate state initializers must be vectors of the declared size"
+                           source (conj path :init)
+                           {:state (:name state) :size size :init init}))
+                   (mapv (fn [value index]
+                           (normalize-initializer value type source
+                                                  (conj path :init index)))
+                         init (range))))]
+      (cond-> {:name (:name state)
+               :type type
+               :init init
+               :next (:next state)}
+        (> size 1) (assoc :size size)))))
 
 (defn- normalize-states
   [states source]
@@ -368,6 +392,10 @@
         (= op 'while) :void
         (= op 'buffer-load) :float
         (= op 'buffer-store) :void
+        ;; Indexed aggregate-state operations are fully type-checked during
+        ;; portable IR lowering, where the state size is available.
+        (= op 'state-load) nil
+        (= op 'state-store) :void
         :else nil))
     :else nil))
 

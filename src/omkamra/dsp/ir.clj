@@ -137,11 +137,15 @@
 (defn- binding-expression
   [binding]
   (case (:kind binding)
-    :state {:op :state-load
-            :state-id (:name binding)
-            :index (:index binding)
-            :type (:type binding)
-            :effects #{:read-state}}
+    :state (do
+             (when (> (or (:size binding) 1) 1)
+               (fail "aggregate DSP state must be accessed with state-load"
+                     {:state (:name binding) :size (:size binding)}))
+             {:op :state-load
+              :state-id (:name binding)
+              :index (:index binding)
+              :type (:type binding)
+              :effects #{:read-state}})
     :buffer (:expression binding)
     :frames {:op :frames :type :int}
     :sample-rate {:op :sample-rate :type :float}
@@ -392,6 +396,67 @@
                :value (:value value)
                :effects #{:write-memory}}]))))
 
+(defn- aggregate-state-binding!
+  [form env state-id]
+  (let [binding (get-in env [:bindings state-id])]
+    (when-not (= :state (:kind binding))
+      (fail "DSP state access requires a declared state name"
+            {:form form :state state-id}))
+    (when-not (> (or (:size binding) 1) 1)
+      (fail "indexed state access requires aggregate state"
+            {:form form :state state-id :size (:size binding)}))
+    binding))
+
+(defn- aggregate-state-index
+  [form env binding index-form]
+  (let [index (lower-value index-form env)]
+    (expect-type! :int (:value index) form)
+    (when (and (= :const (get-in index [:value :op]))
+               (or (neg? (get-in index [:value :value]))
+                   (>= (get-in index [:value :value]) (:size binding))))
+      (fail "DSP aggregate state index is outside the declared range"
+            {:form form :state (:name binding) :size (:size binding)
+             :index (get-in index [:value :value])}))
+    index))
+
+(defn- lower-state-load
+  [form env]
+  (let [[_ state-id index-form & extra] form]
+    (when (or (not (symbol? state-id)) (nil? index-form) extra)
+      (fail "state-load requires an aggregate state name and one integer index"
+            {:form form}))
+    (let [binding (aggregate-state-binding! form env state-id)
+          index (aggregate-state-index form env binding index-form)]
+      (fragment (:statements index)
+                {:op :state-load
+                 :state-id (:name binding)
+                 :index (:index binding)
+                 :element-index (:value index)
+                 :size (:size binding)
+                 :type (:type binding)
+                 :effects #{:read-state}}))))
+
+(defn- lower-state-store
+  [form env]
+  (let [[_ state-id index-form value-form & extra] form]
+    (when (or (not (symbol? state-id)) (nil? index-form) (nil? value-form) extra)
+      (fail "state-store requires an aggregate state name, integer index, and value"
+            {:form form}))
+    (let [binding (aggregate-state-binding! form env state-id)
+          index (aggregate-state-index form env binding index-form)
+          value (lower-value value-form env)]
+      (expect-type! (:type binding) (:value value) form)
+      (void-fragment
+       (concat (:statements index) (:statements value)
+               [{:op :state-store
+                 :state-id (:name binding)
+                 :index (:index binding)
+                 :element-index (:value index)
+                 :size (:size binding)
+                 :type (:type binding)
+                 :value (:value value)
+                 :effects #{:write-state}}])))))
+
 (defn- lower-call
   [form env]
   (let [[_ function-id & arg-forms] form
@@ -451,6 +516,8 @@
         (= 'continue op) (lower-loop-control form env :continue)
         (= 'buffer-load op) (lower-buffer-load form env)
         (= 'buffer-store op) (lower-buffer-store form env)
+        (= 'state-load op) (lower-state-load form env)
+        (= 'state-store op) (lower-state-store form env)
         (= 'int->float op) (lower-conversion form env :int->float :int :float)
         (= 'float->int op) (lower-conversion form env :float->int :float :int)
         (contains? logical-operators op)
@@ -510,16 +577,30 @@
                     :return-type (:return-type definition)}])
              definitions)))
 
+(defn- state-slots
+  "Assign stable element offsets to persistent state.
+
+  The offsets are portable logical storage offsets, not target byte addresses.
+  Backends choose physical arrays or linear-memory layouts from this data."
+  [states]
+  (second
+   (reduce (fn [[offset result] state]
+             (let [size (or (:size state) 1)
+                   state (assoc state :index offset)]
+               [(+ offset size) (conj result state)]))
+           [0 []]
+           states)))
+
 (defn- base-bindings
-  [definition]
+  [definition states]
   (into {}
         (concat
          (map (fn [parameter]
                 [(:name parameter) (assoc parameter :kind :param)])
               (:params definition))
-         (map-indexed (fn [index state]
-                        [(:name state) (assoc state :kind :state :index index)])
-                      (:state definition)))))
+         (map (fn [state]
+                [(:name state) (assoc state :kind :state)])
+              states))))
 
 (defn lower
   "Lower one normalized descriptor to explicit function IR."
@@ -527,7 +608,8 @@
   ([definition {:keys [functions definition-id options]}]
    (normalized-definition! definition)
    (let [return-type (:return-type definition)
-         env (environment (base-bindings definition) (or functions {}) (or options {}))
+         states (state-slots (:state definition))
+         env (environment (base-bindings definition states) (or functions {}) (or options {}))
          body (lower-forms (:body definition) env)]
      (when-not (:value body)
        (fail "DSP function body does not produce a value" {:body (:body definition)}))
@@ -544,7 +626,7 @@
                :params (:params definition)
                :return-type return-type
                :locals @(:locals env)
-               :state (:state definition)
+               :state states
                :precision (:precision options)
                :options (or options {})
                :body body}]
@@ -619,7 +701,7 @@
                {:name :output :direction :output :type :float :channels channels}]))))
 
 (defn- process-bindings
-  [definition channels]
+  [definition states channels]
   (let [process (:process definition)
         sample-name (or (get-in process [:input :name])
                         (get-in definition [:params 0 :name]))
@@ -667,10 +749,9 @@
                  (map (fn [control]
                         [(:name control) (assoc control :kind :control)])
                       controls)
-                 (map-indexed (fn [index state]
-                                [(:name state)
-                                 (assoc state :kind :state :index index)])
-                              (:state definition))))}))
+                 (map (fn [state]
+                        [(:name state) (assoc state :kind :state)])
+                      states)))}))
 
 (defn- process-diagnostics
   "Return portable safety diagnostics for a process body.
@@ -723,8 +804,9 @@
          _ (when (and (> channels 1) (seq (:state definition)))
              (fail "stateful multi-channel DSP processes are not supported yet"
                    {:name (:name definition) :channels channels}))
+         states (state-slots (:state definition))
          buffers (process-buffers definition channels)
-         {:keys [bindings channel controls frames sample-rate]} (process-bindings definition channels)
+         {:keys [bindings channel controls frames sample-rate]} (process-bindings definition states channels)
          env (environment bindings (signatures definitions) (or options {})
                           (into {} (map (juxt :id identity) buffers)))
          output (lower-forms (:body definition) env)
@@ -752,7 +834,7 @@
                                          :type (:type local)
                                          :init (:value next)})
                       :local local})))
-               (:state definition))
+               states)
          frame-statements
          (vec
           (concat
@@ -768,7 +850,7 @@
            (map (fn [{:keys [state local]}]
                   {:op :state-store
                    :state-id (:name state)
-                   :index (.indexOf ^java.util.List (:state definition) state)
+                   :index (:index state)
                    :type (:type state)
                    :value {:op :local :name (:name local) :type (:type local)}
                    :effects #{:write-state}})
@@ -795,7 +877,7 @@
              :sample-rate sample-rate
              :controls controls
              :locals @(:locals env)
-             :state (mapv #(select-keys % [:name :type :init]) (:state definition))
+             :state (mapv #(select-keys % [:name :type :size :init :index]) states)
              :precision (:precision options)
              :lifecycle (merge {:init true :reset true}
                                (get-in definition [:process :lifecycle]))
@@ -904,4 +986,5 @@
         (concat (keys comparison-operators)
                 (keys logical-operators)
                 ['if 'let 'do 'set! 'while 'break 'continue
+                 'buffer-load 'buffer-store 'state-load 'state-store
                  'int->float 'float->int])))

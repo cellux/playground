@@ -9,7 +9,7 @@
 
 (def ^:private language-forms
   '#{if let do set! while break continue buffer-load buffer-store
-     int->float float->int
+     state-load state-store int->float float->int
      + - * / = not= < <= > >= and or not dsp/call})
 
 (defn- fail
