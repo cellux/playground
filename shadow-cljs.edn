@@ -15,4 +15,18 @@
    :asset-path "/rb/explores/threejs/earth"
    :modules
    {:main
-    {:init-fn rb.explores.threejs.earth/init}}}}}
+    {:init-fn rb.explores.threejs.earth/init}}}
+
+  :omkamra.dsp.testbed
+  {:target :browser
+   :output-dir ".dev/cljs/omkamra/dsp/testbed"
+   :asset-path "/omkamra/dsp/testbed"
+   :js-options
+   {:resolve
+    {"fs" {:target :file
+            :file "src/omkamra/dsp/wabt-fs-stub.js"}
+     "process" {:target :file
+                 :file "src/omkamra/dsp/wabt-fs-stub.js"}}}
+   :modules
+   {:main
+    {:init-fn omkamra.dsp.testbed/init}}}}}
