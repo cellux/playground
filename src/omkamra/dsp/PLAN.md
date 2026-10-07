@@ -593,15 +593,44 @@ The ABI must describe:
 
 ### 4. Provide browser-side DSP compilation
 
-Make source editing and compilation independent of JVM-only macros. Define a
-serializable source/descriptor representation and a browser-capable parser,
-normalizer, linker, portable IR lowerer, and diagnostics path that share
-semantics with the JVM compiler. The browser compiler must emit JavaScript or
-WAT, pass WAT through WABT, and install the resulting AudioWorklet without a
-server-side compiler.
+Make source editing and compilation independent of JVM-only macros. The
+browser-facing source front end should use SCI, which is already a project
+dependency, as a sandboxed reader/evaluator and macro-expansion layer:
 
-Support incremental recompilation and clear source locations, while keeping
-compilation and audio-thread execution separate.
+```text
+DSP source text
+  -> SCI evaluation/macro expansion
+  -> serializable DSP descriptors
+  -> CLJS portable compiler
+  -> JavaScript or WAT
+  -> WABT
+  -> AudioWorklet kernel
+```
+
+SCI must not execute DSP bodies sample-by-sample. The DSP definition macro
+should capture each body as data, as it does on the JVM, and SCI should expose
+only an allowlisted DSP namespace and safe literal/core forms. Java, arbitrary
+JavaScript, I/O, dynamic evaluation, and unrestricted host functions must not
+be available to edited DSP source.
+
+Provide an SCI-compatible `omkamra.dsp` macro namespace that registers
+serializable descriptors in an in-memory definition registry. Browser linking
+must resolve that registry rather than JVM Vars, `find-ns`, or `ns-resolve`.
+Captured aliases, refers, source locations, and diagnostics must have an
+explicit browser representation.
+
+Port the descriptor validator, linker, portable IR, and JavaScript/Wasm
+emitters to `.cljc`/`.cljs` or provide semantically identical browser
+implementations. The current JVM-only `.clj` namespaces cannot be loaded in the
+browser unchanged. The JVM and browser front ends must produce the same
+normalized descriptor and portable IR for equivalent source.
+
+The browser compiler must emit JavaScript or WAT, pass WAT through WABT, and
+install the resulting AudioWorklet without a server-side compiler. Compilation
+and worklet attachment must remain separate from audio-thread execution.
+Support incremental recompilation, descriptor/IR caching, clear source
+locations, and errors that distinguish SCI errors from DSP validation and
+backend errors.
 
 ### 5. Make worklet installation artifact-driven
 
