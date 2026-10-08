@@ -23,7 +23,7 @@
   (let [width (.-innerWidth js/window)
         height (.-innerHeight js/window)]
     (set! (.-aspect camera) (/ width height))
-    (.updateProjectionMatrix camera)
+    (.updateProjectionMatrix ^js camera)
     (.setSize renderer width height false)))
 
 (defn- add-instructions!
@@ -112,12 +112,15 @@
     (swap! app-state assoc :active? false))
   (set! (.-innerHTML (.-body js/document)) "")
   (set! (.. js/document -body -style -margin) "0")
+  (set! (.. js/document -body -style -width) "100vw")
+  (set! (.. js/document -body -style -height) "100vh")
   (set! (.. js/document -body -style -overflow) "hidden")
   (let [width (.-innerWidth js/window)
         height (.-innerHeight js/window)
         scene (three/Scene.)
         camera (three/PerspectiveCamera. 38 (/ width height) 0.1 100)
         renderer (three/WebGLRenderer. #js {:antialias true})
+        canvas (.-domElement renderer)
         geometry (three/SphereGeometry. 1 192 128)
         material (three/MeshPhongMaterial. #js {:color 0x7799bb
                                                 :displacementBias 0
@@ -129,7 +132,7 @@
         texture-loader (three/TextureLoader.)
         state {:active? true
                :camera camera
-               :canvas (.-domElement renderer)
+               :canvas canvas
                :globe globe
                :last-time nil
                :renderer renderer
@@ -139,7 +142,15 @@
     (set! (.-background scene) (three/Color. 0x02040a))
     (.setPixelRatio renderer (min 2 (.-devicePixelRatio js/window)))
     (.setSize renderer width height false)
+    (set! (.. canvas -style -display) "block")
+    (set! (.. canvas -style -position) "fixed")
+    (set! (.. canvas -style -top) "0")
+    (set! (.. canvas -style -left) "0")
+    (set! (.. canvas -style -width) "100vw")
+    (set! (.. canvas -style -height) "100vh")
     (.set (.-position camera) 0 0 3.1)
+    (.lookAt ^js camera 0 0 0)
+    (.set (.-position globe) 0 0 0)
     (.set (.-position sunlight) 4 2 5)
     (.add scene ambient)
     (.add scene sunlight)
