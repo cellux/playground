@@ -9,6 +9,14 @@
    {:main
     {:init-fn rb.explores.dev.cljs/init}}}
 
+  :rb.explores.demo-effects
+  {:target :browser
+   :output-dir ".dev/cljs/rb/explores/demo-effects"
+   :asset-path "/rb/explores/demo-effects"
+   :modules
+   {:main
+    {:init-fn rb.explores.demo-effects/init}}}
+
   :rb.explores.threejs.earth
   {:target :browser
    :output-dir ".dev/cljs/rb/explores/threejs/earth"
