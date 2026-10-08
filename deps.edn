@@ -104,12 +104,18 @@
   com.jcraft/jsch.agentproxy.sshagent {:mvn/version "0.0.9"}
   com.jcraft/jsch.agentproxy.usocket-jna {:mvn/version "0.0.9"}
 
-  com.github.omkamra/jnr {:local/root "../omkamra/jnr"}
-  com.github.omkamra/fluidsynth {:local/root "../omkamra/fluidsynth"}
-  com.github.omkamra/sequencer {:local/root "../omkamra/sequencer"}
-  com.github.omkamra/sequencer-midi {:local/root "../omkamra/sequencer-midi"}
-  com.github.omkamra/sequencer-fluidsynth {:local/root "../omkamra/sequencer-fluidsynth"}
-  com.github.omkamra/cowbells {:local/root "../omkamra/cowbells"}
+  com.github.omkamra/jnr
+  #_{:local/root "../omkamra/jnr"} {:mvn/version "0.2.0"}
+  com.github.omkamra/fluidsynth
+  #_{:local/root "../omkamra/fluidsynth"} {:mvn/version "0.3.0"}
+  com.github.omkamra/sequencer
+  #_{:local/root "../omkamra/sequencer"} {:mvn/version "0.4.1"}
+  com.github.omkamra/sequencer-midi
+  #_{:local/root "../omkamra/sequencer-midi"} {:mvn/version "0.4.0"}
+  com.github.omkamra/sequencer-fluidsynth
+  #_{:local/root "../omkamra/sequencer-fluidsynth"} {:mvn/version "0.4.0"}
+  com.github.omkamra/cowbells
+  #_{:local/root "../omkamra/cowbells"} {:mvn/version "0.3.1"}
 
   org.lwjgl/lwjgl {:mvn/version "3.3.6"}
   org.lwjgl/lwjgl-glfw {:mvn/version "3.3.6"}
