@@ -1,12 +1,15 @@
 (ns omkamra.vice.decoder
   "Tools for recording and decoding code executed by VICE's binary monitor."
   (:require
+   [clojure.edn :as edn]
    [clojure.java.io :as io]
    [clojure.string :as str]
    [omkamra.vice.binary-monitor :as bm]
    [omkamra.vice.asm :as asm]
    [omkamra.vice.trace :as trace])
-  (:import [java.io FileReader]))
+  (:import [java.io FileReader]
+           [java.nio.file AtomicMoveNotSupportedException Files StandardCopyOption]
+           [java.util.concurrent ArrayBlockingQueue TimeUnit]))
 
 ;; FIFO ingestion keeps trace records as compact vectors.  These ten values are
 ;; needed while decoding; maps are materialized only in final artifacts.
@@ -17,9 +20,7 @@
 (def ^:private trace-a 4)
 (def ^:private trace-x 5)
 (def ^:private trace-y 6)
-(def ^:private trace-sp 7)
 (def ^:private trace-flags 8)
-(def ^:private trace-global-cycle 9)
 
 ;; [trace-event instruction-id instruction boundary? event-index]
 (def ^:private occurrence-event 0)
@@ -38,12 +39,6 @@
 ;; therefore derived from the pre-instruction registers, captured opcode bytes,
 ;; and a mutable copy of the initial memory snapshot. The raw monitor samples
 ;; and both memory snapshots remain in the result for replay and inspection.
-
-(def ^:private vic-register-addresses
-  (conj (set (range 0xd000 0xd02f)) 0xdd00))
-
-(def ^:private layout-register-addresses
-  #{0xd011 0xd018 0xdd00})
 
 (defn- memory-word
   [memory address]
@@ -70,7 +65,7 @@
         zp-word (fn [address]
                   (bit-or (memory-byte memory address)
                           (bit-shift-left (memory-byte memory
-                                                         (bit-and (inc address) 0xff))
+                                                       (bit-and (inc address) 0xff))
                                           8)))]
     (case mode
       :zp operand
@@ -111,20 +106,20 @@
        "LSR" (bit-shift-right old-value 1)
        "ROL" (bit-or (bit-shift-left old-value 1) carry)
        "ROR" (bit-or (bit-shift-right old-value 1)
-                      (bit-shift-left carry 7))
+                     (bit-shift-left carry 7))
        "INC" (inc old-value)
        "DEC" (dec old-value)
        "SLO" (bit-shift-left old-value 1)
        "RLA" (bit-or (bit-shift-left old-value 1) carry)
        "SRE" (bit-shift-right old-value 1)
        "RRA" (bit-or (bit-shift-right old-value 1)
-                      (bit-shift-left carry 7))
+                     (bit-shift-left carry 7))
        "DCP" (dec old-value)
        "ISC" (inc old-value)))))
 
 (defn- inferred-write
   [memory decoded entry]
-  (let [{:keys [mnemonic mode]} decoded]
+  (let [{:keys [mnemonic]} decoded]
     (when (or (contains? direct-store-mnemonics mnemonic)
               (contains? read-modify-write-mnemonics mnemonic))
       (when-let [address (effective-address memory decoded entry)]
@@ -197,29 +192,42 @@
                       (get kind-ids (:kind write))])
                    writes)}))
 
-(defn expand-writes
-  "Expand compact artifact write records into analysis maps.
+(defn write-records
+  "Return a fresh lazy sequence of expanded maps from compact write records.
 
-  Captures persist writes as positional records to avoid repeating map keys
-  and mnemonic/kind values millions of times. Use this helper at an analysis
-  boundary when map-shaped records are more convenient."
+  Unlike `expand-writes`, this does not retain a map for every write. Call it
+  again for each independent pass over the compact column data."
   [{:keys [mnemonics kinds writes]}]
-  (mapv (fn [[event-index pc address value old-value raster-line cpu-cycle
+  (map (fn [[event-index pc address value old-value raster-line cpu-cycle
              instruction-raster-line instruction-cpu-cycle write-cycle-offset
              mnemonic-id kind-id]]
-          {:event-index event-index
-           :pc pc
-           :address address
-           :value value
-           :old-value old-value
-           :raster-line raster-line
-           :cpu-cycle cpu-cycle
-           :instruction-raster-line instruction-raster-line
-           :instruction-cpu-cycle instruction-cpu-cycle
-           :write-cycle-offset write-cycle-offset
-           :mnemonic (nth mnemonics mnemonic-id)
-           :kind (nth kinds kind-id)})
-        writes))
+         {:event-index event-index
+          :pc pc
+          :address address
+          :value value
+          :old-value old-value
+          :raster-line raster-line
+          :cpu-cycle cpu-cycle
+          :instruction-raster-line instruction-raster-line
+          :instruction-cpu-cycle instruction-cpu-cycle
+          :write-cycle-offset write-cycle-offset
+          :mnemonic (nth mnemonics mnemonic-id)
+          :kind (nth kinds kind-id)})
+       writes))
+
+(defn expand-writes
+  "Eagerly expand compact artifact write records into analysis maps.
+
+  Prefer `write-records` for streaming analysis. This helper remains available
+  for callers that explicitly need a retained vector."
+  [compact-writes]
+  (mapv identity (write-records compact-writes)))
+
+(def ^:private vic-register-addresses
+  (conj (set (range 0xd000 0xd02f)) 0xdd00))
+
+(def ^:private layout-register-addresses
+  #{0xd011 0xd018 0xdd00})
 
 (defn- vic-register-name
   [address]
@@ -319,8 +327,10 @@
   (mapv #(memory-byte memory (+ start %)) (range length)))
 
 (defn- asset-sample
-  [initial-memory writes configuration]
-  (let [memory (memory-after-writes initial-memory writes (:event-index configuration))
+  [initial-memory writes-source configuration]
+  (let [memory (memory-after-writes initial-memory
+                                    (writes-source)
+                                    (:event-index configuration))
         {:keys [bank-base screen-base charset-base bitmap? bitmap-base]} configuration
         pointers (memory-range memory (+ screen-base 0x3f8) 8)]
     (merge configuration
@@ -337,7 +347,7 @@
              {:bitmap {:address bitmap-base :data (memory-range memory bitmap-base 8192)}}))))
 
 (defn- asset-samples
-  [initial-memory writes configurations]
+  [initial-memory writes-source configurations]
   ;; Fine-scroll changes in D011/D016 do not alter any asset address.  Only
   ;; snapshot when the address layout changes, while retaining every VIC write
   ;; in :vic/:writes for raster-precise scroll/border analysis.
@@ -345,7 +355,7 @@
        (partition-by #(select-keys % [:bank-base :screen-base :charset-base
                                       :bitmap? :bitmap-base]))
        (map first)
-       (mapv #(asset-sample initial-memory writes %))))
+       (mapv #(asset-sample initial-memory writes-source %))))
 
 (def ^:private basic-block-terminators
   #{"BRK" "JMP" "JSR" "RTI" "RTS" "KIL"
@@ -560,6 +570,15 @@
     (and (seq successors)
          (not (contains? successors (instruction-pc current))))))
 
+(def ^:private stream-events-format
+  :omkamra.vice/instruction-block-stream-v4)
+
+(def ^:private stream-sample-keys
+  [:raster-line :cpu-cycle :a :x :y :sp :flags :global-cycle])
+
+;; Occurrence layout is declared with the trace layout above because the
+;; basic-block transducers consume it before the stream ingester is defined.
+
 (defn- ram-code-pc?
   [pc {:keys [ram-start ram-end]
        :or {ram-start 0x0400
@@ -567,12 +586,6 @@
   (and (integer? pc)
        (<= ram-start pc)
        (< pc ram-end)))
-
-(def ^:private stream-events-format
-  :omkamra.vice/instruction-block-stream-v4)
-
-(def ^:private stream-sample-keys
-  [:raster-line :cpu-cycle :a :x :y :sp :flags :global-cycle])
 
 ;; Occurrence layout is declared with the trace layout above because the
 ;; basic-block transducers consume it before the stream ingester is defined.
@@ -642,11 +655,11 @@
         instruction (nth pending occurrence-instruction)
         memory (:memory @analysis)
         duration-cycles (when (and next-event
-                                    (nth event trace-raster-line)
-                                    (nth event trace-cpu-cycle)
-                                    (nth next-event trace-raster-line)
-                                    (nth next-event trace-cpu-cycle))
-                           (elapsed-cycles event next-event 63 312))
+                                   (nth event trace-raster-line)
+                                   (nth event trace-cpu-cycle)
+                                   (nth next-event trace-raster-line)
+                                   (nth next-event trace-cpu-cycle))
+                          (elapsed-cycles event next-event 63 312))
         write (inferred-write memory instruction event)]
     (when write
       (let [write-event (merge {:pc (nth event trace-pc)
@@ -752,7 +765,7 @@
    (let [instruction-state (atom {:instruction-ids {} :instructions []})
          block-state (atom {:block-ids {} :blocks []})
          analysis-state (atom (make-analysis-state initial-memory
-                                                    retain-samples?))
+                                                   retain-samples?))
          event-count (volatile! 0)
          xf (comp (intern-stream-instructions-xf instruction-state)
                   (assign-event-index-xf event-count)
@@ -763,18 +776,18 @@
                    #(nth (:instructions @instruction-state) %)
                    initial-memory)
                   (deduplicate-basic-blocks-xf block-state))
-        reducer (xf (fn
-                      ([] (empty-stream-state))
-                      ([result] result)
-                      ([result block-run]
-                       (update result :block-runs append-block-run block-run))))]
-    {:step (fn [state event] (reducer state event))
-     :complete (fn [state] (reducer state))
-     :instruction-state instruction-state
-     :block-state block-state
-     :analysis-state analysis-state
-     :event-count event-count
-     :retain-samples? retain-samples?})))
+         reducer (xf (fn
+                       ([] (empty-stream-state))
+                       ([result] result)
+                       ([result block-run]
+                        (update result :block-runs append-block-run block-run))))]
+     {:step (fn [state event] (reducer state event))
+      :complete (fn [state] (reducer state))
+      :instruction-state instruction-state
+      :block-state block-state
+      :analysis-state analysis-state
+      :event-count event-count
+      :retain-samples? retain-samples?})))
 
 (defn- analysis-snapshot
   [analysis]
@@ -782,7 +795,7 @@
     {:writes (vec (.toArray ^java.util.ArrayList (:writes state)))
      :boundaries (vec (.toArray ^java.util.ArrayList (:boundaries state)))
      :boundary-timings (into {} (.entrySet ^java.util.HashMap
-                                           (:boundary-timings state)))}))
+                                 (:boundary-timings state)))}))
 
 (defn- instruction-block-stream
   [stream-state ingester]
@@ -828,70 +841,6 @@
   (locking stream-state
     (apply swap! stream-state f args)))
 
-(defn- ingest-stream-batch!
-  "Apply a FIFO record batch and publish its stream state once.
-
-  The reducer has side effects in the instruction, block, and analysis state,
-  so use `reset!` rather than `swap!`: a CAS retry could repeat those effects.
-  The lifecycle lock prevents status updates from interleaving with the
-  batch, while reducing the batch under one lock avoids one atom update per
-  instruction."
-  [stream-state ingester records]
-  (locking stream-state
-    (let [state (reduce (:step ingester) @stream-state records)
-          event-count (if-let [counter (:event-count ingester)]
-                        @counter
-                        (:event-count state))]
-      (reset! stream-state (assoc state :event-count event-count)))))
-
-(defn- start-fifo-reader!
-  [^String fifo-path stream-state ingester reader-ref]
-  (let [thread
-        (Thread.
-         (fn []
-           (try
-             ;; The trace scanner owns buffering; a FileReader avoids a second
-             ;; BufferedReader layer and its per-line String allocation.
-             (with-open [reader (FileReader. fifo-path)]
-               (reset! reader-ref reader)
-               (update-stream-state! stream-state assoc :status :streaming)
-               (let [batch (volatile! (transient []))
-                     flush-batch!
-                     (fn []
-                       (let [records (persistent! @batch)]
-                         (vreset! batch (transient []))
-                         (when (seq records)
-                           (ingest-stream-batch! stream-state ingester records))))
-                     consume!
-                     (fn [record]
-                       (let [next-batch (conj! @batch record)]
-                         (if (= fifo-state-batch-size (count next-batch))
-                           (do
-                             (vreset! batch (transient []))
-                             (ingest-stream-batch!
-                              stream-state ingester (persistent! next-batch)))
-                           (vreset! batch next-batch))))]
-                 ;; Flush in a finally block so records already read are not
-                 ;; lost if closing the FIFO interrupts the character scanner
-                 ;; with an I/O exception during shutdown.
-                 (try
-                   (trace/reduce-records!
-                    reader consume! (:retain-samples? ingester))
-                   (finally
-                     (flush-batch!))))
-               (update-stream-state! stream-state assoc :status :eof))
-             (catch java.io.IOException error
-               ;; Closing the reader is the emergency unblock path during
-               ;; cleanup. It is not an error after logging has been disabled.
-               (when-not (#{:stopping :stopped} (:status @stream-state))
-                 (update-stream-state! stream-state assoc :status :error :error error)))
-             (catch Throwable error
-               (update-stream-state! stream-state assoc :status :error :error error))))
-         (str "vice-trace-fifo-" (System/nanoTime)))]
-    (.setDaemon thread true)
-    (.start thread)
-    thread))
-
 (defn- close-fifo-reader!
   [reader-ref reader-thread timeout-ms]
   (.join ^Thread reader-thread (long timeout-ms))
@@ -903,137 +852,12 @@
     (.join ^Thread reader-thread 1000))
   (not (.isAlive ^Thread reader-thread)))
 
-(defn start-capture
-  "Start a continuous, FIFO-backed execution capture while VICE is paused.
-
-  VICE writes monitor trace text into a Unix FIFO. A dedicated reader reduces
-  its lazy line stream through parser, instruction-interning, basic-block, and
-  block-interning transducers. Only compact dynamic samples and interned static
-  instructions/blocks are retained; no trace log is written to disk.
-
-  The returned recorder is consumed by `capture-status` and `stop-capture`.
-  Options are `:fifo-path`, `:metadata`, `:checkpoint-op` (default 4,
-  execute), and `:retain-samples?` (default false). The latter preserves the
-  full per-instruction register/timing sample stream for forensic analysis;
-  normal captures retain only compact write and control-flow timing data."
-  ([conn]
-   (start-capture conn {}))
-  ([conn {:keys [fifo-path metadata checkpoint-op retain-samples?]
-          :or {checkpoint-op 4
-               retain-samples? false}}]
-   (let [fifo-path (or fifo-path
-                       (str "/tmp/omkamra-vice/trace-"
-                            (System/nanoTime) ".fifo"))
-         state (atom {:status :starting :instruction-count 0})
-         stream-state (atom (empty-stream-state))
-         reader-ref (atom nil)
-         reader-thread (atom nil)
-         checkpoint-number (atom nil)
-         prior-ignored-types (bm/ignored-unsolicited-types conn)]
-     (try
-       (bm/drain-events conn)
-       (bm/ping conn)
-       (bm/drain-events conn)
-       (let [initial-memory (mapv u8
-                                  (:memory (bm/mem-get conn {:start 0
-                                                             :end 65535})))
-             ingester (make-stream-ingester {:initial-memory initial-memory
-                                              :retain-samples? retain-samples?})]
-         (create-fifo! fifo-path)
-         (reset! reader-thread
-                 (start-fifo-reader! fifo-path stream-state ingester reader-ref))
-         ;; A tracepoint also emits a binary CHECKPOINT_INFO event for every hit.
-         ;; Suppress those unsolicited bodies before decoding/queueing; requested
-         ;; checkpoint responses remain available.
-         (bm/ignore-unsolicited-types!
-          conn (conj prior-ignored-types bm/MON_RESPONSE_CHECKPOINT_INFO))
-         (let [checkpoint (bm/checkpoint-set
-                           conn {:start 0
-                                 :end 0xffff
-                                 :stop? false
-                                 :enabled? true
-                                 :op checkpoint-op
-                                 :temporary? false})]
-           (reset! checkpoint-number (:number checkpoint))
-           (bm/resource-set conn {:name "MonitorLogFileName" :value fifo-path})
-           ;; fopen(3) on the writer pairs with the reader thread's blocking open.
-           (bm/resource-set conn {:name "MonitorLogEnabled" :value 1})
-           (reset! state {:status :running
-                          :instruction-count 0
-                          :transport :fifo})
-           {:kind :omkamra.vice/streaming-capture-v2
-            :conn conn
-            :fifo-path fifo-path
-            :checkpoint-number checkpoint-number
-            :initial-memory initial-memory
-            :metadata metadata
-            :state state
-            :stream-state stream-state
-            :ingester ingester
-            :reader-ref reader-ref
-            :reader-thread @reader-thread
-            :prior-ignored-types prior-ignored-types}))
-       (catch Throwable error
-         (try (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
-              (catch Throwable _ nil))
-         (when-let [number @checkpoint-number]
-           (try (bm/checkpoint-delete conn {:number number})
-                (catch Throwable _ nil)))
-         (bm/ignore-unsolicited-types! conn prior-ignored-types)
-         (when-let [thread @reader-thread]
-           (close-fifo-reader! reader-ref thread 1000))
-         (io/delete-file fifo-path true)
-         (throw error))))))
-
-(defn- release-stream-state!
-  "Drop the large mutable ingestion collections after capture finalization.
-
-  The finalized artifact owns the canonical raw stream. The recorder's
-  ingestion atom only needs lightweight counters/status afterwards, otherwise
-  retaining a stopped recorder would keep a second copy of all samples alive."
-  [stream-state ingester]
-  (let [instruction-count (count (:instructions @(:instruction-state ingester)))
-        block-count (count (:blocks @(:block-state ingester)))]
-    (update-stream-state! stream-state
-           (fn [stream]
-             {:status (:status stream)
-              :event-count (:event-count stream)
-              :instruction-count (or (:instruction-count stream) instruction-count)
-              :block-count (or (:block-count stream) block-count)
-              :block-run-count (or (:block-run-count stream)
-                                   (count (:block-runs stream)))
-              :error (:error stream)}))
-    (reset! (:instruction-state ingester) {:instruction-ids {} :instructions []})
-    (reset! (:block-state ingester) {:block-ids {} :blocks []})
-    (reset! (:analysis-state ingester)
-            {:writes (java.util.ArrayList.)
-             :boundaries (java.util.ArrayList.)
-             :boundary-timings (java.util.HashMap.)
-             :pending nil
-             :retain-samples? false
-             :samples nil
-             :memory nil})))
-
-(defn capture-status
-  "Return lightweight progress for a streaming recorder without copying events."
-  [capture]
-  (let [stream @(:stream-state capture)
-        ingester (:ingester capture)]
-    ;; `:artifact` is retained in the decoder state solely so a repeated
-    ;; stop-capture call can return it. Never expose it through a lightweight
-    ;; status query (or copy it into higher-level session state).
-    (merge (dissoc @(:state capture) :artifact)
-           {:event-count (:event-count stream)
-            :instruction-count (or (:instruction-count stream)
-                                   (count (:instructions @(:instruction-state ingester))))
-            :block-count (or (:block-count stream)
-                             (count (:blocks @(:block-state ingester))))
-            :block-run-count (or (:block-run-count stream)
-                                 (count (:block-runs stream)))
-            :reader-status (:status stream)
-            :reader-alive? (.isAlive ^Thread (:reader-thread capture))
-            :reader-error (when-let [error (:error stream)]
-                            (.getMessage ^Throwable error))})))
+(defn- decoded-stream-instructions
+  [events]
+  (mapv (fn [{:keys [id pc bytes]}]
+          (let [decoded (asm/disassemble-bytes pc bytes)]
+            (assoc decoded :id id :address pc)))
+        (:instructions events)))
 
 (defn- stream-instruction-id-array
   [events]
@@ -1044,13 +868,6 @@
         (do (aset-int ids event-index (int instruction-id))
             (recur (inc event-index) (next instruction-ids)))
         ids))))
-
-(defn- decoded-stream-instructions
-  [events]
-  (mapv (fn [{:keys [id pc bytes]}]
-          (let [decoded (asm/disassemble-bytes pc bytes)]
-            (assoc decoded :id id :address pc)))
-        (:instructions events)))
 
 (defn- sample-map
   [events sample]
@@ -1137,7 +954,7 @@
         (if (empty? ranges)
           [[0 event-count]]
           (->> (concat [[0 (ffirst ranges)]]
-                       (map (fn [[[start end] [next-start _]]]
+                       (map (fn [[[_ end] [next-start _]]]
                               [end next-start])
                             (partition 2 1 ranges))
                        [[(second (last ranges)) event-count]])
@@ -1166,108 +983,731 @@
                     (recur (inc index))))))))
         spans))
 
-(defn- streaming-pipeline-artifact
+(defn- minimal-pipeline-artifact
+  "Build the capture-time raw projection for one physical chunk.
+
+  Expensive derived views such as node versions, IRQ spans, VIC timelines,
+  frame-code detection, and assets belong to post-processing. Keeping this
+  projection limited to replayable local dictionaries, compact writes,
+  boundary timing, and memory snapshots keeps the FIFO producer independent of
+  those analyses."
   [events initial-memory final-memory metadata analysis]
   (let [instructions (decoded-stream-instructions events)
-        instruction-ids (stream-instruction-id-array events)
-        writes (:writes analysis)
-        irq-data (stream-irq-data events instructions instruction-ids analysis)
-        spans (:spans irq-data)
-        execution {:format :omkamra.vice/versioned-execution-v4
+        execution {:format :omkamra.vice/versioned-execution-v5
                    :event-count (:event-count events)
                    :instructions instructions
-                   :node-versions (stream-node-versions instructions instruction-ids)
                    :blocks (:blocks events)
                    :block-runs (:block-runs events)}
+        write-data (compact-write-data (:writes analysis))]
+    {:format :omkamra.vice/chunk-pipeline-v1
+     :raw {:metadata metadata}
+     :stages {:decoded {:write-count (count (:writes analysis))}
+              :memory {:initial initial-memory
+                       :final final-memory
+                       :writes write-data}
+              :structure {:boundaries (:boundaries analysis)
+                          :boundary-timings (:boundary-timings analysis)
+                          :execution execution}
+              :semantics {:status :unclassified}}}))
+
+(def ^:private chunk-format :omkamra.vice/chunk-v1)
+(def ^:private capture-format :omkamra.vice/capture-v1)
+(def ^:private default-chunk-max-events 50000)
+(def ^:private default-chunk-max-bytes 128000000)
+(def ^:private default-chunk-queue-capacity 4)
+(def ^:private default-writer-backpressure-ms 5000)
+(def ^:private estimated-bytes-per-event 128)
+(def ^:private writer-stop ::writer-stop)
+
+(defn- file-path
+  [directory & parts]
+  (.getPath (apply io/file directory parts)))
+
+(defn- write-edn-file!
+  [file value]
+  (with-open [writer (io/writer file)]
+    (binding [*out* writer]
+      (pr value)
+      (newline)))
+  file)
+
+(defn- atomic-write-edn!
+  [file value]
+  (let [target (.toPath (io/file file))
+        partial (.toPath (io/file (str file ".partial")))]
+    (write-edn-file! (.toFile partial) value)
+    (try
+      (Files/move partial target
+                  (into-array StandardCopyOption
+                              [StandardCopyOption/ATOMIC_MOVE
+                               StandardCopyOption/REPLACE_EXISTING]))
+      (catch AtomicMoveNotSupportedException _
+        (Files/move partial target
+                    (into-array StandardCopyOption
+                                [StandardCopyOption/REPLACE_EXISTING]))))
+    file))
+
+(defn read-capture-manifest
+  "Read the durable manifest in a chunked capture directory."
+  [capture-directory]
+  (edn/read-string (slurp (file-path capture-directory "manifest.edn"))))
+
+(defn read-chunk
+  "Read one immutable chunk by its number from a capture directory."
+  [capture-directory chunk-number]
+  (edn/read-string
+   (slurp (file-path capture-directory "chunks"
+                     (format "chunk-%06d.edn" chunk-number)))))
+
+(defn- validate-chunk-options!
+  [{:keys [chunk-max-events chunk-max-bytes chunk-queue-capacity
+           writer-backpressure-ms]}]
+  (doseq [[key value] [[:chunk-max-events chunk-max-events]
+                       [:chunk-max-bytes chunk-max-bytes]
+                       [:chunk-queue-capacity chunk-queue-capacity]
+                       [:writer-backpressure-ms writer-backpressure-ms]]
+          :when (some? value)]
+    (when-not (pos-int? value)
+      (throw (ex-info (str (name key) " must be a positive integer")
+                      {key value})))))
+
+(defn- normalized-chunk-options
+  [options]
+  (validate-chunk-options! options)
+  {:chunk-max-events (or (:chunk-max-events options)
+                         default-chunk-max-events)
+   :chunk-max-bytes (or (:chunk-max-bytes options)
+                        default-chunk-max-bytes)
+   :chunk-queue-capacity (or (:chunk-queue-capacity options)
+                             default-chunk-queue-capacity)
+   :writer-backpressure-ms (or (:writer-backpressure-ms options)
+                               default-writer-backpressure-ms)})
+
+(defn- chunk-file-name
+  [number]
+  (format "chunk-%06d.edn" number))
+
+(defn- manifest-chunk-entry
+  [{:keys [chunk-number event-range boundary summary]}]
+  {:number chunk-number
+   :file (str "chunks/" (chunk-file-name chunk-number))
+   :event-range event-range
+   :boundary boundary
+   :summary summary})
+
+(defn- write-manifest!
+  [capture-directory manifest-state]
+  (atomic-write-edn! (file-path capture-directory "manifest.edn")
+                     @manifest-state))
+
+(defn- make-manifest
+  [capture-directory metadata chunk-options]
+  {:format capture-format
+   :capture-id (:capture-id metadata)
+   :capture-directory capture-directory
+   :input (:input metadata)
+   :status :running
+   :capture-mode :continuous
+   :trace-transport :fifo
+   :options (select-keys chunk-options [:chunk-max-events :chunk-max-bytes
+                                        :chunk-queue-capacity])
+   :chunks []
+   :current-chunk 1
+   :event-count 0
+   :analysis {:status :not-run
+              :requested-stage nil
+              :completed-stages []
+              :stages {}
+              :manifest-file "analysis/manifest.edn"}
+   :finalized? false})
+
+(defn- writer-failure
+  [writer-state]
+  (:error @writer-state))
+
+(defn- update-writer-queue-metrics!
+  [writer-state ^ArrayBlockingQueue queue]
+  (let [depth (.size queue)]
+    (swap! writer-state
+           (fn [state]
+             (-> state
+                 (assoc :queue-depth depth)
+                 (update :high-water-mark max depth))))))
+
+(defn- writer-timing!
+  [writer-state finalize-ms write-ms byte-count]
+  (swap! writer-state
+         (fn [state]
+           (let [write-ms-total (+ (long (or (:write-ms-total state) 0))
+                                   write-ms)
+                 bytes-written (+ (long (or (:bytes-written state) 0))
+                                  byte-count)]
+             (assoc state
+                    :last-finalize-ms finalize-ms
+                    :last-write-ms write-ms
+                    :last-chunk-bytes byte-count
+                    :max-finalize-ms (max (long (or (:max-finalize-ms state) 0))
+                                          finalize-ms)
+                    :max-write-ms (max (long (or (:max-write-ms state) 0))
+                                       write-ms)
+                    :finalize-ms-total (+ (long (or (:finalize-ms-total state) 0))
+                                          finalize-ms)
+                    :write-ms-total write-ms-total
+                    :bytes-written bytes-written
+                    :writer-throughput-bps (if (pos? write-ms-total)
+                                             (long (/ (* bytes-written 1000)
+                                                      write-ms-total))
+                                             0))))))
+
+(declare finalize-chunk)
+
+(defn- start-chunk-writer!
+  [capture-directory manifest-state queue writer-state]
+  (let [thread
+        (Thread.
+         (fn []
+           (try
+             (loop []
+               (let [job (.take ^ArrayBlockingQueue queue)]
+                 (update-writer-queue-metrics! writer-state queue)
+                 (if (= writer-stop job)
+                   (swap! writer-state assoc :status :stopped :queue-depth 0)
+                   (let [{:keys [chunk metadata boundary]} job
+                         finalize-start (System/nanoTime)
+                         {:keys [chunk]} (finalize-chunk chunk metadata boundary)
+                         finalize-ms (quot (- (System/nanoTime) finalize-start)
+                                           1000000)
+                         number (:chunk-number chunk)
+                         filename (chunk-file-name number)
+                         output-file (file-path capture-directory "chunks" filename)
+                         write-start (System/nanoTime)]
+                     ;; A chunk becomes visible in the manifest only after the
+                     ;; final file has been atomically installed.
+                     (atomic-write-edn! output-file chunk)
+                     (swap! manifest-state
+                            (fn [manifest]
+                              (-> manifest
+                                  (update :chunks conj (manifest-chunk-entry chunk))
+                                  (assoc :current-chunk (inc number)
+                                         :event-count (second (:event-range chunk))))))
+                     (write-manifest! capture-directory manifest-state)
+                     (let [write-ms (quot (- (System/nanoTime) write-start)
+                                          1000000)
+                           byte-count (.length (io/file output-file))]
+                       (writer-timing! writer-state finalize-ms write-ms byte-count))
+                     (swap! writer-state update :chunks-written (fnil inc 0))
+                     (recur)))))
+             (catch Throwable error
+               (swap! writer-state assoc :status :failed :error error))))
+         (str "vice-chunk-writer-" (System/nanoTime)))]
+    (.setDaemon thread true)
+    (.start thread)
+    thread))
+
+(defn- enqueue-chunk!
+  [^ArrayBlockingQueue queue writer-state job writer-backpressure-ms]
+  (let [deadline (+ (System/nanoTime) (* 1000000 writer-backpressure-ms))]
+    (loop [pressured? false]
+      (when-let [error (writer-failure writer-state)]
+        (throw (ex-info "Chunk writer failed" {:reason :chunk-writer-error}
+                        error)))
+      (if (.offer queue job 100 TimeUnit/MILLISECONDS)
+        (do
+          (update-writer-queue-metrics! writer-state queue)
+          (when pressured?
+            (swap! writer-state update :backpressure-count (fnil inc 0)))
+          nil)
+        (if (< (System/nanoTime) deadline)
+          (recur true)
+          (throw (ex-info "Chunk writer queue remained full"
+                          {:reason :chunk-writer-backpressure
+                           :queue-capacity (.remainingCapacity queue)
+                           :timeout-ms writer-backpressure-ms})))))))
+
+(defn- copy-memory
+  [memory]
+  (mapv u8 memory))
+
+(defn- open-chunk
+  [number global-start initial-memory retain-samples?]
+  {:number number
+   :global-start global-start
+   :initial-memory (copy-memory initial-memory)
+   :ingester (make-stream-ingester {:initial-memory initial-memory
+                                    :retain-samples? retain-samples?})
+   :stream-state (atom (empty-stream-state))})
+
+(defn- chunk-event-count
+  [chunk]
+  @(:event-count (:ingester chunk)))
+
+(defn- chunk-estimated-bytes
+  [chunk]
+  (* estimated-bytes-per-event (chunk-event-count chunk)))
+
+(defn- chunk-limit-reason
+  [chunk {:keys [chunk-max-events chunk-max-bytes]}]
+  (cond
+    (>= (chunk-event-count chunk) chunk-max-events) :max-events
+    (>= (chunk-estimated-bytes chunk) chunk-max-bytes) :max-bytes
+    :else nil))
+
+(defn- ingest-chunk-event!
+  [chunk event]
+  (let [stream-state (:stream-state chunk)
+        ingester (:ingester chunk)]
+    (locking stream-state
+      (let [state ((:step ingester) @stream-state event)]
+        (reset! stream-state (assoc state :event-count @(:event-count ingester)))))))
+
+(defn- finalize-chunk
+  [chunk metadata boundary]
+  (let [{:keys [number global-start initial-memory ingester stream-state]} chunk
+        _ (when-not (:sealed? chunk)
+            (update-stream-state! stream-state (:complete ingester)))
+        events (instruction-block-stream stream-state ingester)
+        analysis (analysis-snapshot (:analysis-state ingester))
+        final-memory (copy-memory (:memory @(:analysis-state ingester)))
+        local-count (:event-count events)
+        event-range [global-start (+ global-start local-count)]
+        artifact (minimal-pipeline-artifact
+                  events initial-memory final-memory
+                  (merge metadata {:event-range event-range
+                                   :chunk-number number})
+                  analysis)
+        summary {:event-count local-count
+                 :instruction-count (count (:instructions events))
+                 :block-count (count (:blocks events))
+                 :write-count (count (:writes analysis))}]
+    {:chunk {:format chunk-format
+             :capture-id (:capture-id metadata)
+             :chunk-number number
+             :event-range event-range
+             :event-index-scope :chunk-local
+             :previous-chunk (when (> number 1) (dec number))
+             :next-chunk (when-not (= :final (:kind boundary)) (inc number))
+             :boundary boundary
+             :local-event-count local-count
+             :events events
+             :stages (:stages artifact)
+             :summary summary}
+     :final-memory final-memory
+     :summary summary}))
+
+(defn- publish-open-chunk!
+  [coordinator chunk]
+  (swap! coordinator assoc
+         :chunk-number (:number chunk)
+         :chunk-event-count (chunk-event-count chunk)
+         :global-event-count (+ (:global-start chunk) (chunk-event-count chunk))
+         :estimated-open-chunk-bytes (chunk-estimated-bytes chunk)))
+
+(defn- seal-chunk!
+  "Finish only the mutable transducer work needed before ownership transfer.
+
+  The expensive artifact projection remains on the writer thread. Completing
+  here is necessary because the final inferred write changes the memory image
+  from which the next chunk starts; it is bounded to one pending event and the
+  final basic-block tail."
+  [chunk]
+  (let [{:keys [ingester stream-state]} chunk]
+    (update-stream-state! stream-state (:complete ingester))
+    (assoc chunk :sealed? true)))
+
+(defn- close-open-chunk!
+  [coordinator metadata chunk-options boundary]
+  (let [chunk (:open-chunk @coordinator)]
+    (when (pos? (chunk-event-count chunk))
+      (let [chunk (seal-chunk! chunk)
+            final-memory (copy-memory
+                          (:memory @(:analysis-state (:ingester chunk))))
+            next-chunk (open-chunk (inc (:number chunk))
+                                   (+ (:global-start chunk)
+                                      (chunk-event-count chunk))
+                                   final-memory
+                                   (:retain-samples? @coordinator))]
+        ;; Transfer the sealed mutable chunk to the bounded queue. The reader
+        ;; never performs artifact projection or EDN serialization.
+        (enqueue-chunk! (:writer-queue @coordinator)
+                        (:writer-state @coordinator)
+                        {:chunk chunk
+                         :metadata metadata
+                         :boundary boundary}
+                        (:writer-backpressure-ms chunk-options))
+        (swap! coordinator assoc :open-chunk next-chunk)
+        (publish-open-chunk! coordinator next-chunk)
+        chunk))))
+
+(defn- ingest-chunked-batch!
+  [coordinator metadata chunk-options records]
+  (doseq [event records]
+    (let [chunk (:open-chunk @coordinator)]
+      (ingest-chunk-event! chunk event)
+      (publish-open-chunk! coordinator chunk)
+      (when-let [reason (chunk-limit-reason chunk chunk-options)]
+        (close-open-chunk! coordinator metadata chunk-options
+                           {:kind :forced-size :reason reason})))))
+
+(defn- start-chunked-fifo-reader!
+  [fifo-path coordinator metadata chunk-options reader-ref on-error!]
+  (let [thread
+        (Thread.
+         (fn []
+           (try
+             (with-open [reader (FileReader. fifo-path)]
+               (reset! reader-ref reader)
+               (swap! coordinator assoc :reader-status :streaming)
+               (let [batch (volatile! (transient []))
+                     flush! (fn []
+                              (let [records (persistent! @batch)]
+                                (vreset! batch (transient []))
+                                (when (seq records)
+                                  (ingest-chunked-batch! coordinator metadata
+                                                         chunk-options records))))
+                     consume! (fn [record]
+                                (let [next-batch (conj! @batch record)]
+                                  (if (= fifo-state-batch-size (count next-batch))
+                                    (do
+                                      (vreset! batch (transient []))
+                                      (ingest-chunked-batch!
+                                       coordinator metadata chunk-options
+                                       (persistent! next-batch)))
+                                    (vreset! batch next-batch))))]
+                 (try
+                   (trace/reduce-records! reader consume!
+                                          (:retain-samples? @coordinator))
+                   (finally (flush!))))
+               (swap! coordinator assoc :reader-status :eof))
+             (catch java.io.IOException error
+               (when-not (#{:stopping :stopped} (:reader-status @coordinator))
+                 (swap! coordinator assoc :reader-status :error :reader-error error)
+                 (on-error! error)))
+             (catch Throwable error
+               (swap! coordinator assoc :reader-status :error :reader-error error)
+               (on-error! error))))
+         (str "vice-chunk-fifo-" (System/nanoTime)))]
+    (.setDaemon thread true)
+    (.start thread)
+    thread))
+
+(defn- shutdown-chunk-writer!
+  [coordinator timeout-ms]
+  (let [{:keys [writer-queue writer-thread writer-state]} @coordinator
+        deadline (+ (System/nanoTime) (* 1000000 timeout-ms))]
+    ;; Preserve FIFO order: the sentinel is accepted only after every chunk
+    ;; job. Unlike an unconditional put, this also notices a dead writer.
+    (loop []
+      (when-let [error (writer-failure writer-state)]
+        (throw (ex-info "Chunk writer failed" {:reason :chunk-writer-error}
+                        error)))
+      (cond
+        (.offer ^ArrayBlockingQueue writer-queue writer-stop 100 TimeUnit/MILLISECONDS) nil
+        (< (System/nanoTime) deadline) (recur)
+        :else (throw (ex-info "Chunk writer queue did not drain"
+                              {:reason :chunk-writer-timeout
+                               :timeout-ms timeout-ms}))))
+    (.join ^Thread writer-thread (long timeout-ms))
+    (when (.isAlive ^Thread writer-thread)
+      (throw (ex-info "Chunk writer did not stop"
+                      {:reason :chunk-writer-timeout :timeout-ms timeout-ms})))
+    (when-let [error (writer-failure writer-state)]
+      (throw (ex-info "Chunk writer failed" {:reason :chunk-writer-error}
+                      error)))))
+
+(defn start-capture
+  "Start a bounded, FIFO-backed chunked capture while VICE is paused.
+
+  Each closed chunk is persisted by a bounded background writer. Options are
+  `:capture-directory`, `:chunk-max-events`, `:chunk-max-bytes`,
+  `:chunk-queue-capacity`, `:writer-backpressure-ms`, `:metadata`, and
+  `:retain-samples?`. `:capture-directory` must already exist and is never
+  replaced; chunks are written below its `chunks/` directory."
+  ([conn] (start-capture conn {}))
+  ([conn {:keys [fifo-path metadata checkpoint-op retain-samples? capture-directory]
+          :or {checkpoint-op 4 retain-samples? false}
+          :as options}]
+   (when-not capture-directory
+     (throw (ex-info "Chunked capture requires :capture-directory" {})))
+   (let [chunk-options (normalized-chunk-options options)
+         fifo-path (or fifo-path (str "/tmp/omkamra-vice/trace-" (System/nanoTime) ".fifo"))
+         capture-directory (.getCanonicalPath (io/file capture-directory))
+         chunks-directory (io/file capture-directory "chunks")
+         _ (when-not (.isDirectory (io/file capture-directory))
+             (throw (ex-info "Capture directory must exist" {:capture-directory capture-directory})))
+         _ (when-not (.mkdirs chunks-directory)
+             (when-not (.isDirectory chunks-directory)
+               (throw (ex-info "Could not create chunks directory"
+                               {:capture-directory capture-directory}))))
+         manifest-state (atom (make-manifest capture-directory metadata chunk-options))
+         queue (ArrayBlockingQueue. (int (:chunk-queue-capacity chunk-options)))
+         writer-state (atom {:status :starting :queue-depth 0 :high-water-mark 0
+                             :chunks-written 0 :backpressure-count 0
+                             :last-finalize-ms 0 :last-write-ms 0
+                             :last-chunk-bytes 0 :max-finalize-ms 0
+                             :max-write-ms 0 :finalize-ms-total 0
+                             :write-ms-total 0 :bytes-written 0
+                             :writer-throughput-bps 0})
+         writer-thread (start-chunk-writer! capture-directory manifest-state queue writer-state)
+         state (atom {:status :starting :instruction-count 0})
+         reader-ref (atom nil)
+         reader-thread (atom nil)
+         checkpoint-number (atom nil)
+         prior-ignored-types (bm/ignored-unsolicited-types conn)]
+     (try
+       (write-manifest! capture-directory manifest-state)
+       (swap! writer-state assoc :status :running)
+       (bm/drain-events conn)
+       (bm/ping conn)
+       (bm/drain-events conn)
+       (let [initial-memory (mapv u8 (:memory (bm/mem-get conn {:start 0 :end 65535})))
+             coordinator (atom {:open-chunk (open-chunk 1 0 initial-memory retain-samples?)
+                                :chunk-number 1
+                                :chunk-event-count 0
+                                :global-event-count 0
+                                :estimated-open-chunk-bytes 0
+                                :chunks-written 0
+                                :reader-status :starting
+                                :retain-samples? retain-samples?
+                                :writer-queue queue
+                                :writer-state writer-state
+                                :writer-thread writer-thread})]
+         (create-fifo! fifo-path)
+         (reset! reader-thread
+                 (start-chunked-fifo-reader!
+                  fifo-path coordinator metadata chunk-options reader-ref
+                  (fn [_]
+                    ;; Stop VICE's FIFO writer before the reader closes. This
+                    ;; prevents a reader-side failure from becoming SIGPIPE in
+                    ;; VICE and preserves the original failure reason.
+                    (try
+                      (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
+                      (catch Throwable _ nil)))))
+         (bm/ignore-unsolicited-types! conn (conj prior-ignored-types
+                                                  bm/MON_RESPONSE_CHECKPOINT_INFO))
+         (let [checkpoint (bm/checkpoint-set conn {:start 0 :end 0xffff
+                                                   :stop? false :enabled? true
+                                                   :op checkpoint-op :temporary? false})]
+           (reset! checkpoint-number (:number checkpoint))
+           (bm/resource-set conn {:name "MonitorLogFileName" :value fifo-path})
+           (bm/resource-set conn {:name "MonitorLogEnabled" :value 1})
+           (reset! state {:status :running :instruction-count 0 :transport :fifo})
+           {:kind :omkamra.vice/chunked-capture-v1
+            :conn conn :fifo-path fifo-path :checkpoint-number checkpoint-number
+            :metadata metadata :capture-directory capture-directory
+            :manifest-state manifest-state :state state :coordinator coordinator
+            ;; Capture orchestration uses this shared state to notice FIFO
+            ;; reader failures and unexpected VICE exits while running.
+            :stream-state coordinator
+            :chunk-options chunk-options :reader-ref reader-ref
+            :reader-thread @reader-thread :prior-ignored-types prior-ignored-types}))
+       (catch Throwable error
+         (try (bm/resource-set conn {:name "MonitorLogEnabled" :value 0}) (catch Throwable _ nil))
+         (when-let [number @checkpoint-number]
+           (try (bm/checkpoint-delete conn {:number number}) (catch Throwable _ nil)))
+         (bm/ignore-unsolicited-types! conn prior-ignored-types)
+         (when-let [thread @reader-thread] (close-fifo-reader! reader-ref thread 1000))
+         (.offer queue writer-stop)
+         (.join writer-thread 1000)
+         (io/delete-file fifo-path true)
+         (throw error))))))
+
+(defn chunked-capture-status
+  "Return bounded progress metadata without loading closed chunk artifacts."
+  [capture]
+  (let [{:keys [coordinator state]} capture
+        {:keys [chunk-number chunk-event-count global-event-count reader-status reader-error
+                writer-state]} @coordinator
+        writer @writer-state]
+    (merge (dissoc @state :artifact)
+           {:event-count global-event-count
+            :chunk-number chunk-number
+            :chunk-event-count chunk-event-count
+            :chunk-count (:chunks-written writer)
+            :chunks-written (:chunks-written writer)
+            :chunks-pending (:queue-depth writer)
+            :writer-status (:status writer)
+            :writer-queue-depth (:queue-depth writer)
+            :writer-high-water-mark (:high-water-mark writer)
+            :writer-backpressure-count (:backpressure-count writer)
+            :last-finalize-ms (:last-finalize-ms writer)
+            :last-write-ms (:last-write-ms writer)
+            :last-chunk-bytes (:last-chunk-bytes writer)
+            :max-finalize-ms (:max-finalize-ms writer)
+            :max-write-ms (:max-write-ms writer)
+            :finalize-ms-total (:finalize-ms-total writer)
+            :write-ms-total (:write-ms-total writer)
+            :bytes-written (:bytes-written writer)
+            :writer-throughput-bps (:writer-throughput-bps writer)
+            :reader-status reader-status
+            :reader-alive? (.isAlive ^Thread (:reader-thread capture))
+            :reader-error (some-> reader-error .getMessage)})))
+
+(defn- derived-chunk-source
+  [format chunk]
+  {:format format
+   :capture-id (:capture-id chunk)
+   :chunk-number (:chunk-number chunk)
+   :event-range (:event-range chunk)
+   :source {:format (:format chunk)
+            :file (chunk-file-name (:chunk-number chunk))}})
+
+(defn derive-structure-chunk
+  "Build the structural view for one immutable raw chunk.
+
+  This stage contains execution-graph and IRQ/control-flow derivation only;
+  video timelines and asset materialization are separate analysis stages."
+  [chunk]
+  (let [events (:events chunk)
+        execution (get-in chunk [:stages :structure :execution])
+        instructions (:instructions execution)
+        instruction-ids (stream-instruction-id-array events)
+        analysis {:boundaries (get-in chunk [:stages :structure :boundaries])
+                  :boundary-timings
+                  (get-in chunk [:stages :structure :boundary-timings])}
+        irq-data (stream-irq-data events instructions instruction-ids analysis)
+        spans (:spans irq-data)
+        execution (assoc execution
+                         :node-versions
+                         (stream-node-versions instructions instruction-ids))
         frame-code {:first-ram-code
                     (first-stream-code-entry events instructions instruction-ids
                                              analysis spans :non-irq)
                     :first-ram-irq-code
                     (first-stream-code-entry events instructions instruction-ids
-                                             analysis spans :irq)}
-        vic (derive-vic initial-memory writes)
-        write-data (compact-write-data writes)
-        raw-events (cond-> (select-keys events [:format :event-count])
-                     (:samples events)
-                     (assoc :sample-keys (:sample-keys events)
-                            :samples (:samples events)))]
-    {:format :omkamra.vice/pipeline-v2
-     :raw {:events raw-events
-           :metadata metadata}
-     :stages
-     {:decoded {:write-count (count writes)}
-      :memory {:initial initial-memory :final final-memory :writes write-data}
-      :structure {:spans spans
-                  :execution execution
-                  :frame-code frame-code}
-      :video {:vic (assoc (dissoc vic :writes)
-                           :sprite-pointer-writes
-                           (sprite-pointer-events initial-memory writes))
-              :assets (asset-samples initial-memory writes
-                                     (:configurations vic))}
-      :semantics {:status :unclassified :spans []}}}))
+                                             analysis spans :irq)}]
+    (assoc (derived-chunk-source :omkamra.vice/structure-chunk-v1 chunk)
+           :stages {:structure {:spans spans
+                                :execution execution
+                                :frame-code frame-code}})))
 
-(defn stop-capture
-  "Stop a FIFO-backed capture and return a compact canonical artifact.
+(defn derive-writes-chunk
+  "Build a compact reusable-write descriptor for one immutable raw chunk.
 
-  Logging is disabled first, closing VICE's FIFO writer. The reader drains to
-  EOF, then compact write and structural data are finalized. Full per-event
-  register samples are discarded unless explicitly requested. Cleanup always
-  removes the checkpoint, restores unsolicited-event handling, closes the
-  reader, and deletes the FIFO. VICE remains paused."
+  The raw chunk remains the sole persisted owner of compact write records.
+  This stage records a versioned reference rather than duplicating millions of
+  expanded write maps in EDN. Analysis workers materialize the descriptor once
+  per raw chunk only when a dependent stage needs the records."
+  [chunk]
+  (assoc (derived-chunk-source :omkamra.vice/writes-chunk-v2 chunk)
+         :stages {:writes {:source {:stage :memory
+                                    :key :writes
+                                    :format (get-in chunk
+                                                    [:stages :memory :writes
+                                                     :format])}}}))
+
+(defn writes-source
+  "Return a fresh, non-retaining write-record source for one raw chunk.
+
+  The returned function creates a lazy expanded sequence for each pass. This
+  lets video and asset analysis stream the compact records without retaining a
+  full expanded vector in the chunk worker heap."
+  [raw-chunk writes-chunk]
+  (or (::write-source writes-chunk)
+      (let [{:keys [stage key]} (get-in writes-chunk [:stages :writes :source])]
+        (when-not (= [:memory :writes] [stage key])
+          (throw (ex-info "Unsupported writes-stage source"
+                          {:source (get-in writes-chunk
+                                           [:stages :writes :source])
+                           :chunk-number (:chunk-number raw-chunk)})))
+        (let [compact-writes (get-in raw-chunk [:stages :memory :writes])]
+          (fn [] (write-records compact-writes))))))
+
+(defn derive-video-chunk
+  "Build the VIC timeline for one immutable raw chunk.
+
+  The optional `writes` argument accepts already-expanded write records so a
+  broadcast analysis pipeline can share them with the dependent asset stage.
+  The result is intentionally free of extracted assets; those are produced by
+  `derive-assets-chunk` after this stage has persisted its configurations."
+  ([chunk]
+   (derive-video-chunk chunk nil))
+  ([chunk writes]
+   (let [memory-stages (get-in chunk [:stages :memory])
+         writes-source (if (fn? writes)
+                         writes
+                         (constantly (or writes
+                                         (expand-writes (:writes memory-stages)))))
+         vic (derive-vic (:initial memory-stages) (writes-source))]
+     (assoc (derived-chunk-source :omkamra.vice/video-chunk-v1 chunk)
+            :stages {:video {:vic (assoc (dissoc vic :writes)
+                                         :sprite-pointer-writes
+                                         (sprite-pointer-events
+                                          (:initial memory-stages)
+                                          (writes-source)))}}))))
+
+(defn derive-assets-chunk
+  "Build replayed display assets using a persisted video-stage chunk.
+
+  The optional `writes` argument accepts the expanded writes retained by an
+  in-flight video stage. When omitted, the persisted compact write records are
+  expanded here for standalone asset-stage requests."
+  ([chunk video-chunk]
+   (derive-assets-chunk chunk video-chunk nil))
+  ([chunk video-chunk writes]
+   (let [memory-stages (get-in chunk [:stages :memory])
+         writes-source (if (fn? writes)
+                         writes
+                         (constantly (or writes
+                                         (expand-writes (:writes memory-stages)))))
+         configurations (get-in video-chunk [:stages :video :vic :configurations])]
+     (assoc (derived-chunk-source :omkamra.vice/assets-chunk-v1 chunk)
+            :stages {:assets {:samples (asset-samples (:initial memory-stages)
+                                                      writes-source
+                                                      configurations)}}))))
+
+(defn- stop-chunked-capture
   [capture]
-  (let [{:keys [conn fifo-path checkpoint-number initial-memory metadata state
-                stream-state ingester reader-ref reader-thread prior-ignored-types]}
-        capture]
-    (if-let [artifact (:artifact @state)]
-      artifact
+  (let [{:keys [conn fifo-path checkpoint-number state coordinator metadata
+                manifest-state capture-directory reader-ref reader-thread
+                prior-ignored-types chunk-options]} capture]
+    (if-let [result (:result @state)]
+      result
       (try
         (swap! state assoc :status :stopping)
-        (update-stream-state! stream-state assoc :status :stopping)
-        (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
+        (swap! coordinator assoc :reader-status :stopping)
+        (try
+          (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
+          (catch Throwable _ nil))
         (when-not (close-fifo-reader! reader-ref reader-thread 5000)
-          (throw (ex-info "FIFO trace reader did not stop"
-                          {:fifo-path fifo-path})))
-        (when-let [error (:error @stream-state)]
+          (throw (ex-info "FIFO trace reader did not stop" {:fifo-path fifo-path})))
+        (when-let [error (:reader-error @coordinator)] (throw error))
+        (close-open-chunk! coordinator metadata chunk-options {:kind :final :reason :stopped})
+        (shutdown-chunk-writer! coordinator 30000)
+        ;; Capture finalization owns only raw persistence. Derived output is a
+        ;; separate, explicitly requested operation in omkamra.vice.analysis.
+        (swap! manifest-state assoc :status :stopped :finalized? true)
+        (write-manifest! capture-directory manifest-state)
+        (let [result {:status :stopped
+                      :capture-directory capture-directory
+                      :manifest-path (file-path capture-directory "manifest.edn")
+                      :event-count (:event-count @manifest-state)
+                      :chunk-count (count (:chunks @manifest-state))}]
+          (swap! state assoc :status :stopped :result result)
+          result)
+        (catch Throwable error
+          (swap! state assoc :status :failed :error error)
+          (swap! manifest-state assoc :status :failed :finalized? false
+                 :failure {:reason (or (:reason (ex-data error)) :capture-error)
+                           :message (.getMessage error)})
+          (try (write-manifest! capture-directory manifest-state) (catch Throwable _ nil))
           (throw error))
-        (let [final-memory (mapv u8
-                                 (:memory (bm/mem-get conn {:start 0
-                                                            :end 65535})))
-              _ (update-stream-state! stream-state (:complete ingester))
-              events (instruction-block-stream stream-state ingester)
-              _ (swap! state assoc :status :finalizing
-                       :instruction-count (:event-count events))
-              artifact (streaming-pipeline-artifact
-                        events initial-memory final-memory
-                        (merge metadata
-                               {:capture-mode :continuous
-                                :trace-transport :fifo
-                                :first-demo-part (:first-demo-part @state)
-                                :cpu-range (:cpu-range @state)})
-                        (analysis-snapshot (:analysis-state ingester)))]
-          (swap! state assoc :status :stopped :artifact artifact)
-          artifact)
         (finally
-          (try (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
-               (catch Throwable _ nil))
+          (try (bm/resource-set conn {:name "MonitorLogEnabled" :value 0}) (catch Throwable _ nil))
           (when-let [number @checkpoint-number]
-            (try (bm/checkpoint-delete conn {:number number})
-                 (catch Throwable _ nil)))
+            (try (bm/checkpoint-delete conn {:number number}) (catch Throwable _ nil)))
           (bm/ignore-unsolicited-types! conn prior-ignored-types)
           (close-fifo-reader! reader-ref reader-thread 1000)
           (io/delete-file fifo-path true)
           (bm/drain-events conn)
-          ;; The artifact now owns the canonical stream. Do not leave the
-          ;; ingestion state holding its duplicate samples or static tables.
-          (release-stream-state! stream-state ingester)
           (reset! reader-ref nil)
           (reset! checkpoint-number nil))))))
 
-(defn write-artifact!
-  "Stream a canonical raw, pipeline, or session artifact as readable EDN."
-  [output-file artifact]
-  (with-open [writer (io/writer output-file)]
-    (binding [*out* writer]
-      (pr artifact)
-      (newline)))
-  output-file)
+(defn capture-status
+  "Return lightweight chunked-recorder progress without loading closed chunks."
+  [capture]
+  (chunked-capture-status capture))
+
+(defn stop-capture
+  "Finalize a chunked capture, draining its writer before returning the manifest result."
+  [capture]
+  (stop-chunked-capture capture))

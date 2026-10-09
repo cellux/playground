@@ -4,8 +4,8 @@
   `start!` performs setup asynchronously and returns a session handle. The
   session owns the VICE process, binary-monitor connection, and FIFO-backed
   decoder capture. `stop-async!` requests shutdown without waiting;
-  `stop!` waits for setup if necessary, finalizes the capture, writes EDN and
-  assembly output, and tears down VICE.
+  `stop!` waits for setup if necessary, commits the final raw chunk and
+  manifest, and tears down VICE.
 
   Model-facing usage for a demo-capture request:
 
@@ -22,21 +22,22 @@
      the capture is complete, call `stop-async!` and poll `status` until the
      session is `:stopped`, or call `stop!` when a synchronous result is
      appropriate.
-  4. Return or report the `:edn-path`, `:assembly-path`, and, when requested,
-     `:profile-edn-path` from the stopped status or result. The EDN is the
-     canonical artifact, the assembly is the compact, deduplicated rendering,
-     and the profile EDN contains Clojure async-profiler stack samples.
+  4. Return or report the `:capture-directory`, `:manifest-path`, and, when
+     requested, `:profile-edn-path` from the stopped result. The manifest and
+     immutable numbered raw chunks are the canonical capture; the profile EDN
+     contains Clojure async-profiler stack samples.
 
   If the user requests loading without execution, pass
   `:run-after-load? false` together with `:full-capture? true` to `start!`;
   otherwise do not override the default."
   (:require [clojure.java.io :as io]
             [omkamra.vice :as vice]
-            [omkamra.vice.asm :as asm]
             [omkamra.vice.binary-monitor :as bm]
             [omkamra.vice.profile :as profile]
             [omkamra.vice.decoder :as decoder])
   (:import [java.net ServerSocket]
+           [java.time LocalDateTime]
+           [java.time.format DateTimeFormatter]
            [java.util UUID]))
 
 (def ^:private default-connect-timeout-ms 30000)
@@ -85,6 +86,26 @@
       (when-not (.mkdirs directory)
         (fail "Could not create capture output directory"
               {:output-dir (.getPath directory)})))
+    (.getPath directory)))
+
+(def ^:private capture-directory-time-format
+  (DateTimeFormatter/ofPattern "yyyyMMdd-HHmmss"))
+
+(defn- prepare-capture-directory!
+  "Reserve the immutable directory for one physical capture.
+
+  It is created before VICE starts, and an existing timestamp/id path is an
+  error rather than an invitation to overwrite an older capture."
+  [output-dir capture-id]
+  (let [name (str (.format (LocalDateTime/now) capture-directory-time-format)
+                  "-" capture-id)
+        directory (io/file output-dir name)]
+    (when (.exists directory)
+      (fail "Capture directory already exists"
+            {:capture-directory (.getPath directory)}))
+    (when-not (.mkdirs directory)
+      (fail "Could not create capture directory"
+            {:capture-directory (.getPath directory)}))
     (.getPath directory)))
 
 (defn- make-capture-id
@@ -164,17 +185,18 @@
 
 (defn- request-stop!
   [session reason]
-  (locking (:lifecycle-lock session)
-    (let [state @(:state session)]
-      (when (and (not (contains? terminal-statuses (:status state)))
-                 (not (:finalization-started state)))
-        (swap! (:state session)
-               (fn [state]
-                 (cond-> (assoc state :status :stopping)
-                   (nil? (:stop-reason state))
-                   (assoc :stop-reason reason))))
-        (when-not (realized? (:stop-requested session))
-          (deliver (:stop-requested session) reason)))))
+  (let [^Object lifecycle-lock (:lifecycle-lock session)]
+    (locking lifecycle-lock
+      (let [state @(:state session)]
+        (when (and (not (contains? terminal-statuses (:status state)))
+                   (not (:finalization-started state)))
+          (swap! (:state session)
+                 (fn [state]
+                   (cond-> (assoc state :status :stopping)
+                     (nil? (:stop-reason state))
+                     (assoc :stop-reason reason))))
+          (when-not (realized? (:stop-requested session))
+            (deliver (:stop-requested session) reason))))))
   @(:state session))
 
 (defn- start-profiler!
@@ -210,33 +232,29 @@
   [session capture]
   (update-status! session :finalizing)
   ;; Stop sampling before finalizing the FIFO so the profile describes the
-  ;; steady-state Clojure capture rather than shutdown and artifact rendering.
+  ;; steady-state Clojure capture rather than shutdown and persistence.
   (stop-profiler! session)
-  (let [artifact (decoder/stop-capture capture)
+  (let [result (decoder/stop-capture capture)
         capture-summary (try
                           (decoder/capture-status capture)
                           (catch Throwable _ nil))
-        _ (swap! (:state session) assoc
-                 :capture-summary capture-summary)
+        _ (swap! (:state session) assoc :capture-summary capture-summary)
         _ (reset! (:capture session) nil)
-        edn-path (:edn-path session)
-        assembly-path (:assembly-path session)
-        profile-edn-path (:profile-edn-path session)]
-    (decoder/write-artifact! edn-path artifact)
-    (asm/artifact->assembly artifact {:output-file assembly-path})
+        result (merge result
+                      {:capture-id (:capture-id session)
+                       :input (:input session)
+                       :capture-directory (:capture-directory session)
+                       :stop-reason (:stop-reason @(:state session))
+                       :capture-summary capture-summary}
+                      (when-let [profile-edn-path (:profile-edn-path session)]
+                        {:profile-edn-path profile-edn-path}))]
     (swap! (:state session) assoc :status :stopped)
-    (cond-> {:status :stopped
-             :capture-id (:capture-id session)
-             :input (:input session)
-             :edn-path edn-path
-             :assembly-path assembly-path
-             :stop-reason (:stop-reason @(:state session))
-             :capture-summary capture-summary}
-      profile-edn-path (assoc :profile-edn-path profile-edn-path))))
+    result))
 
 (defn- finalize-once!
   [session capture]
-  (let [owner? (locking (:lifecycle-lock session)
+  (let [^Object lifecycle-lock (:lifecycle-lock session)
+        owner? (locking lifecycle-lock
                  (if (:finalization-started @(:state session))
                    false
                    (do
@@ -263,7 +281,8 @@
 
 (defn- cleanup-resources!
   [session]
-  (let [owner? (locking (:lifecycle-lock session)
+  (let [^Object lifecycle-lock (:lifecycle-lock session)
+        owner? (locking lifecycle-lock
                  (if (:cleanup-started @(:state session))
                    false
                    (do
@@ -400,7 +419,7 @@
   [session options]
   (try
     (let [instance (vice/start {:executable (or (:executable options)
-                                                 vice/default-executable)
+                                                vice/default-executable)
                                 :address (:address options)
                                 :port (:monitor-port session)
                                 :extra-args (vice-extra-args options)})]
@@ -441,10 +460,16 @@
               (reset! program-start-checkpoint nil))
             (let [capture (decoder/start-capture
                            conn
-                           {:metadata {:capture-id (:capture-id session)
-                                       :input (:input session)}
-                            :retain-samples?
-                            (boolean (:retain-samples? options))})]
+                           (merge
+                            (select-keys options [:chunk-max-events
+                                                  :chunk-max-bytes
+                                                  :chunk-queue-capacity
+                                                  :writer-backpressure-ms])
+                            {:capture-directory (:capture-directory session)
+                             :metadata {:capture-id (:capture-id session)
+                                        :input (:input session)}
+                             :retain-samples?
+                             (boolean (:retain-samples? options))}))]
               (reset! (:capture session) capture)
               (swap! (:state session) assoc :transport :fifo)
               (if (realized? (:stop-requested session))
@@ -487,7 +512,7 @@
   Required options:
 
   * `:input` - an existing `.prg` or `.d64` file
-  * `:output-dir` - directory for `<capture-id>.edn` and `.asm`
+  * `:output-dir` - parent directory for a new timestamped capture directory
 
   Optional options include `:capture-id`, `:executable`, `:address`, `:port`,
   `:extra-args`, `:speed`, `:warp?`, `:connect-timeout-ms`,
@@ -519,18 +544,15 @@
         input (validate-input! input)
         output-dir (prepare-output-dir! output-dir)
         capture-id (make-capture-id capture-id)
+        capture-directory (prepare-capture-directory! output-dir capture-id)
         monitor-port (monitor-port port)
-        edn-path (.getPath (io/file output-dir (str capture-id ".edn")))
-        assembly-path (.getPath (io/file output-dir (str capture-id ".asm")))
         profile-edn-path (when (profile/options options)
-                           (.getPath (io/file output-dir
-                                              (str capture-id ".profile.edn"))))
+                           (.getPath (io/file capture-directory "profile.edn")))
         session {:capture-id capture-id
                  :input input
                  :output-dir output-dir
+                 :capture-directory capture-directory
                  :monitor-port monitor-port
-                 :edn-path edn-path
-                 :assembly-path assembly-path
                  :profile-edn-path profile-edn-path
                  :profiler (atom nil)
                  :state (atom {:status :starting
@@ -575,17 +597,26 @@
                            (decoder/capture-status capture)
                            (catch Throwable error
                              {:capture-status-error (.getMessage error)})))]
-    (cond-> (merge (select-keys session [:capture-id :input :output-dir
-                                         :monitor-port :edn-path :assembly-path])
+    (cond-> (merge (select-keys session [:capture-id :input :output-dir :capture-directory
+                                         :monitor-port])
                    (dissoc state :error-message)
                    (when (:error-message state)
                      {:error-message (:error-message state)}))
       (:profile-edn-path session) (assoc :profile-edn-path
-                                          (:profile-edn-path session))
+                                         (:profile-edn-path session))
       capture-status (merge (select-keys capture-status
-                                         [:event-count :instruction-count
-                                          :block-count :block-run-count
-                                          :reader-status :reader-alive?])))))
+                                         [:event-count :instruction-count :block-count :block-run-count
+                                          :reader-status :reader-alive?
+                                          :chunk-number :chunk-event-count :chunk-count
+                                          :chunks-written :chunks-pending
+                                          :writer-status :writer-queue-depth
+                                          :writer-high-water-mark
+                                          :writer-backpressure-count
+                                          :last-finalize-ms :last-write-ms
+                                          :last-chunk-bytes :max-finalize-ms
+                                          :max-write-ms :finalize-ms-total
+                                          :write-ms-total :bytes-written
+                                          :writer-throughput-bps])))))
 
 (defn stop-async!
   "Request capture shutdown without waiting for finalization.

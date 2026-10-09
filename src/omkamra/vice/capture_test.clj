@@ -1,8 +1,7 @@
 (ns omkamra.vice.capture-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.test :refer [deftest is]]
             [clojure.java.io :as io]
             [omkamra.vice :as vice]
-            [omkamra.vice.asm :as asm]
             [omkamra.vice.binary-monitor :as bm]
             [omkamra.vice.capture :as capture]
             [omkamra.vice.decoder :as decoder]
@@ -35,7 +34,7 @@
 
 (deftest speed-zero-is-distinct-from-warp
   (let [vice-extra-args (var-get (ns-resolve 'omkamra.vice.capture
-                                              'vice-extra-args))]
+                                             'vice-extra-args))]
     (is (= ["-speed" "0"]
            (vice-extra-args {:speed 0})))
     (is (= ["-speed" "0" "-warp"]
@@ -49,8 +48,7 @@
                   :address "localhost"
                   :port 6502
                   :command ["x64sc"]
-                  :process nil}
-        artifact {:format :test/artifact}]
+                  :process nil}]
     (spit input "")
     (try
       (with-redefs [vice/start (fn [params]
@@ -71,24 +69,21 @@
                                    {})
                     decoder/start-capture (fn [_ options]
                                             (swap! calls conj [:capture-start options])
-                                            {:fake-capture true
+                                            {:kind :omkamra.vice/chunked-capture-v1
+                                             :fake-capture true
                                              :stream-state (atom {})})
                     decoder/stop-capture (fn [_]
                                            (swap! calls conj [:capture-stop])
-                                           artifact)
-                    decoder/write-artifact! (fn [path value]
-                                              (swap! calls conj [:write-edn path value])
-                                              path)
+                                           {:status :stopped
+                                            :manifest-path "manifest.edn"
+                                            :chunk-count 1})
+                    decoder/capture-status (fn [_] {:chunk-count 1})
                     profile/start! (fn [options]
                                      (swap! calls conj [:profile-start options])
                                      {:profile-session true})
                     profile/stop! (fn [profiler options]
                                     (swap! calls conj [:profile-stop profiler options])
-                                    {:format :omkamra.vice/profile-v1})
-                    asm/artifact->assembly (fn [value options]
-                                                 (swap! calls conj
-                                                        [:write-assembly value options])
-                                                 (:output-file options))]
+                                    {:format :omkamra.vice/profile-v1})]
         (let [session (capture/start! {:input (.getPath input)
                                        :output-dir (.getPath directory)
                                        :capture-id "test-capture"
@@ -112,14 +107,13 @@
             (is (= result repeated-result))
             (is (= ["-speed" "200" "-warp"]
                    (:extra-args (second (first (filter #(= :start (first %))
-                                                      @calls))))))
+                                                       @calls))))))
             (is (= :stopped (:status result)))
             (is (not (contains? result :artifact)))
-            (is (= (.getPath (io/file directory "test-capture.edn"))
-                   (:edn-path result)))
-            (is (= (.getPath (io/file directory "test-capture.asm"))
-                   (:assembly-path result)))
-            (is (= (.getPath (io/file directory "test-capture.profile.edn"))
+            (is (.isDirectory (io/file (:capture-directory result))))
+            (is (= "manifest.edn" (:manifest-path result)))
+            (is (= 1 (:chunk-count result)))
+            (is (= (.getPath (io/file (:capture-directory result) "profile.edn"))
                    (:profile-edn-path result)))
             (is (some #(= :profile-start (first %)) @calls))
             (is (some #(= :profile-stop (first %)) @calls))
@@ -136,7 +130,7 @@
   (let [directory (temp-directory)
         input (io/file directory "program.prg")
         process (.start (ProcessBuilder. ^java.util.List
-                                         ["sh" "-c" "sleep 10"]))
+                         ["sh" "-c" "sleep 10"]))
         instance {:pid (.pid process)
                   :address "localhost"
                   :port 6502
@@ -153,13 +147,12 @@
                     bm/autostart (fn [_ _]
                                    (.destroy process))
                     decoder/start-capture (fn [_ _]
-                                            {:stream-state (atom {})})
+                                            {:kind :omkamra.vice/chunked-capture-v1
+                                             :stream-state (atom {})})
                     decoder/stop-capture (fn [_]
                                            (swap! calls conj :capture-stop)
-                                           {:format :test/artifact})
-                    decoder/write-artifact! (fn [path _] path)
-                    asm/artifact->assembly (fn [_ options]
-                                                 (:output-file options))]
+                                           {:status :stopped :manifest-path "manifest.edn"})
+                    decoder/capture-status (fn [_] {})]
         (let [session (capture/start! {:input (.getPath input)
                                        :output-dir (.getPath directory)
                                        :full-capture? true})
@@ -187,18 +180,17 @@
                     vice/stop (fn [_] (swap! calls conj :stop))
                     bm/ping (fn [_] {})
                     decoder/start-capture (fn [_ _]
-                                            {:stream-state (atom {})})
+                                            {:kind :omkamra.vice/chunked-capture-v1
+                                             :stream-state (atom {})})
                     decoder/stop-capture (fn [_]
                                            (swap! calls conj :capture-stop)
-                                           (throw (ex-info "finalization failed" {})))
-                    decoder/write-artifact! (fn [_ _] nil)
-                    asm/artifact->assembly (fn [_ _] nil)]
+                                           (throw (ex-info "finalization failed" {})))]
         (let [session (capture/start! {:input (.getPath input)
                                        :output-dir (.getPath directory)
                                        :full-capture? true})]
           (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                                  #"VICE capture failed"
-                                  (capture/stop! session)))
+                                #"VICE capture failed"
+                                (capture/stop! session)))
           (is (= :failed (:status (capture/status session))))
           (is (some #{:close} @calls))
           (is (some #{:stop} @calls))))
@@ -232,10 +224,10 @@
                                    (swap! calls conj [:autostart options])
                                    {})
                     bm/await-event (let [events (atom [{:response-type bm/MON_RESPONSE_CHECKPOINT_INFO
-                                                         :response {:number 17
-                                                                    :hit? true}}
-                                                        {:response-type bm/MON_RESPONSE_STOPPED
-                                                         :response {:pc 0xe144}}])]
+                                                        :response {:number 17
+                                                                   :hit? true}}
+                                                       {:response-type bm/MON_RESPONSE_STOPPED
+                                                        :response {:pc 0xe144}}])]
                                      (fn [_ _ _]
                                        (swap! calls conj [:program-start])
                                        (let [[prior _] (swap-vals! events rest)]
@@ -245,13 +237,12 @@
                                 {})
                     decoder/start-capture (fn [_ _]
                                             (swap! calls conj [:capture-start])
-                                            {:stream-state (atom {})})
+                                            {:kind :omkamra.vice/chunked-capture-v1
+                                             :stream-state (atom {})})
                     decoder/stop-capture (fn [_]
                                            (swap! calls conj [:capture-stop])
-                                           {:format :test/artifact})
-                    decoder/write-artifact! (fn [path _] path)
-                    asm/artifact->assembly (fn [_ options]
-                                             (:output-file options))]
+                                           {:status :stopped :manifest-path "manifest.edn"})
+                    decoder/capture-status (fn [_] {})]
         (let [session (capture/start! {:input (.getPath input)
                                        :output-dir (.getPath directory)
                                        :capture-id "entry-capture"})]
@@ -263,8 +254,8 @@
           (is (= :running (:status @(:state session))))
           (let [names (mapv first @calls)
                 checkpoint-options (second (first (filter #(= :checkpoint-set
-                                                          (first %))
-                                                        @calls)))]
+                                                              (first %))
+                                                          @calls)))]
             (is (= 0xe144 (:start checkpoint-options)))
             (is (= 0xe144 (:end checkpoint-options)))
             (is (= bm/MON_CHECKPOINT_OP_EXECUTE (:op checkpoint-options)))
