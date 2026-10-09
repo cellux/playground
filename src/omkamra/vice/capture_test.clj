@@ -4,7 +4,7 @@
             [omkamra.vice :as vice]
             [omkamra.vice.binary-monitor :as bm]
             [omkamra.vice.capture :as capture]
-            [omkamra.vice.decoder :as decoder]
+            [omkamra.vice.decoder.capture :as recorder]
             [omkamra.vice.profile :as profile]))
 
 (defn- temp-directory
@@ -67,17 +67,17 @@
                     bm/autostart (fn [_ options]
                                    (swap! calls conj [:autostart options])
                                    {})
-                    decoder/start-capture (fn [_ options]
-                                            (swap! calls conj [:capture-start options])
-                                            {:kind :omkamra.vice/chunked-capture-v1
-                                             :fake-capture true
-                                             :stream-state (atom {})})
-                    decoder/stop-capture (fn [_]
-                                           (swap! calls conj [:capture-stop])
-                                           {:status :stopped
-                                            :manifest-path "manifest.edn"
-                                            :chunk-count 1})
-                    decoder/capture-status (fn [_] {:chunk-count 1})
+                    recorder/start-capture (fn [_ options]
+                                             (swap! calls conj [:capture-start options])
+                                             {:kind :omkamra.vice/chunked-capture-v1
+                                              :fake-capture true
+                                              :stream-state (atom {})})
+                    recorder/stop-capture (fn [_]
+                                            (swap! calls conj [:capture-stop])
+                                            {:status :stopped
+                                             :manifest-path "manifest.edn"
+                                             :chunk-count 1})
+                    recorder/capture-status (fn [_] {:chunk-count 1})
                     profile/start! (fn [options]
                                      (swap! calls conj [:profile-start options])
                                      {:profile-session true})
@@ -146,13 +146,13 @@
                     bm/ping (fn [_] {})
                     bm/autostart (fn [_ _]
                                    (.destroy process))
-                    decoder/start-capture (fn [_ _]
-                                            {:kind :omkamra.vice/chunked-capture-v1
-                                             :stream-state (atom {})})
-                    decoder/stop-capture (fn [_]
-                                           (swap! calls conj :capture-stop)
-                                           {:status :stopped :manifest-path "manifest.edn"})
-                    decoder/capture-status (fn [_] {})]
+                    recorder/start-capture (fn [_ _]
+                                             {:kind :omkamra.vice/chunked-capture-v1
+                                              :stream-state (atom {})})
+                    recorder/stop-capture (fn [_]
+                                            (swap! calls conj :capture-stop)
+                                            {:status :stopped :manifest-path "manifest.edn"})
+                    recorder/capture-status (fn [_] {})]
         (let [session (capture/start! {:input (.getPath input)
                                        :output-dir (.getPath directory)
                                        :full-capture? true})
@@ -179,12 +179,12 @@
                     vice/close (fn [_] (swap! calls conj :close))
                     vice/stop (fn [_] (swap! calls conj :stop))
                     bm/ping (fn [_] {})
-                    decoder/start-capture (fn [_ _]
-                                            {:kind :omkamra.vice/chunked-capture-v1
-                                             :stream-state (atom {})})
-                    decoder/stop-capture (fn [_]
-                                           (swap! calls conj :capture-stop)
-                                           (throw (ex-info "finalization failed" {})))]
+                    recorder/start-capture (fn [_ _]
+                                             {:kind :omkamra.vice/chunked-capture-v1
+                                              :stream-state (atom {})})
+                    recorder/stop-capture (fn [_]
+                                            (swap! calls conj :capture-stop)
+                                            (throw (ex-info "finalization failed" {})))]
         (let [session (capture/start! {:input (.getPath input)
                                        :output-dir (.getPath directory)
                                        :full-capture? true})]
@@ -235,14 +235,14 @@
                     bm/resume (fn [_]
                                 (swap! calls conj [:resume])
                                 {})
-                    decoder/start-capture (fn [_ _]
-                                            (swap! calls conj [:capture-start])
-                                            {:kind :omkamra.vice/chunked-capture-v1
-                                             :stream-state (atom {})})
-                    decoder/stop-capture (fn [_]
-                                           (swap! calls conj [:capture-stop])
-                                           {:status :stopped :manifest-path "manifest.edn"})
-                    decoder/capture-status (fn [_] {})]
+                    recorder/start-capture (fn [_ _]
+                                             (swap! calls conj [:capture-start])
+                                             {:kind :omkamra.vice/chunked-capture-v1
+                                              :stream-state (atom {})})
+                    recorder/stop-capture (fn [_]
+                                            (swap! calls conj [:capture-stop])
+                                            {:status :stopped :manifest-path "manifest.edn"})
+                    recorder/capture-status (fn [_] {})]
         (let [session (capture/start! {:input (.getPath input)
                                        :output-dir (.getPath directory)
                                        :capture-id "entry-capture"})]

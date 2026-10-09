@@ -158,7 +158,7 @@
         (->> (range 1 byte-count)
              (filter (fn [position]
                        (> (count (distinct (map #(nth (:bytes %) position 0)
-                                                 variants)))
+                                                variants)))
                           1)))
              set)
         operand (assembly-operand-text representative varying-positions)]
@@ -181,7 +181,7 @@
   [execution]
   (let [instructions (:instructions execution)
         exact-blocks (:blocks execution)
-        {:keys [shape-blocks shape-key-to-id]}
+        {:keys [shape-blocks]}
         (reduce
          (fn [{:keys [shape-blocks shape-key-to-id] :as state}
               block]
@@ -220,6 +220,100 @@
               shape-blocks)]
     {:blocks shape-blocks}))
 
+(defn- merge-execution-dictionary
+  "Accumulate a bounded global structural dictionary from one execution.
+
+  A shape retains one representative instruction vector plus observed values
+  for each byte position. Each value set has at most 256 members, so heavily
+  self-modifying operands cannot retain every dynamic code-image variant.
+  Exact variants remain in the raw chunks."
+  [state execution]
+  (let [instructions (:instructions execution)]
+    (reduce
+     (fn [{:keys [blocks shape-key-to-id] :as state} block]
+       (let [instruction-ids (:instruction-ids block)
+             representative (mapv #(nth instructions %) instruction-ids)
+             shape-key (mapv instruction-shape-key representative)
+             variant (mapv :bytes representative)]
+         (if-let [id (get shape-key-to-id shape-key)]
+           (-> state
+               (update-in [:blocks id :observation-count] inc)
+               (update-in [:blocks id :byte-values]
+                          (fn [byte-values]
+                            (mapv (fn [instruction-values bytes]
+                                    (mapv (fn [values byte]
+                                            (conj values byte))
+                                          instruction-values
+                                          bytes))
+                                  byte-values
+                                  variant))))
+           (-> state
+               (assoc-in [:shape-key-to-id shape-key] (count blocks))
+               (update :blocks conj
+                       {:id (count blocks)
+                        :representative representative
+                        :observation-count 1
+                        :byte-values (mapv #(mapv hash-set %) variant)})))))
+     state
+     (:blocks execution))))
+
+(defn- global-template-instruction
+  [representative byte-values instruction-index]
+  (let [instruction (nth representative instruction-index)
+        instruction (if (:text instruction)
+                      instruction
+                      (merge instruction
+                             (disassemble-bytes (:address instruction)
+                                                (:bytes instruction))))
+        byte-count (count (:bytes instruction))
+        varying-positions
+        (->> (range 1 byte-count)
+             (filter (fn [byte-index]
+                       (> (count (nth (nth byte-values instruction-index)
+                                      byte-index))
+                          1)))
+             set)
+        operand (assembly-operand-text instruction varying-positions)]
+    (assoc instruction
+           :bytes (mapv (fn [byte-index]
+                          (when-not (contains? varying-positions byte-index)
+                            (nth (:bytes instruction) byte-index 0)))
+                        (range byte-count))
+           :operand operand
+           :text (str (:mnemonic instruction)
+                      (when (seq operand) (str " " operand))))))
+
+(defn write-executions-assembly!
+  "Stream one globally deduplicated assembly dictionary for `executions`.
+
+  `executions` may be a lazy sequence of chunk-local execution dictionaries.
+  The function consumes one execution at a time, retaining only a structural
+  template dictionary and bounded per-byte value sets used to mask varying
+  operands. A block shape occurring in multiple source chunks is rendered
+  once; exact code-image variants remain in the raw source chunks."
+  [writer executions]
+  (let [{:keys [blocks]}
+        (reduce merge-execution-dictionary
+                {:blocks [] :shape-key-to-id {}}
+                executions)]
+    (.write writer "; structural basic-block template dictionary\n")
+    (doseq [{:keys [id representative byte-values observation-count]} blocks]
+      (let [instructions (mapv #(global-template-instruction representative
+                                                             byte-values
+                                                             %)
+                               (range (count representative)))]
+        (.write writer
+                (format "\n; block %d, %d instructions%s\n"
+                        id
+                        (count instructions)
+                        (if (> observation-count 1)
+                          (format ", %d code-image observations"
+                                  observation-count)
+                          "")))
+        (doseq [instruction instructions]
+          (write-static-instruction! writer instruction))))
+    nil))
+
 (defn- write-compressed-assembly!
   [writer artifact]
   (let [execution (require-execution artifact)
@@ -240,6 +334,16 @@
   [writer artifact]
   (write-compressed-assembly! writer artifact))
 
+(defn write-assembly!
+  "Stream an artifact's canonical assembly rendering to `writer`.
+
+  This is the writer-oriented counterpart to `artifact->assembly`.  It lets
+  semantic-segment materializers render one source chunk at a time without
+  retaining an entire segment's assembly text in memory."
+  [writer artifact]
+  (render-assembly! writer artifact)
+  nil)
+
 (defn artifact->assembly
   "Render a pipeline artifact using the canonical assembly renderer.
 
@@ -257,8 +361,8 @@
   ([artifact {:keys [output-file]}]
    (if output-file
      (with-open [writer (io/writer output-file)]
-       (render-assembly! writer artifact)
+       (write-assembly! writer artifact)
        output-file)
      (let [writer (java.io.StringWriter.)]
-       (render-assembly! writer artifact)
+       (write-assembly! writer artifact)
        (str writer)))))

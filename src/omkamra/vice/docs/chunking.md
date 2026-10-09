@@ -17,6 +17,13 @@ The implementation must:
 
 The implementation should not initially require a perfect semantic classifier. Physical chunking is the memory and durability mechanism; semantic classification is an evidence-producing layer on top.
 
+The end goal is a tool that emits one `.asm` listing per semantic segment
+(fast-loader, decruncher, demopart, and later music), where each listing
+contains only the code that belongs to that segment. Boundaries and labels must
+come from general electronic signals - where writes go, whether the serial bus
+is driven, whether a destination advances - never from code patterns observed
+in one particular demo.
+
 ## 2. Terminology
 
 Use these terms consistently:
@@ -360,6 +367,17 @@ Initial output should be evidence such as:
  :event-range [.. ..]}
 ```
 
+A load is recognised by **reading** `$dd00`, not by writing it. On the IEC bus
+the C64 is the master: it samples CLOCK/DATA by reading, and only writes the
+register to handshake. `$dd00` bits 0-1 additionally select the VIC bank and are
+written by raster routines too, so a write counts as serial traffic only when it
+changes bits 2-7. A transfer is then a phase in which serial-register access is
+sustained across units. That test is IRQ-agnostic, so it also covers trackmo
+loaders that run inside an IRQ handler. Measured on the Triad capture, the two
+fast-loader transfers show 816k and 490k serial accesses while every other
+uncovered range shows 0-8, and their inferred write counts alone (about 10k)
+were far too weak to identify them.
+
 ### 9.2 Decrunch evidence
 
 Use existing inferred-write data and the evolving memory image to track:
@@ -371,6 +389,18 @@ Use existing inferred-write data and the evolving memory image to track:
 - transition from a write-heavy routine into newly written code.
 
 Avoid treating every large clear/copy as a decruncher. Initially expose `:possible-decruncher` evidence with confidence and preserve the underlying counters.
+
+A decruncher moves data from memory to memory and never touches the serial bus,
+so the general discriminator is ordinary-RAM writes with **no** serial-register
+access. A real decruncher also writes its destination region in increasing or
+decreasing address order while that region expands; copy loops such as the
+Triad's `LDA ($2F),Y` / `STA ($2D),Y` with `INC $2F` / `INC $2D` at
+`41.1M-41.5M` show exactly this. Scattered RAM writes with no monotonic
+destination are a calculation/support routine producing data for another
+handler, not a decruncher. The current `:ram-frontier-movement` is computed over
+all ordinary RAM rather than the destination region, so a destination-relative
+monotonicity metric is still required before decruncher and calculation can be
+separated reliably.
 
 ### 9.3 Demopart/IRQ evidence
 
@@ -391,6 +421,16 @@ A fingerprint should be stable over a configurable window of frames before being
 - meaningful VIC configuration change.
 
 The fingerprint should be persisted in summaries so classification can be improved offline without replaying the entire trace.
+
+The hardware IRQ vector is `$fffe/$ffff`. While KERNAL ROM is mapped in, it
+reads as the KERNAL entry `$ff48`; while ROM is banked out, the program's RAM
+word is authoritative. Detect an IRQ entry whenever the executed PC equals that
+effective vector, independently of control flow, because an IRQ whose entry
+follows `RTI` is invisible to an unexpected-control-flow test and was lost for
+258 of the Triad's 498 chunks before this rule existed. The KERNAL entry then
+dispatches through `$0314/$0315`, so resolve it to the installed handler; parts
+that all enter at `$ff48` are otherwise indistinguishable. A handler that runs
+in only some frames of an epoch is sampling noise, not an IRQ topology change.
 
 ### 9.4 Peripheral register timelines
 
@@ -419,6 +459,12 @@ The current decoder already derives VIC-register history, while SID writes curre
 
 Write timing is inferred from instruction-start trace samples and the following event; it is not a direct VICE bus-event stream. The implementation must retain the timing fields, make PAL/NTSC raster geometry configurable, and validate write-commit calculation against known instruction timings. The timeline should distinguish sampled instruction timing from estimated write-commit timing rather than presenting the latter as directly observed.
 
+Domain classification must use the CPU port `$01` value at the write. When the
+I/O area is banked out, `$d000-$dfff` is ordinary RAM: those writes must not
+inflate the IEC/VIC counters and must be included in decrunch destination
+footprints. The Triad contains a banked-out range where all 256 `$dd00` writes
+are RAM, which previously produced a false IEC signal.
+
 ## 10. Semantic model
 
 Do not force semantic activities into one enum per event. Use two related structures:
@@ -444,6 +490,23 @@ Do not force semantic activities into one enum per event. Use two related struct
 ```
 
 Activities may overlap. Parts are longer-lived semantic epochs and may span many physical chunk files. A physical chunk may contain the end of one part, a loader activity, and the beginning of another part.
+
+Classify each unit (IRQ frame or write window) by a **behavior flag set** rather
+than one exclusive label, so a handler that combines activities - for example a
+raster routine that also loads, or a trackmo loader driven from a raster IRQ -
+is represented as a combination:
+
+- serial reads of `$dd00` (bits 2-7) -> loader;
+- VIC register writes -> raster/demopart;
+- SID writes -> music;
+- ordinary-RAM writes with a broad, monotonic destination and no serial access
+  -> decruncher;
+- ordinary-RAM writes that are neither monotonic nor broad -> calculation (a
+  support routine producing data for another handler).
+
+Segment labels then come from the dominant or combined flags of their units,
+which is what allows one IRQ handler to be reported as, say, both raster and
+loader instead of being forced into a single kind.
 
 The initial offline classifier should use hysteresis:
 
@@ -703,9 +766,14 @@ Capture finalization now commits raw chunks and the capture manifest only; it
 never launches derived analysis. `omkamra.vice.analysis` provides the first
 ordered stage, structural/video indexing, as an explicit request. Its durable
 analysis manifest, per-stage atomic staging, compatibility checks, force
-reruns, and independent status form the Phase 2 foundation. The next
-implementation work is to add the feature, classifier, semantic-segment, and
-asset stages to that registry.
+reruns, and independent status form the Phase 2 foundation. Feature, classifier, asset, and semantic-segment stages are now registered.
+The current refinement adds bounded cross-chunk write-to-execution handoff
+evidence, per-unit behavior flags, a destination-relative decrunch footprint,
+first-class loader/decruncher transition segments, KERNAL-default-handler part
+demotion, exclusive part/transition code ownership, clustered file grouping,
+per-demopart raster/music routine separation, and a compact disassembly input
+that avoids re-parsing raw chunks. The remaining review work is loader-aware
+IRQ-topology comparison over the replaceable segment index.
 
 ### Phase 1: physical chunking without classification — implemented
 
@@ -732,10 +800,13 @@ to ensure capture shutdown does not invoke that analysis pass.
   analysis;
 - [x] define the ordered analysis-stage registry, versions, configuration,
   and durable analysis-manifest status; every stage implements an
-  `:init`/`:step`/`:close` reducer contract, and the current registry contains
-  named stages `:writes`, `:structure`, `:video`, and `:assets`, with
-  `:video` depending on `:writes` and `:assets` depending on both `:writes`
-  and `:video`;
+  `:init`/`:step`/`:close` reducer contract. The current registry contains
+  `:writes`, `:structure`, `:video`, `:assets`, `:features`,
+  `:classification`, `:segments`, and `:disassembly`; `:video` depends on
+  `:writes`, `:assets` depends on both `:writes` and `:video`, `:features`
+  depends on `:writes`, `:structure`, and `:video`, `:classification` depends
+  on `:features`, `:segments` depends on `:classification`, and
+  `:disassembly` depends on `:segments`;
 - [x] expose synchronous and asynchronous analysis requests for a numeric
   stage and `:latest` through `omkamra.vice.analysis/run!` and `run-async!`;
 - [x] run only missing or stale registered stages in order; `:force?` reruns a
@@ -757,44 +828,352 @@ to ensure capture shutdown does not invoke that analysis pass.
   capture status;
 - [x] delete stale stage `.partial` directories before a retry and retain raw
   chunks after interrupted or failed analysis;
-- [ ] add feature, classifier, semantic-segment, and asset stages to the
-  registry; semantic-segment assembly files will be generated by the segment
-  stage once classification provides segment ranges.
+- [x] add the `:segments` stage after `:classification`. It persists exact
+  cross-chunk source slices for transition and observed-demopart segments,
+  retains the overlapping classifier activities, and materializes one `.edn`
+  descriptor per segment. The subsequent `:disassembly` stage owns the
+  independently rerunnable, globally deduplicated `.asm` dictionaries. Its
+  merger keys structural templates by address/opcode and retains bounded
+  per-byte value sets, masking self-modified operand bytes as wildcards; exact
+  full-byte variants remain in immutable raw chunks and changed opcodes remain
+  distinct templates. When the capture was not `:full-capture?`, disassembly
+  reconstructs the CPU port `$01` at each event and omits only instructions
+  executed while BASIC ROM (`$A000-$BFFF`) or KERNAL ROM (`$E000-$FFFF`)
+  is actually mapped; those same addresses remain visible when the port maps
+  them to RAM. The capture manifest persists this option for repeatable
+  reruns. The existing `:assets`,
+  `:features`, and classifier outputs remain independent derived views.
 
-The split writes/structure/video/assets pipeline was validated against
+The ordered writes/structure/video/assets/features/classification/segments/
+disassembly pipeline was validated against
 `captures/20261009-082940-no-booze-triad-e2e`, the 49,733,934-event,
-498-chunk Triad capture. All four registered stages completed with bounded
-one-chunk-at-a-time processing; a combined request now parses each raw chunk
-once and broadcasts it to the requested stage reducers. A subsequent `:latest`
-request skips all compatible stages. The previous flat `analysis/chunks/` output
-is left untouched; new stage output is written under
-`analysis/stages/writes/`, `structure/`, `video/`, and `assets/`.
+498-chunk Triad capture. Segment analysis ran through `run-async!` with
+`:chunk-parallelism 4`; its chunk projections remained bounded. The separate
+disassembly close pass reports its assembly-materialization progress while it
+streams raw source chunks into globally deduplicated dictionaries. The
+RAM-only decrunch evidence refinement removed VIC/SID/CIA-driven false
+positives from the late demo, leaving eight observed IRQ-demopart epochs and
+four loader/decrunch transition clusters. The `disassembly-v3` rerun
+regenerated 12 Triad assembly files with the BASIC/KERNAL ROM filter;
+high-memory addresses remain only when the captured CPU port indicates RAM
+mapping. A subsequent `:latest` request skips all compatible stages. The
+previous flat
+`analysis/chunks/` output is left untouched; new stage output is written under
+`analysis/stages/writes/`, `structure/`, `video/`, `assets/`, `features/`,
+`classification/`, `segments/`, and `disassembly/`.
 
-### Phase 3: feature summaries
+### Phase 3: feature summaries — implemented
 
-- add rolling IRQ/frame fingerprints;
-- add loader I/O counters;
-- add write-density and overwritten-region counters;
-- persist feature summaries in each chunk and the manifest;
-- expose classifier diagnostics in analysis status.
+- [x] add rolling IRQ/frame fingerprints;
+- [x] add loader I/O counters;
+- [x] add write-density and overwritten-region counters;
+- [x] persist feature summaries in each chunk and the manifest;
+- [x] expose feature diagnostics in analysis status.
 
-### Phase 4: conservative offline classification
+`analysis/run!` now provides a versioned `:features` stage. It consumes the
+existing `:writes`, `:structure`, and `:video` views one raw chunk at a time,
+then persists exact write/domain counters, ordinary-RAM write counts, IEC and
+configurable KERNAL-range activity, executed-code overwrite counts, observed
+IRQ-frame fingerprints, and bounded VIC/$D012 samples. Hardware-domain decoding recognizes the VIC-II,
+SID, and CIA mirrored I/O ranges, so intentionally mirrored demo writes remain
+visible to later analysis. Rolling fingerprints are local to each physical
+chunk; the persisted frame records retain global event ranges so the classifier
+can join neighbouring chunks without recapturing. The analysis-stage index and
+`analysis/status` retain capture-level aggregate diagnostics. The Triad No
+Booze, No Phone, No Party capture (`20261009-082940-no-booze-triad-e2e`) was
+processed successfully: 49,733,934 events across 498 chunks, with 11,624,495
+inferred writes and no raw-capture rewrite.
 
-- add candidate boundaries and hysteresis;
-- label loader/decruncher activities with confidence and evidence;
-- identify stable demopart fingerprints;
-- distinguish semantic transitions from forced physical boundaries;
-- add cross-chunk lookback handling;
-- make classifier versions and configurations explicit stage inputs.
+### Phase 4: conservative offline classification — implemented
 
-### Phase 5: offline refinement and tooling
+- [x] add candidate boundaries and hysteresis;
+- [x] label loader/decruncher activities with confidence and evidence;
+- [x] identify stable demopart fingerprints;
+- [x] distinguish semantic transitions from forced physical boundaries;
+- [x] add cross-chunk lookback handling;
+- [x] make classifier versions and configurations explicit stage inputs.
 
-- provide a classifier pass over existing chunk files;
-- allow confidence/signature algorithms to evolve without recapturing;
-- produce part/activity reports and cross-segment assembly indexes;
-- add visualizations or summaries for IRQ fingerprints, memory writes, and part transitions.
+`analysis/run!` now provides a versioned `:classification` stage after
+`:features`. It persists per-chunk evidence candidates, then consumes those
+chunks in manifest order during stage close so hysteresis and fingerprint
+lookback cross physical chunk boundaries without retaining the capture in
+memory. Loader and decruncher activities may overlap; demopart activities are
+promoted from stable IRQ fingerprints and also appear as numbered `:parts`.
+Physical forced boundaries remain in a separate `:physical-boundaries` index,
+so they are not mistaken for semantic transitions. Confidence thresholds,
+lookback length, and evidence-window size are recorded in the stage
+configuration and can be changed to rerun classification without recapturing.
+The Triad capture was classified successfully with four chunk workers, yielding
+498 physical-boundary records, 2 loader activities, 3 decruncher activities,
+and 8 inferred IRQ-demopart epochs. Before the Phase 5 refinement, the
+classifier retained one coalesced stable-fingerprint `:demopart` activity while
+the semantic segment stage split it into those eight epochs.
+Mapped-register-heavy raster activity no longer extends decruncher activities
+into the final demo part.
 
-Offline refinement should be repeatable and non-destructive to raw data. Raw chunks remain immutable; each classifier version replaces the current derived semantic index after successful staging:
+### Phase 5: semantic segments and offline refinement — in progress
+
+- [x] add semantic-segment cross-chunk materialization and replaceable
+  part/activity indexes;
+- [x] add the separately rerunnable `:disassembly` stage with one globally
+  deduplicated assembly dictionary per segment;
+- [x] omit boot BASIC/KERNAL ROM instructions from non-`:full-capture?`
+  assembly while retaining RAM execution by reconstructing the live `$01`
+  port;
+- [x] make decrunch write-rate evidence count ordinary RAM writes only,
+  excluding VIC/SID/CIA/color-RAM and other mapped-register activity;
+- [x] refine effect boundaries without recapturing: a coarser IRQ/VIC frame
+  signature now creates only a candidate boundary, which is promoted after a
+  configurable stable-frame window (`:signature-stability-frames`, default
+  four frames). Exact fingerprints remain forensic evidence and are not used
+  directly as segment boundaries;
+- [x] split coalesced stable-fingerprint demopart activities at meaningful
+  frame gaps and stable frame-signature changes instead of leaving one broad
+  classifier activity;
+- [x] tighten loader/decruncher boundaries using strong-evidence onset/exit
+  rather than hysteresis-expanded ranges. The retained hysteresis extent is
+  preserved separately as lead-in/trail-out metadata;
+- [x] add bounded destination-footprint evidence for ordinary RAM writes:
+  unique-address count, address span, forward/backward frontier movement, and
+  exact adjacent-frame repeated-footprint detection within a chunk and a
+  compact cross-chunk fingerprint check. A `BitSet` is retained only for a
+  frame in the active chunk; persisted feature records contain a compact
+  fingerprint and counters. This distinguishes an advancing decruncher
+  destination from repeated screen, bitmap, or raster-operand copies;
+- [x] keep loader evidence tied to IEC/KERNAL activity and separate it from
+  RAM-write-rate evidence, so slow disk-driven writes are not classified as
+  decrunching;
+- [x] assign exclusive segment roles or explicit `:compound` roles to
+  overlapping activities, clip activity evidence to segment ranges, and
+  expose boundary confidence in the segment index;
+- [x] add a durable EDN/text boundary-audit report listing adjacent segment
+  overlaps/gaps, clipped activity ranges, assembly files, and
+  confidence/signals for repeatable manual review;
+- [x] add interrupt-independent write-window evidence for classifier units.
+  `:features` now partitions a no-IRQ chunk, and a substantial pre-IRQ
+  interval, into configurable bounded `:write-window` units (10,000 events by
+  default). These retain the same ordinary-RAM write, destination-footprint,
+  and loader counters as IRQ frames but intentionally have no fingerprint, so
+  they cannot manufacture a demopart. A short pre-IRQ physical-chunk fragment
+  is folded into the following IRQ unit rather than becoming a tiny negative
+  observation that breaks cross-chunk hysteresis;
+- [x] distinguish frame-epoch candidates from confirmed semantic demoparts.
+  A sustained IRQ epoch is retained as an `:effect-candidate` and becomes a
+  `:demopart` only with stable execution evidence, a meaningful signature
+  transition, or corroborating loader/decrunch completion. The Triad rerun
+  retains 11 effect-candidate epochs and four materialized demoparts;
+- [x] make signature-change promotion depend on signature distance and
+  semantic corroboration, not exact equality of every coarse field. Small
+  VIC-write-band changes and event-gap-only splits remain candidates unless
+  IRQ topology, VIC configuration distance, execution identity, or transition
+  evidence also changes;
+- [x] add visualizations or summaries for IRQ fingerprints, memory writes,
+  destination footprints, and part transitions. Each classifier unit now
+  persists its `:behavior-flags` and `:destination-*` profile (unique-address
+  count, range, page count, compact page bitmap), and the replaceable
+  `boundary-audit.edn`/`.txt` reports each segment's signals, clipped
+  activities, gaps and transitions;
+- [x] verify semantic `.asm` boundaries against emitted structural dictionaries
+  and activity evidence. Inspecting the Triad transition assemblies confirmed
+  the decruncher/loader materialisations: `segment 19` sets up screen and
+  colour RAM and then `JMP $0400; SEI; STA $01`, while `segment 24` contains
+  the `LDA ($2F),Y` / `STA ($2D),Y` copy loop with `INC $2F` / `INC $2D`;
+- [x] prevent demopart `.asm` materializations from silently absorbing loader
+  code by marking overlapping materializations `:compound` and recording the
+  clipped activity evidence in both the assembly header and boundary audit;
+- [x] suppress false decrunch classifications caused by stable IRQ/raster
+  routines that self-modify code and produce high ordinary-RAM write counts.
+  A repeated bounded footprint, stable IRQ fingerprint, and repeated
+  write-then-immediate-execute behavior is classified as
+  `:self-modifying-raster`, not `:decruncher`, while retaining the evidence;
+- [x] require real decrunch evidence to combine an advancing or newly expanded
+  ordinary-RAM destination footprint with a transition into newly written
+  code. High write rate, density, or overwritten-code counts alone are not
+  sufficient;
+- [x] preserve bounded cross-chunk handoff evidence. The feature stage stores
+  only tail-written and head-executed RAM address sets for a configured event
+  window; ordered classification intersects adjacent chunks and extends the
+  activity evidence across the physical boundary without retaining all events;
+- [x] add provisional file grouping and trace-backed uncovered-range
+  diagnostics. Strong loader starts delimit three reviewable file ranges;
+  every range outside a semantic descriptor is summarized from persisted
+  classifier units as `:write-heavy`, `:raster-heavy`,
+  `:candidate-transition`, `:no-irq`, or `:low-evidence`. Short gaps receive
+  an explicit continuation/transition recommendation instead of being merged
+  silently. IEC-only transport evidence is retained and marked as possible
+  custom-drive transport; it is not rejected merely because no CPU RAM
+  destination is visible.
+- [x] merge stable neighboring frame epochs when their coarse IRQ/VIC change
+  is below the configured signature-distance thresholds. This prevents normal
+  VIC write-band animation from manufacturing extra part candidates while
+  preserving meaningful topology/configuration changes.
+- [x] investigate the Triad's final-file grouping using the two detected
+  fast-loader intervals as provisional file boundaries. The first two file
+  ranges contain three part candidates each; the final range contains six and
+  is retained as an explicit `:overfull` review result rather than being forced
+  into the expected three-to-four range;
+- [x] classify the large uncovered ranges in the boundary audit by cause:
+  `:no-irq`, `:write-heavy`, `:raster-heavy`, `:low-evidence`, or
+  `:candidate-transition`. IEC-only stretches also retain a possible
+  custom-drive-transport interpretation;
+- [x] audit short gaps between adjacent IRQ epochs and record whether each is a
+  candidate continuation or candidate transition without silently merging it.
+- [x] detect the hardware IRQ entry from the effective `$fffe/$ffff` vector
+  instead of relying on unexpected control flow alone. With KERNAL ROM mapped
+  in the vector reads as `$ff48`; with ROM banked out the program's RAM word is
+  authoritative. The same rule is applied at capture time and re-derived
+  offline from the persisted chunk, so an IRQ whose entry follows an `RTI` is
+  no longer lost. This restored IRQ structure to 258 chunks that previously
+  produced only 10,000-event write windows;
+- [x] classify `$d000-$dfff` writes using the CPU port `$01` value at the
+  write. When I/O is banked out those addresses are ordinary RAM, so they no
+  longer inflate the IEC/VIC counters or suppress decruncher destination
+  footprints;
+- [x] resolve the KERNAL IRQ entry (`$ff48`) to the actually installed handler
+  through `$0314/$0315`, and treat a handler that runs in only some frames as
+  sampling noise rather than a part boundary. This consolidated the Triad
+  candidate list from 22 to 16 frame epochs;
+- [x] identify transfers generally from **serial-register reads**. On the IEC
+  bus the C64 is the master: loading samples `$dd00` by reading it and only
+  writes it for handshaking, so write counts measured the wrong direction.
+  Serial writes are additionally masked to bits 2-7, because bits 0-1 are the
+  VIC bank select that raster routines also store to the same register. In the
+  Triad the two fast-loader transfers show 816k and 490k serial accesses
+  against 0-8 everywhere else;
+- [x] separate transfer/decode phases from raster phases by the per-unit
+  hardware traffic mix (serial / VIC / ordinary RAM / SID) rather than by code
+  shape, so the distinction is IRQ-agnostic and also covers trackmo loaders and
+  decrunchers that run inside an IRQ handler;
+- [x] replace the single traffic keyword with a per-unit *behavior flag set*
+  (`:loader`, `:raster`, `:music`, `:calculation`; the `:decruncher` flag is
+  added by a destination phase). The flag set is persisted per classifier unit
+  and the old `:traffic-mode` is retained as its projection, so a raster
+  routine that also drives the serial bus is reported as both `:raster` and
+  `:loader`;
+- [x] distinguish a decruncher from a calculation/support routine by
+  destination-relative footprint growth. Features now persist a per-unit
+  destination profile derived from ordinary RAM writes at or above a
+  configurable floor, so zero-page and stack scratch (where decrunchers copy
+  their own code and pointers) no longer dominate the minimum address. Ordered
+  classification accumulates the page bitmap across consecutive RAM-dominant,
+  serial-free units and requires a broad, contiguous destination plus a
+  transfer into produced code or a following custom-handler part. This is what
+  separated the Triad's `$0F89` calculation part from the real decrunchers;
+- [x] promote the classified transfer/decode phases from bounded diagnostics
+  into first-class `:transition` segments. The classifier accumulates a
+  sustained serial-access loader phase and a destination-growth decruncher
+  phase across physical chunks; segment assembly clusters them and materialises
+  one assembly per transition;
+- [x] give each segment exclusive ownership of the code executed in its own
+  range. Part epochs are now clipped against loader/decruncher transitions that
+  do not concurrently run a custom-handler IRQ frame, so a main-loop decruncher
+  no longer leaks into the preceding or following part listing and the
+  redundant default-handler effect fragments disappear. A transition that
+  overlaps a part's own custom-handler frames (a trackmo loader running inside
+  the last part) is preserved and marked `:compound` rather than being cut
+  apart, because part and loader genuinely interleave there;
+- [x] verify that the two compound file-swap transition assemblies really
+  contain both responsibilities. `segment 5` (`5.3M-9.9M`) and `segment 14`
+  (`25.16M-30.83M`) each contain a serial loader (`LDA`/`STA $DD00` around
+  `$E4xx-$EExx`) together with memory-to-memory copy loops (`LDA ($FB),Y` /
+  `STA ($FD),Y`, `LDA ($D6),Y`), confirming that a decrunch-load-decrunch file
+  swap legitimately belongs in one materialization;
+- [x] treat music and raster symmetrically: a routine is identified by the
+  hardware domain its code writes. Features persist the per-unit VIC and SID
+  writing PCs, `behavior-flags` marks `:raster`/`:music` on write presence
+  rather than a dominant share (so a per-frame music player inside a VIC-heavy
+  frame is visible), and each demopart gets a detected raster routine and music
+  routine with anchor write PCs, a code range, write count, and per-frame
+  cadence. The disassembly stage emits `segment-NNNNNN.music.asm` and
+  `segment-NNNNNN.raster.asm`, selecting only the basic blocks that contain an
+  anchor PC. All 13 Triad demoparts yield a self-contained music player; the
+  final part resolves to the `$13C4-$13ED` player, and a resident player may
+  legitimately be shared by several parts with different song data;
+- [x] speed up disassembly materialization. Rather than re-parsing the large
+  raw chunks once per segment, the disassembly step persists a compact per-chunk
+  CPU-port timeline and the close pass reads the already-persisted structure
+  chunk (which owns the execution and block runs). Rendering is unchanged
+  byte-for-byte, while the close pass no longer re-reads roughly a gigabyte of
+  raw EDN;
+- [ ] a refined `topology-changed?` should ignore handlers classified as
+  `:loader`, because a trackmo may replace every IRQ handler except the one
+  loading the next part;
+- [ ] revisit the decruncher/loader/calculation distinction against a trackmo
+  whose IRQ loader decrunches in place. A decruncher may run inside a custom
+  IRQ handler, and a calculation routine is expected to regenerate per-frame
+  data that a raster routine then reads. The write-domain phase rules may need
+  to become routine-consumption rules (output executed vs output read by a
+  raster/music routine) once such a capture is available;
+
+The current refinement produces `features-v15`, `classification-v19`,
+`segments-v21`, and `disassembly-v12`. A demo segment is now identified as a
+stable combination of concurrently-running routines: a demopart by its
+installed IRQ handler set (so VIC-write-volume animation no longer splits an
+epoch into fragments or prevents it from stabilising), and a loader or
+decruncher as its own phase rather than a clustered file-swap transition. On
+the Triad capture this yields 22 segments: **10 decrunchers, 2 loaders, and 10
+demoparts**. Files 2 and 3 each contain exactly four demoparts; file 1
+contains two. `:music` fires on 664 part frames as `#{:music :raster}` (plus
+352 more with `:calculation`/`:loader`), and each demopart carries a detected
+raster routine and music routine. The disassembly stage emits 10
+`segment-NNNNNN.music.asm`, 10 `segment-NNNNNN.raster.asm`, 2
+`segment-NNNNNN.loader.asm`, and 10 `segment-NNNNNN.decrunch.asm` listings in
+addition to the 22 full segment listings; the final part's music listing is
+the self-contained `$13C4-$13ED` player, while a resident player may be shared
+by several parts with different song data. Segment assembly enforces
+exclusive ownership: part epochs are clipped against non-concurrent
+transitions, leaving no standalone default-handler effect fragments. The three
+real files are recovered at `[0 5.38M]`, `[5.38M 25.16M]`, and
+`[25.16M 49.73M]`; loader boundaries are clustered so that the momentary
+serial idle gaps inside one fast-loader no longer fragment the capture into
+spurious files. KERNAL-default handler epochs (`$0314 = $EA31`) are demoted to
+non-part effects, but the check is made against every frame in an epoch,
+because the epoch's stored signature can be stale; this is what kept the final
+`$40B4` part from being demoted. Only two uncovered ranges remain:
+`[0 181360]` (`:raster-heavy`) and `[45780000 45782087]`
+(`:decruncher-stretch`). An IRQ entry that jumps to `$EA31` only to perform
+stack restore and `RTI` is still a raster routine, so demotion is decided by
+the resolved `$0314` handler rather than by the presence of `$EA31` in the
+executed code. The two trackmo-overlap demoparts are marked `:compound` rather
+than being cut apart, because their raster and loader routines genuinely
+interleave. Consecutive decrunchers are deliberately allowed to coalesce into
+one `:decruncher` segment: there is no per-decrun fingerprint (unlike
+demoparts), and a slow decompressor followed by a fast RLE pass may
+legitimately share one materialization. Calculation routines are not
+separated yet. The rule will be the same symmetry: a calc routine is an IRQ
+handler whose behaviour flags are exactly `#{:calculation}` (ordinary-RAM
+writes with no VIC, SID or serial access), carved out by its RAM-write PCs
+like raster and music; newer 3D-effect demos are where this is expected to
+appear.
+
+An earlier refinement remains repeatable and non-destructive to raw data. The
+`structure-v3`, `features-v13`, `classification-v15`, `segments-v16`, and
+`disassembly-v5` run was validated against the Triad capture through
+`run-async!` with `:chunk-parallelism 4`. It completed with 49,733,934 events
+across 498 raw chunks and 3,930 classifier units. Classification reports three
+confirmed demopart activities, two loader activities, one real decrunch
+transition, and two `:self-modifying-raster` activities. That segment index
+then contained 19 materialized ranges: seven demoparts, nine effect
+candidates, and three transitions. Vector-based IRQ recovery reduced the
+uncovered area from 26.4M to 14.2M events.
+
+The cross-chunk handoff evidence extended the confirmed decrunch observation
+from the end of one physical chunk into the next (`40.7M–40.81M` events),
+while removing the previous broad `37M–40.8M` false positive. That
+`classification-v15`/`segments-v16` review was run asynchronously with
+`:chunk-parallelism 4` against the immutable Triad capture. Recovering the IRQ
+vector exposed the previously invisible parts in `13.3M–23.3M` events as
+demoparts 7–9, plus a further part at `9.9M–12.1M`. Because those parts are now
+visible, file 2 is explicitly `:overfull` with 13 candidates rather than
+silently missing them; that overfull status is signature fragmentation, not
+absent evidence. The port-aware write domain removed the false IEC signal in
+`41.1M–41.48M` (all 256 `$DD00` writes are RAM under banked-out I/O), and the
+read-based serial signal now names the two fast-loader transfers
+`5.4M–9.9M` and `27.1M–30.8M`, with four serial-free RAM-decode stretches
+classed `:decruncher-stretch`. Raw chunks remained
+immutable while successful derived stage directories replaced their
+predecessors atomically. Each classifier version replaces the current derived
+semantic index after successful staging:
 
 ```text
 analysis/
@@ -806,13 +1185,18 @@ analysis/
       index.edn
     assets/
       index.edn
-    04-features/
+    features/
       index.edn
-    ...
-  segments/
-    segment-000001.edn
-    segment-000001.asm
-    segment-000001.ram.bin
+    classification/
+      index.edn
+    segments/
+      index.edn
+      segments/
+        segment-000001.edn
+    disassembly/
+      index.edn
+      assemblies/
+        segment-000001.asm
 ```
 
 The derived index should record the classifier version, configuration, input capture format, and source chunk ranges. Reverting classifier code and rerunning the processor recreates the earlier analysis without rewriting or re-capturing the raw chunks.
@@ -847,6 +1231,29 @@ End-to-end behavior will be validated manually against the demos and intros avai
 - requesting later analysis stages and rerunning a stage on the same raw chunks.
 
 The automated test suite should focus on unit-level transducers, serialization, chunk ownership, writer/manifest atomicity, and classifier primitives rather than attempting to reproduce full VICE/demo integrations.
+
+Development workflow for the offline refinement:
+
+- start the dev server with `clojure_start_dev` and evaluate through
+  `clojure_eval`;
+- run analysis with `(omkamra.vice.analysis/run-async! "<capture-dir>"
+  {:stage :all :chunk-parallelism 4})` and poll
+  `(omkamra.vice.analysis/status "<capture-dir>")`; a full Triad run takes
+  roughly 10-15 minutes;
+- use `clj-reload`, not `require :reload`, to reload edited namespaces.
+  Initialize once with `(reload/init {:dirs ["src"] :output :quiet})` returning
+  `nil`, then after editing call
+  `(select-keys (reload/reload) [:unloaded :loaded])`. Plain `require :reload`
+  leaves downstream namespaces stale;
+- do not create aliases in the `user` namespace; `clj-reload` unloads and
+  recreates namespaces, so aliases go stale. Use fully-qualified names;
+- bumping a stage's `:version` invalidates it and its direct dependents, but not
+  dependents-of-dependents, so bump `:segments` explicitly whenever `:features`
+  changes;
+- `artifact/read-chunk` returns the raw chunk; derived spans live under
+  `analysis/stages/structure/chunks/`. Per-event timing samples are not
+  retained, so re-derived IRQ boundaries take raster anchors from write-record
+  `:raster-line` values.
 
 ### Acceptance criteria
 

@@ -84,6 +84,19 @@
     (is (.contains assembly "$0079  AD ?? ?? LDA $????"))
     (is (not (.contains assembly "; chronological span/block timeline")))))
 
+(deftest stream-assembly-deduplicates-templates-across-executions
+  (let [execution (fn [value]
+                    {:instructions [{:id 0 :address 0x1000 :bytes [0xa9 value]
+                                     :mnemonic "LDA" :mode :imm
+                                     :operand (format "#$%02X" value)}]
+                     :blocks [{:id 0 :instruction-ids [0]}]})
+        writer (java.io.StringWriter.)]
+    (asm/write-executions-assembly! writer [(execution 1) (execution 2)])
+    (let [assembly (str writer)]
+      (is (= 1 (count (re-seq #"(?m)^; block " assembly))))
+      (is (.contains assembly "; block 0, 1 instructions, 2 code-image observations"))
+      (is (.contains assembly "$1000  A9 ??    LDA #$??")))))
+
 (deftest assembly-masks-varying-immediate-operands
   (let [execution {:format :omkamra.vice/versioned-execution-v3
                    :instructions [{:id 0 :address 0xd012 :bytes [0xa9 0x07]

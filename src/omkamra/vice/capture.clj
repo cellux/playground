@@ -34,7 +34,7 @@
             [omkamra.vice :as vice]
             [omkamra.vice.binary-monitor :as bm]
             [omkamra.vice.profile :as profile]
-            [omkamra.vice.decoder :as decoder])
+            [omkamra.vice.decoder.capture :as recorder])
   (:import [java.net ServerSocket]
            [java.time LocalDateTime]
            [java.time.format DateTimeFormatter]
@@ -221,7 +221,7 @@
   [session]
   (when-let [capture @(:capture session)]
     (try
-      (decoder/stop-capture capture)
+      (recorder/stop-capture capture)
       (catch Throwable error
         (swap! (:state session) assoc
                :capture-cleanup-error (.getMessage error)))
@@ -234,9 +234,9 @@
   ;; Stop sampling before finalizing the FIFO so the profile describes the
   ;; steady-state Clojure capture rather than shutdown and persistence.
   (stop-profiler! session)
-  (let [result (decoder/stop-capture capture)
+  (let [result (recorder/stop-capture capture)
         capture-summary (try
-                          (decoder/capture-status capture)
+                          (recorder/capture-status capture)
                           (catch Throwable _ nil))
         _ (swap! (:state session) assoc :capture-summary capture-summary)
         _ (reset! (:capture session) nil)
@@ -458,7 +458,7 @@
               (delete-program-start-checkpoint!
                conn @program-start-checkpoint)
               (reset! program-start-checkpoint nil))
-            (let [capture (decoder/start-capture
+            (let [capture (recorder/start-capture
                            conn
                            (merge
                             (select-keys options [:chunk-max-events
@@ -467,7 +467,8 @@
                                                   :writer-backpressure-ms])
                             {:capture-directory (:capture-directory session)
                              :metadata {:capture-id (:capture-id session)
-                                        :input (:input session)}
+                                        :input (:input session)
+                                        :full-capture? full-capture?}
                              :retain-samples?
                              (boolean (:retain-samples? options))}))]
               (reset! (:capture session) capture)
@@ -594,7 +595,7 @@
         capture @(:capture session)
         capture-status (when capture
                          (try
-                           (decoder/capture-status capture)
+                           (recorder/capture-status capture)
                            (catch Throwable error
                              {:capture-status-error (.getMessage error)})))]
     (cond-> (merge (select-keys session [:capture-id :input :output-dir :capture-directory
