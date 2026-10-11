@@ -1,64 +1,84 @@
 (ns omkamra.vice.capture
-  "Non-GUI orchestration for VICE PRG/D64 captures.
+  "Non-GUI VICE lifecycle and v2 raw-capture orchestration.
 
-  `start!` performs setup asynchronously and returns a session handle. The
-  session owns the VICE process, binary-monitor connection, and FIFO-backed
-  decoder capture. `stop-async!` requests shutdown without waiting;
-  `stop!` waits for setup if necessary, commits the final raw chunk and
-  manifest, and tears down VICE.
+  Responsibilities are split across threads with a bounded queue between them:
 
-  Model-facing usage for a demo-capture request:
+  * the **reader thread** opens the trace FIFO, parses text records with
+    `omkamra.vice.trace`, and puts them on a bounded `ArrayBlockingQueue`.
+    It reopens the FIFO after each end of stream, and stops when the session's
+    stop flag is set.
+  * the **controller thread** (the session worker) converts records into packed
+    events, assembles chunks, and owns the boundary protocol.
+  * a short-lived **resume future** starts execution after the controller is
+    already draining, because monitor-log writing blocks both VICE and the
+    reader when the bounded queue fills.
 
-  1. Call `start!` with the user's existing `.prg` or `.d64` path and an
-     output directory. Do not use the GUI namespace or manually orchestrate
-     VICE, the monitor, or the FIFO.
-  2. Retain the returned session handle and use `status` for progress checks.
-     The session is running once its status is `:running`; the input has been
-     loaded and, by default, execution has resumed with `:run-after-load?`
-     set to true. Unless `:full-capture?` is true, tracing begins at the
-     KERNAL's `$E144 JMP ($0014)` dispatch into the loaded program rather than
-     at boot.
-  3. Keep the session alive while the requested demo runs. When the user says
-     the capture is complete, call `stop-async!` and poll `status` until the
-     session is `:stopped`, or call `stop!` when a synchronous result is
-     appropriate.
-  4. Return or report the `:capture-directory`, `:manifest-path`, and, when
-     requested, `:profile-edn-path` from the stopped result. The manifest and
-     immutable numbered raw chunks are the canonical capture; the profile EDN
-     contains Clojure async-profiler stack samples.
+  Boundary protocol:
 
-  If the user requests loading without execution, pass
-  `:run-after-load? false` together with `:full-capture? true` to `start!`;
-  otherwise do not override the default."
+  1. an execute-only, non-stopping tracepoint produces trace records;
+  2. when the approximate event target is crossed the controller disables
+     `MonitorLogEnabled`, which pauses VICE and closes the log file;
+  3. the reader therefore reaches end of stream, draining every record emitted
+     before the pause into the closing chunk;
+  4. the controller reads the complete canonical snapshot while VICE remains
+     paused, then re-enables logging and resumes;
+  5. the first event after the resume supplies the next chunk's boundary
+     timestamp, so a chunk's snapshot and timing are committed at the *next*
+     boundary, when its timing is already known.
+
+  A stop commits the non-empty final chunk and finalizes the manifest. Any
+  failure destroys the reserved capture directory."
   (:require [clojure.java.io :as io]
             [omkamra.vice :as vice]
             [omkamra.vice.binary-monitor :as bm]
-            [omkamra.vice.profile :as profile]
-            [omkamra.vice.decoder.capture :as recorder])
-  (:import [java.net ServerSocket]
-           [java.time LocalDateTime]
-           [java.time.format DateTimeFormatter]
-           [java.util UUID]))
+            [omkamra.vice.trace :as trace]
+            [omkamra.vice.contract :as contract]
+            [omkamra.vice.event :as event]
+            [omkamra.vice.recorder :as recorder]
+            [omkamra.vice.snapshot :as snapshot])
+  (:import [java.io Reader]
+           [java.net ServerSocket]
+           [java.util UUID]
+           [java.util.concurrent ArrayBlockingQueue TimeUnit]))
 
+(def ^:private program-entry-address 0xe144)
+(def ^:private basic-program-address 0x0801)
+(def ^:private basic-sys-token 0x9e)
+(def ^:private basic-probe-bytes 128)
+(def ^:private basic-max-lines 8)
 (def ^:private default-connect-timeout-ms 30000)
 (def ^:private default-connect-retry-ms 100)
 (def ^:private default-autostart-timeout-ms 5000)
 (def ^:private default-program-start-timeout-ms 30000)
-(def ^:private program-entry-address 0xe144)
-(def ^:private terminal-statuses #{:stopped :failed})
+(def ^:private default-event-target 100000)
+(def ^:private default-queue-capacity 65536)
+(def ^:private eof-sentinel ::eof)
 
 (defn- fail
   [message data]
   (throw (ex-info message data)))
 
+(defn- now-ms []
+  (System/currentTimeMillis))
+
+(defn- elapsed-ms
+  [start-nanos]
+  (quot (- (System/nanoTime) start-nanos) 1000000))
+
 (defn- canonical-file
-  [path]
-  (try
-    (.getCanonicalFile (io/file path))
-    (catch java.io.IOException error
-      (throw (ex-info "Could not resolve path"
-                      {:path path}
-                      error)))))
+  ^java.io.File [path]
+  (.getCanonicalFile (io/file path)))
+
+(defn- process-alive?
+  [instance]
+  (or (nil? (:process instance))
+      (.isAlive ^Process (:process instance))))
+
+(defn- free-port []
+  (with-open [socket (ServerSocket. 0)]
+    (.getLocalPort socket)))
+
+;; Input and dataset validation ---------------------------------------------
 
 (defn- validate-input!
   [input]
@@ -74,38 +94,18 @@
             {:input (.getPath file)}))
     (.getPath file)))
 
-(defn- prepare-output-dir!
-  [output-dir]
-  (when-not output-dir
-    (fail "Capture requires :output-dir" {}))
-  (let [directory (canonical-file output-dir)]
+(defn- prepare-dataset-root!
+  [dataset-root]
+  (when-not dataset-root
+    (fail "Capture requires :dataset-root" {}))
+  (let [directory (canonical-file dataset-root)]
     (when (and (.exists directory) (not (.isDirectory directory)))
-      (fail "Capture output path is not a directory"
-            {:output-dir (.getPath directory)}))
+      (fail "Capture dataset root is not a directory"
+            {:dataset-root (.getPath directory)}))
     (when-not (.exists directory)
       (when-not (.mkdirs directory)
-        (fail "Could not create capture output directory"
-              {:output-dir (.getPath directory)})))
-    (.getPath directory)))
-
-(def ^:private capture-directory-time-format
-  (DateTimeFormatter/ofPattern "yyyyMMdd-HHmmss"))
-
-(defn- prepare-capture-directory!
-  "Reserve the immutable directory for one physical capture.
-
-  It is created before VICE starts, and an existing timestamp/id path is an
-  error rather than an invitation to overwrite an older capture."
-  [output-dir capture-id]
-  (let [name (str (.format (LocalDateTime/now) capture-directory-time-format)
-                  "-" capture-id)
-        directory (io/file output-dir name)]
-    (when (.exists directory)
-      (fail "Capture directory already exists"
-            {:capture-directory (.getPath directory)}))
-    (when-not (.mkdirs directory)
-      (fail "Could not create capture directory"
-            {:capture-directory (.getPath directory)}))
+        (fail "Could not create the capture dataset root"
+              {:dataset-root (.getPath directory)})))
     (.getPath directory)))
 
 (defn- make-capture-id
@@ -120,243 +120,183 @@
             {:capture-id id}))
     id))
 
-(defn- free-port
-  []
-  (with-open [socket (ServerSocket. 0)]
-    (.getLocalPort socket)))
-
-(defn- monitor-port
-  [port]
-  (let [port (if (nil? port) (free-port) port)]
-    (when-not (and (integer? port) (<= 0 port 65535))
-      (fail "Monitor port must be an integer between 0 and 65535"
-            {:port port}))
-    (if (zero? port) (free-port) port)))
-
-(defn- now-ms
-  []
-  (System/currentTimeMillis))
-
-(defn- process-alive?
-  [instance]
-  (or (nil? (:process instance))
-      (.isAlive ^Process (:process instance))))
-
-(defn- connect-when-ready
-  [instance {:keys [timeout-ms retry-ms]}]
-  (let [deadline (+ (now-ms) timeout-ms)]
-    (loop [last-error nil]
-      (when-not (process-alive? instance)
-        (fail "VICE exited before its binary monitor became ready"
-              {:instance (select-keys instance [:pid :command])
-               :cause last-error}))
-      (let [attempt (try
-                      (let [conn (vice/connect instance (fn [_ _] nil))]
-                        (try
-                          ;; A socket can accept before the monitor is ready to
-                          ;; process commands. PING verifies the complete
-                          ;; monitor handshake.
-                          (bm/ping conn)
-                          {:conn conn}
-                          (catch InterruptedException error
-                            (vice/close conn)
-                            (throw error))
-                          (catch Throwable error
-                            (vice/close conn)
-                            {:error error})))
-                      (catch InterruptedException error
-                        (throw error))
-                      (catch Throwable error
-                        {:error error}))]
-        (if-let [conn (:conn attempt)]
-          conn
-          (if (< (now-ms) deadline)
-            (do
-              (Thread/sleep (long retry-ms))
-              (recur (:error attempt)))
-            (throw (ex-info "Timed out waiting for VICE binary monitor"
-                            {:timeout-ms timeout-ms
-                             :instance (select-keys instance [:pid :command])}
-                            (:error attempt)))))))))
-
-(defn- update-status!
-  [session status & data]
-  (apply swap! (:state session) assoc :status status data))
-
-(defn- request-stop!
-  [session reason]
-  (let [^Object lifecycle-lock (:lifecycle-lock session)]
-    (locking lifecycle-lock
-      (let [state @(:state session)]
-        (when (and (not (contains? terminal-statuses (:status state)))
-                   (not (:finalization-started state)))
-          (swap! (:state session)
-                 (fn [state]
-                   (cond-> (assoc state :status :stopping)
-                     (nil? (:stop-reason state))
-                     (assoc :stop-reason reason))))
-          (when-not (realized? (:stop-requested session))
-            (deliver (:stop-requested session) reason))))))
-  @(:state session))
-
-(defn- start-profiler!
-  [session options]
-  (when-let [profile-options (profile/options options)]
-    (reset! (:profiler session) (profile/start! profile-options))
-    (swap! (:state session) assoc :profiling :running)
-    nil))
-
-(defn- stop-profiler!
-  [session]
-  (when-let [profiler @(:profiler session)]
-    (let [result (profile/stop!
-                  profiler
-                  {:output-file (:profile-edn-path session)
-                   :capture-id (:capture-id session)
-                   :input (:input session)})]
-      (swap! (:state session) assoc :profiling :stopped)
-      result)))
-
-(defn- cleanup-capture!
-  [session]
-  (when-let [capture @(:capture session)]
-    (try
-      (recorder/stop-capture capture)
-      (catch Throwable error
-        (swap! (:state session) assoc
-               :capture-cleanup-error (.getMessage error)))
-      (finally
-        (reset! (:capture session) nil)))))
-
-(defn- finalize-capture!
-  [session capture]
-  (update-status! session :finalizing)
-  ;; Stop sampling before finalizing the FIFO so the profile describes the
-  ;; steady-state Clojure capture rather than shutdown and persistence.
-  (stop-profiler! session)
-  (let [result (recorder/stop-capture capture)
-        capture-summary (try
-                          (recorder/capture-status capture)
-                          (catch Throwable _ nil))
-        _ (swap! (:state session) assoc :capture-summary capture-summary)
-        _ (reset! (:capture session) nil)
-        result (merge result
-                      {:capture-id (:capture-id session)
-                       :input (:input session)
-                       :capture-directory (:capture-directory session)
-                       :stop-reason (:stop-reason @(:state session))
-                       :capture-summary capture-summary}
-                      (when-let [profile-edn-path (:profile-edn-path session)]
-                        {:profile-edn-path profile-edn-path}))]
-    (swap! (:state session) assoc :status :stopped)
-    result))
-
-(defn- finalize-once!
-  [session capture]
-  (let [^Object lifecycle-lock (:lifecycle-lock session)
-        owner? (locking lifecycle-lock
-                 (if (:finalization-started @(:state session))
-                   false
-                   (do
-                     (swap! (:state session) assoc
-                            :finalization-started true
-                            :status :finalizing)
-                     true)))]
-    (if-not owner?
-      @(:finalization session)
-      (let [result (try
-                     (finalize-capture! session capture)
-                     (catch Throwable error
-                       (cleanup-capture! session)
-                       (swap! (:state session) assoc
-                              :status :failed
-                              :error-message (.getMessage error))
-                       {:status :failed
-                        :capture-id (:capture-id session)
-                        :input (:input session)
-                        :stop-reason (:stop-reason @(:state session))
-                        :error error}))]
-        (deliver (:finalization session) result)
-        result))))
-
-(defn- cleanup-resources!
-  [session]
-  (let [^Object lifecycle-lock (:lifecycle-lock session)
-        owner? (locking lifecycle-lock
-                 (if (:cleanup-started @(:state session))
-                   false
-                   (do
-                     (swap! (:state session) assoc :cleanup-started true)
-                     true)))]
-    (when owner?
-      (try
-        (when-let [conn @(:conn session)]
-          (try
-            (vice/close conn)
-            (catch Throwable error
-              (swap! (:state session) assoc
-                     :monitor-cleanup-error (.getMessage error))))
-          (reset! (:conn session) nil))
-        (when-let [instance @(:instance session)]
-          (try
-            (vice/stop instance)
-            (catch Throwable error
-              (swap! (:state session) assoc
-                     :vice-cleanup-error (.getMessage error))))
-          (reset! (:instance session) nil))
-        (finally
-          (swap! (:state session) assoc
-                 :monitor :closed
-                 :vice :stopped
-                 :cleanup-complete true))))))
-
-(defn- speed-extra-args
+(defn- event-target
   [options]
-  (if (nil? (:speed options))
-    []
-    (let [speed (:speed options)]
-      (when-not (and (integer? speed) (<= 0 speed))
-        (fail "Capture :speed must be a non-negative integer percentage"
-              {:speed speed}))
-      ["-speed" (str speed)])))
+  (let [target (or (:event-target options) default-event-target)]
+    (when-not (pos-int? target)
+      (fail "Capture :event-target must be a positive integer"
+            {:event-target target}))
+    target))
+
+(defn- queue-capacity
+  [options]
+  (let [capacity (or (:record-queue-capacity options) default-queue-capacity)]
+    (when-not (pos-int? capacity)
+      (fail "Capture :record-queue-capacity must be a positive integer"
+            {:record-queue-capacity capacity}))
+    capacity))
+
+;; VICE process and monitor --------------------------------------------------
 
 (defn- vice-extra-args
-  "Build VICE arguments, optionally setting speed and warp mode."
   [options]
-  (cond-> (into (vec (or (:extra-args options) []))
-                (speed-extra-args options))
+  (cond-> (vec (or (:extra-args options) []))
+    (some? (:speed options)) (conj "-speed" (str (:speed options)))
     (true? (:warp? options)) (conj "-warp")))
 
-(defn- wait-for-stop!
-  [session instance capture]
-  (try
+(defn- connect-when-ready
+  [instance {:keys [connect-timeout-ms connect-retry-ms]}]
+  (let [deadline (+ (now-ms) (or connect-timeout-ms default-connect-timeout-ms))]
     (loop []
-      (let [signal (deref (:stop-requested session) 100 ::timeout)
-            stream @(:stream-state capture)]
+      (when-not (process-alive? instance)
+        (fail "VICE exited before its binary monitor became ready"
+              {:pid (:pid instance)}))
+      (let [conn (try
+                   (let [conn (vice/connect instance (fn [_ _] nil))]
+                     (bm/ping conn)
+                     conn)
+                   (catch Throwable _ nil))]
         (cond
-          (not= ::timeout signal)
-          signal
-
-          (not (process-alive? instance))
-          (do
-            (request-stop! session {:kind :vice-exited
-                                    :message "VICE exited unexpectedly"})
-            (:stop-reason @(:state session)))
-
-          (:error stream)
-          (do
-            (request-stop! session {:kind :capture-reader-error
-                                    :error (:error stream)
-                                    :message "FIFO capture reader failed"})
-            (:stop-reason @(:state session)))
-
+          conn conn
+          (< (now-ms) deadline)
+          (do (Thread/sleep (long (or connect-retry-ms default-connect-retry-ms)))
+              (recur))
           :else
-          (recur))))
-    (catch InterruptedException error
-      (request-stop! session {:kind :interrupted
-                              :error error
-                              :message "Capture worker was interrupted"})
-      (:stop-reason @(:state session)))))
+          (fail "Timed out waiting for the VICE binary monitor"
+                {:pid (:pid instance)}))))))
+
+(defn- set-logging!
+  [session value]
+  (bm/resource-set @(:conn session) {:name "MonitorLogEnabled" :value value}))
+
+;; Program-entry start policy ------------------------------------------------
+
+(defn- monitor-bytes
+  "Read `[start end]` (inclusive) from CPU-visible memory through the monitor."
+  ^bytes [conn start end]
+  (:memory (bm/mem-get conn {:start start :end end :memspace 0})))
+
+(defn- unsigned-byte
+  [^bytes bytes index]
+  (bit-and (int (aget bytes index)) 0xff))
+
+(defn- little-endian-u16
+  [^bytes bytes index]
+  (bit-or (unsigned-byte bytes index)
+          (bit-shift-left (unsigned-byte bytes (inc index)) 8)))
+
+(defn- decimal-after
+  "Parse the decimal operand at or after `start`.
+
+  Skips spaces, and a parenthesized operand's opening `(` (BASIC accepts
+  `SYS (2064)`). Returns nil when no digit is present before `limit`."
+  [^bytes bytes start limit]
+  (loop [index (long start)
+         value nil]
+    (if (< index (long limit))
+      (let [byte (unsigned-byte bytes index)]
+        (cond
+          (or (= byte 0x20)
+              (and (nil? value) (= byte 0x28))) (recur (inc index) value)
+          (<= 0x30 byte 0x39)
+          (recur (inc index) (+ (* (long (or value 0)) 10) (- byte 0x30)))
+          :else value))
+      value)))
+
+(defn- sys-target-in-text
+  "Decimal operand of the first BASIC SYS token in `[start limit)`, or nil."
+  [^bytes bytes start limit]
+  (loop [index (long start)]
+    (when (< index (long limit))
+      (if (= basic-sys-token (unsigned-byte bytes index))
+        (decimal-after bytes (inc index) limit)
+        (recur (inc index))))))
+
+(defn- basic-sys-target
+  "Return the machine-language entry of the autostarted BASIC stub, or nil.
+
+  A PRG autostarted through VICE is usually a tokenized `SYS <address>` stub at
+  `$0801`. Walking the program's line links and parsing the operand of the first
+  SYS token yields the address of the program's first machine instruction."
+  [conn]
+  (let [bytes (monitor-bytes conn basic-program-address
+                             (+ basic-program-address (dec basic-probe-bytes)))]
+    (loop [offset 0
+           lines 0]
+      (if (or (> (+ offset 4) (alength bytes))
+              (>= lines basic-max-lines))
+        nil
+        (let [link (little-endian-u16 bytes offset)]
+          (if (zero? link)
+            nil
+            (let [text-start (+ offset 4)
+                  next-offset (- link basic-program-address)
+                  limit (if (and (>= next-offset text-start)
+                                 (<= next-offset (alength bytes)))
+                          next-offset
+                          (alength bytes))]
+              (or (sys-target-in-text bytes text-start limit)
+                  (recur (long next-offset) (inc lines))))))))))
+
+(defn- set-execute-checkpoint!
+  [conn address]
+  (bm/checkpoint-set conn {:start address
+                           :end address
+                           :stop? true
+                           :enabled? true
+                           :op bm/MON_CHECKPOINT_OP_EXECUTE
+                           :temporary? false}))
+
+(defn- set-program-start-checkpoint!
+  [conn]
+  (set-execute-checkpoint! conn program-entry-address))
+
+(defn- wait-for-stop-at!
+  [conn checkpoint-number address timeout-ms]
+  (or (bm/await-event
+       conn
+       (fn [{:keys [response-type response]}]
+         (and (= bm/MON_RESPONSE_CHECKPOINT_INFO response-type)
+              (= checkpoint-number (:number response))
+              (:hit? response)))
+       timeout-ms)
+      (fail "VICE did not reach the requested execution checkpoint"
+            {:checkpoint-number checkpoint-number
+             :address address}))
+  (or (bm/await-event
+       conn
+       (fn [{:keys [response-type response]}]
+         (and (= bm/MON_RESPONSE_STOPPED response-type)
+              (= address (:pc response))))
+       timeout-ms)
+      (fail "VICE did not stop at the requested execution checkpoint"
+            {:address address})))
+
+(defn- wait-for-program-start!
+  [conn checkpoint-number timeout-ms]
+  (wait-for-stop-at! conn checkpoint-number program-entry-address timeout-ms))
+
+(defn- refine-program-start!
+  "Continue from the BASIC RUN stop to the stub's SYS target.
+
+  The autostart path stops at `$E144` (BASIC RUN); the loaded stub is normally
+  `SYS <address>`, so resume and stop again at that address. The capture then
+  begins on the program's first machine instruction instead of inside the BASIC
+  interpreter, and the initial snapshot is taken at that instruction. Returns
+  the target it stopped at, or nil when the program has no SYS stub."
+  [session program-checkpoint options]
+  (let [conn @(:conn session)
+        target (basic-sys-target conn)]
+    (when (and target (not= target program-entry-address))
+      (let [checkpoint (set-execute-checkpoint! conn target)]
+        (reset! program-checkpoint checkpoint)
+        (bm/resume conn)
+        (wait-for-stop-at! conn (:number checkpoint) target
+                           (or (:program-start-timeout-ms options)
+                               default-program-start-timeout-ms))
+        (bm/checkpoint-delete conn {:number (:number checkpoint)})
+        (reset! program-checkpoint nil)
+        target))))
 
 (defn- autostart-options
   [session options]
@@ -368,290 +308,499 @@
    :timeout-ms (or (:autostart-timeout-ms options)
                    default-autostart-timeout-ms)})
 
-(defn- set-program-start-checkpoint!
-  [conn]
-  ;; VICE autostart dispatches into the loaded PRG through the C64 KERNAL's
-  ;; $E144 JMP ($0014).  This is an EXEC-only checkpoint, so loader/BASIC
-  ;; reads and writes do not start the capture.
-  (bm/checkpoint-set
-   conn {:start program-entry-address
-         :end program-entry-address
-         :stop? true
-         :enabled? true
-         :op bm/MON_CHECKPOINT_OP_EXECUTE
-         :temporary? false}))
+;; FIFO ----------------------------------------------------------------------
 
-(defn- wait-for-program-start!
-  [conn checkpoint-number timeout-ms]
-  ;; A stopping checkpoint emits CHECKPOINT_INFO with :hit? true, followed by
-  ;; the register/stopped events for the monitor transition.  Wait for both so
-  ;; capture setup cannot race the monitor opening at the checkpoint.  Match
-  ;; the stopped PC as well: VICE can leave an older STOPPED event queued from
-  ;; the autostart monitor transition.
-  (or (bm/await-event
-       conn
-       (fn [{:keys [response-type response]}]
-         (and (= bm/MON_RESPONSE_CHECKPOINT_INFO response-type)
-              (= checkpoint-number (:number response))
-              (:hit? response)))
-       timeout-ms)
-      (throw (ex-info "VICE did not reach the loaded program entry point"
-                      {:checkpoint-number checkpoint-number
-                       :entry-address program-entry-address
-                       :timeout-ms timeout-ms})))
-  (or (bm/await-event
-       conn
-       (fn [{:keys [response-type response]}]
-         (and (= bm/MON_RESPONSE_STOPPED response-type)
-              (= program-entry-address (:pc response))))
-       timeout-ms)
-      (throw (ex-info "VICE did not stop at the loaded program entry jump"
-                      {:checkpoint-number checkpoint-number
-                       :entry-address program-entry-address
-                       :timeout-ms timeout-ms}))))
+(defn- create-fifo!
+  [session]
+  (let [fifo (str "/tmp/omkamra-vice-v2/trace-" (System/nanoTime) ".fifo")]
+    (.mkdirs (.getParentFile (io/file fifo)))
+    (io/delete-file fifo true)
+    (let [^java.util.List command ["mkfifo" fifo]
+          process (.start (ProcessBuilder. command))]
+      (when-not (.waitFor process 5 TimeUnit/SECONDS)
+        (.destroyForcibly process)
+        (fail "Timed out creating the trace FIFO" {:fifo fifo}))
+      (when-not (zero? (.exitValue process))
+        (fail "Could not create the trace FIFO"
+              {:fifo fifo :exit-code (.exitValue process)})))
+    (reset! (:fifo session) fifo)
+    fifo))
 
-(defn- delete-program-start-checkpoint!
-  [conn checkpoint]
-  (when-let [number (:number checkpoint)]
-    (bm/checkpoint-delete conn {:number number})))
+(defn- start-fifo-reader!
+  "Read the trace FIFO forever, reopening after each end of stream.
+
+  After a boundary the log file is closed, so the reader reaches EOF, queues the
+  sentinel, and blocks reopening the FIFO until logging is re-enabled. On final
+  stop `:stop-requested` is set before logging is disabled, so the reader queues
+  the last sentinel and then exits instead of reopening. The `recur` must stay
+  inside the `when-not`; otherwise a stopped reader spins on an empty body."
+  [session fifo]
+  (let [^ArrayBlockingQueue queue (:queue session)
+        stop-requested (:stop-requested session)
+        reader-ref (:reader session)
+        body (fn []
+               (try
+                 (loop []
+                   (when-not @stop-requested
+                     (let [reader (io/reader fifo)]
+                       (reset! reader-ref reader)
+                       (try
+                         (trace/reduce-records!
+                          reader
+                          (fn [record] (.put queue record))
+                          true)
+                         (finally
+                           (reset! reader-ref nil)))
+                       (.put queue eof-sentinel))
+                     (recur)))
+                 (catch Throwable error
+                   (try (.put queue {:error error})
+                        (catch Throwable _ nil)))))
+        thread (doto (Thread. ^Runnable body)
+                 (.setName "vice-v2-reader")
+                 (.setDaemon true)
+                 (.start))]
+    (reset! (:reader-thread session) thread)
+    thread))
+
+(defn- release-fifo-open!
+  "Release a reader blocked inside its FIFO open.
+
+  A POSIX FIFO opens for reading only once a writer appears, so a reader that
+  has not yet opened blocks until VICE enables logging. Opening the write end
+  briefly lets that open complete; the reader then reads EOF and leaves its loop
+  because `:stop-requested` is set."
+  [fifo]
+  (when fifo
+    (try
+      (let [out (io/output-stream fifo)]
+        (.close out))
+      (catch Throwable _ nil))))
+
+(defn- stop-fifo-reader!
+  [session]
+  (reset! (:stop-requested session) true)
+  (when-let [reader @(:reader session)]
+    (try (.close ^Reader reader) (catch Throwable _ nil)))
+  (when-let [^Thread thread @(:reader-thread session)]
+    ;; A reader still inside its blocking FIFO open cannot be interrupted, so
+    ;; release it from a short-lived daemon thread. The writer open itself
+    ;; blocks when no reader is waiting, hence the timeout rather than a plain
+    ;; call on this thread.
+    (when (and (.isAlive thread) (nil? @(:reader session)))
+      (let [releaser (doto (Thread. #(release-fifo-open! @(:fifo session)))
+                       (.setName "vice-v2-reader-release")
+                       (.setDaemon true)
+                       (.start))]
+        (.join releaser 1000)))
+    (.join thread 2000)
+    (when (.isAlive thread)
+      (.interrupt thread)
+      (.join thread 1000))))
+
+;; Metrics -------------------------------------------------------------------
+
+(defn- start-metrics!
+  [session]
+  (reset! (:metrics session)
+          {:event-target (:event-target session)
+           :events 0
+           :chunks 0
+           :overshoot-total 0
+           :overshoot-max 0
+           :snapshot-ms-total 0
+           :snapshot-ms-max 0
+           :boundary-ms-total 0
+           :boundary-ms-max 0
+           :commit-ms-total 0
+           :commit-ms-max 0
+           :started-at (now-ms)}))
+
+(defn- record-boundary-metrics!
+  [session {:keys [events overshoot snapshot-ms boundary-ms commit-ms]}]
+  (swap! (:metrics session)
+         (fn [metrics]
+           (-> metrics
+               (assoc :events (+ (:events metrics) (long (or events 0)))
+                      :chunks (inc (:chunks metrics)))
+               (update :overshoot-total + (long (or overshoot 0)))
+               (update :overshoot-max max (long (or overshoot 0)))
+               (update :snapshot-ms-total + (long (or snapshot-ms 0)))
+               (update :snapshot-ms-max max (long (or snapshot-ms 0)))
+               (update :boundary-ms-total + (long (or boundary-ms 0)))
+               (update :boundary-ms-max max (long (or boundary-ms 0)))
+               (update :commit-ms-total + (long (or commit-ms 0)))
+               (update :commit-ms-max max (long (or commit-ms 0)))))))
+
+(defn- final-metrics
+  [session]
+  (let [metrics @(:metrics session)
+        manifest (some-> (:capture session) :state deref)
+        elapsed (- (now-ms) (:started-at metrics))
+        event-count (or (:event-count manifest) 0)
+        chunk-count (or (:chunk-count manifest) 0)]
+    (assoc metrics
+           :chunks chunk-count
+           :events event-count
+           :elapsed-ms elapsed
+           :events-per-second (if (pos? elapsed)
+                                (long (/ (* event-count 1000) elapsed))
+                                0))))
+
+;; Chunk commitment ----------------------------------------------------------
+
+(defn- chunk-request
+  [chunk boundary]
+  {:event-count (count (:events chunk))
+   :event-writer (fn [out] (event/write-events! out (:events chunk)))
+   :ram (:ram (:snapshot chunk))
+   :mem (:mem (:snapshot chunk))
+   :snapshot (snapshot/canonical-snapshot (:snapshot chunk) (:timing chunk))
+   :snapshot-timing (:timing chunk)
+   :boundary boundary})
+
+(defn- commit-chunk!
+  [session chunk boundary]
+  (let [started (System/nanoTime)]
+    (recorder/commit-chunk! (:capture session) (chunk-request chunk boundary))
+    (elapsed-ms started)))
+
+;; Boundary, finish, and failure ---------------------------------------------
+
+(defn- finish!
+  [session chunk]
+  (let [capture (:capture session)]
+    (try
+      (when (and (seq (:events chunk))
+                 (:snapshot chunk)
+                 (:timing chunk))
+        (commit-chunk! session chunk {:kind :final :reason :stopped}))
+      (let [result (recorder/finalize-capture! capture)]
+        (swap! (:state session) assoc :status :stopped :result result)
+        (assoc result :status :stopped))
+      (catch Throwable error
+        (recorder/abort-capture! capture)
+        (throw error)))))
+
+(defn- boundary!
+  "Close the current chunk and open the next one.
+
+  VICE is already paused by the logging disable. The next snapshot is read while
+  it stays paused, then logging is re-enabled and execution resumes before the
+  closing chunk is written, keeping the disk write off the pause path."
+  [session chunk]
+  (let [conn @(:conn session)
+        boundary-start (System/nanoTime)
+        snapshot-start (System/nanoTime)
+        acquired (snapshot/acquire conn)
+        snapshot-ms (elapsed-ms snapshot-start)
+        next-chunk {:number (inc (:number chunk))
+                    :snapshot acquired
+                    :timing nil
+                    :events []
+                    :closing? false}]
+    (set-logging! session 1)
+    (bm/resume conn)
+    (let [commit-ms (commit-chunk! session chunk
+                                   {:kind :forced-size :reason :max-events})]
+      (record-boundary-metrics!
+       session {:events (count (:events chunk))
+                :overshoot (- (count (:events chunk)) (:event-target session))
+                :snapshot-ms snapshot-ms
+                :boundary-ms (elapsed-ms boundary-start)
+                :commit-ms commit-ms})
+      next-chunk)))
+
+(defn- fail-session!
+  [session error]
+  (when-let [capture (:capture session)]
+    (try (recorder/abort-capture! capture) (catch Throwable _ nil)))
+  (swap! (:state session) assoc
+         :status :failed
+         :error-message (.getMessage ^Throwable error))
+  {:status :failed
+   :capture-id (:capture-id session)
+   :input (:input session)
+   :dataset-root (:dataset-root session)
+   :error error})
+
+;; Controller ----------------------------------------------------------------
+
+(defn- controller-loop!
+  "Consume trace records from the reader, close chunks at the target, commit,
+  and return the final capture result."
+  [session initial-chunk]
+  (let [^ArrayBlockingQueue queue (:queue session)]
+    (loop [chunk initial-chunk]
+      (let [item (.take queue)]
+        (cond
+          (= item eof-sentinel)
+          (cond
+            @(:stop-requested session) (finish! session chunk)
+            (:closing? chunk) (recur (boundary! session chunk))
+            :else (fail "Trace logging ended unexpectedly" {}))
+
+          (and (map? item) (:error item))
+          (throw (:error item))
+
+          :else
+          (let [trace-event (event/trace-record->event item)
+                chunk (-> chunk
+                          (cond-> (nil? (:timing chunk))
+                            (assoc :timing
+                                   (snapshot/timing-from-event trace-event)))
+                          (update :events conj trace-event))]
+            (if (and (not (:closing? chunk))
+                     (>= (count (:events chunk)) (:event-target session)))
+              (do
+                (set-logging! session 0)
+                (recur (assoc chunk :closing? true)))
+              (recur chunk))))))))
+
+;; Session lifecycle ---------------------------------------------------------
+
+;; Captures started by this process and not yet finished, keyed by session id.
+(defonce ^:private sessions (atom {}))
+
+(defn- register-session!
+  [session]
+  (swap! sessions assoc (:session-id session) session)
+  session)
+
+(defn- unregister-session!
+  [session]
+  (swap! sessions dissoc (:session-id session)))
+
+(defn- cleanup!
+  [session]
+  (stop-fifo-reader! session)
+  (let [conn @(:conn session)]
+    (when conn
+      (try (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
+           (catch Throwable _ nil))
+      (when-let [number @(:trace-checkpoint session)]
+        (try (bm/checkpoint-delete conn {:number number})
+             (catch Throwable _ nil)))
+      (when-let [prior @(:prior-ignored session)]
+        (try (bm/ignore-unsolicited-types! conn prior)
+             (catch Throwable _ nil)))
+      (try (bm/drain-events conn) (catch Throwable _ nil)))
+    (when-let [fifo @(:fifo session)]
+      (io/delete-file fifo true))
+    (when-let [instance @(:instance session)]
+      (try (vice/stop instance) (catch Throwable _ nil)))
+    (when conn
+      (try (vice/close conn) (catch Throwable _ nil)))))
+
+(defn- run-capture!
+  [session options]
+  (let [full-capture? (true? (:full-capture? options))
+        conn @(:conn session)
+        program-checkpoint (atom nil)]
+    (try
+      (when-not full-capture?
+        (when (false? (:run-after-load? options))
+          (fail ":run-after-load? false requires :full-capture? true" {}))
+        (reset! program-checkpoint (set-program-start-checkpoint! conn))
+        (bm/autostart conn (autostart-options session options))
+        (wait-for-program-start! conn
+                                 (:number @program-checkpoint)
+                                 (or (:program-start-timeout-ms options)
+                                     default-program-start-timeout-ms))
+        (bm/checkpoint-delete conn {:number (:number @program-checkpoint)})
+        (reset! program-checkpoint nil)
+        (refine-program-start! session program-checkpoint options))
+      (bm/drain-events conn)
+      (bm/ping conn)
+      (bm/drain-events conn)
+      (let [initial (snapshot/acquire conn)
+            trace-checkpoint (bm/checkpoint-set
+                              conn
+                              {:start 0
+                               :end 0xffff
+                               :stop? false
+                               :enabled? true
+                               :op bm/MON_CHECKPOINT_OP_EXECUTE
+                               :temporary? false})]
+        (reset! (:trace-checkpoint session) (:number trace-checkpoint))
+        (reset! (:prior-ignored session) (bm/ignored-unsolicited-types conn))
+        (bm/ignore-unsolicited-types! conn #{bm/MON_RESPONSE_CHECKPOINT_INFO})
+        (let [fifo (create-fifo! session)]
+          (bm/resource-set conn {:name "MonitorLogFileName" :value fifo})
+          (start-fifo-reader! session fifo))
+        ;; Enabling logging opens the FIFO writer so the reader can open it.
+        (set-logging! session 1)
+        (swap! (:state session) assoc :status :running)
+        ;; The controller must be draining before VICE resumes: monitor-log
+        ;; writing blocks both VICE and the reader once the queue is full.
+        (if @(:stop-requested session)
+          (set-logging! session 0)
+          (future
+            (try
+              (if full-capture?
+                (bm/autostart conn (autostart-options session options))
+                (bm/resume conn))
+              (catch Throwable error
+                (try (.put ^ArrayBlockingQueue (:queue session) {:error error})
+                     (catch Throwable _ nil))))))
+        (finish! session
+                 (controller-loop! session
+                                   {:number 1
+                                    :snapshot initial
+                                    :timing nil
+                                    :events []
+                                    :closing? false})))
+      (finally
+        (when-let [number (:number @program-checkpoint)]
+          (try (bm/checkpoint-delete conn {:number number})
+               (catch Throwable _ nil)))))))
 
 (defn- run-session!
   [session options]
-  (try
-    (let [instance (vice/start {:executable (or (:executable options)
-                                                vice/default-executable)
-                                :address (:address options)
-                                :port (:monitor-port session)
-                                :extra-args (vice-extra-args options)})]
-      (reset! (:instance session) instance)
-      (swap! (:state session) assoc
-             :pid (:pid instance)
-             :command (:command instance))
-      (let [conn (connect-when-ready
-                  instance
-                  {:timeout-ms (or (:connect-timeout-ms options)
-                                   default-connect-timeout-ms)
-                   :retry-ms (or (:connect-retry-ms options)
-                                 default-connect-retry-ms)})]
-        (reset! (:conn session) conn)
-        (let [full-capture? (true? (:full-capture? options))
-              program-start-checkpoint (atom nil)]
-          (try
-            ;; A normal capture should not trace the disk loader, BASIC, or
-            ;; the KERNAL startup path.  VICE autostart resumes emulation
-            ;; before the file has necessarily reached its entry point, so
-            ;; stop on the first execution in the loaded program area before
-            ;; installing the streaming trace checkpoint.
-            (when-not full-capture?
-              (when (false? (:run-after-load? options))
-                (fail ":run-after-load? false requires :full-capture? true"
-                      {:run-after-load? false
-                       :full-capture? false}))
-              (reset! program-start-checkpoint
-                      (set-program-start-checkpoint! conn))
-              (bm/autostart conn (autostart-options session options))
-              (wait-for-program-start!
-               conn
-               (:number @program-start-checkpoint)
-               (or (:program-start-timeout-ms options)
-                   default-program-start-timeout-ms))
-              (delete-program-start-checkpoint!
-               conn @program-start-checkpoint)
-              (reset! program-start-checkpoint nil))
-            (let [capture (recorder/start-capture
-                           conn
-                           (merge
-                            (select-keys options [:chunk-max-events
-                                                  :chunk-max-bytes
-                                                  :chunk-queue-capacity
-                                                  :writer-backpressure-ms])
-                            {:capture-directory (:capture-directory session)
-                             :metadata {:capture-id (:capture-id session)
-                                        :input (:input session)
-                                        :full-capture? full-capture?}
-                             :retain-samples?
-                             (boolean (:retain-samples? options))}))]
-              (reset! (:capture session) capture)
-              (swap! (:state session) assoc :transport :fifo)
-              (if (realized? (:stop-requested session))
-                (finalize-once! session capture)
-                (do
-                  (if full-capture?
-                    (bm/autostart conn (autostart-options session options))
-                    (bm/resume conn))
-                  (start-profiler! session options)
-                  (update-status! session :running)
-                  (wait-for-stop! session instance capture)
-                  (finalize-once! session capture))))
-            (finally
-              (when-let [checkpoint @program-start-checkpoint]
-                (try
-                  (delete-program-start-checkpoint! conn checkpoint)
-                  (catch Throwable _ nil))))))))
-    (catch Throwable error
-      (try
-        (stop-profiler! session)
-        (catch Throwable profile-error
-          (swap! (:state session) assoc
-                 :profiling-cleanup-error (.getMessage profile-error))))
-      (cleanup-capture! session)
-      (swap! (:state session) assoc
-             :status :failed
-             :error-message (.getMessage error))
-      {:status :failed
-       :capture-id (:capture-id session)
-       :input (:input session)
-       :profile-edn-path (:profile-edn-path session)
-       :stop-reason (:stop-reason @(:state session))
-       :error error})
-    (finally
-      (cleanup-resources! session))))
+  (let [result (try
+                 (let [instance (vice/start
+                                 {:executable (or (:executable options)
+                                                  vice/default-executable)
+                                  :address (:address options)
+                                  :port (:monitor-port session)
+                                  :extra-args (vice-extra-args options)})]
+                   (reset! (:instance session) instance)
+                   (swap! (:state session) assoc
+                          :pid (:pid instance)
+                          :status :connecting)
+                   (let [conn (connect-when-ready instance options)]
+                     (reset! (:conn session) conn)
+                     (swap! (:state session) assoc
+                            :status :starting
+                            :monitor :connected)
+                     (run-capture! session options)))
+                 (catch Throwable error
+                   (fail-session! session error)))]
+    (cleanup! session)
+    (unregister-session! session)
+    (let [final (assoc result
+                       :capture-directory (:directory (:capture session))
+                       :metrics (final-metrics session))
+          status (if (= :failed (:status result)) :failed :stopped)]
+      (swap! (:state session) assoc :status status :result final)
+      (deliver (:completion session) final)
+      final)))
+
+;; Public API ----------------------------------------------------------------
 
 (defn start!
-  "Start an asynchronous non-GUI VICE capture.
+  "Reserve a capture and start VICE capture on a background worker.
 
-  Required options:
+  Required options: `:input` (an existing `.prg` or `.d64`) and
+  `:dataset-root`. Optional: `:capture-id`, `:executable`, `:address`,
+  `:port`, `:extra-args`, `:speed`, `:warp?`, `:full-capture?`,
+  `:run-after-load?`, `:event-target`, `:vic-value-blacklist`,
+  `:timing-model`, `:connect-timeout-ms`, `:connect-retry-ms`,
+  `:autostart-timeout-ms`, `:program-start-timeout-ms`, and
+  `:record-queue-capacity`.
 
-  * `:input` - an existing `.prg` or `.d64` file
-  * `:output-dir` - parent directory for a new timestamped capture directory
-
-  Optional options include `:capture-id`, `:executable`, `:address`, `:port`,
-  `:extra-args`, `:speed`, `:warp?`, `:connect-timeout-ms`,
-  `:connect-retry-ms`, `:autostart-timeout-ms`, `:program-start-timeout-ms`,
-  `:run-after-load?`, `:full-capture?`, `:retain-samples?`, and `:profile`.
-  By default, `:full-capture?` is false and the trace starts at the C64
-  KERNAL's `$E144 JMP ($0014)` dispatch into the loaded program; set it true
-  to trace the complete boot/load sequence. Set `:speed` to a non-negative integer
-  percentage such as `200` to pass VICE's `-speed 200` option. `:speed 0`
-  removes the speed limit while retaining normal video and sound behavior.
-  Set `:warp?` true to pass VICE's `-warp` option, which also changes video
-  refresh and sound behavior for maximum available speed. If both are set,
-  warp mode takes precedence. Set `:profile true`
-  to write `<capture-id>.profile.edn`, or
-  provide an async-profiler option map such as
-  `{:event :cpu :interval 1000000 :threads true}`. Profiling always targets
-  this Clojure JVM, never the external VICE process, and starts once the
-  capture is running. The default profile uses 1 ms CPU samples with per-thread
-  stacks. Full per-instruction register/timing samples are disabled by default;
-  enable them only for forensic captures. If `:port` is omitted (or zero), an
-  available local monitor port is selected. VICE remains windowed; callers can
-  provide additional VICE arguments through `:extra-args`.
-
-  Returns immediately with a session handle. VICE startup, monitor connection,
-  FIFO setup, and autostart happen on the session's background worker.
-  "
-  [{:keys [input output-dir capture-id port] :as options}]
-  (let [_ (speed-extra-args options)
-        input (validate-input! input)
-        output-dir (prepare-output-dir! output-dir)
-        capture-id (make-capture-id capture-id)
-        capture-directory (prepare-capture-directory! output-dir capture-id)
-        monitor-port (monitor-port port)
-        profile-edn-path (when (profile/options options)
-                           (.getPath (io/file capture-directory "profile.edn")))
-        session {:capture-id capture-id
+  Returns a session handle immediately."
+  [options]
+  (let [input (validate-input! (:input options))
+        dataset-root (prepare-dataset-root! (:dataset-root options))
+        capture-id (make-capture-id (:capture-id options))
+        target (event-target options)
+        blacklist (set (or (:vic-value-blacklist options)
+                           contract/default-vic-value-blacklist))
+        _ (contract/validate-vic-value-blacklist! blacklist)
+        capture (recorder/start-capture!
+                 {:dataset-root dataset-root
+                  :capture-id capture-id
+                  :timing-model (:timing-model options)
+                  :options {:event-target target
+                            :vic-value-blacklist blacklist}})
+        session {:session-id (str (UUID/randomUUID))
+                 :capture-id capture-id
                  :input input
-                 :output-dir output-dir
-                 :capture-directory capture-directory
-                 :monitor-port monitor-port
-                 :profile-edn-path profile-edn-path
-                 :profiler (atom nil)
+                 :dataset-root dataset-root
+                 :event-target target
+                 :capture capture
+                 :monitor-port (or (:port options) (free-port))
                  :state (atom {:status :starting
                                :capture-id capture-id
                                :input input
-                               :output-dir output-dir
-                               :monitor-port monitor-port})
+                               :dataset-root dataset-root
+                               :capture-directory (:directory capture)
+                               :event-target target})
                  :instance (atom nil)
                  :conn (atom nil)
-                 :capture (atom nil)
-                 :lifecycle-lock (Object.)
-                 :stop-requested (promise)
-                 :finalization (promise)
-                 :completion (promise)}
-        worker (future
-                 (let [result (try
-                                (run-session! session options)
-                                (catch Throwable error
-                                  (swap! (:state session) assoc
-                                         :status :failed
-                                         :error-message (.getMessage error))
-                                  {:status :failed
-                                   :capture-id (:capture-id session)
-                                   :input (:input session)
-                                   :profile-edn-path (:profile-edn-path session)
-                                   :error error}))]
-                   (deliver (:completion session) result)
-                   ;; The session's completion promise is the result owner;
-                   ;; do not retain the same artifact in the FutureTask result.
-                   nil))]
-    (assoc session :worker worker)))
+                 :queue (ArrayBlockingQueue. (int (queue-capacity options)))
+                 :stop-requested (atom false)
+                 :reader (atom nil)
+                 :reader-thread (atom nil)
+                 :fifo (atom nil)
+                 :trace-checkpoint (atom nil)
+                 :prior-ignored (atom nil)
+                 :metrics (atom nil)
+                 :worker (atom nil)
+                 :completion (promise)}]
+    (register-session! session)
+    (start-metrics! session)
+    (reset! (:worker session) (future (run-session! session options)))
+    session))
 
 (defn status
-  "Return lightweight status for a capture session without stopping it."
+  "Return lightweight capture progress without stopping the capture."
   [session]
   (when-not (map? session)
     (throw (IllegalArgumentException. "Session must be a map")))
-  (let [state @(:state session)
-        capture @(:capture session)
-        capture-status (when capture
-                         (try
-                           (recorder/capture-status capture)
-                           (catch Throwable error
-                             {:capture-status-error (.getMessage error)})))]
-    (cond-> (merge (select-keys session [:capture-id :input :output-dir :capture-directory
-                                         :monitor-port])
-                   (dissoc state :error-message)
-                   (when (:error-message state)
-                     {:error-message (:error-message state)}))
-      (:profile-edn-path session) (assoc :profile-edn-path
-                                         (:profile-edn-path session))
-      capture-status (merge (select-keys capture-status
-                                         [:event-count :instruction-count :block-count :block-run-count
-                                          :reader-status :reader-alive?
-                                          :chunk-number :chunk-event-count :chunk-count
-                                          :chunks-written :chunks-pending
-                                          :writer-status :writer-queue-depth
-                                          :writer-high-water-mark
-                                          :writer-backpressure-count
-                                          :last-finalize-ms :last-write-ms
-                                          :last-chunk-bytes :max-finalize-ms
-                                          :max-write-ms :finalize-ms-total
-                                          :write-ms-total :bytes-written
-                                          :writer-throughput-bps])))))
+  (let [manifest (some-> (:capture session) :state deref)]
+    (merge (select-keys session [:session-id :capture-id :input :dataset-root
+                                 :event-target])
+           (dissoc @(:state session) :result)
+           {:metrics @(:metrics session)
+            :chunk-count (:chunk-count manifest 0)
+            :event-count (:event-count manifest 0)
+            :capture-directory (:directory (:capture session))
+            :queue-depth (.size ^ArrayBlockingQueue (:queue session))
+            :reader-alive? (some-> ^Thread @(:reader-thread session) .isAlive)
+            :worker-done? (some-> ^java.util.concurrent.Future @(:worker session) .isDone)
+            :stop-requested? (boolean @(:stop-requested session))})))
+
+(defn live-sessions
+  "Lightweight summaries of captures started by this process and still running.
+
+  Every entry is a `status` map, so a stopped capture whose reader or worker is
+  still alive is visible as a leak instead of being silently forgotten."
+  []
+  (->> @sessions
+       vals
+       (map status)
+       (sort-by :session-id)
+       vec))
 
 (defn stop-async!
-  "Request capture shutdown without waiting for finalization.
+  "Request capture shutdown without waiting.
 
-  Returns immediately with the lightweight session status. Poll `status` until
-  the session reaches `:stopped` or `:failed`; use `stop!` when the completed
-  result is needed synchronously. Calling this more than once is harmless."
+  Sets the stop flag and disables monitor logging, which pauses VICE, closes the
+  log file, and lets the controller drain the final chunk and finalize."
   [session]
   (when-not (map? session)
     (throw (IllegalArgumentException. "Session must be a map")))
-  (request-stop! session {:kind :explicit
-                          :message "Capture stopped by caller"})
+  (reset! (:stop-requested session) true)
+  (when-let [conn @(:conn session)]
+    (try (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
+         (catch Throwable _ nil)))
   (status session))
 
 (defn stop!
-  "Stop a session, finalize its FIFO capture, and return output paths/results.
+  "Stop a capture, finalize it, and return the paths and metrics.
 
-  This call blocks until startup/finalization completes. Calling it more than
-  once returns the same result; only one caller performs finalization. A
-  startup or finalization failure is thrown as an `ExceptionInfo` with the
-  failed result in ex-data."
+  Blocks until the worker completes. Throws on setup or capture failure with
+  the failed result in `ex-data`."
   [session]
-  (when-not (map? session)
-    (throw (IllegalArgumentException. "Session must be a map")))
   (stop-async! session)
-  (try
-    (let [result @(:completion session)]
-      (if (= :failed (:status result))
-        (throw (ex-info "VICE capture failed"
-                        (dissoc result :error)
-                        (:error result)))
-        result))
-    (catch InterruptedException error
-      (request-stop! session {:kind :interrupted
-                              :error error
-                              :message "Waiting for capture shutdown was interrupted"})
-      (throw error))))
+  (let [result (deref (:completion session) 60000 ::timeout)]
+    (cond
+      (= ::timeout result)
+      (do
+        (cleanup! session)
+        (throw (ex-info "Timed out waiting for capture shutdown" {})))
+      (= :failed (:status result))
+      (throw (ex-info "VICE capture failed" (dissoc result :error) (:error result)))
+      :else result)))

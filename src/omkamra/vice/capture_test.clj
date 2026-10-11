@@ -1,275 +1,341 @@
 (ns omkamra.vice.capture-test
-  (:require [clojure.test :refer [deftest is]]
-            [clojure.java.io :as io]
-            [omkamra.vice :as vice]
-            [omkamra.vice.binary-monitor :as bm]
+  "Tests for the event codec, trace adaptation, and transactional capture
+  commitment with a synthetic FIFO trace."
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
+            [omkamra.vice.trace :as trace]
             [omkamra.vice.capture :as capture]
-            [omkamra.vice.decoder.capture :as recorder]
-            [omkamra.vice.profile :as profile]))
+            [omkamra.vice.contract :as contract]
+            [omkamra.vice.event :as event]
+            [omkamra.vice.recorder :as recorder]
+            [omkamra.vice.store :as store])
+  (:import [java.nio.file Files]
+           [java.nio.file.attribute FileAttribute]
+           [java.util Arrays]
+           [java.util.concurrent TimeUnit]))
 
-(defn- temp-directory
-  []
-  (let [file (java.io.File/createTempFile "omkamra-capture-test-" "")]
-    (.delete file)
-    (.mkdirs file)
-    file))
+;; Fixtures -----------------------------------------------------------------
 
-(deftest validates-input-and-output-contract
-  (let [directory (temp-directory)
-        prg (io/file directory "program.prg")
-        txt (io/file directory "program.txt")]
-    (spit prg "")
-    (spit txt "")
+(def ^:private sample-events
+  [{:pc 0x1000 :bytes [0xA9 0x01] :a 0x00 :x 0x00 :y 0x00 :sp 0xff
+    :flags "..-..I.C" :global-cycle 100 :raster 1 :cpu-cycle 5}
+   {:pc 0x1002 :bytes [0x8D 0x00 0x20] :a 0x01 :x 0x00 :y 0x00 :sp 0xff
+    :flags "..-..I.C" :global-cycle 102 :raster 1 :cpu-cycle 7}
+   {:pc 0x1005 :bytes [0xEA] :a 0x01 :x 0x00 :y 0x00 :sp 0xff
+    :flags "..-..I.C" :global-cycle 106 :raster 1 :cpu-cycle 11}
+   {:pc 0x1006 :bytes [0x4C 0x00 0x10] :a 0x01 :x 0x00 :y 0x00 :sp 0xff
+    :flags "..-..I.C" :global-cycle 108 :raster 1 :cpu-cycle 13}
+   {:pc 0x1000 :bytes [0xA9 0x01] :a 0x01 :x 0x00 :y 0x00 :sp 0xff
+    :flags "..-..I.C" :global-cycle 111 :raster 1 :cpu-cycle 16}
+   {:pc 0x1002 :bytes [0x8D 0x00 0x20] :a 0x01 :x 0x00 :y 0x00 :sp 0xff
+    :flags "..-..I.C" :global-cycle 113 :raster 1 :cpu-cycle 18}])
+
+(def ^:private malformed-event
+  {:pc 0x2000 :bytes [0xA9 0x01 0x02 0x03] :a 0x00 :x 0x00 :y 0x00 :sp 0xff
+   :flags "..-..I.C" :global-cycle 500 :raster 1 :cpu-cycle 1})
+
+(defn- trace-pair
+  [{:keys [pc bytes a x y sp flags global-cycle raster cpu-cycle]}]
+  (str (format "#1 (Trace EXEC %04x) %d/$%x, %d/$%x%n"
+               pc raster raster cpu-cycle cpu-cycle)
+       (format ".C:%04x %s - A:%02X X:%02X Y:%02X SP:%02X %s %d%n"
+               pc (str/join " " (map #(format "%02X" %) bytes))
+               a x y sp flags global-cycle)))
+
+(defn- trace-text
+  [events]
+  (apply str (map trace-pair events)))
+
+(defn- string-source
+  [text]
+  (fn [consume!]
+    (trace/reduce-records! (java.io.StringReader. text) consume! true)))
+
+(defn- temp-dataset-root []
+  (str (Files/createTempDirectory "vice-v2-test"
+                                  (make-array FileAttribute 0))))
+
+(defn- snapshot-at
+  [timing]
+  {:cpu {:pc 0x1000 :a 0 :x 0 :y 0 :sp 0xff :flags 5}
+   :timing timing
+   :registers {:vic (vec (repeat 47 0))
+               :sid (vec (repeat 32 0))
+               :cia1 (vec (repeat 16 0))
+               :cia2 (vec (repeat 16 0))}
+   :cpu-port [0x2f 0x37]
+   :color-ram (vec (repeat 1024 0))
+   :semantics contract/register-semantics})
+
+(defn- test-snapshot-provider
+  [{:keys [first-event]}]
+  (let [timing (select-keys first-event [:global-cycle :raster-line :cpu-cycle])]
+    {:ram (byte-array contract/memory-image-size)
+     :mem (byte-array contract/memory-image-size)
+     :snapshot (snapshot-at timing)
+     :snapshot-timing timing}))
+
+(defn- expected-event
+  [{:keys [pc bytes a x y sp global-cycle raster cpu-cycle]}]
+  {:pc pc
+   :instruction-length (count bytes)
+   :instruction-bytes (vec bytes)
+   :a a
+   :x x
+   :y y
+   :sp sp
+   :flags 5
+   :global-cycle global-cycle
+   :raster-line raster
+   :cpu-cycle cpu-cycle})
+
+(defn- record-event!
+  ([dataset-root events] (record-event! dataset-root events 50000))
+  ([dataset-root events target]
+   (let [capture (recorder/start-capture! {:dataset-root dataset-root
+                                           :capture-id "synthetic"
+                                           :options {:event-target target}})]
+     (recorder/ingest-trace-records!
+      capture
+      (string-source (trace-text events))
+      {:event-target target
+       :snapshot-provider test-snapshot-provider})
+     (recorder/finalize-capture! capture))))
+
+;; Codec --------------------------------------------------------------------
+
+(deftest event-record-offsets-are-exact
+  (let [source {:pc 0x1234
+                :instruction-length 2
+                :instruction-bytes [0xAB 0xCD]
+                :a 0x11
+                :x 0x22
+                :y 0x33
+                :sp 0x44
+                :flags 0x55
+                :global-cycle 0x0102030405060708
+                :raster-line 0x0abc
+                :cpu-cycle 0x0def}
+        buffer (event/encode-event source)
+        slice (fn [start end]
+                (mapv contract/unsigned (Arrays/copyOfRange buffer start end)))]
+    (is (= 23 (alength buffer)))
+    (is (= [0x34 0x12] (slice 0 2)))
+    (is (= [0x02] (slice 2 3)))
+    (is (= [0xab 0xcd 0x00] (slice 3 6)))
+    (is (= [0x11] (slice 6 7)))
+    (is (= [0x22] (slice 7 8)))
+    (is (= [0x33] (slice 8 9)))
+    (is (= [0x44] (slice 9 10)))
+    (is (= [0x55] (slice 10 11)))
+    (is (= [0x08 0x07 0x06 0x05 0x04 0x03 0x02 0x01] (slice 11 19)))
+    (is (= [0xbc 0x0a] (slice 19 21)))
+    (is (= [0xef 0x0d] (slice 21 23)))
+    (is (= source (select-keys (event/decode-event buffer 0) (keys source))))))
+
+(deftest event-codec-handles-high-addresses-and-raster-lines
+  ;; VICE addresses above $7FFF and raster lines above 255 must round-trip;
+  ;; Clojure's checked `short` would otherwise reject them.
+  (let [source {:pc 0xfd74
+                :instruction-length 1
+                :instruction-bytes [0x60]
+                :a 0xff
+                :x 0xff
+                :y 0xff
+                :sp 0xff
+                :flags 0xff
+                :global-cycle 0x1ffffffff
+                :raster-line 0x0137
+                :cpu-cycle 0x0038}
+        decoded (event/decode-event (event/encode-event source) 0)]
+    (is (= source (select-keys decoded (keys source))))))
+
+(deftest event-codec-rejects-malformed-records
+  (testing "instruction length must match the byte vector"
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (event/encode-event
+                  {:pc 0x1000 :instruction-length 2 :instruction-bytes [0xA9]
+                   :a 0 :x 0 :y 0 :sp 0 :flags 0 :global-cycle 0
+                   :raster-line 0 :cpu-cycle 0})))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (event/encode-event
+                  {:pc 0x1000 :instruction-length 4
+                   :instruction-bytes [1 2 3 4]
+                   :a 0 :x 0 :y 0 :sp 0 :flags 0 :global-cycle 0
+                   :raster-line 0 :cpu-cycle 0}))))
+  (testing "out-of-range fields fail"
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (event/encode-event
+                  {:pc 0x10000 :instruction-length 1 :instruction-bytes [0xEA]
+                   :a 0 :x 0 :y 0 :sp 0 :flags 0 :global-cycle 0
+                   :raster-line 0 :cpu-cycle 0}))))
+  (testing "misaligned event bytes fail"
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (event/decode-events (byte-array 5))))))
+
+(deftest trace-records-convert-to-packed-events
+  (is (= (expected-event (first sample-events))
+         (event/trace-record->event
+          [0x1000 [0xA9 0x01] 1 5 0x00 0x00 0x00 0xff "..-..I.C" 100])))
+  (testing "unsupported records fail closed"
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (event/trace-record->event
+                  [0x2000 [0xA9 0x01 0x02 0x03] 1 1 0 0 0 0xff "..-..I.C" 1])))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (event/trace-record->event
+                  [0x2000 [0xA9] 1 1 0 0 0 0xff "..-..I.C" nil])))))
+
+;; Synthetic capture --------------------------------------------------------
+
+(deftest synthetic-trace-produces-valid-binary-chunks
+  (let [dataset-root (temp-dataset-root)]
+    (try
+      (let [result (record-event! dataset-root sample-events 4)
+            opened (store/open-capture (io/file dataset-root "capture"))
+            manifest (:manifest opened)
+            chunks (:chunks manifest)
+            chunk1 (store/read-edn (io/file (:directory opened)
+                                            (:file (first chunks))))
+            chunk2 (store/read-edn (io/file (:directory opened)
+                                            (:file (second chunks))))
+            events1 (event/read-events-file
+                     (io/file (:directory opened)
+                              (get-in chunk1 [:artifacts :events :file])))
+            events2 (event/read-events-file
+                     (io/file (:directory opened)
+                              (get-in chunk2 [:artifacts :events :file])))]
+        (is (= 2 (:chunk-count result)))
+        (is (= 6 (:event-count result)))
+        (is (= 2 (count chunks)))
+        (is (= [0 4] (:event-range (first chunks))))
+        (is (= [4 6] (:event-range (second chunks))))
+        (is (= 6 (:event-count manifest)))
+        (is (= (mapv expected-event sample-events)
+               (into events1 events2)))
+        (is (= 4 (count events1)))
+        (is (= 2 (count events2)))
+        (is (= contract/memory-image-size
+               (.length (io/file (:directory opened)
+                                 (get-in chunk1 [:artifacts :ram :file])))))
+        (is (= contract/memory-image-size
+               (.length (io/file (:directory opened)
+                                 (get-in chunk1 [:artifacts :mem :file]))))))
+      (finally
+        (store/delete-tree! (io/file dataset-root))))))
+
+(deftest malformed-trace-record-destroys-the-capture
+  (let [dataset-root (temp-dataset-root)
+        capture (recorder/start-capture! {:dataset-root dataset-root
+                                          :capture-id "malformed"})]
     (try
       (is (thrown? clojure.lang.ExceptionInfo
-                   (capture/start! {:input (.getPath txt)
-                                    :output-dir (.getPath directory)})))
+                   (recorder/ingest-trace-records!
+                    capture
+                    (string-source (trace-text [malformed-event]))
+                    {:snapshot-provider test-snapshot-provider})))
+      (is (not (.exists (io/file dataset-root "capture"))))
+      (finally
+        (store/delete-tree! (io/file dataset-root))))))
+
+(deftest basic-sys-stub-parsing
+  (let [target (fn [text]
+                 (#'capture/sys-target-in-text (byte-array text) 0 (count text)))]
+    (testing "plain and parenthesized SYS operands are both accepted"
+      (is (= 2070 (target [0x9e 0x20 0x32 0x30 0x37 0x30])))
+      (is (= 2064 (target [0x9e 0x20 0x28 0x32 0x30 0x36 0x34 0x29])))
+      (is (= 2049 (target [0x9e 0x32 0x30 0x34 0x39 0x3a 0x00]))))
+    (testing "a line without a SYS token has no target"
+      (is (nil? (target [0x20 0x41 0x42 0x43 0x00]))))))
+
+(deftest session-registry-lifecycle
+  (let [fake {:session-id "test-session"
+              :capture-id "test-capture"
+              :input "in" :dataset-root "root" :event-target 1
+              :capture {:state (atom {})}
+              :state (atom {:status :stopped})
+              :metrics (atom nil)
+              :queue (java.util.concurrent.ArrayBlockingQueue. 1)
+              :reader-thread (atom nil)
+              :worker (atom nil)
+              :stop-requested (atom true)}]
+    (#'capture/register-session! fake)
+    (is (some #(= "test-session" (:session-id %)) (capture/live-sessions)))
+    (testing "a registered session reports reader/worker liveness"
+      (let [summary (first (filter #(= "test-session" (:session-id %))
+                                   (capture/live-sessions)))]
+        (is (contains? summary :reader-alive?))
+        (is (not (:reader-alive? summary)))
+        (is (true? (:stop-requested? summary)))
+        (is (not (:worker-done? summary)))))
+    (#'capture/unregister-session! fake)
+    (is (not (some #(= "test-session" (:session-id %)) (capture/live-sessions))))))
+
+(deftest release-fifo-open-unblocks-a-blocked-reader
+  (let [directory (Files/createTempDirectory "vice-fifo-release-"
+                                             (make-array FileAttribute 0))
+        fifo (str directory "/trace.fifo")]
+    (try
+      (let [mkfifo (ProcessBuilder. ["mkfifo" fifo])]
+        (is (.waitFor (.start mkfifo) 5 TimeUnit/SECONDS)))
+      (let [opened (promise)
+            reader (doto (Thread. (fn []
+                                    (try
+                                      (let [r (io/reader fifo)]
+                                        (.close r)
+                                        (deliver opened :opened))
+                                      (catch Throwable error
+                                        (deliver opened error)))))
+                     (.setName "vice-fifo-release-reader")
+                     (.setDaemon true)
+                     (.start))]
+        ;; The reader blocks in the FIFO open until a writer appears.
+        (Thread/sleep 300)
+        (is (not (realized? opened)))
+        (#'capture/release-fifo-open! fifo)
+        (is (= :opened (deref opened 3000 :timeout)))
+        (.join reader 2000))
+      (finally
+        (store/delete-tree! (.toFile directory))))))
+
+(deftest finalized-captures-are-not-overwritten
+  (let [dataset-root (temp-dataset-root)]
+    (try
+      (record-event! dataset-root sample-events 4)
       (is (thrown? clojure.lang.ExceptionInfo
-                   (capture/start! {:input (.getPath prg)
-                                    :output-dir (.getPath txt)})))
+                   (recorder/start-capture! {:dataset-root dataset-root
+                                             :capture-id "second"})))
       (finally
-        (.delete prg)
-        (.delete txt)
-        (.delete directory)))))
+        (store/delete-tree! (io/file dataset-root))))))
 
-(deftest speed-zero-is-distinct-from-warp
-  (let [vice-extra-args (var-get (ns-resolve 'omkamra.vice.capture
-                                             'vice-extra-args))]
-    (is (= ["-speed" "0"]
-           (vice-extra-args {:speed 0})))
-    (is (= ["-speed" "0" "-warp"]
-           (vice-extra-args {:speed 0 :warp? true})))))
-
-(deftest runs-non-gui-lifecycle-and-writes-results
-  (let [directory (temp-directory)
-        input (io/file directory "program.prg")
-        calls (atom [])
-        instance {:pid 123
-                  :address "localhost"
-                  :port 6502
-                  :command ["x64sc"]
-                  :process nil}]
-    (spit input "")
+(deftest unfinalized-captures-are-not-openable
+  (let [dataset-root (temp-dataset-root)
+        capture (recorder/start-capture! {:dataset-root dataset-root
+                                          :capture-id "partial"})]
     (try
-      (with-redefs [vice/start (fn [params]
-                                 (swap! calls conj [:start params])
-                                 instance)
-                    vice/connect (fn [_ _]
-                                   (swap! calls conj [:connect])
-                                   {})
-                    vice/close (fn [_]
-                                 (swap! calls conj [:close]))
-                    vice/stop (fn [_]
-                                (swap! calls conj [:stop]))
-                    bm/ping (fn [_]
-                              (swap! calls conj [:ping])
-                              {})
-                    bm/autostart (fn [_ options]
-                                   (swap! calls conj [:autostart options])
-                                   {})
-                    recorder/start-capture (fn [_ options]
-                                             (swap! calls conj [:capture-start options])
-                                             {:kind :omkamra.vice/chunked-capture-v1
-                                              :fake-capture true
-                                              :stream-state (atom {})})
-                    recorder/stop-capture (fn [_]
-                                            (swap! calls conj [:capture-stop])
-                                            {:status :stopped
-                                             :manifest-path "manifest.edn"
-                                             :chunk-count 1})
-                    recorder/capture-status (fn [_] {:chunk-count 1})
-                    profile/start! (fn [options]
-                                     (swap! calls conj [:profile-start options])
-                                     {:profile-session true})
-                    profile/stop! (fn [profiler options]
-                                    (swap! calls conj [:profile-stop profiler options])
-                                    {:format :omkamra.vice/profile-v1})]
-        (let [session (capture/start! {:input (.getPath input)
-                                       :output-dir (.getPath directory)
-                                       :capture-id "test-capture"
-                                       :profile true
-                                       :speed 200
-                                       :warp? true
-                                       :full-capture? true})]
-          (loop [attempt 0]
-            (when (and (< attempt 100)
-                       (not= :running (:status @(:state session))))
-              (Thread/sleep 5)
-              (recur (inc attempt))))
-          (let [requested (capture/stop-async! session)
-                result (capture/stop! session)
-                repeated-result (capture/stop! session)]
-            (is (#{:stopping :finalizing :stopped}
-                 (:status requested)))
-            (is (= {:kind :explicit
-                    :message "Capture stopped by caller"}
-                   (:stop-reason requested)))
-            (is (= result repeated-result))
-            (is (= ["-speed" "200" "-warp"]
-                   (:extra-args (second (first (filter #(= :start (first %))
-                                                       @calls))))))
-            (is (= :stopped (:status result)))
-            (is (not (contains? result :artifact)))
-            (is (.isDirectory (io/file (:capture-directory result))))
-            (is (= "manifest.edn" (:manifest-path result)))
-            (is (= 1 (:chunk-count result)))
-            (is (= (.getPath (io/file (:capture-directory result) "profile.edn"))
-                   (:profile-edn-path result)))
-            (is (some #(= :profile-start (first %)) @calls))
-            (is (some #(= :profile-stop (first %)) @calls))
-            (is (= [:capture-stop]
-                   (last (filter #(= :capture-stop (first %)) @calls))))
-            (is (some #(= :autostart (first %)) @calls))
-            (is (some #(= :close (first %)) @calls))
-            (is (some #(= :stop (first %)) @calls)))))
+      (recorder/ingest-trace-records!
+       capture
+       (string-source (trace-text sample-events))
+       {:event-target 4 :snapshot-provider test-snapshot-provider})
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (store/open-capture (io/file dataset-root "capture"))))
       (finally
-        (.delete input)
-        (.delete directory)))))
+        (store/delete-tree! (io/file dataset-root))))))
 
-(deftest detects-unexpected-vice-exit-and-is-idempotent
-  (let [directory (temp-directory)
-        input (io/file directory "program.prg")
-        process (.start (ProcessBuilder. ^java.util.List
-                         ["sh" "-c" "sleep 10"]))
-        instance {:pid (.pid process)
-                  :address "localhost"
-                  :port 6502
-                  :command ["x64sc"]
-                  :process process}
-        calls (atom [])]
-    (spit input "")
+(deftest tampered-artifacts-are-detected
+  (let [dataset-root (temp-dataset-root)]
     (try
-      (with-redefs [vice/start (fn [_] instance)
-                    vice/connect (fn [_ _] {})
-                    vice/close (fn [_] (swap! calls conj :close))
-                    vice/stop (fn [_] (swap! calls conj :stop))
-                    bm/ping (fn [_] {})
-                    bm/autostart (fn [_ _]
-                                   (.destroy process))
-                    recorder/start-capture (fn [_ _]
-                                             {:kind :omkamra.vice/chunked-capture-v1
-                                              :stream-state (atom {})})
-                    recorder/stop-capture (fn [_]
-                                            (swap! calls conj :capture-stop)
-                                            {:status :stopped :manifest-path "manifest.edn"})
-                    recorder/capture-status (fn [_] {})]
-        (let [session (capture/start! {:input (.getPath input)
-                                       :output-dir (.getPath directory)
-                                       :full-capture? true})
-              result @(:completion session)]
-          (is (= :stopped (:status result)))
-          (is (= :vice-exited (get-in result [:stop-reason :kind])))
-          (is (= result (capture/stop! session)))
-          (is (= 1 (count (filter #(= :capture-stop %) @calls))))))
+      (record-event! dataset-root sample-events 4)
+      (let [directory (io/file dataset-root "capture")
+            manifest (store/read-manifest directory)
+            event-file (io/file directory
+                                (get-in (first (:chunks manifest))
+                                        [:artifacts :events :file]))
+            bytes (Files/readAllBytes (.toPath event-file))]
+        (aset-byte bytes 0 (unchecked-byte (bit-xor (aget bytes 0) 0xff)))
+        (Files/write (.toPath event-file) bytes
+                     (make-array java.nio.file.OpenOption 0))
+        (is (thrown? clojure.lang.ExceptionInfo
+                     (store/open-capture directory))))
       (finally
-        (.destroy process)
-        (.delete input)
-        (.delete directory)))))
-
-(deftest finalization-failure-does-not-leak-session
-  (let [directory (temp-directory)
-        input (io/file directory "program.prg")
-        calls (atom [])]
-    (spit input "")
-    (try
-      (with-redefs [vice/start (fn [_]
-                                 {:pid 123 :address "localhost" :port 6502
-                                  :command ["x64sc"] :process nil})
-                    vice/connect (fn [_ _] {})
-                    vice/close (fn [_] (swap! calls conj :close))
-                    vice/stop (fn [_] (swap! calls conj :stop))
-                    bm/ping (fn [_] {})
-                    recorder/start-capture (fn [_ _]
-                                             {:kind :omkamra.vice/chunked-capture-v1
-                                              :stream-state (atom {})})
-                    recorder/stop-capture (fn [_]
-                                            (swap! calls conj :capture-stop)
-                                            (throw (ex-info "finalization failed" {})))]
-        (let [session (capture/start! {:input (.getPath input)
-                                       :output-dir (.getPath directory)
-                                       :full-capture? true})]
-          (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                                #"VICE capture failed"
-                                (capture/stop! session)))
-          (is (= :failed (:status (capture/status session))))
-          (is (some #{:close} @calls))
-          (is (some #{:stop} @calls))))
-      (finally
-        (.delete input)
-        (.delete directory)))))
-
-(deftest default-capture-starts-at-loaded-program-entry
-  (let [directory (temp-directory)
-        input (io/file directory "program.prg")
-        calls (atom [])
-        instance {:pid 123
-                  :address "localhost"
-                  :port 6502
-                  :command ["x64sc"]
-                  :process nil}]
-    (spit input "")
-    (try
-      (with-redefs [vice/start (fn [_] instance)
-                    vice/connect (fn [_ _] {})
-                    vice/close (fn [_] (swap! calls conj [:close]))
-                    vice/stop (fn [_] (swap! calls conj [:stop]))
-                    bm/ping (fn [_] {})
-                    bm/checkpoint-set (fn [_ options]
-                                        (swap! calls conj [:checkpoint-set options])
-                                        {:number 17})
-                    bm/checkpoint-delete (fn [_ options]
-                                           (swap! calls conj [:checkpoint-delete options])
-                                           {})
-                    bm/autostart (fn [_ options]
-                                   (swap! calls conj [:autostart options])
-                                   {})
-                    bm/await-event (let [events (atom [{:response-type bm/MON_RESPONSE_CHECKPOINT_INFO
-                                                        :response {:number 17
-                                                                   :hit? true}}
-                                                       {:response-type bm/MON_RESPONSE_STOPPED
-                                                        :response {:pc 0xe144}}])]
-                                     (fn [_ _ _]
-                                       (swap! calls conj [:program-start])
-                                       (let [[prior _] (swap-vals! events rest)]
-                                         (first prior))))
-                    bm/resume (fn [_]
-                                (swap! calls conj [:resume])
-                                {})
-                    recorder/start-capture (fn [_ _]
-                                             (swap! calls conj [:capture-start])
-                                             {:kind :omkamra.vice/chunked-capture-v1
-                                              :stream-state (atom {})})
-                    recorder/stop-capture (fn [_]
-                                            (swap! calls conj [:capture-stop])
-                                            {:status :stopped :manifest-path "manifest.edn"})
-                    recorder/capture-status (fn [_] {})]
-        (let [session (capture/start! {:input (.getPath input)
-                                       :output-dir (.getPath directory)
-                                       :capture-id "entry-capture"})]
-          (loop [attempt 0]
-            (when (and (< attempt 100)
-                       (not= :running (:status @(:state session))))
-              (Thread/sleep 5)
-              (recur (inc attempt))))
-          (is (= :running (:status @(:state session))))
-          (let [names (mapv first @calls)
-                checkpoint-options (second (first (filter #(= :checkpoint-set
-                                                              (first %))
-                                                          @calls)))]
-            (is (= 0xe144 (:start checkpoint-options)))
-            (is (= 0xe144 (:end checkpoint-options)))
-            (is (= bm/MON_CHECKPOINT_OP_EXECUTE (:op checkpoint-options)))
-            (is (< (.indexOf names :checkpoint-set)
-                   (.indexOf names :autostart)))
-            (is (< (.indexOf names :autostart)
-                   (.indexOf names :program-start)))
-            (is (< (.indexOf names :program-start)
-                   (.indexOf names :checkpoint-delete)))
-            (is (< (.indexOf names :checkpoint-delete)
-                   (.indexOf names :capture-start)))
-            (is (< (.indexOf names :capture-start)
-                   (.indexOf names :resume))))
-          (is (= :stopped (:status (capture/stop! session))))))
-      (finally
-        (.delete input)
-        (.delete directory)))))
+        (store/delete-tree! (io/file dataset-root))))))

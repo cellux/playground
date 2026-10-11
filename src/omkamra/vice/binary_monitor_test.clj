@@ -1,5 +1,5 @@
 (ns omkamra.vice.binary-monitor-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.test :refer [deftest is]]
             [omkamra.vice.binary-monitor :as bm]))
 
 (deftest reads-complete-byte-sequences

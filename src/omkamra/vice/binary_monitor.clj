@@ -113,7 +113,7 @@
 (def MON_RESPONSE_AUTOSTART 0xdd)
 
 (defmulti read-response
-  (fn [response-type in] response-type))
+  (fn [response-type _] response-type))
 
 (defn read-byte
   [^InputStream in]
@@ -189,73 +189,73 @@
   ([^String host ^long port handle-event]
    (connect host port handle-event {}))
   ([^String host ^long port handle-event {:keys [ignored-unsolicited-types]
-                            :or {ignored-unsolicited-types #{}}}]
-  (let [socket (Socket. host (int port))
+                                          :or {ignored-unsolicited-types #{}}}]
+   (let [socket (Socket. host (int port))
         ;; Monitor responses are decoded one byte at a time. Buffer the socket
         ;; stream so those reads do not each cross the socket/native boundary.
-        in (BufferedInputStream. (.getInputStream socket) input-buffer-size)
-        out (.getOutputStream socket)
-        discard-buffer (byte-array discard-buffer-size)
-        pending-requests (atom {})
-        write-lock (Object.)
-        events (LinkedBlockingQueue.)
-        ignored-unsolicited-types (atom (set ignored-unsolicited-types))
-        response-reader
-        (future
-          (try
-            (while (not (.isInputShutdown socket))
-              (let [stx (read-byte in)
-                    _ (assert (= stx 0x02) "bad response")
-                    api-version (read-byte in)
-                    len (read-int in)
-                    response-type (read-byte in)
-                    error-code (read-byte in)
-                    request-id (read-int in)
+         in (BufferedInputStream. (.getInputStream socket) input-buffer-size)
+         out (.getOutputStream socket)
+         discard-buffer (byte-array discard-buffer-size)
+         pending-requests (atom {})
+         write-lock (Object.)
+         events (LinkedBlockingQueue.)
+         ignored-unsolicited-types (atom (set ignored-unsolicited-types))
+         response-reader
+         (future
+           (try
+             (while (not (.isInputShutdown socket))
+               (let [stx (read-byte in)
+                     _ (assert (= stx 0x02) "bad response")
+                     _api-version (read-byte in)
+                     len (read-int in)
+                     response-type (read-byte in)
+                     error-code (read-byte in)
+                     request-id (read-int in)
                     ;; _ (println (format "request_id: %x got response of type: %02x length: %d" request-id response-type len))
-                    unsolicited? (= request-id 0xffffffff)
-                    ignored? (and unsolicited?
-                                  (contains? @ignored-unsolicited-types
-                                             response-type))
+                     unsolicited? (= request-id 0xffffffff)
+                     ignored? (and unsolicited?
+                                   (contains? @ignored-unsolicited-types
+                                              response-type))
                     ;; Ignored unsolicited responses still need to be drained
                     ;; from the stream, but their bodies are never decoded.
-                    body (if ignored?
-                           (do (discard-bytes in discard-buffer len)
-                               nil)
-                           (read-bytes in len))]
-                (when-not ignored?
-                  (let [response (if (zero? error-code)
-                                   (read-response response-type
-                                                  (ByteArrayInputStream. body))
-                                   {:error-code error-code
-                                    :response-type response-type})]
-                    (if unsolicited?
-                      (let [event {:response-type response-type
-                                   :response response}]
-                        (.offer events event)
-                        (handle-event response-type response))
-                      (let [request-promise (get @pending-requests request-id)]
-                        (if request-promise
-                          (do
-                            (swap! pending-requests dissoc request-id)
-                            (deliver request-promise response))
-                          (.offer events {:response-type response-type
-                                          :response response
-                                          :request-id request-id}))))))))
-            (catch SocketException _)
-            (catch Throwable t
-              (.close socket)
-              (println "caught throwable:" t))))]
-    {:host host
-     :port port
-     :socket socket
-     :in in
-     :out out
-     :pending-requests pending-requests
-     :write-lock write-lock
-     :events events
-     :ignored-unsolicited-types ignored-unsolicited-types
-     :response-reader response-reader
-     :next-request-id (atom 0)})))
+                     body (if ignored?
+                            (do (discard-bytes in discard-buffer len)
+                                nil)
+                            (read-bytes in len))]
+                 (when-not ignored?
+                   (let [response (if (zero? error-code)
+                                    (read-response response-type
+                                                   (ByteArrayInputStream. body))
+                                    {:error-code error-code
+                                     :response-type response-type})]
+                     (if unsolicited?
+                       (let [event {:response-type response-type
+                                    :response response}]
+                         (.offer events event)
+                         (handle-event response-type response))
+                       (let [request-promise (get @pending-requests request-id)]
+                         (if request-promise
+                           (do
+                             (swap! pending-requests dissoc request-id)
+                             (deliver request-promise response))
+                           (.offer events {:response-type response-type
+                                           :response response
+                                           :request-id request-id}))))))))
+             (catch SocketException _)
+             (catch Throwable t
+               (.close socket)
+               (println "caught throwable:" t))))]
+     {:host host
+      :port port
+      :socket socket
+      :in in
+      :out out
+      :pending-requests pending-requests
+      :write-lock write-lock
+      :events events
+      :ignored-unsolicited-types ignored-unsolicited-types
+      :response-reader response-reader
+      :next-request-id (atom 0)})))
 
 (defn ignore-unsolicited-types!
   "Replace the set of unsolicited response types discarded by `connect`.
@@ -289,7 +289,7 @@
    (let [deadline (+ (System/nanoTime) (* (long timeout-ms) 1000000))
          skipped (transient [])]
      (try
-       (loop []
+       (loop [skipped skipped]
          (let [remaining (quot (- deadline (System/nanoTime)) 1000000)]
            (when (not (neg? remaining))
              (when-let [event (.poll ^LinkedBlockingQueue events
@@ -297,8 +297,7 @@
                                      TimeUnit/MILLISECONDS)]
                (if (pred event)
                  event
-                 (do (conj! skipped event)
-                     (recur)))))))
+                 (recur (conj! skipped event)))))))
        (finally
          (doseq [event (persistent! skipped)]
            (.offer ^LinkedBlockingQueue events event)))))))
@@ -312,7 +311,7 @@
       result)))
 
 (defmethod read-response :default
-  [_ in]
+  [_ _in]
   {})
 
 (defn body-length
@@ -336,31 +335,31 @@
   ([conn cmd body-sig body-args response-timeout-ms]
    (assert (= (count body-sig) (count body-args)))
    (let [{:keys [next-request-id pending-requests write-lock]} conn
-        ^OutputStream out (:out conn)
-        request-id (swap! next-request-id (comp #(mod % 0x100000000) inc))
-        request-promise (promise)]
-    (swap! pending-requests assoc request-id request-promise)
-    (locking write-lock
-      (write-byte out 0x02)
-      (write-byte out vice-api-version)
-      (write-int out (body-length body-sig body-args))
-      (write-int out request-id)
-      (write-byte out cmd)
-      (doseq [[code arg] (map vector body-sig body-args)]
-        (case code
-          \1 (write-byte out (cond (nil? arg) 0
-                                   (boolean? arg) (if arg 1 0)
-                                   :else arg))
-          \2 (write-short out arg)
-          \4 (write-int out arg)
-          \b (.write ^OutputStream out arg 0 (alength ^bytes arg))))
-      (.flush ^OutputStream out))
-    (let [rv (deref request-promise response-timeout-ms nil)]
-      (when (nil? rv)
-        (swap! pending-requests dissoc request-id))
-      (if (and (map? rv) (:error-code rv))
-        (throw (ex-info "VICE monitor command failed" rv))
-        rv)))))
+         ^OutputStream out (:out conn)
+         request-id (swap! next-request-id (comp #(mod % 0x100000000) inc))
+         request-promise (promise)]
+     (swap! pending-requests assoc request-id request-promise)
+     (locking write-lock
+       (write-byte out 0x02)
+       (write-byte out vice-api-version)
+       (write-int out (body-length body-sig body-args))
+       (write-int out request-id)
+       (write-byte out cmd)
+       (doseq [[code arg] (map vector body-sig body-args)]
+         (case code
+           \1 (write-byte out (cond (nil? arg) 0
+                                    (boolean? arg) (if arg 1 0)
+                                    :else arg))
+           \2 (write-short out arg)
+           \4 (write-int out arg)
+           \b (.write ^OutputStream out arg 0 (alength ^bytes arg))))
+       (.flush ^OutputStream out))
+     (let [rv (deref request-promise response-timeout-ms nil)]
+       (when (nil? rv)
+         (swap! pending-requests dissoc request-id))
+       (if (and (map? rv) (:error-code rv))
+         (throw (ex-info "VICE monitor command failed" rv))
+         rv)))))
 
 (defn mem-get
   [conn {:keys [side-effects? start end memspace bank]}]
@@ -431,7 +430,7 @@
                      [first-response])
         checkpoints (->> (concat first-info queued)
                          (filter #(= MON_RESPONSE_CHECKPOINT_INFO
-                                      (:response-type %)))
+                                     (:response-type %)))
                          (map :response)
                          vec)]
     (assoc summary :checkpoints checkpoints)))
@@ -736,32 +735,53 @@
     {:main-version main-version
      :svn-revision svn-revision}))
 
-(defmethod read-response MON_RESPONSE_CPUHISTORY_GET
+(defmethod
+  read-response
+  MON_RESPONSE_CPUHISTORY_GET
   [_ in]
-  (let [count (read-int in)]
+  (let
+   [count (read-int in)]
     {:entries
-     (loop [remaining count
-            entries []]
-       (if (zero? remaining)
+     (loop
+      [remaining count entries []]
+       (if
+        (zero? remaining)
          entries
-         (let [_item-size (read-byte in)
-               register-count (read-short in)
-               registers (loop [registers-left register-count
-                                result {}]
-                           (if (zero? registers-left)
-                             result
-                             (let [_register-size (read-byte in)
-                                   id (read-byte in)
-                                   value (read-short in)]
-                               (recur (dec registers-left)
-                                      (assoc result id {:id id :value value})))))]
-           (let [cycle (read-long in)
-                 instruction-length (read-byte in)
-                 bytes (read-bytes in instruction-length)
-                 entry {:registers registers
-                        :cycle cycle
-                        :bytes (mapv #(bit-and (int %) 0xff) bytes)}]
-             (recur (dec remaining) (conj entries entry))))))}))
+         (let
+          [_item-size
+           (read-byte in)
+           register-count
+           (read-short in)
+           registers
+           (loop
+            [registers-left register-count result {}]
+             (if
+              (zero? registers-left)
+               result
+               (let
+                [_register-size
+                 (read-byte in)
+                 id
+                 (read-byte in)
+                 value
+                 (read-short in)]
+                 (recur
+                  (dec registers-left)
+                  (assoc result id {:id id, :value value})))))
+           cycle
+           (read-long in)
+           instruction-length
+           (read-byte in)
+           bytes
+           (read-bytes in instruction-length)
+           entry
+           {:registers registers,
+            :cycle cycle,
+            :bytes
+            (mapv
+             (fn* [p1__17912#] (bit-and (int p1__17912#) 255))
+             bytes)}]
+           (recur (dec remaining) (conj entries entry)))))}))
 
 (defn cpuhistory-get
   "Return recent CPU-history entries, oldest first.

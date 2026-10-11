@@ -37,11 +37,11 @@
   (let [value (int character)]
     (cond
       (<= (int \0) value (int \9)) (let [digit (- value (int \0))]
-                                      (if (< digit radix) digit -1))
+                                     (if (< digit radix) digit -1))
       (<= (int \A) value (int \F)) (let [digit (+ 10 (- value (int \A)))]
-                                      (if (< digit radix) digit -1))
+                                     (if (< digit radix) digit -1))
       (<= (int \a) value (int \f)) (let [digit (+ 10 (- value (int \a)))]
-                                      (if (< digit radix) digit -1))
+                                     (if (< digit radix) digit -1))
       :else -1)))
 
 (defn- parse-number-range
@@ -146,8 +146,8 @@
                    (some? pc) (some? raster) (some? cycle))
           (aset-long header 0 1)
           (aset-long header 1 (if (ascii-equals-ignore-case?
-                                  chars operation-start operation-end "exec")
-                               1 0))
+                                   chars operation-start operation-end "exec")
+                                1 0))
           (aset-long header 2 raster)
           (aset-long header 3 cycle)
           true)))))
