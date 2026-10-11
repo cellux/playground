@@ -72,11 +72,19 @@ Useful optional capture settings are:
     :capture-id "my-program"
     :executable "/opt/vice/bin/x64sc"
     :event-target 100000       ; approximate events per raw chunk
-    :warp? true                ; faster emulation; optional
     :program-start-timeout-ms 60000
     :record-queue-capacity 65536
     :extra-args ["-sounddev" "dummy"]}))
 ```
+
+**Do not enable warp mode (`:warp? true`).** The option is accepted, but VICE's
+`-warp` is not merely a speed-up: with VICE's default warp handling the sound
+chips are not emulated (`-soundwarpmode 0`), so a capture taken under warp is
+not guaranteed to reproduce what a normal-speed run does. Programs that pace
+themselves against SID behavior or other cycle-exact side effects can diverge
+or stall. Capture at normal speed and accept the longer wall-clock
+time; `:warp?` is retained only for throwaway experiments that do not need
+faithful behavior.
 
 `:event-target` affects raw chunking only; it does not stop the capture or
 change the logical event coordinate. Chunk sizes may overshoot the target.
@@ -88,10 +96,16 @@ should therefore have the intended executable as its first/autostartable file;
 use a PRG when an exact file selection is needed. Programs that require
 special VICE command-line options can pass them through `:extra-args`.
 
-### Full-capture mode
+### Full-capture mode (do not use)
 
-To include the boot and loading path instead of using the program-only start
-policy, set `:full-capture? true`:
+`:full-capture? true` starts recording before autostart, so the trace opens in
+KERNAL/BASIC boot code, the program entry point is never pinned, and the
+capture spends its budget on boot and loader code. Many programs then never
+reach the demo at all and stay in the KERNAL IEC wait loop. Program-only mode
+already covers the autostart path through to the machine-code entry point,
+including anything the program loads at runtime, which is what analysis needs.
+The setting exists for completeness; do not enable it. The example below is
+kept only to document what the option does:
 
 ```clojure
 (def session
@@ -99,15 +113,11 @@ policy, set `:full-capture? true`:
    {:input input
     :dataset-root dataset-root
     :capture-id "my-program-full"
-    :full-capture? true
-    :warp? true}))
+    :full-capture? true}))
 ```
 
-This mode starts recording before autostart. It is useful for loader analysis,
-but some programs can remain in the KERNAL IEC wait loop rather than reaching
-the demo. Prefer program-only mode unless the boot/loading behavior is itself
-the target. `:run-after-load? false` is only valid together with
-`:full-capture? true`.
+`:run-after-load? false` is only valid together with `:full-capture? true`, so
+it is not usable in the recommended program-only configuration.
 
 ### Monitor progress and stop
 
@@ -264,9 +274,13 @@ rendered as `??`, and each block has a compact context/control-flow annotation.
 - **VICE exits before capture:** check the VICE executable, its ROM/config
   installation, and any values in `:extra-args`; capture setup errors are
   returned by the session worker and `capture/stop!` rethrows them.
-- **No useful program trace:** try the default program-only mode for a PRG or
-  an autostartable D64; verify the intended D64 file is index `0`. Use
-  `:full-capture? true` only when boot/loading events are required.
+- **No useful program trace:** stay in the default program-only mode for a PRG
+  or an autostartable D64, and verify the intended D64 file is index `0`.
+  `:full-capture? true` is not a remedy: it usually captures only boot and
+  loader code instead of the program.
+- **The traced program stalls or diverges from a plain VICE run:** check that
+  the capture did not enable `:warp? true`, and repeat it at normal speed before
+  investigating the program itself.
 - **Analysis refuses the dataset:** ensure `capture/stop!` completed and that
   `<dataset-root>/capture/manifest.edn` is finalized. Never point analysis at
   a parent directory containing only an unfinished capture.
