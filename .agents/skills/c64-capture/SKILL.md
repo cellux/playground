@@ -150,6 +150,55 @@ orphaned, inspect `(capture/live-sessions)` before starting another one.
 Do not run analysis against an active or incomplete capture. The reader
 validates the finalized manifest, chunk artifacts, images, and checksums.
 
+### Injecting input into a running capture
+
+Some programs stop and wait for input: a "press space" screen, a
+"press fire" screen, or the turn-disk prompt. When the user requests
+such an action, identify the wait from the trace first; the usual
+shapes are a KERNAL keyboard-buffer wait (`$E5CD`: `LDA $C6` / `BEQ`),
+a poll of `$DC00`/`$DC01`, or a spin on a flag that an IRQ handler
+never sets. Then inject through the capture's live monitor connection
+and **always finish with `bm/exit` (or `bm/resume`)**, because every
+monitor request leaves VICE paused:
+
+```clojure
+(require '[omkamra.vice.binary-monitor :as bm])
+(def conn @(:conn session))           ; the session's live connection
+
+(bm/keyboard-feed conn {:text " "})   ; KERNAL keyboard buffer
+(bm/resume conn)                     ; required: requests leave VICE paused
+```
+
+- **Keyboard (`bm/keyboard-feed`)** feeds raw bytes into the KERNAL keyboard
+  buffer (`$0277`, count `$C6`), so it works only when the program reads input
+  through the KERNAL (`GETIN`/`CHRIN`, the screen editor). The string is used
+  as-is: there is no keyname or escape parsing, so press space with a literal
+  `" "`, not `"SPACE"`, and RETURN as `(char 13)`. Verified on VICE 3.9:
+  feeding `PRINT "HI"` plus RETURN at the BASIC prompt echoes the line and
+  executes it. VICE queues the bytes and flushes at most one KERNAL buffer's
+  worth (10 on the C64) per frame, so longer strings trickle in.
+- **Joystick (`bm/joyport-set`)** presses directions and fire:
+  `(bm/joyport-set conn {:port 0 :value 0x0f})` presses fire on control port 1.
+  The port index is 0-based (`0` = control port 1 = `$DC01`, `1` = control
+  port 2 = `$DC00`). The value is active low: bits 0-3 are up/down/left/right,
+  bit 4 is fire, `0x1f` is everything released. The port must have the
+  **Joyport I/O simulation** device attached (device 37), either at startup
+  with `:extra-args ["-controlport1device" "37" "-controlport2device" "37"]`
+  or live with `(bm/resource-set conn {:name "JoyPort1Device" :value 37})`;
+  without that device the command succeeds but never reaches the machine.
+  Verify by reading `$DC00`/`$DC01` back: bits 0-4 track the value. Release
+  the joystick again afterwards. Control port 1's lines share `$DC01` with the
+  keyboard rows, so holding them low can look like stuck keys to the KERNAL
+  scan; prefer port 2 when the program reads the joystick from it.
+- **Key-matrix injection is not available.** The binary monitor has no command
+  for pressing individual matrix keys. When a program polls `$DC00`/`$DC01`
+  itself, the Joyport I/O simulation route above (if it reads the joystick) or
+  `bm/mem-set` on the flag the program polls are the only options, and the
+  latter is fragile.
+- **Never leave the emulator paused.** `capture/status` keeps reporting
+  `:running` while nothing is captured, so confirm that `:event-count` still
+  grows after any manual monitor traffic.
+
 ## Run analysis
 
 The public orchestration API is `omkamra.vice.pipeline/build!`. It discovers
@@ -278,6 +327,9 @@ rendered as `??`, and each block has a compact context/control-flow annotation.
   or an autostartable D64, and verify the intended D64 file is index `0`.
   `:full-capture? true` is not a remedy: it usually captures only boot and
   loader code instead of the program.
+- **`:event-count` stops growing while `:status` is `:running`:** a monitor
+  request left VICE paused. Send `bm/resume` on the capture's connection; only
+  `EXIT`/`RESUME` restarts the emulator.
 - **The traced program stalls or diverges from a plain VICE run:** check that
   the capture did not enable `:warp? true`, and repeat it at normal speed before
   investigating the program itself.
