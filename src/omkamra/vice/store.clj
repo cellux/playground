@@ -14,6 +14,7 @@
   <dataset-root>/capture/chunks/chunk-000001.bin
   <dataset-root>/capture/chunks/chunk-000001.ram
   <dataset-root>/capture/chunks/chunk-000001.mem
+  <dataset-root>/capture/chunks/chunk-000001.png
   ```"
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
@@ -21,7 +22,8 @@
   (:import [java.io BufferedOutputStream OutputStream]
            [java.nio.file AtomicMoveNotSupportedException Files LinkOption
             StandardCopyOption]
-           [java.security DigestOutputStream MessageDigest]))
+           [java.security DigestOutputStream MessageDigest]
+           [java.util Arrays]))
 
 (def default-timing-model
   "Fallback PAL timing model recorded in the manifest so raster and cycle
@@ -45,9 +47,20 @@
 (def snapshot-format-descriptor
   {:format contract/snapshot-format})
 
+(def screen-format-descriptor
+  {:format contract/screen-png-format
+   :media-type "image/png"
+   :pixel-format :rgb24
+   :frame :vic-debug-frame})
+
 (defn- fail
   [reason data]
   (throw (ex-info "Invalid v2 capture artifact" (assoc data :reason reason))))
+
+(def ^:private png-signature
+  (byte-array [(unchecked-byte 0x89) 0x50 0x4e 0x47 0x0d 0x0a 0x1a 0x0a]))
+
+(def ^:private png-signature-length (alength ^bytes png-signature))
 
 ;; Checksums and atomic publication -----------------------------------------
 
@@ -194,7 +207,7 @@
   (format "chunk-%06d.edn" number))
 
 (def ^:private artifact-extensions
-  {:events "bin" :ram "ram" :mem "mem"})
+  {:events "bin" :ram "ram" :mem "mem" :screenshot "png"})
 
 (defn chunk-artifact-name
   [number kind]
@@ -224,7 +237,8 @@
      :formats {:events contract/event-record-descriptor
                :ram ram-format-descriptor
                :mem mem-format-descriptor
-               :snapshot snapshot-format-descriptor}
+               :snapshot snapshot-format-descriptor
+               :screenshot screen-format-descriptor}
      :chunk-count 0
      :event-count 0
      :chunks []}))
@@ -267,6 +281,13 @@
       :mem
       (when-not (= contract/memory-image-size (.length file))
         (fail :mem-image-size-mismatch {:file (str file)}))
+      :screenshot
+      (let [magic (byte-array png-signature-length)]
+        (with-open [in (io/input-stream file)]
+          (when-not (= png-signature-length (.read in magic))
+            (fail :screenshot-truncated {:file (str file)})))
+        (when-not (Arrays/equals ^bytes magic ^bytes png-signature)
+          (fail :screenshot-not-a-png {:file (str file)})))
       nil)))
 
 (defn- validate-chunk-entry!

@@ -150,6 +150,49 @@ orphaned, inspect `(capture/live-sessions)` before starting another one.
 Do not run analysis against an active or incomplete capture. The reader
 validates the finalized manifest, chunk artifacts, images, and checksums.
 
+### Screenshots of every chunk
+
+Every committed chunk carries the VIC frame of its boundary instant as
+`chunks/chunk-NNNNNN.png`, next to its `.edn`, `.bin`, `.ram`, and `.mem`
+files. There is no option to disable it. The frame is read from the monitor
+while VICE is *already* paused for the boundary snapshot (`DISPLAY_GET` plus
+`PALETTE_GET`, two extra round trips, ~80 ms measured), and PNG encoding and
+the artifact write happen on their own thread during the chunk commit, so they
+never lengthen the pause. Nothing extra is needed to see them: list
+`<dataset-root>/capture/chunks/*.png` and step through the frames in order for
+a filmstrip of the run, one frame per ~0.3 s of demo time. They are ordinary
+image files, so an editor, an image viewer, or an image-capable read tool can
+open any of them directly.
+
+It is the **full VICE debug frame, border included** (504x312 on PAL), so
+border effects stay visible. The chunk metadata records the visible inner
+rectangle (`:x-offset`, `:y-offset`, `:inner-width`, `:inner-height`, here
+`(136, 51)` plus `320x200`) if a consumer needs to crop:
+
+```clojure
+(require '[omkamra.vice.reader :as reader])
+
+(def capture (reader/open dataset-root))
+(reader/chunk-screenshots capture)      ; one description per chunk
+(reader/chunk-screenshot capture entry) ; the entry from (:chunks capture)
+(reader/screenshot-file capture entry)  ; java.io.File of the PNG
+(reader/screenshot-bytes capture entry) ; raw PNG bytes
+```
+
+The screenshot is the fastest way to tell *what a program is waiting for*: a
+`READY.` prompt with a cursor means the program dropped to BASIC (often a
+failed loader), a "press space"/"turn disk" screen means input injection (see
+below), and a blank screen is usually `$D011.4 = 0` rather than a hang — check
+whether the chunk still executes code before concluding anything.
+
+Caveats: the screenshot is a *view*, not replayable state — use the boundary
+snapshot (`reader/boundary-snapshot`) for state, and the screenshot only to see
+what was displayed. Raster-split effects are recorded as whatever VICE had
+drawn at that instant, so such a frame can look partially drawn: compare
+several chunks before judging a part. `:screenshot-ms-total` and
+`:screenshot-ms-max` in `(capture/status session)` report the per-boundary
+cost.
+
 ### Injecting input into a running capture
 
 Some programs stop and wait for input: a "press space" screen, a

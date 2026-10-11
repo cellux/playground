@@ -1,12 +1,10 @@
 (ns omkamra.vice.binary-monitor
-  (:require [clojure.java.io :as io])
+  (:require [omkamra.vice.screen :as screen])
   (:import
-   [java.awt.image BufferedImage]
    [java.io BufferedInputStream ByteArrayInputStream InputStream OutputStream]
    [java.net Socket SocketException]
    [java.nio.charset StandardCharsets]
-   [java.util.concurrent LinkedBlockingQueue TimeUnit]
-   [javax.imageio ImageIO]))
+   [java.util.concurrent LinkedBlockingQueue TimeUnit]))
 
 (def vice-api-version 0x02)
 
@@ -831,31 +829,9 @@
                       :or {use-vic-ii? true
                            resume? true}}]
    (try
-     (let [{:keys [debug-width debug-height buffer]}
-           (display-get conn {:use-vic-ii? use-vic-ii? :format 0})
-           palette (palette-get conn {:use-vic-ii? use-vic-ii?})
-           width (int debug-width)
-           height (int debug-height)
-           expected (* width height)]
-       (when-not (and (pos? width) (pos? height))
-         (throw (ex-info "VICE returned an invalid display size"
-                         {:width width :height height})))
-       (when (< (alength ^bytes buffer) expected)
-         (throw (ex-info "VICE returned a short display buffer"
-                         {:expected expected
-                          :actual (alength ^bytes buffer)})))
-       (let [image (BufferedImage. width height BufferedImage/TYPE_INT_RGB)]
-         (dotimes [y height]
-           (dotimes [x width]
-             (let [index (bit-and (int (aget ^bytes buffer (+ x (* y width)))) 0xff)
-                   [r g b] (get palette index [0 0 0])
-                   rgb (bit-or (bit-shift-left (int r) 16)
-                               (bit-shift-left (int g) 8)
-                               (int b))]
-               (.setRGB image x y rgb))))
-         (when-not (ImageIO/write image "png" (io/file output-file))
-           (throw (ex-info "No PNG writer is available" {:output-file output-file}))))
-       output-file)
+     (let [frame (display-get conn {:use-vic-ii? use-vic-ii? :format 0})
+           palette (palette-get conn {:use-vic-ii? use-vic-ii?})]
+       (screen/write-png! frame palette output-file))
      (finally
        (when resume?
          (resume conn))))))

@@ -34,6 +34,7 @@
 (def ram-image-format :omkamra.vice/ram-image-v2)
 (def mem-image-format :omkamra.vice/mem-image-v2)
 (def snapshot-format :omkamra.vice/snapshot-v2)
+(def screen-png-format :omkamra.vice/screen-png-v1)
 (def chunk-format :omkamra.vice/chunk-v2)
 (def dedupe-version 4)
 (def dedupe-format (format-keyword :dedupe dedupe-version))

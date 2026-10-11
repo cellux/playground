@@ -10,6 +10,7 @@
   (:require [clojure.java.io :as io]
             [omkamra.vice.contract :as contract]
             [omkamra.vice.event :as event]
+            [omkamra.vice.screen :as screen]
             [omkamra.vice.store :as store])
   (:import [java.io OutputStream]))
 
@@ -72,8 +73,44 @@
   [number kind]
   {:file (str "chunks/" (store/chunk-artifact-name number kind))})
 
+(defn- screenshot-description
+  "Describe the VIC screenshot artifact of a chunk.
+
+  The geometry belongs to the metadata rather than the manifest, so a consumer
+  can crop the border without guessing. The frame is the full debug frame."
+  [number screenshot]
+  (let [{:keys [debug-width debug-height x-offset y-offset inner-width
+                inner-height bpp]}
+        (:frame screenshot)]
+    (when-not (and (pos-int? debug-width) (pos-int? debug-height))
+      (fail :invalid-screenshot-frame
+            {:debug-width debug-width :debug-height debug-height}))
+    {:file (str "chunks/" (store/chunk-artifact-name number :screenshot))
+     :width debug-width
+     :height debug-height
+     :inner-width inner-width
+     :inner-height inner-height
+     :x-offset x-offset
+     :y-offset y-offset
+     :bpp bpp}))
+
+(defn- start-screenshot-artifact!
+  "Start writing a chunk's PNG artifact on its own thread.
+
+  Encoding and storing a 384x272 frame costs tens of milliseconds. Running it
+  on the controller thread would stall trace consumption, so it overlaps the
+  event, ram, and mem writes; the result is awaited before the manifest is
+  published, keeping the commit transactional."
+  [chunks-directory number screenshot]
+  (when screenshot
+    (let [target (io/file chunks-directory
+                          (store/chunk-artifact-name number :screenshot))
+          writer (screen/png-writer (:frame screenshot) (:palette screenshot))]
+      (future (store/write-artifact! target writer)))))
+
 (defn- do-commit-chunk!
-  [capture event-count event-writer ram mem snapshot snapshot-timing boundary]
+  [capture event-count event-writer ram mem snapshot snapshot-timing boundary
+   screenshot]
   (when-not (pos-int? event-count)
     (fail :invalid-event-count {:event-count event-count}))
   (when-not (fn? event-writer)
@@ -87,62 +124,82 @@
         start (:event-count manifest)
         end (+ start event-count)
         chunks-directory (store/chunks-directory directory)
-        events-artifact (store/write-artifact!
-                         (io/file chunks-directory
-                                  (store/chunk-artifact-name number :events))
-                         event-writer)
-        _ (when-not (= (* contract/event-record-size event-count)
-                       (:size events-artifact))
-            (fail :event-writer-size-mismatch
-                  {:event-count event-count
-                   :expected (* contract/event-record-size event-count)
-                   :actual (:size events-artifact)}))
-        ram-artifact (store/write-image!
-                      (io/file chunks-directory
-                               (store/chunk-artifact-name number :ram))
-                      ram
-                      store/ram-format-descriptor)
-        mem-artifact (store/write-image!
-                      (io/file chunks-directory
-                               (store/chunk-artifact-name number :mem))
-                      mem
-                      store/mem-format-descriptor)
-        metadata {:format contract/chunk-format
-                  :capture-id (:capture-id manifest)
-                  :chunk-number number
-                  :event-range [start end]
-                  :event-count event-count
-                  :target (get-in manifest [:options :event-target])
-                  :boundary boundary
-                  :snapshot snapshot
-                  :snapshot-timing snapshot-timing
-                  :schemas {:events contract/event-stream-format
-                            :ram contract/ram-image-format
-                            :mem contract/mem-image-format
-                            :snapshot contract/snapshot-format}
-                  :artifacts {:events (chunk-artifact-reference number :events)
-                              :ram (chunk-artifact-reference number :ram)
-                              :mem (chunk-artifact-reference number :mem)}}
-        metadata-path (store/chunk-metadata-path directory number)
-        _ (store/atomic-write-edn! metadata-path metadata)
-        entry {:number number
-               :file (str "chunks/" (store/chunk-file-name number))
-               :size (.length (io/file metadata-path))
-               :sha256 (store/sha256-file metadata-path)
-               :event-range [start end]
-               :event-count event-count
-               :boundary boundary
-               :artifacts {:events (assoc (chunk-artifact-spec number :events
-                                                               events-artifact)
-                                          :records event-count)
-                           :ram (chunk-artifact-spec number :ram ram-artifact)
-                           :mem (chunk-artifact-spec number :mem mem-artifact)}}
-        manifest' (-> manifest
-                      (update :chunks conj entry)
-                      (assoc :chunk-count number :event-count end))]
-    (store/write-manifest! directory manifest')
-    (reset! (:state capture) manifest')
-    entry))
+        screenshot-task (start-screenshot-artifact! chunks-directory number
+                                                    screenshot)]
+    (try
+      (let [events-artifact (store/write-artifact!
+                             (io/file chunks-directory
+                                      (store/chunk-artifact-name number :events))
+                             event-writer)
+            _ (when-not (= (* contract/event-record-size event-count)
+                           (:size events-artifact))
+                (fail :event-writer-size-mismatch
+                      {:event-count event-count
+                       :expected (* contract/event-record-size event-count)
+                       :actual (:size events-artifact)}))
+            ram-artifact (store/write-image!
+                          (io/file chunks-directory
+                                   (store/chunk-artifact-name number :ram))
+                          ram
+                          store/ram-format-descriptor)
+            mem-artifact (store/write-image!
+                          (io/file chunks-directory
+                                   (store/chunk-artifact-name number :mem))
+                          mem
+                          store/mem-format-descriptor)
+            screenshot-artifact (some-> screenshot-task deref)
+            metadata {:format contract/chunk-format
+                      :capture-id (:capture-id manifest)
+                      :chunk-number number
+                      :event-range [start end]
+                      :event-count event-count
+                      :target (get-in manifest [:options :event-target])
+                      :boundary boundary
+                      :snapshot snapshot
+                      :snapshot-timing snapshot-timing
+                      :screenshot (when screenshot
+                                    (screenshot-description number screenshot))
+                      :schemas (cond-> {:events contract/event-stream-format
+                                        :ram contract/ram-image-format
+                                        :mem contract/mem-image-format
+                                        :snapshot contract/snapshot-format}
+                                 screenshot
+                                 (assoc :screenshot contract/screen-png-format))
+                      :artifacts (cond-> {:events (chunk-artifact-reference number :events)
+                                          :ram (chunk-artifact-reference number :ram)
+                                          :mem (chunk-artifact-reference number :mem)}
+                                   screenshot
+                                   (assoc :screenshot
+                                          (chunk-artifact-reference number :screenshot)))}
+            metadata-path (store/chunk-metadata-path directory number)
+            _ (store/atomic-write-edn! metadata-path metadata)
+            entry {:number number
+                   :file (str "chunks/" (store/chunk-file-name number))
+                   :size (.length (io/file metadata-path))
+                   :sha256 (store/sha256-file metadata-path)
+                   :event-range [start end]
+                   :event-count event-count
+                   :boundary boundary
+                   :artifacts (cond-> {:events (assoc (chunk-artifact-spec number :events
+                                                                           events-artifact)
+                                                      :records event-count)
+                                       :ram (chunk-artifact-spec number :ram ram-artifact)
+                                       :mem (chunk-artifact-spec number :mem mem-artifact)}
+                                screenshot
+                                (assoc :screenshot
+                                       (chunk-artifact-spec number :screenshot
+                                                            screenshot-artifact)))}
+            manifest' (-> manifest
+                          (update :chunks conj entry)
+                          (assoc :chunk-count number :event-count end))]
+        (store/write-manifest! directory manifest')
+        (reset! (:state capture) manifest')
+        entry)
+      (catch Throwable error
+        ;; Join a failed or in-flight screenshot write before the capture is
+        ;; aborted, so its directory is not recreated while being removed.
+        (some-> screenshot-task (deref 5000 nil))
+        (throw error)))))
 
 (defn commit-chunk!
   "Commit one non-empty raw chunk transactionally.
@@ -150,13 +207,14 @@
   Request keys: `:event-count` (positive), `:event-writer` (a function of an
   `OutputStream` writing exactly `event-count` packed records), `:ram` and
   `:mem` (64 KiB `byte-array`s), `:snapshot` (a canonical snapshot map),
-  `:snapshot-timing`, and optional `:boundary`."
+  `:snapshot-timing`, optional `:screenshot` (`{:frame ... :palette ...}` as
+  returned by the binary monitor) and optional `:boundary`."
   [capture {:keys [event-count event-writer ram mem snapshot snapshot-timing
-                   boundary]
+                   boundary screenshot]
             :or {boundary default-boundary}}]
   (try
     (do-commit-chunk! capture event-count event-writer ram mem snapshot
-                      snapshot-timing boundary)
+                      snapshot-timing boundary screenshot)
     (catch Throwable error
       (abort-capture! capture)
       (throw error))))
@@ -190,6 +248,7 @@
                     :mem (:mem provided)
                     :snapshot (:snapshot provided)
                     :snapshot-timing (:snapshot-timing provided)
+                    :screenshot (:screenshot provided)
                     :boundary (or (:boundary provided) boundary)})))
 
 (defn ingest-trace-records!

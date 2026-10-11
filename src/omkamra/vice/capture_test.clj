@@ -9,11 +9,13 @@
             [omkamra.vice.contract :as contract]
             [omkamra.vice.event :as event]
             [omkamra.vice.recorder :as recorder]
+            [omkamra.vice.reader :as reader]
             [omkamra.vice.store :as store])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]
            [java.util Arrays]
-           [java.util.concurrent TimeUnit]))
+           [java.util.concurrent TimeUnit]
+           [javax.imageio ImageIO]))
 
 ;; Fixtures -----------------------------------------------------------------
 
@@ -76,6 +78,24 @@
      :snapshot (snapshot-at timing)
      :snapshot-timing timing}))
 
+(def ^:private test-frame
+  {:debug-width 4
+   :debug-height 2
+   :x-offset 1
+   :y-offset 0
+   :inner-width 2
+   :inner-height 1
+   :bpp 8
+   :buffer (byte-array (map unchecked-byte [0 1 2 3 0 1 2 3]))})
+
+(def ^:private test-palette
+  [[0 0 0] [255 0 0] [0 255 0] [0 0 255]])
+
+(defn- screenshot-snapshot-provider
+  [request]
+  (assoc (test-snapshot-provider request)
+         :screenshot {:frame test-frame :palette test-palette}))
+
 (defn- expected-event
   [{:keys [pc bytes a x y sp global-cycle raster cpu-cycle]}]
   {:pc pc
@@ -93,6 +113,8 @@
 (defn- record-event!
   ([dataset-root events] (record-event! dataset-root events 50000))
   ([dataset-root events target]
+   (record-event! dataset-root events target test-snapshot-provider))
+  ([dataset-root events target snapshot-provider]
    (let [capture (recorder/start-capture! {:dataset-root dataset-root
                                            :capture-id "synthetic"
                                            :options {:event-target target}})]
@@ -100,7 +122,7 @@
       capture
       (string-source (trace-text events))
       {:event-target target
-       :snapshot-provider test-snapshot-provider})
+       :snapshot-provider snapshot-provider})
      (recorder/finalize-capture! capture))))
 
 ;; Codec --------------------------------------------------------------------
@@ -221,6 +243,48 @@
         (is (= contract/memory-image-size
                (.length (io/file (:directory opened)
                                  (get-in chunk1 [:artifacts :mem :file]))))))
+      (finally
+        (store/delete-tree! (io/file dataset-root))))))
+
+(deftest chunk-screenshots-are-committed
+  (let [dataset-root (temp-dataset-root)]
+    (try
+      (record-event! dataset-root sample-events 4 screenshot-snapshot-provider)
+      (let [directory (io/file dataset-root "capture")
+            opened (store/open-capture directory)
+            manifest (:manifest opened)
+            entry (first (:chunks manifest))
+            chunk (store/read-edn (io/file (:directory opened) (:file entry)))
+            artifact (get-in entry [:artifacts :screenshot])
+            ^java.io.File png (io/file (:directory opened) (:file artifact))
+            reader (reader/open dataset-root)]
+        (testing "the PNG artifact is declared and checksummed"
+          (is (= contract/screen-png-format
+                 (get-in manifest [:formats :screenshot :format])))
+          (is (= contract/screen-png-format
+                 (get-in chunk [:schemas :screenshot])))
+          (is (= (str "chunks/" (store/chunk-artifact-name 1 :screenshot))
+                 (:file artifact)))
+          (is (= (.getPath png)
+                 (.getPath (reader/screenshot-file reader entry))))
+          (is (= (:size artifact) (.length png)))
+          (is (= (:sha256 artifact) (store/sha256-file png))))
+        (testing "the metadata describes the full debug frame"
+          (is (= {:file (str "chunks/" (store/chunk-artifact-name 1 :screenshot))
+                  :width 4
+                  :height 2
+                  :inner-width 2
+                  :inner-height 1
+                  :x-offset 1
+                  :y-offset 0
+                  :bpp 8}
+                 (:screenshot chunk)))
+          (is (= (:screenshot chunk) (reader/chunk-screenshot reader entry)))
+          (is (some? (reader/screenshot-bytes reader entry))))
+        (testing "the committed PNG decodes to the frame geometry"
+          (let [image (ImageIO/read png)]
+            (is (= 4 (.getWidth image)))
+            (is (= 2 (.getHeight image))))))
       (finally
         (store/delete-tree! (io/file dataset-root))))))
 

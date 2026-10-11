@@ -410,6 +410,8 @@
            :overshoot-max 0
            :snapshot-ms-total 0
            :snapshot-ms-max 0
+           :screenshot-ms-total 0
+           :screenshot-ms-max 0
            :boundary-ms-total 0
            :boundary-ms-max 0
            :commit-ms-total 0
@@ -417,7 +419,8 @@
            :started-at (now-ms)}))
 
 (defn- record-boundary-metrics!
-  [session {:keys [events overshoot snapshot-ms boundary-ms commit-ms]}]
+  [session {:keys [events overshoot snapshot-ms screenshot-ms boundary-ms
+                   commit-ms]}]
   (swap! (:metrics session)
          (fn [metrics]
            (-> metrics
@@ -427,6 +430,8 @@
                (update :overshoot-max max (long (or overshoot 0)))
                (update :snapshot-ms-total + (long (or snapshot-ms 0)))
                (update :snapshot-ms-max max (long (or snapshot-ms 0)))
+               (update :screenshot-ms-total + (long (or screenshot-ms 0)))
+               (update :screenshot-ms-max max (long (or screenshot-ms 0)))
                (update :boundary-ms-total + (long (or boundary-ms 0)))
                (update :boundary-ms-max max (long (or boundary-ms 0)))
                (update :commit-ms-total + (long (or commit-ms 0)))
@@ -457,7 +462,21 @@
    :mem (:mem (:snapshot chunk))
    :snapshot (snapshot/canonical-snapshot (:snapshot chunk) (:timing chunk))
    :snapshot-timing (:timing chunk)
+   :screenshot (:screenshot chunk)
    :boundary boundary})
+
+(defn- acquire-screenshot!
+  "Read the VIC canvas while VICE is already paused for a boundary snapshot.
+
+  Only the monitor round trips happen here; encoding and storing the PNG is
+  left to the chunk commit, which runs after execution resumes."
+  [session]
+  (let [conn @(:conn session)
+        started (System/nanoTime)
+        screenshot {:frame (bm/display-get conn {:use-vic-ii? true :format 0})
+                    :palette (bm/palette-get conn {:use-vic-ii? true})}]
+    {:screenshot screenshot
+     :screenshot-ms (elapsed-ms started)}))
 
 (defn- commit-chunk!
   [session chunk boundary]
@@ -494,8 +513,10 @@
         snapshot-start (System/nanoTime)
         acquired (snapshot/acquire conn)
         snapshot-ms (elapsed-ms snapshot-start)
+        {:keys [screenshot screenshot-ms]} (acquire-screenshot! session)
         next-chunk {:number (inc (:number chunk))
                     :snapshot acquired
+                    :screenshot screenshot
                     :timing nil
                     :events []
                     :closing? false}]
@@ -507,6 +528,7 @@
        session {:events (count (:events chunk))
                 :overshoot (- (count (:events chunk)) (:event-target session))
                 :snapshot-ms snapshot-ms
+                :screenshot-ms screenshot-ms
                 :boundary-ms (elapsed-ms boundary-start)
                 :commit-ms commit-ms})
       next-chunk)))
@@ -614,6 +636,7 @@
       (bm/ping conn)
       (bm/drain-events conn)
       (let [initial (snapshot/acquire conn)
+            {:keys [screenshot]} (acquire-screenshot! session)
             trace-checkpoint (bm/checkpoint-set
                               conn
                               {:start 0
@@ -647,6 +670,7 @@
                  (controller-loop! session
                                    {:number 1
                                     :snapshot initial
+                                    :screenshot screenshot
                                     :timing nil
                                     :events []
                                     :closing? false})))
@@ -698,6 +722,11 @@
   `:timing-model`, `:connect-timeout-ms`, `:connect-retry-ms`,
   `:autostart-timeout-ms`, `:program-start-timeout-ms`, and
   `:record-queue-capacity`.
+
+  Every committed chunk carries the VIC screenshot of its boundary instant as
+  `chunks/chunk-NNNNNN.png`. The frame is read from the monitor while VICE is
+  already paused for the boundary snapshot, and is encoded and stored on its
+  own thread during the chunk commit, off the pause path.
 
   Returns a session handle immediately."
   [options]

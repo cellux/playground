@@ -299,12 +299,15 @@ At a boundary, capture:
 3. waits for a verified logging flush/end-of-stream barrier and drains every trace record emitted before it;
 4. assigns all drained records to the chunk being closed;
 5. reads the next snapshot while VICE remains paused;
-6. establishes a fresh FIFO reader before logging is re-enabled, if disabling logging closed the writer;
-7. resumes trace logging and execution.
+6. reads the VIC frame for the new chunk's screenshot from the same paused monitor;
+7. establishes a fresh FIFO reader before logging is re-enabled, if disabling logging closed the writer;
+8. resumes trace logging and execution.
 
 A quiet-time heuristic is not a valid drain barrier. The exact stock-VICE mechanism—expected to be FIFO EOF after `MonitorLogEnabled` is disabled—must be established by the feasibility gate and covered by an integration test.
 
 The paused snapshot has no independent raw frame counter. Its authoritative boundary timestamp is taken from the first trace event after execution resumes, whose timing tuple is `(global-cycle, raster-line, cpu-cycle)`. Chunk metadata therefore remains pending until that first event arrives. This relies on the verified pre-instruction trace semantics and on pausing not advancing emulated time. Every later event carries the same timing *fields* with its own values. Empty trailing chunks are not committed.
+
+The screenshot is a *view*, not state: it exists so a human or a later stage can see what the machine displayed at a boundary without reconstructing the VIC. It is the full debug frame, border included, plus the visible inner rectangle in the chunk metadata, so a consumer can crop. Only two extra monitor round trips happen while paused (`DISPLAY_GET` and `PALETTE_GET`); PNG encoding and the artifact write happen on a separate thread during the chunk commit, after execution has resumed, so they never lengthen the pause.
 
 As a continuity check, replaying one completed chunk from its starting snapshot should produce the next chunk's underlying RAM and canonical mutable device state. CPU-visible `.mem` bytes are also compared wherever the required mapped source (RAM, I/O shadow, or available ROM bytes) is known within the explicitly supported replay envelope.
 
@@ -344,10 +347,12 @@ Public APIs receive a **dataset root** which owns sibling `capture/` and `analys
       chunk-000001.ram
       chunk-000001.mem
       chunk-000001.bin
+      chunk-000001.png
       chunk-000002.edn
       chunk-000002.ram
       chunk-000002.mem
       chunk-000002.bin
+      chunk-000002.png
   analysis/
     manifest.edn
     ...
@@ -362,7 +367,7 @@ Public APIs receive a **dataset root** which owns sibling `capture/` and `analys
 - `:capturing` or `:finalized` status;
 - capture-level timing model needed to interpret raster and cycle values;
 - capture options, including the fixed event target and VIC value blacklist;
-- binary format descriptors for event, RAM, and memory files;
+- binary format descriptors for event, RAM, memory, and screen-PNG files;
 - canonical snapshot schema descriptors;
 - chunk count and total event count;
 - committed chunk entries in order;
@@ -383,7 +388,8 @@ Each chunk EDN file contains:
 - global half-open event range `[start end)`;
 - actual event count;
 - approximate target used to request the boundary;
-- references by artifact kind (`:ram`, `:mem`, `:events`) rather than arbitrary filesystem paths;
+- references by artifact kind (`:ram`, `:mem`, `:events`, `:screenshot`) rather than arbitrary filesystem paths;
+- the screenshot description of that boundary instant: artifact file, debug-frame size, the visible inner rectangle, and the palette depth;
 - snapshot state;
 - snapshot timing;
 - schema/version identifiers;
@@ -3465,3 +3471,62 @@ spans, roles, segments):
   high-effort/divergence-prone, with `:features` now the larger bottleneck),
   `:video`/`:assets` rebuild and coalescing, a handful of fidelity items
   (NMI vs IRQ, indirect `$01`, piecewise leveling), and general housekeeping.
+
+### Diary entry: per-chunk VIC screenshots (2026-10-11)
+
+- **Status:** complete. Every committed chunk now carries the VIC frame of its
+  boundary instant as `chunks/chunk-NNNNNN.png` next to the memory images.
+- **Why:** the boundary snapshot is exact state but says nothing about what the
+  machine *showed*. A screenshot makes part and prompt identification
+  (`READY.`, "press fire", turn-disk screens) a matter of looking, without
+  reconstructing the VIC through `:video`/`:assets`.
+- **Design.**
+  - The frame is read from the monitor while VICE is *already* paused for the
+    boundary snapshot: `DISPLAY_GET` (indexed 8-bit debug frame, border
+    included) plus `PALETTE_GET`, i.e. two extra round trips per boundary and
+    once for the initial snapshot of a session. No new pause is introduced.
+  - Only the round trips sit on the pause path. PNG encoding and the artifact
+    write run on a separate thread during the chunk commit, overlapping the
+    event/ram/mem writes; the commit joins that thread before publishing the
+    manifest entry, and joins it on the failure path before the capture is
+    aborted so an aborting capture cannot recreate its own deleted directory.
+  - New artifact kind `:screenshot` (extension `.png`), format keyword
+    `:omkamra.vice/screen-png-v1` (`:pixel-format :rgb24`,
+    `:frame :vic-debug-frame`), declared in the manifest `:formats` and per
+    chunk in `:schemas`/`:artifacts`.
+  - Chunk metadata carries the geometry: debug-frame size, visible inner
+    rectangle, and palette depth. On PAL that is a 504x312 frame whose
+    320x200 inner area sits at `(136, 51)`, so a consumer can crop the border
+    without guessing.
+  - `store/validate-artifact!` checks the PNG signature (and reports
+    `:screenshot-truncated` / `:screenshot-not-a-png`); checksums and sizes
+    flow through the existing artifact machinery.
+  - New namespace `omkamra.vice.screen` owns frame conversion (`frame->image`,
+    `png-writer`, `write-png!`); `binary_monitor/screenshot!` now shares it
+    instead of duplicating the pixel loop. Reader accessors:
+    `chunk-screenshot`, `chunk-screenshots`, `screenshot-file`,
+    `screenshot-bytes`.
+- **Cost.** Measured on the *Fairlight legendary intro* smoke capture
+  (100k-event chunks): `:screenshot-ms` 83 ms average/83 ms maximum per
+  boundary against a ~380 ms snapshot pause, i.e. roughly +20% pause time and
+  no measurable change to capture throughput. Boundary work grew from
+  ~762 ms to ~923 ms worst case.
+- **Notes.**
+  - `clj-reload` unloads and reloads namespaces, so an existing REPL alias can
+    keep pointing at the *old* namespace object. Captures started through such
+    an alias ran a stale generation of `capture.clj` and silently produced no
+    screenshots. A fresh JVM (or a re-`require` of the namespace) fixes it, and
+    `:screenshot-ms-total` in the capture metrics is a cheap staleness canary.
+  - The screenshot is a view, not replayable state: it is not a substitute for
+    the boundary snapshot, and raster-split effects are recorded as the frame
+    VICE had drawn at that instant.
+- **Verification.** New/updated tests: `screen_test` (palette conversion,
+  rejected geometries, decodable PNG), `capture_test/chunk-screenshots-are-committed`
+  (artifact, metadata geometry, manifest format, reader accessors, PNG decodes),
+  `store_test/screenshot-artifacts-must-be-png` and
+  `store_test/manifest-declares-the-screenshot-format`. Full v2 suite through
+  the nREPL: **49 tests / 234 assertions, 0 failures**; `clj-kondo` and
+  `cljfmt` clean. End-to-end: a live capture of
+  `r53390_Fairlight Intro (the Legendary one).prg` produced 6 chunks with 6
+  PNGs, validated by `store/validate-capture!` and `reader/open`, and the
+  frames show the intro screen itself.

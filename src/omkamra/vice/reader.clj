@@ -164,6 +164,35 @@
                        :chunk-start (first (:event-range entry))})))
     (:snapshot (chunk-metadata reader entry))))
 
+(defn chunk-screenshot
+  "Return the committed VIC screenshot description of a chunk, or nil.
+
+  The description carries `:file`, the frame geometry (`:width`, `:height`),
+  the visible inner rectangle (`:x-offset`, `:y-offset`, `:inner-width`,
+  `:inner-height`), and `:bpp`. The PNG itself is the full debug frame,
+  border included."
+  [reader entry]
+  (:screenshot (chunk-metadata reader entry)))
+
+(defn chunk-screenshots
+  "Return the committed VIC screenshot descriptions in chunk order.
+
+  Chunks without a screenshot yield nil."
+  [reader]
+  (mapv #(chunk-screenshot reader %) (:chunks reader)))
+
+(defn screenshot-file
+  "Return the `File` of a chunk's screenshot PNG, or nil."
+  ^java.io.File [reader entry]
+  (when-let [description (chunk-screenshot reader entry)]
+    (io/file (:directory reader) (:file description))))
+
+(defn screenshot-bytes
+  "Return the bytes of a chunk's screenshot PNG."
+  [reader entry]
+  (when-let [^java.io.File file (screenshot-file reader entry)]
+    (Files/readAllBytes (.toPath file))))
+
 (defn boundary-snapshots
   "Return the committed boundary snapshots in chunk order."
   [reader]
