@@ -5,14 +5,16 @@
 - **Design status:** Initial design complete.
 - **Implementation status:** **Complete.** Phases 0–9 are implemented. The full
   pipeline runs end to end — capture → `:dedupe` → `:video`/`:assets`/`:audio`
-  → `:features` → `:classification` → `:segments` → `:disassembly` — with an
-  OS-visible writer lock, transactional all-or-nothing commits, signature and
-  input-provenance reuse, and parallel independent branches. `:dedupe` owns
+  → `:features` → `:classification` → `:segments` → `:disassembly` →
+  `:report` — with an OS-visible writer lock, transactional all-or-nothing
+  commits, signature and input-provenance reuse, and parallel independent
+  branches. `:dedupe` owns
   explicit execution frames and auditable timeline leveling; `:features` streams
   a sparse evidence projection plus a binary occurrence channel;
   `:classification` carries observed context identity; `:segments` derives
   demoparts from the *display-handler set*; `:disassembly` renders annotated
-  assembly. v1 orchestration is retired and the `omkamra.vice.v2.*` prefix is
+  assembly; `:report` renders a linked HTML overview of the segments. v1
+  orchestration is retired and the `omkamra.vice.v2.*` prefix is
   gone, so the public API is `omkamra.vice.*`. Tests are capture-free
   (a synthetic dataset), and the whole tree is `clj-kondo`/`cljfmt`/
   reflection clean.
@@ -850,11 +852,31 @@ Example shape:
 
 The exact identifiers and their meanings must be specified before implementation of the renderer.
 
+### 7.9 `:report`
+
+`:report` consumes `:segments` and `:disassembly` only, plus the raw capture's
+per-chunk screenshots. It is a pure presentation projection:
+
+- it writes one self-contained HTML page with embedded styling and no scripts;
+- it copies nothing: screenshots, `.asm` files, and role files are referenced
+  with relative links, and the generation index records every link;
+- it chooses `:screenshots-per-segment` (default 3) committed chunk boundaries
+  nearest to 25%, 50%, 75% … of each segment's event range, marking frames that
+  fall outside the segment so a short segment is never silently misrepresented;
+- it records each segment's metadata (kind, roles, IRQ roles, signals,
+  confidence, handler contexts, context ids, phases, event range, cycle span and
+  duration) plus the boundary-audit counts;
+- a capture without screenshots still produces a report, recording a zero
+  screenshot count.
+
+Because every link is relative, a report is only complete while the dataset,
+its `:disassembly` generation, and the referenced capture stay together.
+
 ---
 
 ## 8. Streaming and concurrency
 
-The analysis runner remains able to execute any requested target stage and its dependency closure. A full request interleaves stages through bounded queues. `:dedupe` and `:video` can begin from raw capture together; `:audio` joins raw SID writes with ordered dedupe mappings; `:features` joins raw data with ordered dedupe/video messages; `:classification`, `:segments`, and finally `:disassembly` consume their ordered dependencies as those become available. `:assets` is an independent downstream consumer of `:video`.
+The analysis runner remains able to execute any requested target stage and its dependency closure. A full request interleaves stages through bounded queues. `:dedupe` and `:video` can begin from raw capture together; `:audio` joins raw SID writes with ordered dedupe mappings; `:features` joins raw data with ordered dedupe/video messages; `:classification`, `:segments`, and finally `:disassembly` consume their ordered dependencies as those become available. `:assets` is an independent downstream consumer of `:video`, and `:report` is a downstream consumer of `:segments` and `:disassembly`.
 
 Rules:
 
@@ -3530,3 +3552,52 @@ spans, roles, segments):
   `r53390_Fairlight Intro (the Legendary one).prg` produced 6 chunks with 6
   PNGs, validated by `store/validate-capture!` and `reader/open`, and the
   frames show the intro screen itself.
+
+### Diary entry: the `:report` HTML stage (2026-10-11)
+
+- **Status:** complete. A new presentation stage renders one HTML page per
+  generation, listing every semantic segment with its metadata, up to three
+  screenshots, and links to its `.asm` file and role files.
+- **Why:** the reconstruction output was only readable by reading EDN and
+  opening files by hand. A page makes part boundaries, roles, and *what the
+  machine displayed* visible at a glance — the missing half of the segments
+  index.
+- **Design.**
+  - `:report` depends on `:segments` and `:disassembly` only; the capture is
+    implicit, as for every stage. It is a pure projection: it writes
+    `report.html` plus `index.edn` and copies nothing.
+  - Screenshots are the capture's committed chunk PNGs, referenced with
+    relative links (`../../../capture/chunks/chunk-NNNNNN.png`), as are the
+    `.asm` files (`../../disassembly/<generation>/…`). Every link is recorded
+    in the index, so a consumer never reconstructs a path.
+  - Each segment shows `:screenshots-per-segment` (default 3) frames chosen from
+    the boundaries nearest to **25%, 50%, 75%** of the segment's event range —
+    the interior of the segment, not its edges. Targets that resolve to the
+    same boundary are deduplicated, and a frame outside the segment range is
+    marked as such in the page and the index, so a short segment is never
+    silently misrepresented.
+  - Per segment the page carries kind, roles, IRQ roles, signals, confidence,
+    handler contexts, context ids, phases (with their own event ranges), event
+    range, cycle span, duration in seconds and PAL frames, and the disassembly
+    link. The header carries the capture identity and manifest checksum, the
+    upstream generation directories, the timing model, counts, and the boundary
+    audit's gap/overlap counts.
+  - Rendering is a pure function of the index (`render-html`), so the page can
+    be checked without touching a dataset; `build!` only performs the capture
+    reads (chunk boundaries, one event read per segment endpoint) and the
+    commit.
+- **Versioning note:** the stage went through versions 1→3 while it was being
+  written (screenshot selection rule, then index/render key fixes). Each bump
+  correctly invalidated only `:report` and reused all six upstream stages,
+  which is the reuse behaviour the graph promises.
+- **Verification.** `report_test`: target-index arithmetic, the 25/50/75%
+  nearest-boundary selection (including deduplication and outside-range
+  marking), link paths, HTML escaping, and a committed generation through
+  `pipeline/build!` on the synthetic capture (which has no screenshots, so the
+  zero-screenshot path is covered too). Full suite through the nREPL:
+  **79 tests / 411 assertions, 0 failures**; `clj-kondo` and `cljfmt` clean.
+  End to end: a fresh capture of
+  `r53390_Fairlight Intro (the Legendary one).prg` (12 chunks, 1.2 M events)
+  built `:dedupe`…`:report`, the page rendered in a browser with all
+  screenshots and `.asm` links resolving, and the two segments show the loader
+  screen and three 25/50/75% frames of the intro itself.

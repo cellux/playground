@@ -136,7 +136,8 @@
          :features (:features images)
          :classification (:classification images)
          :segments (:segments images)
-         :disassembly (:disassembly images)})
+         :disassembly (:disassembly images)
+         :report (:report images)})
       (catch Throwable error
         (remove-root! root)
         (throw error)))))

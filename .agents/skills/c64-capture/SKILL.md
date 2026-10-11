@@ -267,7 +267,7 @@ generations on later invocations.
 capture -> dedupe
         -> video -> assets
         -> audio
-        -> features -> classification -> segments -> disassembly
+        -> features -> classification -> segments -> disassembly -> report
 ```
 
 The exact dependency closure for the final assembly is smaller. To build only
@@ -285,9 +285,9 @@ not required by the current disassembly closure, but use `:all` when their
 visual/asset projections are also wanted.
 
 Other valid targets include `:dedupe`, `:video`, `:assets`, `:audio`,
-`:features`, `:classification`, and `:segments`; a collection of targets is
-also accepted. There is normally no need to call individual stage `build!`
-functions or pass upstream images by hand.
+`:features`, `:classification`, `:segments`, and `:report`; a collection of
+targets is also accepted. There is normally no need to call individual stage
+`build!` functions or pass upstream images by hand.
 
 A second invocation against the same finalized capture should mostly report
 `:reused`. To deliberately rebuild a stage and its affected downstream
@@ -358,6 +358,39 @@ segment files contain deduplicated blocks selected by semantic segment; role
 files contain the routine-oriented `:raster`, `:music`, `:loader`, and
 `:decruncher` views when those roles were observed. Volatile operand bytes are
 rendered as `??`, and each block has a compact context/control-flow annotation.
+
+## Read the report
+
+The `:report` stage turns a reconstruction into one HTML page: every semantic
+segment with its metadata, up to three screenshots, and links to its `.asm`
+file and the role files.
+
+```clojure
+(require '[omkamra.vice.pipeline :as pipeline]
+         '[omkamra.vice.report :as report])
+
+(pipeline/build! dataset-root :report {:stage-parallelism 2})
+
+(def report-image (report/open dataset-root))
+(:directory report-image)                    ; absolute generation directory
+(report/segments report-image)               ; one entry per segment
+(report/screenshots (first (report/segments report-image)))
+(report/html report-image)                   ; the page as a string
+```
+
+`<generation>/report.html` is a normal file, so it can also just be opened in a
+browser. Screenshots are chosen nearest to 25%, 50%, and 75% of each segment's
+span (`:configuration {:report {:screenshots-per-segment 3}}` overrides the
+count); a segment shorter than the chunk granularity shows fewer frames, and a
+frame that falls outside the segment is labelled as such. The page also lists
+the boundary audit's gap/overlap counts and the upstream generation
+directories.
+
+Everything in the page is a *relative* link — into `capture/chunks/` for
+screenshots and into the `:disassembly` generation for the `.asm` files — so the
+report stays small but only makes sense while the dataset and those generations
+stay together. A capture recorded before the screenshot feature has no PNGs, and
+the report then lists segments without images.
 
 ## Troubleshooting
 

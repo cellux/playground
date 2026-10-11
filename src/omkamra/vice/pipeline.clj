@@ -21,6 +21,7 @@
             [omkamra.vice.disassembly :as disassembly]
             [omkamra.vice.features :as features]
             [omkamra.vice.reader :as reader]
+            [omkamra.vice.report :as report]
             [omkamra.vice.segments :as segments]
             [omkamra.vice.video :as video])
   (:import [java.security MessageDigest]))
@@ -34,7 +35,8 @@
    :features #{:dedupe}
    :classification #{:features :audio}
    :segments #{:features :classification}
-   :disassembly #{:dedupe :segments}})
+   :disassembly #{:dedupe :segments}
+   :report #{:segments :disassembly}})
 
 (def versions
   {:dedupe dedupe/dedupe-version
@@ -44,7 +46,8 @@
    :features features/features-version
    :classification classification/classification-version
    :segments segments/segments-version
-   :disassembly disassembly/disassembly-version})
+   :disassembly disassembly/disassembly-version
+   :report report/report-version})
 
 (def stage-defaults
   "Semantic default configuration per stage, where the stage defines one."
@@ -52,7 +55,8 @@
    :assets assets/default-configuration
    :audio audio/default-configuration
    :features features/default-configuration
-   :classification classification/default-configuration})
+   :classification classification/default-configuration
+   :report report/default-configuration})
 
 (def configuration-keys
   "Configuration keys that participate in a stage's signature.
@@ -67,7 +71,8 @@
    :features (set (keys features/default-configuration))
    :classification (set (keys classification/default-configuration))
    :segments #{}
-   :disassembly (set (keys disassembly/default-configuration))})
+   :disassembly (set (keys disassembly/default-configuration))
+   :report (set (keys report/default-configuration))})
 
 (defn normalize-configuration
   "Reduce a stage configuration to the canonical map used for signatures.
@@ -123,7 +128,8 @@
     :features (features/open dataset-root)
     :classification (classification/open dataset-root)
     :segments (segments/open dataset-root)
-    :disassembly (disassembly/open dataset-root)))
+    :disassembly (disassembly/open dataset-root)
+    :report (report/open dataset-root)))
 
 (defn- build-stage!
   [stage {:keys [capture] :as context} configuration]
@@ -142,7 +148,9 @@
       :segments (segments/build! (:classification images) (:features images)
                                  {:configuration configuration})
       :disassembly (disassembly/build! (:dedupe images) (:segments images)
-                                       {:configuration configuration}))))
+                                       {:configuration configuration})
+      :report (report/build! (:segments images) (:disassembly images)
+                             {:configuration configuration}))))
 
 ;; Driver --------------------------------------------------------------------
 
