@@ -240,7 +240,7 @@
 
 (assembler/define-asset resource-asset
   {:resource "omkamra/vice/assembler_test/bytes.bin"
-   :constraints {:alignment 256}})
+   :constraints {:align 256}})
 
 (deftest expressions-evaluate
   (is (= '[(lda 3)
@@ -294,10 +294,76 @@
                    '((lda [inline-asset]))
                    {:ns 'omkamra.vice.assembler-test})))))
 
+(def plain-bytes
+  "Inline data as a plain Clojure vector: no asset ceremony."
+  [7 8 9])
+
+(defn- linked-bytes-at
+  [artifact address length]
+  (let [segment (first (filter (fn [{:keys [start-address bytes]}]
+                                 (<= (long start-address)
+                                     (long address)
+                                     (+ (long start-address) (count bytes))))
+                               (:segments artifact)))]
+    (mapv #(bit-and (int %) 0xff)
+          (take length (drop (- (long address) (long (:start-address segment)))
+                             (:bytes segment))))))
+
+(deftest plain-defs-of-bytes-are-assets
+  (is (= '[(lda [omkamra.vice.assembler-test/plain-bytes])]
+         (:source (assembler/assemble
+                   '((lda [plain-bytes]))
+                   {:ns 'omkamra.vice.assembler-test}))))
+  (testing "the linker places it like any other asset"
+    (let [artifact (assembler/link
+                    (assembler/assemble
+                     '((%org 0x1000)
+                       (lda [plain-bytes]))
+                     {:ns 'omkamra.vice.assembler-test})
+                    {:ranges [[0x1000 0x2000]]})
+          asset (first (:assets artifact))]
+      (is (= ['omkamra.vice.assembler-test/plain-bytes] (mapv :name (:assets artifact))))
+      (is (= [7 8 9] (linked-bytes-at artifact (:start-address asset) 3))))))
+
+(defn syntax-quoted-macro
+  "An assembly macro in the idiomatic style: syntax-quote, no `list` calls.
+
+  Syntax-quote qualifies its symbols, so the expansion arrives as
+  `…-test/ldx`, `…-test/x` and so on. The assembler accepts a qualified
+  mnemonic or directive by name (and canonicalises a qualified index
+  register), which is what makes macros writable this way."
+  [label table]
+  `[(ldx 0x00)
+    ~label
+    (lda [~table x])
+    (iny)
+    (bne ~label)])
+
+(deftest syntax-quoted-macros-assemble
+  (is (= '[(ldx 0)
+           :loop
+           (lda [omkamra.vice.assembler-test/inline-asset x])
+           (iny)
+           (bne :loop)]
+         (:source (assembler/assemble
+                   '((syntax-quoted-macro :loop inline-asset))
+                   {:ns 'omkamra.vice.assembler-test}))))
+  (testing "the qualified index register still selects absolute,X"
+    (let [artifact (assembler/link
+                    (assembler/assemble
+                     '((%org 0x1000)
+                       (syntax-quoted-macro :loop inline-asset))
+                     {:ns 'omkamra.vice.assembler-test})
+                    {:ranges [[0x1000 0x2000]]})]
+      (is (= [0xa2 0x00                 ; LDX #$00
+              0xbd]                     ; LDA abs,X
+             (mapv #(bit-and (int %) 0xff)
+                   (take 3 (:bytes (first (:segments artifact))))))))))
+
 (deftest resource-assets
   (is (= [1 2 3 255]
          (mapv (fn [b] (bit-and (int b) 0xff)) (seq (:data resource-asset)))))
-  (is (= {:alignment 256} (:constraints resource-asset)))
+  (is (= {:align 256} (:constraints resource-asset)))
   (is (= "omkamra/vice/assembler_test/bytes.bin" (:resource resource-asset))))
 
 (deftest asset-dependencies
@@ -351,7 +417,7 @@
 (deftest alignment-and-org
   (let [object (assemble-only '((%db [1]) (%align 4) (%db [2])))]
     (is (= [1 0 0 0 2] (section-bytes object)))
-    (is (= 4 (:alignment (first (:sections object))))))
+    (is (= 4 (:align (first (:sections object))))))
   (let [object (assemble-only '((%db [1]) (%org 0x4000) (%db [2])))]
     (is (= [0x4000] (mapv :base (rest (:sections object)))))
     (is (= [2] (vec (:bytes (first (:items (second (:sections object)))))))))
@@ -437,6 +503,228 @@
     (is (= 0x800 (:entry-point artifact)))
     (is (= 0x804 (get (:labels (second (:objects artifact))) :clear-screen-fn)))))
 
+;; Object entries ------------------------------------------------------------
+
+(assembler/define-asm default-entry-object
+  (lda 0x01)
+  (rts))
+
+(assembler/define-asm default-entry-caller
+  (%entry :start)
+  :start
+  (jsr default-entry-object)
+  (rts))
+
+(def data-only-object
+  (assembler/assemble '((%db [1 2 3]))
+                      {:ns 'omkamra.vice.assembler-test
+                       :object-id :omkamra.vice.assembler-test/data-only}))
+
+(deftest define-asm-adds-a-default-entry-label
+  (is (nil? (:entry default-entry-object)))
+  (is (= {:section 0 :offset 0}
+         (get (:labels default-entry-object) :default-entry-object)))
+  (testing "an object that declares %entry gets no default label"
+    (is (nil? (get (:labels entry-object) :entry-object)))))
+
+(deftest object-vars-resolve-to-their-entry
+  (testing "the Var reference becomes an external label for the entry"
+    (is (some #{'(jsr :omkamra.vice.assembler-test/default-entry-object)}
+              (:source default-entry-caller)))
+    (is (= [:omkamra.vice.assembler-test/default-entry-object]
+           (:objects (:dependencies default-entry-caller)))))
+  (testing "and links to the entry label's address"
+    (let [artifact (assembler/link default-entry-caller)
+          handler (first (filter #(= :omkamra.vice.assembler-test/default-entry-object
+                                     (:object-id %))
+                                 (:objects artifact)))]
+      (is (some? handler))
+      (is (= 0x804 (get (:labels handler) :default-entry-object))))))
+
+(deftest object-name-label-must-name-the-first-instruction
+  (is (= :object-entry-label-mismatch
+         (error-reason
+          #(assembler/assemble '((rts) :irq (rts))
+                               {:ns 'omkamra.vice.assembler-test
+                                :object-id :omkamra.vice.assembler-test/irq}))))
+  (testing "naming the first instruction is accepted"
+    (is (= [:irq]
+           (keys (:labels
+                  (assembler/assemble '(:irq (rts))
+                                      {:ns 'omkamra.vice.assembler-test
+                                       :object-id :omkamra.vice.assembler-test/irq})))))))
+
+(deftest object-without-entry-cannot-be-referenced
+  (is (nil? (get (:labels data-only-object) :data-only)))
+  (is (= :no-object-entry
+         (error-reason
+          #(assembler/assemble '((lda (< data-only-object)))
+                               {:ns 'omkamra.vice.assembler-test})))))
+
+;; %labels -------------------------------------------------------------------
+
+(deftest labels-directive-renames-its-labels
+  (let [object (assembler/assemble
+                '((%labels [:loop] :loop (inx) (bne :loop)))
+                {:ns 'omkamra.vice.assembler-test})
+        [label inx bne] (:source object)]
+    (is (keyword? label))
+    (is (not= :loop label))
+    (is (= '(inx) inx))
+    (is (= label (second bne)))
+    (is (= [label] (keys (:labels object))))))
+
+(deftest labels-directive-is-unique-per-use
+  (let [object (assembler/assemble
+                '((%labels [:loop] :loop (inx) (bne :loop))
+                  (%labels [:loop] :loop (dex) (bne :loop)))
+                {:ns 'omkamra.vice.assembler-test})
+        labels (keys (:labels object))]
+    (is (= 2 (count labels)))
+    (is (= 2 (count (distinct labels))))))
+
+(deftest labels-directive-scopes-its-body
+  (let [object (assembler/assemble
+                '((%labels [:loop] :loop (bne :loop))
+                  :loop)
+                {:ns 'omkamra.vice.assembler-test})
+        labels (set (keys (:labels object)))]
+    (is (contains? labels :loop) "the outer label is untouched")
+    (is (= 2 (count labels)) "and the scoped one is separate")))
+
+(deftest labels-directive-validates-its-names
+  (is (= :invalid-labels
+         (error-reason
+          (fn [] (assembler/assemble '((%labels :loop (inx)))
+                                     {:ns 'omkamra.vice.assembler-test}))))))
+
+;; %reserve ------------------------------------------------------------------
+
+(def reserve-anchor [1 2 3 4 5 6 7 8])
+
+(deftest reserve-records-its-range
+  (let [object (assembler/assemble
+                '((%org 0x9000) :start (%reserve 0x0800 0x100) (rts))
+                {:ns 'omkamra.vice.assembler-test})]
+    (is (= [[0x0800 0x0900]] (:reserved (:constraints object))))))
+
+(deftest reserve-accepts-a-range-vector
+  (let [object (assembler/assemble
+                '((%org 0x9000) :start (%reserve [0x0800 0x0900]) (rts))
+                {:ns 'omkamra.vice.assembler-test})]
+    (is (= [[0x0800 0x0900]] (:reserved (:constraints object))))))
+
+(deftest reserve-keeps-the-linker-out-of-the-range
+  (let [object (assembler/assemble
+                '((%org 0x9000) :start (%reserve 0x0800 0x100)
+                                (lda [reserve-anchor])
+                                (rts))
+                {:ns 'omkamra.vice.assembler-test
+                 :object-id :omkamra.vice.assembler-test/reserved})
+        artifact (assembler/link object)
+        anchor (first (filter #(= 'omkamra.vice.assembler-test/reserve-anchor
+                                  (:name %))
+                              (:assets artifact)))]
+    (is (= 0x0900 (:start-address anchor))
+        "the floating asset skips the reserved range")))
+
+(deftest reserve-validates-its-arguments
+  (is (= :invalid-reserve
+         (error-reason
+          (fn [] (assembler/assemble '((%reserve :nope 4))
+                                     {:ns 'omkamra.vice.assembler-test}))))))
+
+(deftest reserve-rejects-overlap
+  (is (= :overlap
+         (error-reason
+          (fn [] (assembler/link
+                  (assembler/assemble '((%org 0xC000) :start (%reserve 0xC000 16) (rts))
+                                      {:ns 'omkamra.vice.assembler-test})))))))
+
+;; implicit-asset alignment ---------------------------------------------------
+
+(def ^{:align 256} aligned-inline [1 2 3 4 5 6 7 8])
+
+(deftest implicit-asset-honours-alignment-metadata
+  (let [object (assembler/assemble
+                '((%org 0x2000) (%reserve 0x0800 2) (lda [aligned-inline,x]))
+                {:ns 'omkamra.vice.assembler-test})
+        artifact (assembler/link object)
+        asset (first (filter #(= 'omkamra.vice.assembler-test/aligned-inline
+                                 (:name %))
+                             (:assets artifact)))]
+    (is (= 0 (mod (:start-address asset) 256))
+        "the inline table aligns itself to a page")))
+
+(def ^{:align true} nine-bytes (vec (repeat 9 1)))
+(def ^{:align true} twenty-one-bytes (vec (repeat 21 1)))
+
+(defn- placed-asset
+  "The linked start address of implicit asset `sym` in a small object."
+  [sym]
+  (let [object (assembler/assemble
+                (list '(%org 0x4000) '(%reserve 0x0800 2) (list 'lda (vector sym 'x)))
+                {:ns 'omkamra.vice.assembler-test
+                 :object-id (keyword "omkamra.vice.assembler-test"
+                                     (str "align-" (name sym)))})
+        artifact (assembler/link object)
+        qualified (symbol "omkamra.vice.assembler-test" (name sym))]
+    (:start-address (first (filter #(= qualified (:name %)) (:assets artifact))))))
+
+(deftest align-true-uses-the-next-power-of-two
+  (is (= 0x0810 (placed-asset 'nine-bytes)) "9 bytes -> align 16")
+  (is (= 0x0820 (placed-asset 'twenty-one-bytes)) "21 bytes -> align 32")
+  (is (= {:align 32}
+         (:constraints (assembler/build-asset 't {:data (vec (repeat 21 1))
+                                                  :align true})))
+      "define-asset accepts :align true too"))
+
+;; string assets --------------------------------------------------------------
+
+(def ^{:charset :screen-codes :at 0x3000} screen-coded-string "AB C1:9'Z")
+(def ^{:charset :petscii :at 0x3100} petscii-coded-string "Ab1!")
+(def ^{:at 0x3200} ascii-coded-string "Hi!")
+(def ^{:align true} aligned-string "abc")
+(def ^{:charset :ebcdic} unknown-charset-string "hi")
+(def ^{:charset :screen-codes} unencodable-string "ok\ttab")
+(def empty-string-asset "")
+
+(defn- asset-bytes
+  "The linked bytes of asset `sym`, which must be pinned alone at its address."
+  [sym]
+  (let [object (assembler/assemble
+                (list '(%org 0x4000) (list 'lda (list '< sym)) (list 'ldx (list '> sym)))
+                {:ns 'omkamra.vice.assembler-test
+                 :object-id (keyword "omkamra.vice.assembler-test"
+                                     (str "string-" (name sym)))})
+        artifact (assembler/link object)
+        qualified (symbol "omkamra.vice.assembler-test" (name sym))
+        address (:start-address (first (filter #(= qualified (:name %))
+                                               (:assets artifact))))
+        segment (first (filter #(= (long address) (long (:start-address %)))
+                               (:segments artifact)))]
+    (mapv #(bit-and (int %) 0xff) (:bytes segment))))
+
+(deftest a-string-var-is-an-asset-in-the-charset-it-names
+  (is (= [1 2 0x20 3 0x31 0x3A 0x39 0x27 26] (asset-bytes 'screen-coded-string))
+      ":screen-codes: letters run from $01, $20-$3F are unchanged")
+  (is (= [0x41 0x42 0x31 0x21] (asset-bytes 'petscii-coded-string))
+      ":petscii: letters run from $41, upper and lower case fold")
+  (is (= [0x48 0x69 0x21] (asset-bytes 'ascii-coded-string))
+      ":ascii is the default"))
+
+(deftest a-string-asset-takes-the-same-placement-metadata
+  (is (= 0x3000 (placed-asset 'screen-coded-string)) ":at pins the asset")
+  (is (= 0 (mod (placed-asset 'aligned-string) 4)) ":align true still applies"))
+
+(deftest a-string-asset-rejects-what-it-cannot-encode
+  (is (= :unknown-charset
+         (error-reason #(link-forms '((lda (< unknown-charset-string))) {}))))
+  (is (= :unencodable-character
+         (error-reason #(link-forms '((lda (< unencodable-string))) {}))))
+  (is (= :empty-asset
+         (error-reason #(link-forms '((lda (< empty-string-asset))) {})))))
+
 (deftest link-rejects-ambiguous-and-unresolved-externals
   (let [ns-sym 'omkamra.vice.assembler-test
         main (assembler/assemble
@@ -520,3 +808,94 @@
                 {:ns 'omkamra.vice.assembler-test})]
     (is (= :multiple-entries (error-reason #(assembler/link object))))
     (is (= 0x800 (:entry-point (assembler/link object {:entry :b}))))))
+
+;; operand expressions --------------------------------------------------------
+
+;; A label used by the link-time expression tests, and an object to reference
+;; from an expression (so the external-label path is covered too).
+(assembler/define-asm expression-target :start (rts))
+
+(defn- artifact-bytes [artifact]
+  (mapv #(bit-and (int %) 0xff) (:bytes (first (:segments artifact)))))
+
+(defn- bytes-at-address
+  "The linked bytes starting at `address`, which must lie inside one segment."
+  [artifact address length]
+  (let [segment (first (filter (fn [{:keys [start-address bytes]}]
+                                 (<= (long start-address) (long address)
+                                     (dec (+ (long start-address) (count bytes)))))
+                               (:segments artifact)))]
+    (mapv #(bit-and (int %) 0xff)
+          (take length (drop (- (long address) (long (:start-address segment)))
+                             (:bytes segment))))))
+
+(defn- little-endian-bytes [n]
+  [(bit-and (long n) 0xff) (bit-and (bit-shift-right (long n) 8) 0xff)])
+
+(deftest operand-expressions-are-evaluated-at-link-time
+  ;; A form mentioning a label (or asset) is kept whole and evaluated by the
+  ;; linker, where the addresses exist; nested arithmetic and `let` are just
+  ;; Clojure in the assembled namespace.
+  (let [artifact (link-forms '((%org 0x2000)
+                               :volume
+                               (lda 0x18)
+                               (inc (+ :volume 1))
+                               (lda [(+ :volume (* 2 3))])
+                               (lda (< (+ :volume 1)))
+                               (lda (> (+ :volume 1)))
+                               (lda [(let [n 3] (+ :volume n))])
+                               (lda (+ 1 2)))
+                             {})]
+    (is (= [0xa9 0x18
+            0xee 0x01 0x20          ; INC $2001: the operand byte itself
+            0xad 0x06 0x20          ; LDA $2006: (* 2 3)
+            0xa9 0x01 0xa9 0x20     ; the low and high bytes of $2001
+            0xad 0x03 0x20          ; LDA $2003: a let-bound offset
+            0xa9 0x03]              ; a constant expression still folds here
+           (artifact-bytes artifact)))))
+
+(deftest operand-expressions-may-reference-assets-and-objects
+  (let [artifact (link-forms '((%dw [(+ inline-asset 4)])
+                               (lda [(+ expression-target 1)]))
+                             {})
+        inline (:start-address
+                (first (filter #(= 'omkamra.vice.assembler-test/inline-asset
+                                   (:name %))
+                               (:assets artifact))))
+        owner (first (filter #(= (keyword "omkamra.vice.assembler-test"
+                                          "expression-target")
+                                 (:object-id %))
+                             (:objects artifact)))
+        ;; the primary object is the one assembled without an `:object-id`
+        section (first (get-in (first (filter #(nil? (:object-id %))
+                                              (:objects artifact)))
+                               [:placement :sections]))
+        bytes (bytes-at-address artifact (:base section) (:size section))]
+    (is (= (concat (little-endian-bytes (+ inline 4))
+                   [0xad]
+                   (little-endian-bytes (inc (long (get-in owner
+                                                           [:placement :sections 0 :base])))))
+           bytes))))
+
+(deftest operand-expressions-keep-their-errors
+  (testing "a label that does not exist is still caught while assembling"
+    (is (= :unresolved-label
+           (error-reason #(link-forms '((lda [(+ :missing 1)])) {})))))
+  (testing "a bad expression is reported when linking"
+    (is (= :expression-error
+           (error-reason (fn [] (link-forms '((%org 0x2000)
+                                              :here
+                                              (lda [(quot :here 0)]))
+                                            {})))))))
+
+(deftest operand-expressions-take-qualified-constants
+  ;; Syntax-quote inside an assembly macro qualifies every name, including the
+  ;; namespace's own constants. Those are constants, not asset references.
+  (let [object (assemble-only '((%org 0x2000)
+                                :here
+                                (lda [(+ omkamra.vice.assembler-test/magic :here)])))
+        artifact (assembler/link object)]
+    (is (empty? (:assets (:dependencies object)))
+        "a qualified constant does not become an asset dependency")
+    (is (= [0xad 0x42 0x20] (artifact-bytes artifact))
+        "it folds to $2042")))

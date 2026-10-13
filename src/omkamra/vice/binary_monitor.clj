@@ -198,6 +198,9 @@
          write-lock (Object.)
          events (LinkedBlockingQueue.)
          ignored-unsolicited-types (atom (set ignored-unsolicited-types))
+         ;; Set by `close` so an intentional shutdown does not look like a
+         ;; dropped monitor stream in the reader thread.
+         closed? (atom false)
          response-reader
          (future
            (try
@@ -242,7 +245,8 @@
              (catch SocketException _)
              (catch Throwable t
                (.close socket)
-               (println "caught throwable:" t))))]
+               (when-not @closed?
+                 (println "caught throwable:" t)))))]
      {:host host
       :port port
       :socket socket
@@ -253,6 +257,7 @@
       :events events
       :ignored-unsolicited-types ignored-unsolicited-types
       :response-reader response-reader
+      :closed? closed?
       :next-request-id (atom 0)})))
 
 (defn ignore-unsolicited-types!
@@ -269,6 +274,8 @@
 
 (defn close
   [conn]
+  (when-let [closed? (:closed? conn)]
+    (reset! closed? true))
   (.close ^Socket (:socket conn))
   (reset! (:pending-requests conn) {})
   (reset! (:next-request-id conn) 0)

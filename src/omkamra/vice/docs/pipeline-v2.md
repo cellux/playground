@@ -102,9 +102,11 @@ plan to be considered done.
 - **Freshness: rebuild `:video`/`:assets` on the current capture.** No
   `:video`/`:assets` generations are committed for the fresh
   `no-booze-triad-v2` capture; a full `pipeline/build! … :all` would build them.
-- **`:full-capture? true` boot path.** Under monitor-log tracing the
-  `:full-capture? true` mode was observed parked in the KERNAL IEC wait loop
-  rather than reaching the demo; diagnose or document as unsupported.
+- **`:full-capture? true` boot path (resolved).** A full capture now powers on
+  a fresh VICE, stops at the CPU reset vector, takes its initial snapshot there,
+  and records the boot from `$FCE2` before autostarting the input; combine with
+  `:max-events` for a bounded boot capture. The old start that missed the reset
+  (and could park in the KERNAL loader) is gone.
 - **Raw-capture reproducibility.** Record a capture-manifest checksum plus a
   documented `capture/start!` recipe in a dataset README, and ideally commit a
   small demo so acceptance runs are self-contained.
@@ -3601,3 +3603,42 @@ spans, roles, segments):
   built `:dedupe`…`:report`, the page rendered in a browser with all
   screenshots and `.asm` links resolving, and the two segments show the loader
   screen and three 25/50/75% frames of the intro itself.
+
+### Diary entry: running-instance capture backend and boot-capturing `:full-capture?` (2026-10-13)
+
+- **Status:** implemented and live-validated. `omkamra.vice.capture` gained
+  `:instance`, `:from-pc`, and `:max-events`, and `:full-capture?` now records
+  the C64 boot sequence from the reset vector.
+- **Why:** the capture layer only knew how to start VICE and autostart a file.
+  Capturing an already running emulator, starting at a chosen PC, or bounding a
+  capture deterministically were not expressible, and `:full-capture?` started
+  after VICE had already booted, so the reset/boot was missed (and a demo
+  autostart under monitor-log tracing was observed parked in the KERNAL loader).
+- **Design.**
+  - The PRG/D64 flow is split: an input path that starts VICE, autostarts the
+    file, waits for BASIC RUN at `$E144`, and computes the start PC, handing the
+    connected emulator to a *running-instance backend*. The backend itself only
+    knows a connected, paused VICE and an optional start PC.
+  - `:instance` (a descriptor from `omkamra.vice/start!`) skips process startup
+    and autostart and records the emulator from its current position; it is left
+    running and resumed when the capture ends. `:input` and `:instance` are
+    mutually exclusive.
+  - `:from-pc` installs a temporary execute checkpoint, resumes, and waits for
+    the CPU to stop there before the initial snapshot. It replaces only the
+    follow-up `SYS`-target wait of the program path; the `$E144` wait remains.
+  - `:max-events` is a hard event cap. The controller drops queued records once
+    the cap is reached (rather than after appending them, which had kept the
+    record), so the finalized capture ends exactly at the cap.
+  - `:full-capture?` powers on a fresh VICE (`:instance` is rejected), resets it
+    (`reset` with power cycle), and stops at the reset entry — the vector read
+    from `$FFFC`, or `:from-pc` — so the initial snapshot is the reset state.
+    The resume future then runs a second power cycle (pure boot capture, no
+    input), autostarts the input, or resumes from an explicit `:from-pc`; the
+    trace therefore begins exactly at `$FCE2` for the boot case. `:input` is
+    optional and `:max-events` bounds the capture.
+- **Verification.** Fast suite: 14 tests / 74 assertions, 0 failures. Live
+  (on-demand `^:live`): full-capture boot starts at `$FCE2` and stops exactly at
+  `:max-events`; program-only still starts at the stub's `SYS` target; the
+  running-instance path records a live emulator from `:from-pc` and self-stops
+  at `:max-events`; the original boundary/full-capture test still passes.
+  `clj-kondo` and `cljfmt` clean.

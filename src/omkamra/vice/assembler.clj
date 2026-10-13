@@ -12,6 +12,7 @@
   (:require
    [clojure.java.io :as io]
    [clojure.string :as str]
+   [clojure.walk :as walk]
    [omkamra.vice.isa :as isa]
    [sci.core :as sci]))
 
@@ -43,9 +44,171 @@
              (unchecked-byte byte)))
          values)))
 
+(defn- inline-bytes?
+  "True when `x` is inline byte data: a non-empty sequence of bytes.
+
+  A plain `def` of such a value is an asset: referencing it in operand position
+  places the bytes and resolves to their address, exactly like a `define-asset`
+  with inline data. `define-asset` stays for what it adds: file-backed
+  `:resource` assets and `:constraints`/`:at` placement."
+  [x]
+  (and (sequential? x)
+       (seq x)
+       (every? #(and (integer? %) (<= 0 (long %) 255)) x)))
+
+;; A `def` of a string is an asset too: the string is translated to bytes with
+;; the `:charset` its metadata names, so text can live in the source as text.
+;; `$20-$3F` (space through `?`) hold the same code in every set below, so the
+;; encoders differ only in the letters.
+
+(defn- letters?
+  [code]
+  (or (<= 65 code 90) (<= 97 code 122)))
+
+(defn- letter-code
+  "A letter's code in a set whose `A` is `base` (upper and lower case fold)."
+  [code base]
+  (+ (long base) (if (<= 65 code 90) (- code 65) (- code 97))))
+
+(defn- unencodable!
+  [charset ch]
+  (throw (ex-info (str "No " (name charset) " code for character " (pr-str ch))
+                  {:reason :unencodable-character
+                   :charset charset :character ch})))
+
+(def ^:private charsets
+  "String encoders selected by a `def`'s `:charset` metadata (`:ascii` by
+  default): `:ascii` is the code point, `:petscii` the KERNAL byte (letters at
+  `$41`, `\n` at `$0D`) and `:screen-codes` the VIC's video-matrix byte
+  (letters at `$01`, `@` at `$00`)."
+  {:ascii
+   (fn [s]
+     (mapv (fn [ch]
+             (let [code (int ch)]
+               (when-not (<= 0 code 255)
+                 (unencodable! :ascii ch))
+               code))
+           s))
+   :petscii
+   (fn [s]
+     (mapv (fn [ch]
+             (let [code (int ch)]
+               (cond
+                 (letters? code) (letter-code code 0x41)
+                 (<= 0x20 code 0x3F) code
+                 (= code 10) 0x0D
+                 :else (unencodable! :petscii ch))))
+           s))
+   :screen-codes
+   (fn [s]
+     (mapv (fn [ch]
+             (let [code (int ch)]
+               (cond
+                 (letters? code) (letter-code code 0x01)
+                 (<= 0x20 code 0x3F) code
+                 (= code 64) 0x00
+                 :else (unencodable! :screen-codes ch))))
+           s))})
+
+(defn- encode-string
+  "Translate the string `s` to bytes with `charset`, for the asset `name`."
+  [name s charset]
+  (let [charset (or charset :ascii)]
+    (when (empty? s)
+      (throw (ex-info (str "Empty string asset " name)
+                      {:reason :empty-asset :asset name})))
+    (if-let [encode (get charsets charset)]
+      (encode s)
+      (throw (ex-info (str "Unknown :charset " (pr-str charset) " on " name)
+                      {:reason :unknown-charset :asset name :charset charset
+                       :known (vec (sort (keys charsets)))})))))
+
+(defn- inline-asset?
+  "True when `x` is inline asset data: bytes, or a string to encode."
+  [x]
+  (or (string? x) (inline-bytes? x)))
+
+(defn- inline-asset-bytes
+  "The bytes of a Var's inline value, or nil when it is not inline asset data."
+  [name value meta]
+  (cond
+    (string? value) (normalize-asset-bytes (encode-string name value (:charset meta)))
+    (inline-bytes? value) (normalize-asset-bytes value)
+    :else nil))
+
+(defn- next-power-of-two
+  "The smallest power of two ≥ `n` (at least 1)."
+  ^long [n]
+  (loop [p 1]
+    (if (>= p (long n)) p (recur (* p 2)))))
+
+(defn- resolve-align
+  "Replace a `true` `:align` with the next power of two ≥ the byte count, so an
+  indexed table cannot cross a page."
+  [constraints byte-count]
+  (if (true? (:align constraints))
+    (assoc constraints :align (next-power-of-two byte-count))
+    constraints))
+
+(defn- var-constraints
+  "The placement constraints a Var's metadata declares for its inline asset."
+  [meta]
+  (let [{:keys [align at address]} meta
+        constraints (cond-> {}
+                      at (assoc :at at)
+                      address (assoc :address address))]
+    (if align (assoc constraints :align align) constraints)))
+
+(defn- implicit-asset
+  "The asset for a Var whose value is inline asset data, named after the Var.
+
+  The Var's metadata may select the string's `:charset` and place the asset
+  (`:align`, `:at`/`:address`); `:align true` means the next power of two ≥
+  the byte count."
+  [name value meta]
+  (when-let [bytes (inline-asset-bytes name value meta)]
+    (->Asset name bytes
+             (resolve-align (var-constraints meta) (alength ^bytes bytes))
+             nil)))
+
+(defn- namespace-directory
+  "The classpath directory of a namespace's source file, or nil.
+
+  `my.app-foo.core` lives at `my/app_foo/core.clj`, so its directory is
+  `my/app_foo`."
+  [ns-name]
+  (let [path (-> ns-name (str/replace "-" "_") (str/replace "." "/"))]
+    (when-let [index (str/last-index-of path "/")]
+      (subs path 0 index))))
+
+(defn- normalize-resource-path
+  [path]
+  (->> (str/split path #"/")
+       (reduce (fn [segments segment]
+                 (cond
+                   (or (str/blank? segment) (= segment ".")) segments
+                   (= segment "..") (if (seq segments) (pop segments) segments)
+                   :else (conj segments segment)))
+               [])
+       (str/join "/")))
+
+(defn- resolve-resource-path
+  "Resolve a `:resource` path against the defining namespace's directory.
+
+  Only paths starting with `./` or `../` are namespace-relative; anything else
+  is a classpath-root-relative path as before."
+  [path ns-dir]
+  (if (or (str/starts-with? path "./") (str/starts-with? path "../"))
+    (if ns-dir
+      (normalize-resource-path (str ns-dir "/" path))
+      (throw (ex-info "A namespace-relative :resource needs a namespace context"
+                      {:reason :no-namespace-for-relative-resource :resource path})))
+    path))
+
 (defn- read-asset-resource
-  [asset path]
-  (let [url (io/resource path)]
+  [asset path ns-dir]
+  (let [path (resolve-resource-path path ns-dir)
+        url (io/resource path)]
     (when-not url
       (throw (ex-info (str "Asset resource not found: " path)
                       {:reason :asset-resource-not-found
@@ -58,29 +221,36 @@
 
   Assets are kept with the source and read as classpath resources, so a file
   is found whether it lives under `src/` or `resources/`. `spec` is either a
-  sequence of byte-sized integers, or a map with `:data` or a
-  classpath-root-relative `:resource`, plus optional `:constraints`."
-  [asset spec]
-  (cond
-    (sequential? spec)
-    (->Asset asset (normalize-asset-bytes spec) nil nil)
+  sequence of byte-sized integers, or a map with `:data` or `:resource`, plus
+  optional `:constraints` or a top-level `:at`/`:address`. A `:resource`
+  starting with `./` or `../` is resolved relative to the defining namespace's
+  directory; otherwise it is classpath-root-relative."
+  ([asset spec]
+   (build-asset asset spec nil))
+  ([asset spec ns-dir]
+   (cond
+     (sequential? spec)
+     (->Asset asset (normalize-asset-bytes spec) nil nil)
 
-    (map? spec)
-    (let [{:keys [data resource constraints]} spec]
-      (cond
-        (sequential? data)
-        (->Asset asset (normalize-asset-bytes data) constraints nil)
+     (map? spec)
+     (let [{:keys [data resource constraints at address align]} spec
+           constraints (cond-> (or constraints {})
+                         (or at address) (assoc :at (or at address))
+                         (contains? spec :align) (assoc :align align))
+           bytes (cond
+                   (sequential? data) (normalize-asset-bytes data)
+                   resource (read-asset-resource asset resource ns-dir)
+                   :else nil)]
+       (when-not bytes
+         (throw (ex-info "An asset map requires :data bytes or a :resource"
+                         {:reason :invalid-asset :asset asset :spec spec})))
+       (->Asset asset bytes
+                (resolve-align constraints (alength ^bytes bytes))
+                (when resource (resolve-resource-path resource ns-dir))))
 
-        resource
-        (->Asset asset (read-asset-resource asset resource) constraints resource)
-
-        :else
-        (throw (ex-info "An asset map requires :data bytes or a :resource"
-                        {:reason :invalid-asset :asset asset :spec spec}))))
-
-    :else
-    (throw (ex-info "Invalid asset specification"
-                    {:reason :invalid-asset :asset asset :spec spec}))))
+     :else
+     (throw (ex-info "Invalid asset specification"
+                     {:reason :invalid-asset :asset asset :spec spec})))))
 
 (defn object?
   "True when `x` is a relocatable assembler object."
@@ -111,8 +281,8 @@
 ;; Builtin recognition ------------------------------------------------------
 
 (def ^:private directive-names
-  #{"%entry" "%label" "%db" "%dw" "%align" "%region" "%org" "%meta"
-    "%volatile" "%opcode"})
+  #{"%entry" "%label" "%labels" "%db" "%dw" "%align" "%region" "%org"
+    "%reserve" "%meta" "%volatile" "%opcode" "%asset"})
 
 (defn- directive-symbol? [x]
   (and (symbol? x) (contains? directive-names (name x))))
@@ -147,8 +317,12 @@
 (defn- mnemonic-symbol? [x]
   (and (symbol? x) (valid-mnemonic? (parse-mnemonic x))))
 
-(defn- register-symbol? [x]
-  (contains? #{'x 'y} x))
+(defn- register-symbol?
+  ;; By name, not identity: a syntax-quoted macro expansion qualifies its
+  ;; symbols (`my.ns/x`), and assembly macros are ordinary functions, so they
+  ;; are the main way index operands get written.
+  [x]
+  (and (symbol? x) (contains? #{"x" "y"} (name x))))
 
 ;; Curated SCI environment ---------------------------------------------------
 
@@ -263,14 +437,18 @@
 
 ;; Operand normalization -----------------------------------------------------
 
-(declare normalize-operand normalize-statement)
+(declare normalize-operand normalize-statement
+         normalize-expression references-assembly-symbol?)
 
 (defn- normalize-memory
   [ctx contents index]
   (mapv (fn [element]
           (cond
             (= element '%zp) '%zp
-            (register-symbol? element) element
+            ;; Canonicalise the index register: a macro expansion written with
+            ;; syntax-quote arrives as `some.ns/x`, which would otherwise be
+            ;; taken for an asset reference.
+            (register-symbol? element) (symbol (name element))
             (vector? element) (normalize-memory ctx element index)
             :else (normalize-operand ctx element index)))
         contents))
@@ -320,7 +498,30 @@
         (list '%meta m (normalize-annotated ctx target index)))
 
       :else
-      (eval-expression ctx form index))))
+      (if (references-assembly-symbol? ctx form)
+        (normalize-expression ctx form index)
+        (eval-expression ctx form index)))))
+
+(defn- object-entry-label
+  "External label naming `obj`'s entry point.
+
+  An object referenced by its Var (or that Var's symbol) resolves to its entry:
+  the `%entry` label when declared, otherwise the default entry label named
+  after the object (see `with-object-entry-label`). Both are qualified with the
+  object's namespace, so the reference rides the external-label machinery."
+  [obj sym index]
+  (let [id (:object-id obj)
+        entry (:entry obj)
+        self-label (keyword (name id))]
+    (cond
+      (and entry (namespace entry)) entry
+      entry (keyword (namespace id) (name entry))
+      (contains? (:labels obj) self-label)
+      (keyword (namespace id) (name self-label))
+      :else
+      (fail! :no-object-entry
+             (str "Object " id " has no entry point")
+             {:object-id id :symbol sym} sym index))))
 
 (defn- normalize-operand-symbol
   [ctx sym index]
@@ -338,22 +539,73 @@
           (list op (normalize-operand-symbol ctx (symbol suffix) index))))
 
       :else
-      (let [v (resolve-var ctx sym)]
+      (let [v (resolve-var ctx sym)
+            value (when v (deref v))]
         (cond
           (nil? v)
           (fail! :unresolved-symbol
                  (str "Unable to resolve assembly symbol " sym)
                  {:symbol sym} sym index)
 
-          (asset? (deref v))
+          (or (asset? value) (inline-asset? value))
           (qualify-var v)
 
-          (fn? (deref v))
+          (fn? value)
           (fail! :function-as-operand
                  (str "Function " sym " cannot be used as an assembly operand")
                  {:symbol sym} sym index)
 
-          :else (deref v))))))
+          (and (map? value) (:object-id value))
+          (object-entry-label value sym index)
+
+          :else value)))))
+
+(defn- references-assembly-symbol?
+  "True when `x` mentions something whose address is only known at link time:
+  a label keyword, an external label, or an asset.
+
+  A form that mentions none of those is an ordinary constant expression and is
+  still evaluated while assembling; one that does is kept for the linker."
+  [ctx x]
+  (cond
+    (keyword? x) true
+    (symbol? x) (let [v (resolve-var ctx x)
+                      value (when v (deref v))]
+                  (boolean (and v (or (asset? value)
+                                      (inline-asset? value)
+                                      (and (map? value) (:object-id value))))))
+    (vector? x) (boolean (some #(references-assembly-symbol? ctx %) x))
+    (seq? x) (boolean (some #(references-assembly-symbol? ctx %) x))
+    :else false))
+
+(defn- normalize-expression
+  "Keep an operand expression for link-time evaluation.
+
+  The form is left as written — its function heads and bound names are not
+  operands — except that symbols resolving to an asset or an object are
+  rewritten the way a plain operand would be, so the linker can resolve them
+  once the layout is known. Inside a deferred expression a keyword is a label."
+  [ctx x index]
+  (cond
+    (seq? x) (with-meta (cons (first x)
+                              (mapv #(normalize-expression ctx % index) (rest x)))
+               (meta x))
+    (vector? x) (mapv #(normalize-expression ctx % index) x)
+    (symbol? x) (let [v (resolve-var ctx x)
+                      value (when v (deref v))]
+                  (cond
+                    (and v (or (asset? value) (inline-asset? value)))
+                    (qualify-var v)
+                    (and v (map? value) (:object-id value))
+                    (object-entry-label value x index)
+                    ;; A function is looked up again when the expression is
+                    ;; evaluated; every other name is a constant, and folds in
+                    ;; here — otherwise a namespace-qualified constant would be
+                    ;; mistaken for an asset reference.
+                    (fn? value) x
+                    v value
+                    :else x))
+    :else x))
 
 (defn- normalize-operand
   [ctx x index]
@@ -398,6 +650,35 @@
     (with-meta result (meta form))
     result))
 
+(defn- rename-label-keywords
+  "Return `form` with each keyword in `renames` replaced by its mapping."
+  [renames form]
+  (walk/postwalk
+   (fn [x] (if (and (keyword? x) (contains? renames x)) (renames x) x))
+   form))
+
+(defn- normalize-labels-directive
+  "Normalize `(%labels [names...] body...)`.
+
+  Each declared local label and its references, within `body`, are replaced by
+  a unique keyword, so an assembly macro can write its labels as plain keywords
+  (`:loop`) yet stay hygienic across expansions. Scopes are independent, so a
+  nested `%labels` keeps its own labels."
+  [ctx args form index]
+  (let [names (first args)
+        body (rest args)]
+    (when-not (and (vector? names)
+                   (every? #(and (keyword? %) (nil? (namespace %))) names))
+      (fail! :invalid-labels
+             "(%labels ...) expects a vector of local label keywords"
+             {:form form} form index))
+    (let [renames (into {}
+                        (map (fn [label]
+                               [label (keyword (gensym (str (name label) "-")))]))
+                        names)
+          normalized (mapcat #(normalize-statement ctx % index) body)]
+      (mapv #(rename-label-keywords renames %) normalized))))
+
 (defn- normalize-directive*
   [ctx form index]
   (let [[head & args] form]
@@ -418,6 +699,9 @@
                  {:form form} form index))
         [target])
 
+      "%labels"
+      (normalize-labels-directive ctx args form index)
+
       "%db"
       (let [values (if (and (= 1 (count args)) (vector? (first args)))
                      (first args)
@@ -436,11 +720,32 @@
       "%region"
       [(list '%region (normalize-operand ctx (first args) index))]
 
+      "%reserve"
+      (let [[first-arg second-arg] args
+            interval (cond
+                       (and (vector? first-arg)
+                            (= 2 (count first-arg))
+                            (every? integer? first-arg))
+                       [(long (first first-arg)) (long (second first-arg))]
+
+                       (and (integer? first-arg) (integer? second-arg))
+                       [(long first-arg) (+ (long first-arg) (long second-arg))]
+
+                       :else nil)]
+        (when-not interval
+          (fail! :invalid-reserve
+                 "(%reserve ...) expects an address and a length, or [start end]"
+                 {:form form} form index))
+        [(list '%reserve interval)])
+
       "%org"
       [(list '%org (normalize-operand ctx (first args) index))]
 
       "%opcode"
       [(list '%opcode (normalize-operand ctx (first args) index))]
+
+      "%asset"
+      [(list '%asset (normalize-operand ctx (first args) index))]
 
       "%meta"
       (let [[m target] (parse-meta-args args form index)]
@@ -455,7 +760,10 @@
 
 (defn- normalize-instruction
   [ctx form index]
-  (let [[head & operands] form]
+  (let [[head & operands] form
+        ;; A syntax-quoted macro expansion qualifies its mnemonics; the
+        ;; normalized form keeps them plain, so serialized source round-trips.
+        head (symbol (name head))]
     (when (> (count operands) 1)
       (fail! :invalid-instruction
              (str head " takes at most one operand")
@@ -658,7 +966,10 @@
          (reduce (fn [a e] (collect-operand-refs a e index form))
                  acc (second form))
          (= '%meta head) (collect-operand-refs acc (nth form 2 nil) index form)
-         (contains? #{"%align" "%region" "%org" "%opcode"} (name head)) acc
+         (contains? #{"%align" "%region" "%reserve" "%org" "%opcode"}
+                    (name head))
+         acc
+         (= '%asset head) (collect-operand-refs acc (second form) index form)
          ;; instruction form, or a bare label keyword
          :else (collect-operand-refs acc (second form) index form))))
    {:labels {} :external #{} :assets #{}}
@@ -676,6 +987,9 @@
   [value form index]
   (cond
     (integer? value) {:type :constant :value (long value)}
+    ;; A list is an arithmetic expression over labels and assets; it can only
+    ;; be evaluated once the linker knows their addresses.
+    (seq? value) {:type :expression :form value}
     (and (keyword? value) (nil? (namespace value))) {:type :label :name value}
     (keyword? value) {:type :external :name value}
     (and (symbol? value) (namespace value)) {:type :asset :name value}
@@ -747,7 +1061,8 @@
                  {:value value} form index))
         {:bytes [0]
          :volatile? volatile?
-         :relocation {:kind :relative :width 1 :target target}})
+         :relocation {:kind :relative :width 1 :target target
+                      :form form :index index}})
 
       :else
       (let [{:keys [modifier target]} (classify-value value form index)]
@@ -755,7 +1070,8 @@
           modifier
           {:bytes [0]
            :volatile? volatile?
-           :relocation {:kind modifier :width 1 :target target}}
+           :relocation {:kind modifier :width 1 :target target
+                        :form form :index index}}
 
           (= :constant (:type target))
           {:bytes (little-endian
@@ -766,7 +1082,8 @@
           :else
           {:bytes (vec (repeat width 0))
            :volatile? volatile?
-           :relocation {:kind :address :width width :target target}})))))
+           :relocation {:kind :address :width width :target target
+                        :form form :index index}})))))
 
 (defn- instruction-item
   [form index meta]
@@ -816,6 +1133,7 @@
                                    :kind (or modifier :address)
                                    :width 1
                                    :target target
+                                   :form form :index index
                                    :volatile? volatile?})))))
                 {:bytes [] :relocations []}
                 values)]
@@ -844,6 +1162,7 @@
                                    :kind (or modifier :address)
                                    :width (if modifier 1 2)
                                    :target target
+                                   :form form :index index
                                    :volatile? volatile?})))))
                 {:bytes [] :relocations []}
                 values)]
@@ -862,7 +1181,7 @@
 
 (defn- new-section
   ([] (new-section :object))
-  ([base] {:base base :alignment 1 :size 0 :items [] :labels {} :relocations []}))
+  ([base] {:base base :align 1 :size 0 :items [] :labels {} :relocations []}))
 
 (defn- empty-state []
   {:sections [(new-section)]
@@ -898,21 +1217,21 @@
   (when-not (and (integer? alignment) (pos? (long alignment)))
     (fail! :invalid-alignment
            "(%align ...) expects a positive integer"
-           {:alignment alignment} form index))
+           {:align alignment} form index))
   (let [alignment (long alignment)
         section (current-section state)
         base (:base section)
         pad (pad-count base (:size section) alignment)
         section (if (integer? base)
                   section
-                  (update section :alignment lcm alignment))
+                  (update section :align lcm alignment))
         state (assoc-in state [:sections (dec (count (:sections state)))] section)]
     (if (zero? pad)
       state
       (append-item state {:type :padding
                           :bytes (vec (repeat pad 0))
                           :size pad
-                          :alignment alignment
+                          :align alignment
                           :relocations []}))))
 
 (defn- start-org [state address form index]
@@ -944,6 +1263,18 @@
                         {:value value} form index))]
     (update state :constraints update :regions (fnil conj []) region)))
 
+(defn- add-reserved
+  "Reserve the half-open `[start end]` interval for runtime-written data: the
+  linker keeps it clear, but emits no bytes."
+  [state interval form index]
+  (let [[start end] interval]
+    (when-not (<= 0 (long start) (long end) 0x10000)
+      (fail! :invalid-reserve
+             "(%reserve ...) range must be a valid memory interval"
+             {:form form :interval interval} form index))
+    (update state :constraints update :reserved (fnil conj [])
+            [(long start) (long end)])))
+
 (defn- build-form
   [state form meta]
   (let [head (statement-head form)]
@@ -959,9 +1290,11 @@
       (= '%org head) (start-org state (second form) form -1)
       (= '%align head) (apply-align state (second form) form -1)
       (= '%region head) (add-region state (second form) form -1)
+      (= '%reserve head) (add-reserved state (second form) form -1)
       (= '%db head) (append-item state (db-item (second form) form -1 meta))
       (= '%dw head) (append-item state (dw-item (second form) form -1 meta))
       (= '%opcode head) (append-item state (opcode-item (second form) form -1 meta))
+      (= '%asset head) state
       (= '%volatile head) (build-form state (second form) meta)
 
       :else (append-item state (instruction-item form -1 meta)))))
@@ -1065,6 +1398,42 @@
        (keep (fn [[label n]] (when (> (long n) 1) label)))
        vec))
 
+(defn- first-instruction-offset
+  "Offset of the first instruction in the first section, or nil."
+  [sections]
+  (when-let [section (first sections)]
+    (let [offsets (keep (fn [item]
+                          (when (= :instruction (:type item)) (:offset item)))
+                        (:items section))]
+      (when (seq offsets) (apply min offsets)))))
+
+(defn- with-object-entry-label
+  "Give a `define-asm` object its default entry label.
+
+  An object is named by its `:object-id`, e.g. `:ns/irq`. When it declares no
+  `%entry` and contains an instruction, a label named after the object (`:irq`)
+  is added at its first instruction, so `(jsr ::irq)` and a reference to the
+  object's Var both resolve to the entry. A label that already carries the
+  object's name must name that first instruction."
+  [sections object-id entry source]
+  (let [self-label (keyword (name object-id))
+        first-offset (first-instruction-offset sections)
+        present? (contains? (:labels (first sections)) self-label)]
+    (cond
+      present?
+      (if (= first-offset (get-in sections [0 :labels self-label]))
+        sections
+        (fail! :object-entry-label-mismatch
+               (str "Label " self-label " must name the object's first "
+                    "instruction")
+               {:object-id object-id :label self-label}
+               source -1))
+
+      (and (nil? entry) first-offset)
+      (update-in sections [0 :labels] assoc self-label first-offset)
+
+      :else sections)))
+
 (defn assemble
   "Assemble quoted source data into a relocatable object.
 
@@ -1100,6 +1469,9 @@
                    (when (= 1 (count entries)) (first entries)))
          program (build-program forms)
          sections (finalize-sections (:sections program))
+         sections (if-let [object-id (:object-id options)]
+                    (with-object-entry-label sections object-id entry source)
+                    sections)
          label-map (into {}
                          (for [section sections
                                [label offset] (:labels section)]
@@ -1140,14 +1512,15 @@
   "Bind an asset descriptor to `name`.
 
   `spec` is a sequence of byte-sized integers, or a map with inline `:data`
-  bytes or a classpath-root-relative `:resource`, plus optional
-  `:constraints`. Assets are kept with the source and read as classpath
-  resources."
+  bytes or a `:resource`, plus optional `:constraints`. Assets are kept with
+  the source and read as classpath resources; a `:resource` starting with
+  `./` or `../` is resolved relative to this namespace's directory."
   [name spec]
   (let [ns-name (str *ns*)
-        qualified (symbol ns-name (str name))]
+        qualified (symbol ns-name (str name))
+        ns-dir (namespace-directory ns-name)]
     `(do
-       (def ~name (build-asset '~qualified ~spec))
+       (def ~name (build-asset '~qualified ~spec ~ns-dir))
        ~name)))
 
 ;; Human-oriented assembly rendering -----------------------------------------
@@ -1255,7 +1628,7 @@
                  (if (str/blank? operand) mnemonic (str mnemonic " " operand)))
 
                :padding
-               (str ";; align " (:alignment item) " (" (:size item)
+               (str ";; align " (:align item) " (" (:size item)
                     " bytes of padding)")
 
                :bytes
@@ -1428,10 +1801,13 @@
 (defn- resolve-asset-var
   [options sym]
   (or (get (:assets options) sym)
-      (some-> (try
-                (requiring-resolve sym)
-                (catch Throwable _ nil))
-              deref)))
+      (when-let [v (try
+                     (requiring-resolve sym)
+                     (catch Throwable _ nil))]
+        (let [value (deref v)]
+          (if (asset? value)
+            value
+            (implicit-asset sym value (meta v)))))))
 
 (defn- discover-assets
   [objects options]
@@ -1491,12 +1867,20 @@
            :section section
            :index (:index section)
            :base (:base section)
-           :alignment (long (or (:alignment section) 1))
+           :align (long (or (:align section) 1))
            :size (long (:size section))
            :bytes (section-bytes section)
            :regions (or regions-override
                         (:regions (:constraints object)))})
         (:sections object)))
+
+(defn- asset-regions
+  "Placement regions for an asset, from `:regions`, `:at`, or `:address`."
+  [asset]
+  (let [constraints (:constraints asset)]
+    (or (:regions constraints)
+        (when-let [address (or (:at constraints) (:address constraints))]
+          [{:start (long address)}]))))
 
 (defn- asset-section-spec
   [asset]
@@ -1506,21 +1890,21 @@
      :key (:name asset)
      :asset asset
      :base :object
-     :alignment (long (or (get-in asset [:constraints :alignment]) 1))
+     :align (long (or (get-in asset [:constraints :align]) 1))
      :size (count bytes)
      :bytes (or bytes [])
-     :regions (:regions (:constraints asset))}))
+     :regions (asset-regions asset)}))
 
 (defn- place-section
   [occupied spec ranges]
-  (let [alignment (long (:alignment spec))
+  (let [alignment (long (:align spec))
         size (long (:size spec))]
     (if (integer? (:base spec))
       (let [base (long (:base spec))]
         (when-not (zero? (mod base alignment))
           (link-fail! :unaligned-org
                       (str "Fixed address " base " breaks alignment " alignment)
-                      {:address base :alignment alignment}))
+                      {:address base :align alignment}))
         (when (overlaps? occupied base size)
           (link-fail! :overlap
                       (str "Section at " base " overlaps an earlier section")
@@ -1542,7 +1926,7 @@
               (link-fail! :unaligned-region
                           (str "Region start " base " breaks alignment "
                                alignment)
-                          {:address base :alignment alignment}))
+                          {:address base :align alignment}))
             (when (overlaps? occupied base size)
               (link-fail! :overlap
                           (str "Section at " base " overlaps an earlier section")
@@ -1552,14 +1936,14 @@
             [base (conj occupied [base (+ base size)])]
             (link-fail! :unsatisfiable-placement
                         "No free range satisfies an object's constraints"
-                        {:alignment alignment
+                        {:align alignment
                          :size size
                          :ranges intervals})))))))
 
 (defn- place-all
-  [specs ranges]
+  [specs ranges occupied]
   (loop [specs specs
-         occupied []
+         occupied occupied
          placement {}]
     (if-let [spec (first specs)]
       (let [[base occupied] (place-section occupied spec ranges)]
@@ -1576,8 +1960,50 @@
           [label (+ (long (get placement [object (:index section)]))
                     (long offset))])))
 
+(defn- expression-addresses
+  "The addresses of the labels and assets an operand expression references."
+  [form {:keys [object-labels external-owners placement asset-placement]}]
+  (into {}
+        (keep (fn [x]
+                (cond
+                  (and (keyword? x) (namespace x))
+                  (when-let [owner (get external-owners x)]
+                    (when-let [address (get (label-addresses owner placement)
+                                            (keyword (name x)))]
+                      [x address]))
+
+                  (keyword? x)
+                  (when-let [address (get object-labels x)] [x address])
+
+                  (symbol? x)
+                  (when-let [address (get asset-placement x)] [x address])
+
+                  :else nil)))
+        (distinct (filter #(or (keyword? %) (symbol? %))
+                          (tree-seq coll? seq form)))))
+
+(defn- expression-value
+  "Evaluate an operand expression once the layout, and so the labels, exist."
+  [form context]
+  (let [{:keys [expression-context namespace]} context
+        sci-ctx (and expression-context (expression-context namespace))
+        substituted (walk/postwalk-replace (expression-addresses form context) form)]
+    (when-not sci-ctx
+      (link-fail! :expression-error
+                  (str "No namespace context to evaluate " (pr-str form))
+                  {:expression form :namespace namespace}))
+    (try
+      (sci/eval-form sci-ctx substituted)
+      (catch Throwable error
+        (link-fail! :expression-error
+                    (str "Failed to evaluate operand expression "
+                         (pr-str form) ": " (ex-message error))
+                    {:expression form :namespace namespace
+                     :cause (ex-message error)})))))
+
 (defn- relocation-value
-  [relocation object-labels external-owners placement asset-placement]
+  [relocation {:keys [object-labels external-owners placement asset-placement]
+               :as context}]
   (let [target (:target relocation)
         type (:type target)]
     (case type
@@ -1587,7 +2013,8 @@
       (let [owner (get external-owners (:name target))]
         (get (label-addresses owner placement)
              (keyword (name (:name target)))))
-      :asset (get asset-placement (:name target)))))
+      :asset (get asset-placement (:name target))
+      :expression (expression-value (:form target) context))))
 
 (defn- write-relocation!
   [bytes relocation address section-base]
@@ -1696,20 +2123,31 @@
              object-specs (mapcat #(object-section-specs % (:regions options))
                                   objects)
              asset-specs (mapv asset-section-spec assets)
-             placement (place-all (concat object-specs asset-specs) ranges)
+             reserved (vec (mapcat #(get-in % [:constraints :reserved]) objects))
+             placement (place-all (concat object-specs asset-specs) ranges reserved)
              asset-placement (into {} (map (fn [asset] [(:name asset)
                                                         (get placement (:name asset))])
                                            assets))
+           ;; An operand expression is evaluated here, where the labels have
+           ;; addresses, in the namespace that wrote it.
+             expression-context
+             (memoize (fn [ns-symbol]
+                        (when-let [ns-obj (and ns-symbol (find-ns ns-symbol))]
+                          (make-sci-context ns-obj))))
            ;; Resolve relocations into mutable section byte arrays.
              resolved
              (mapv (fn [spec]
                      (let [base (long (get placement (:key spec)))
                            bytes (byte-array (map unchecked-byte (:bytes spec)))
-                           labels (label-addresses (:object spec) placement)]
+                           labels (label-addresses (:object spec) placement)
+                           context {:object-labels labels
+                                    :external-owners external-owners
+                                    :placement placement
+                                    :asset-placement asset-placement
+                                    :expression-context expression-context
+                                    :namespace (:namespace (:object spec))}]
                        (doseq [relocation (:relocations (:section spec))]
-                         (let [address (relocation-value relocation labels
-                                                         external-owners placement
-                                                         asset-placement)]
+                         (let [address (relocation-value relocation context)]
                            (when (nil? address)
                              (link-fail! :unresolved-relocation
                                          "Relocation target could not be resolved"

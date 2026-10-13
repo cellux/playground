@@ -491,3 +491,239 @@ earlier entries.
   (labels resolved through the object's fixed-section bases), not by encoded
   displacement, since disassembly objects are unlinked.
 - **Next step:** resume the Fairlight intro reimplementation.
+
+## Follow-up — Asset/runner refinements for the Fairlight reimplementation
+
+- **Status:** complete.
+- **Changes:**
+  - `(%asset name)` directive: includes an asset in the link without emitting
+    bytes.
+  - Asset placement `:at ADDRESS` / `:address ADDRESS` at the top level of the
+    asset map (or inside `:constraints`), alongside `:regions`/`:alignment`.
+  - Namespace-relative `:resource` paths: a value starting with `./` or `../`
+    is resolved against the defining namespace's directory; anything else
+    stays classpath-root-relative.
+  - The runner writes a segment's `$D800-$DBFF` window through the CPU-visible
+    bank (`write-color-ram!`), because the RAM bank cannot reach colour RAM.
+    The example relies on this instead of copying the table itself, and the
+    future PRG startup stub will do the same.
+  - `run!` now picks a free monitor port per run when `:port` is absent, and
+    `stop!` waits for the process to exit before returning.
+  - The example `run!` functions delegate with `[& args] (apply common/run! …)`.
+- **Tests run:** `vice-test` (including a new
+  `run!-writes-color-ram-through-the-cpu-bank`), `assembler-test`,
+  `demo-test`; all pass. `clj-kondo` and `cljfmt` clean.
+- **Observed issues:** reloading `omkamra.vice.assembler` redefines the `Asset`
+  record class, so assets held in already-loaded namespaces fail `asset?`
+  until those namespaces are reloaded. A fresh JVM is unaffected; the tests
+  reload the example namespaces.
+- **Decisions or deviations:** colour RAM is a loader concern, not a program
+  concern: both `run!` and the planned PRG stub special-case it. Documented in
+  the assembler guide and `fairlight-legendary-intro.md`.
+- **Next step:** Fairlight intro Step 2 — raster IRQ and rasterbars.
+
+## Follow-up — Relocatable examples: label scoping, reserves, string assets
+
+- **Status:** complete.
+- **Context:** the Fairlight intro reimplementation (steps 2–4) kept needing
+  the assembler to stay out of the way: hardware-facing assets are pinned, but
+  code, tables and the scroller text should be the linker's business.
+- **Changes:**
+  - `(%labels [names…] body…)` — a block's local labels are renamed to unique
+    keywords, so an assembly macro can write `:loop`/`:wait` as plain labels
+    without collisions across expansions. Replaced a `common/labels` helper.
+  - `(%reserve ADDRESS LENGTH)` / `(%reserve [START END])` — reserve a range for
+    memory the program writes at runtime (the sprite bitmap at `$C3C0`): the
+    linker keeps out of it, and overlap with a placed object or asset is an
+    error.
+  - `:align true` — the next power of two ≥ the byte count, which is exactly
+    what an indexed table needs so `LDA table,X` cannot cross a page. Accepted
+    in `define-asset` maps and in a bytes Var's metadata, beside an explicit
+    `:align n`.
+  - Object Var references resolve to the object's entry label: its `%entry`, or
+    a default label named after the object, added at its first instruction. A
+    label already carrying the object's name must name that first instruction
+    (`:object-entry-label-mismatch`); a pure-data object has no entry
+    (`:no-object-entry`). This lets a handler be little more than `JSR`s to
+    per-effect objects.
+  - String assets: a Var holding a string is an implicit asset, translated to
+    bytes by its `:charset` metadata — `:ascii` (default, the code point),
+    `:petscii` (letters at `$41`, case folded, `\n` at `$0D`) or
+    `:screen-codes` (letters at `$01`, `@` at `$00`); `$20-$3F` is the same in
+    all three. Unknown charsets (`:unknown-charset`), characters a set cannot
+    encode (`:unencodable-character`) and empty strings (`:empty-asset`) are
+    errors. A Var's metadata also carries placement, so `:at`/`:address` joins
+    `:align`.
+- **Tests run:** `assembler-test` (60 tests / 170 assertions, including string
+  encodings, `:charset` errors, `:at` metadata and `:align true`),
+  `fairlight-legendary-intro-test` (17 / 85); `clj-kondo` and `cljfmt` clean.
+  The reimplementation was re-captured
+  (`captures/fairlight-legendary-reimpl-step4b`, since pruned — only the
+  original is kept) and its
+  `$D021`/`$D016`/matrix/colour-RAM writes match the original's.
+- **Observed issues:** reloading `omkamra.vice.assembler` still redefines the
+  `Asset` record class, so namespaces holding assets must be reloaded too (see
+  the earlier entry). An aborted nREPL evaluation that is inside a Clojure
+  `loop` keeps running — restart the dev process rather than trusting the
+  interrupt.
+- **Decisions or deviations:** the scroller text is *not* pinned. `$39/$3A`
+  walks it two pages at a time, so `intro` records the start page in `$3C` and
+  the wrap page in `$3B` and the handler wraps at whatever address the linker
+  chose — three bytes of zero page instead of a magic `$CC`. Only the
+  VIC-addressed assets (screen `$C400`, charset `$C800`, colour RAM `$D800`)
+  stay pinned, because `$D018` and the VIC bank fix them. `:charset` is named
+  for the set the string is written *into*, and stays distinct from the C64
+  `charset` asset.
+- **Next step:** Fairlight intro steps 5 (palette/timing polish) and 6 (SID
+  music).
+
+## Follow-up — Operand expressions across the assemble/link boundary
+
+- **Status:** complete.
+- **Context:** the reimplementation wanted self-modifying code in the original's
+  idiom (`INC` on the operand byte of an instruction), which needs the operand's
+  *address*. That is `label + 1` — symbolic arithmetic — and the assembler had
+  none: every list operand was evaluated eagerly, so a label inside an
+  expression was a keyword being cast to a number.
+- **Decision:** don't build a symbolic arithmetic tower. Split the *decision*
+  instead. An operand expression that mentions no label or asset keeps the
+  existing eager path, so constant folding and `:source` are unchanged. One that
+  does is kept whole and evaluated by the linker, where the addresses exist:
+  substitute the resolved labels and assets, then run the same SCI evaluator.
+  That is ordinary Clojure — `let`, nested arithmetic, namespace helpers — with
+  no second expression language and no new numeric type.
+- **Changes:**
+  - `references-assembly-symbol?` and `normalize-expression`: an operand list
+    mentioning a label keyword, an external label or an asset is normalised
+    (assets and object entries rewritten as usual) but not evaluated.
+  - `value->target` gains `{:type :expression :form …}`; `encode-value`,
+    `db-item` and `dw-item` carry `:form`/`:index` on the relocation so a
+    link-time failure can be reported against the source form.
+  - The linker resolves an `:expression` target: it collects the addresses of
+    the labels and assets the form references, substitutes them, and evaluates
+    in a per-namespace SCI context (memoised per link).
+  - `:low`/`:high` are applied *after* the expression is evaluated, so
+    `(> (+ :orange 1))` is the high byte of `label + 1`.
+  - A namespace-qualified *constant* inside a deferred expression folds while
+    assembling — syntax-quote qualifies every name it emits, so without this a
+    macro could not write `(+ base row-offset 1)`; its own constant would have
+    been collected as an asset reference.
+- **Tests run:** `assembler-test` (63 / 174: labels, `let`, `(* 2 3)`, `<`/`>`
+  modifiers, assets, object entries, unresolved label, bad expression),
+  `fairlight-legendary-intro-test`, `vice-test` — 91 / 295 in total; `clj-kondo`
+  and `cljfmt` clean.
+- **Observed issues:** `%org` inside a `#(...)` literal is still a reader error
+  (the `%` is the argument literal) — use `(fn [] …)`.
+- **Decisions or deviations:** linking now evaluates source forms, so it needs
+  the defining namespace loaded. That is not a new dependency — `link` already
+  `requiring-resolve`s asset Vars — and it buys full Clojure expressions instead
+  of a restricted `+`/`-` grammar.
+- **Next step:** Fairlight intro step 5 — the `$D418` volume/quit counter as the
+  original's self-modified operand byte.
+
+## Follow-up — Rasterbar timing: the `$D021` latch, and the band table
+
+- **Status:** complete.
+- **Context:** once the volume fade was added to the frame, the red bar's top
+  line started dropping out on most frames — the signature of a store landing
+  after the VIC had latched `$D021` for that line.
+- **Findings:**
+  - The VIC latches `$D021` for a line at about **cycle 9**; a store at cycle 9
+    or later shows up a line late. Measured on the original: its band stores are
+    at cycles 4–8, never later.
+  - `CMP $D012 / BNE` is a seven-cycle loop sampling `$D012` once per iteration,
+    so an exact-line wait stores anywhere in cycles 4–10 — and *where* depends on
+    how long everything before the loop takes. Adding the volume `JSR` moved it
+    from mostly 3–5 to mostly 9, which is the entire flicker.
+  - The original's wait reads `$D012` **twice per iteration, four cycles apart**
+    (`LDA $D012 / CMP $D012 / BEQ`), exiting on a change. That is a ~4-cycle
+    reaction, so its stores land at 4–8 whatever runs before them.
+  - Our init was also enabling the raster IRQ while the VIC still held a stale
+    interrupt flag, so the handler's *first* entry was wherever the init
+    happened to finish (line 39 in one capture, 261 in another). A late first
+    entry makes the band's line waits slip a frame, after which the handler
+    spans a full frame and locks there for good.
+- **Changes:**
+  - `draw-bands`: the original's loop — one exact wait for line 152, then a
+    two-sample change wait per entry.
+  - `band-table`: one entry per raster line from the opening wait, generated from
+    the row geometry (the pads derived from the bad-line pattern) and equal to
+    the capture's `$C280` byte for byte. Bad lines are no longer skipped *by the
+    table*: the cycle stealing delays the store there and the doubled colour
+    falls out of the mechanism, as it does in the original.
+  - `volume`: the `$D418` fade as the original's self-modified operand byte,
+    `JSR`ed after `sprite-bar` because it reads `$D001`, which `sprite-bar`
+    writes last.
+  - The init clears `$D019` before enabling the raster IRQ, making the handler's
+    entry deterministic at line 1.
+- **Tests run:** `assembler-test` 64 / 176, `fairlight-legendary-intro-test`
+  21 / 108, `vice-test`; all pass, `clj-kondo` and `cljfmt` clean. Verified
+  against the capture: the `$D021` write *lines* now match the original's
+  42-line pattern exactly, and the rendered band rows are identical.
+- **Decisions or deviations:** the exact-line wait from step 2 is gone. Its
+  purpose — reproducing the doubled bad line — is served instead by the change
+  wait's latency, which is what the original does and what makes the timing
+  independent of the code before it. The quit path is left unimplemented:
+  unreachable in the capture, and it needs GETIN's vector.
+- **Next step:** Fairlight intro step 6 — the SID music.
+
+## Fairlight intro step 6 — the SID player
+
+- **Status:** complete.
+- **Context:** `music.clj` held the tune as readable data and a compiler that
+  produced the player's image, but no player. The player had to be reconstructed
+  from the capture, and two pieces of it never executed there, so the committed
+  disassembly lacks them.
+- **Findings:**
+  - The **reload tail** at `$CCB6` is in the RAM image: `TXA / ASL A / TAY /
+    LDA $CE00,Y / STA $0364,Y / LDA $CE01,Y / STA $0365,Y / JMP $CC85` — on a
+    zero-duration event, reload the voice's pointer from the tune's table and
+    re-read its first event.
+  - The player reads an event **backwards**: frequency hi (offset 2), then lo,
+    then ticks. A stream therefore closes with **three** zero bytes, and ours
+    closed with one — so the player read the *next* stream's first byte as a
+    frequency high byte, settling a garbage frequency and opening the gate, with
+    the gate showing only until the reload. The image was also two bytes per
+    stream short.
+  - Our tune can float: the pointers only have to be *words naming the streams*,
+    and `%dw` of labels is already relocatable, so the original's absolute
+    `$CE00 + offset` arithmetic was never load-bearing.
+  - The state block can live **in the image**, so everything constant or zeroed
+    at start — the frequency shadows, the gate flags and the gate-off control
+    bytes — needs no initialisation code at all.
+  - A macro's returned vector is spliced into the object's body *with its
+    labels*: a label emitted from an assembly macro resolves like any other, so
+    one call may both name and fill a block.
+- **Changes:**
+  - `stream-bytes`: the stream marker is `[0 0 0]`.
+  - `tune-data`: emits `:tune-pointers` and `%dw` of the streams' labels;
+    `tune-bytes`, the absolute `:base` variant, is gone.
+  - new `music` object: one reserved state block with a named row per variable
+    (`:counter`, `:freq-lo`, `:freq-hi`, `:gate`, `:control`, `:ptr-lo`,
+    `:ptr-hi`) and X the voice index, so every access is `lda [:row x]`; `init`
+    and `play`; `sid-init-data` and `control-data` emit their tables out of the
+    Clojure variables rather than transcribing them.
+  - `core.clj`: `jsr ::music/init` at the top of `:start`, `jsr ::music/play`
+    first in `irq`, in front of `sprite-bar`, as in the original.
+- **Tests run:** `assembler-test` 64 / 176, `fairlight-legendary-intro-test`
+  25 / 122, `vice-test` — 100 / 336 in total; `clj-kondo` and `cljfmt` clean.
+  Verified against the capture: the same ten-frame cadence (our publish frames
+  `[1 11]`, the original's `[0 10 …]`, ours one bucket late because our init
+  clears `$D019`), the same registers and values in the bursts, and `$D418 = $10`
+  in every frame between them.
+- **Observed issues:**
+  - **A symbol naming a local label shadows a same-named Var.** `(dec (count
+    sid-init))` folded `sid-init` to the *label's* address and failed with
+    “count not supported on this type: Long”. The count is now its own Var; the
+    guide says so too.
+  - A require used only through `::ns/label` keywords inside quoted assembler
+    data reads as unused to clj-kondo; `^{:clj-kondo/ignore [:unused-namespace]}`
+    on the require entry is the fix.
+- **Decisions or deviations:** the tune floats instead of sitting at `$CE00`,
+  and the player's state is its object's own block rather than the original's
+  fixed `$0354–$0369`: the addresses and the layout are ours, the behaviour is
+  its. Voice 2's pulse-width jitter, the voice-1-waits-one-tick detail and the
+  gate-off-before-retrigger order are kept exactly.
+- **Next step:** nothing outstanding. The quit path (the `$1F` branch, GETIN,
+  `$FF81`, VIC bank 0, BASIC warm start) stays deliberately unimplemented, as in
+  step 5.

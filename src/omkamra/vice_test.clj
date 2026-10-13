@@ -13,6 +13,7 @@
 
 (defn- fake-state []
   (atom {:mem {}
+         :writes []
          :closed? false
          :resumed? false
          :stopped nil
@@ -27,7 +28,10 @@
 (defn- fake-registers [_conn]
   {3 {:id 3 :name "PC" :size 2}})
 
-(defn- fake-mem-set! [state _conn {:keys [start data]}]
+(defn- fake-mem-set! [state _conn {:keys [start data bank]}]
+  (swap! state update :writes conj {:bank (long (or bank 0))
+                                    :start (long start)
+                                    :length (alength ^bytes data)})
   (swap! state update :mem
          (fn [mem]
            (reduce (fn [m i]
@@ -84,7 +88,7 @@
 
 (deftest run!-injects-verifies-and-resumes
   (with-fake-vice*
-    (fn [state conn]
+    (fn [state _conn]
       (let [artifact (assembler/link (simple-object))
             runtime (vice/run! artifact {:connect-timeout-ms 50})]
         (is (:resumed? @state))
@@ -93,9 +97,26 @@
         (is (= 1 (:bank runtime)))
         (is (= 3 (:pc-register runtime)))
         (is (:verified (:injection runtime)))
-        (is (= conn (:connection runtime)))
+        (is (nil? (:connection runtime))
+            "the monitor is released for the next owner")
+        (is (:closed? @state))
         (is (= 8 (count (:mem @state)))
             "only the linked segment is injected")))))
+
+(deftest run!-writes-color-ram-through-the-cpu-bank
+  (with-fake-vice*
+    (fn [state _conn]
+      (let [object (assembler/assemble
+                    '((%entry :start)
+                      (%org 0xC000) :start (rts)
+                      (%org 0xD800) :colors (%db [1 2 3]))
+                    {:ns 'omkamra.vice-test})]
+        (vice/run! (assembler/link object) {})
+        (is (= [{:bank 1 :start 0xC000 :length 1}
+                {:bank 1 :start 0xD800 :length 3}
+                {:bank 0 :start 0xD800 :length 3}]
+               (:writes @state))
+            "the RAM bank gets the segment, and the CPU bank gets colour RAM")))))
 
 (deftest run!-object-links-with-link-options
   (with-fake-vice*
@@ -195,9 +216,14 @@
                               :connect-retry-ms 100})]
       (try
         (is (= 0x800 (:entry-point runtime)))
-        (is (= "ram" (:name (get (bm/banks-available (:connection runtime))
-                                 (:bank runtime)))))
         (is (:verified (:injection runtime)))
         (is (pos? (long (:pid runtime))))
+        ;; The runner released the monitor; take it again to inspect the banks.
+        (let [conn (vice/connect! runtime {:connect-timeout-ms 15000})]
+          (try
+            (is (= "ram" (:name (get (bm/banks-available conn)
+                                     (:bank runtime)))))
+            (finally
+              (vice/close conn))))
         (finally
           (vice/stop! runtime))))))

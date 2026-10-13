@@ -7,6 +7,7 @@
             [omkamra.vice.trace :as trace]
             [omkamra.vice.capture :as capture]
             [omkamra.vice.contract :as contract]
+            [omkamra.vice.driver :as driver]
             [omkamra.vice.event :as event]
             [omkamra.vice.recorder :as recorder]
             [omkamra.vice.reader :as reader]
@@ -302,9 +303,41 @@
       (finally
         (store/delete-tree! (io/file dataset-root))))))
 
+(deftest capture-option-validation
+  (testing ":from-pc must be a 16-bit address"
+    (is (nil? (#'capture/from-pc-option {})))
+    (is (= 0x1000 (#'capture/from-pc-option {:from-pc 0x1000})))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (#'capture/from-pc-option {:from-pc 0x10000})))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (#'capture/from-pc-option {:from-pc -1}))))
+  (testing ":max-events must be a positive integer"
+    (is (nil? (#'capture/max-events-option {})))
+    (is (= 10 (#'capture/max-events-option {:max-events 10})))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (#'capture/max-events-option {:max-events 0})))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (#'capture/max-events-option {:max-events 1.5}))))
+  (testing ":instance must describe an address and port"
+    (is (= {:address "localhost" :port 6502}
+           (#'capture/instance-option
+            {:instance {:address "localhost" :port 6502}})))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (#'capture/instance-option {:instance {:port 6502}})))
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (#'capture/instance-option {:instance "localhost:6502"}))))
+  (testing ":input and :instance are mutually exclusive"
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (capture/start! {:input "program.prg"
+                                  :instance {:address "localhost" :port 6502}}))))
+  (testing "a full capture powers on its own VICE"
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (capture/start! {:full-capture? true
+                                  :instance {:address "localhost" :port 6502}})))))
+
 (deftest basic-sys-stub-parsing
   (let [target (fn [text]
-                 (#'capture/sys-target-in-text (byte-array text) 0 (count text)))]
+                 (#'driver/sys-target-in-text (byte-array text) 0 (count text)))]
     (testing "plain and parenthesized SYS operands are both accepted"
       (is (= 2070 (target [0x9e 0x20 0x32 0x30 0x37 0x30])))
       (is (= 2064 (target [0x9e 0x20 0x28 0x32 0x30 0x36 0x34 0x29])))

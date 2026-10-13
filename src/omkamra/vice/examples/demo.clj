@@ -35,11 +35,7 @@
 (defn run!
   "Run the border-cycle example on a fresh VICE instance.
 
-  Options are `:link-options` and `:run-options`, passed through to the shared
-  runner."
-  ([] (run! {}))
-  ([options]
-   (common/run! border-cycle
-                {:link-options (:link-options options)
-                 :run-options (merge {:connect-timeout-ms 15000}
-                                     (:run-options options))})))
+  Arguments are passed straight to `omkamra.vice/run!`; for this relocatable
+  object that means an optional map with `:link-options` and `:run-options`."
+  [& args]
+  (apply common/run! border-cycle args))
