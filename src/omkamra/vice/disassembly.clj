@@ -9,29 +9,33 @@
   whose occurrences *begin* inside the segment (so a block whose execution
   straddles a boundary belongs to the segment it started in, and neighbouring
   segments never share a block in the same output), and renders each selected
-  block exactly once per file. Volatile operand bytes render as `??`; operand
-  and instruction bytes come from the instruction dictionary, so no replay or
-  raw memory access is needed.
+  block exactly once per file.
 
-  Every rendered block carries one fixed annotation line
-  (`contract/format-annotation`): `; B:.. C:.. P:.. S:.. E:.. R:..`, the global
-  block id, the context, the distinct predecessor/successor counts within the
-  selected segment and context, the occurrence count in the segment, and the
-  observed back-edge repeats.
+  Each segment becomes one anonymous normalized assembly object. Every
+  discovered block variant is emitted as a fixed-address `%org` fragment,
+  including variants that overlap at the same address; labels are synthesized
+  for block starts and direct control-flow targets; volatile operands are
+  wrapped in `(%volatile ...)`; block/segment/role annotation is attached with
+  `(%meta ...)`. The shared `assembler/serialize-clj` and
+  `assembler/serialize-asm` functions render the object.
 
   Files:
 
   ```text
   analysis/disassembly/<generation>/
     index.edn
-    segments/segment-000.asm   ; one file per semantic segment
-    roles/<role>.asm           ; raster/music/loader/decruncher routines
+    segments/segment-000.clj   ; canonical normalized object
+    segments/segment-000.asm   ; human-readable listing
+    roles/<role>.asm           ; derived analysis view, one per role
   ```
 
-  No `.asm` file contains a basic block twice."
+  No file contains a basic block twice. A disassembly object that contains
+  overlapping fragments remains valid for analysis and serialization but the
+  linker rejects it as a runnable artifact until the overlap is resolved."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [omkamra.vice.analysis :as analysis]
+            [omkamra.vice.assembler :as assembler]
             [omkamra.vice.contract :as contract]
             [omkamra.vice.dedupe :as dedupe]
             [omkamra.vice.isa :as isa]
@@ -43,55 +47,6 @@
 
 (def default-configuration
   {:roles [:raster :music :loader :decruncher]})
-
-;; Instruction rendering -----------------------------------------------------
-
-(defn- operand-text
-  [pc mode template volatile-mask]
-  (let [lo (long (nth template 0 0))
-        hi (long (nth template 1 0))
-        vol0? (pos? (bit-and (long volatile-mask) 1))
-        vol1? (pos? (bit-and (long volatile-mask) 2))
-        byte (if vol0? "??" (format "$%02X" (bit-and lo 0xff)))
-        word (if (or vol0? vol1?)
-               "??"
-               (format "$%04X" (bit-and (bit-or lo (bit-shift-left hi 8)) 0xffff)))]
-    (case mode
-      :imp ""
-      :acc "A"
-      :imm (str "#" byte)
-      :zp byte
-      :zpx (str byte ",X")
-      :zpy (str byte ",Y")
-      :abs word
-      :absx (str word ",X")
-      :absy (str word ",Y")
-      :ind (str "(" word ")")
-      :indx (str "(" byte ",X)")
-      :indy (str "(" byte "),Y")
-      :rel (if vol0?
-             "??"
-             (format "$%04X" (bit-and (long (isa/relative-target pc lo)) 0xffff)))
-      nil)))
-
-(defn- render-instruction
-  [{:keys [pc opcode width template volatile-mask]}]
-  (let [mnemonic (aget ^objects isa/mnemonic-by-opcode opcode)
-        mode (aget ^objects isa/mode-by-opcode opcode)
-        operand (operand-text pc mode template volatile-mask)
-        operand-count (dec (long width))
-        byte-text (str/join
-                   " "
-                   (cons (format "%02X" (bit-and (long opcode) 0xff))
-                         (map (fn [index]
-                                (if (pos? (bit-and (long volatile-mask)
-                                                   (bit-shift-left 1 index)))
-                                  "??"
-                                  (format "%02X"
-                                          (bit-and (long (nth template index 0)) 0xff))))
-                              (range operand-count))))
-        text (if (str/blank? operand) mnemonic (str mnemonic " " operand))]
-    (format "%04X  %-11s %s" (bit-and (long pc) 0xffff) byte-text text)))
 
 ;; Address-space visibility --------------------------------------------------
 
@@ -218,6 +173,7 @@
                     :repeats (get (:backedges stats) key 0)}]
     {:block-id block-id
      :context-id context-id
+     :pc pc
      :mapping (mapping pc port)
      :mapped-rom? (mapped-rom? (mapping pc port))
      :annotation annotation
@@ -225,14 +181,415 @@
      :true-successors (count (get (:successors stats) key #{}))
      :instructions (:instructions block)}))
 
-(defn- block-text
-  [{:keys [annotation instructions]}]
-  (str/join "\n"
-            (cons (contract/format-annotation annotation)
-                  (map render-instruction instructions))))
+;; Well-known addresses -------------------------------------------------------
 
-(defn- blocks-text [block-records]
-  (str/join "\n" (map block-text block-records)))
+(def ^:private c64-comments
+  "Hardware and KERNAL remarks, keyed by the accessed address."
+  {0x0001 "CPU port: 6510 memory mapping"
+   0x0314 "IRQ vector (lo)"
+   0x0315 "IRQ vector (hi)"
+   0x028d "shift-key flags"
+   0x028e "shift-key flags mirror"
+   0x00c5 "keyboard buffer length"
+   0x00c6 "keys waiting in the KERNAL buffer"
+   0x00cb "KERNAL screen-editor pointer"
+   0xd000 "VIC sprite 0 X"
+   0xd001 "VIC sprite 0 Y"
+   0xd002 "VIC sprite 1 X"
+   0xd003 "VIC sprite 1 Y"
+   0xd004 "VIC sprite 2 X"
+   0xd005 "VIC sprite 2 Y"
+   0xd006 "VIC sprite 3 X"
+   0xd007 "VIC sprite 3 Y"
+   0xd008 "VIC sprite 4 X"
+   0xd009 "VIC sprite 4 Y"
+   0xd00a "VIC sprite 5 X"
+   0xd00b "VIC sprite 5 Y"
+   0xd00c "VIC sprite 6 X"
+   0xd00d "VIC sprite 6 Y"
+   0xd00e "VIC sprite 7 X"
+   0xd00f "VIC sprite 7 Y"
+   0xd010 "VIC sprite X MSB"
+   0xd011 "VIC control 1 (raster/MSB/rows/scroll)"
+   0xd012 "VIC raster line"
+   0xd013 "VIC light pen X"
+   0xd014 "VIC light pen Y"
+   0xd015 "VIC sprite enable"
+   0xd016 "VIC control 2 (reset/scroll/columns)"
+   0xd017 "VIC sprite Y expand"
+   0xd018 "VIC memory pointers (screen/charset)"
+   0xd019 "VIC IRQ flag (write to acknowledge)"
+   0xd01a "VIC IRQ mask"
+   0xd01b "VIC sprite/background priority"
+   0xd01c "VIC sprite multicolour enable"
+   0xd01d "VIC sprite X expand"
+   0xd01e "VIC sprite-sprite collision"
+   0xd01f "VIC sprite-background collision"
+   0xd020 "VIC border colour"
+   0xd021 "VIC background colour 0"
+   0xd022 "VIC background colour 1"
+   0xd023 "VIC background colour 2"
+   0xd024 "VIC background colour 3"
+   0xd025 "VIC sprite multicolour 0"
+   0xd026 "VIC sprite multicolour 1"
+   0xd027 "VIC sprite 0 colour"
+   0xd028 "VIC sprite 1 colour"
+   0xd029 "VIC sprite 2 colour"
+   0xd02a "VIC sprite 3 colour"
+   0xd02b "VIC sprite 4 colour"
+   0xd02c "VIC sprite 5 colour"
+   0xd02d "VIC sprite 6 colour"
+   0xd02e "VIC sprite 7 colour"
+   0xd400 "SID voice 1 frequency lo"
+   0xd401 "SID voice 1 frequency hi"
+   0xd402 "SID voice 1 pulse width lo"
+   0xd403 "SID voice 1 pulse width hi"
+   0xd404 "SID voice 1 control"
+   0xd405 "SID voice 1 attack/decay"
+   0xd406 "SID voice 1 sustain/release"
+   0xd407 "SID voice 2 frequency lo"
+   0xd408 "SID voice 2 frequency hi"
+   0xd409 "SID voice 2 pulse width lo"
+   0xd40a "SID voice 2 pulse width hi"
+   0xd40b "SID voice 2 control"
+   0xd40c "SID voice 2 attack/decay"
+   0xd40d "SID voice 2 sustain/release"
+   0xd40e "SID voice 3 frequency lo"
+   0xd40f "SID voice 3 frequency hi"
+   0xd410 "SID voice 3 pulse width lo"
+   0xd411 "SID voice 3 pulse width hi"
+   0xd412 "SID voice 3 control"
+   0xd413 "SID voice 3 attack/decay"
+   0xd414 "SID voice 3 sustain/release"
+   0xd415 "SID filter cutoff lo"
+   0xd416 "SID filter cutoff hi"
+   0xd417 "SID filter control"
+   0xd418 "SID volume / filter mode"
+   0xdc00 "CIA1 port A (keyboard columns)"
+   0xdc01 "CIA1 port B (keyboard rows/joystick)"
+   0xdc0d "CIA1 interrupt control"
+   0xdc0e "CIA1 control A"
+   0xdc0f "CIA1 control B"
+   0xdd00 "CIA2 port A (VIC bank/serial)"
+   0xdd01 "CIA2 port B"
+   0xdd0d "CIA2 interrupt control"
+   0xff48 "KERNAL hardware IRQ entry"
+   0xff81 "KERNAL CINT"
+   0xff84 "KERNAL IOINIT"
+   0xff87 "KERNAL RAMTAS"
+   0xff8a "KERNAL RESTOR"
+   0xff8d "KERNAL VECTOR"
+   0xff90 "KERNAL SETMSG"
+   0xff93 "KERNAL SECOND"
+   0xff96 "KERNAL TKSA"
+   0xff99 "KERNAL MEMTOP"
+   0xff9c "KERNAL MEMBOT"
+   0xff9f "KERNAL SCNKEY"
+   0xffa2 "KERNAL SETTMO"
+   0xffa5 "KERNAL ACPTR"
+   0xffa8 "KERNAL CIOUT"
+   0xffab "KERNAL UNTLK"
+   0xffae "KERNAL UNLSN"
+   0xffb1 "KERNAL LISTEN"
+   0xffb4 "KERNAL TALK"
+   0xffb7 "KERNAL READST"
+   0xffba "KERNAL SETLFS"
+   0xffbd "KERNAL SETNAM"
+   0xffc0 "KERNAL OPEN"
+   0xffc3 "KERNAL CLOSE"
+   0xffc6 "KERNAL CHKIN"
+   0xffc9 "KERNAL CHKOUT"
+   0xffcc "KERNAL CLRCHN"
+   0xffcf "KERNAL CHRIN"
+   0xffd2 "KERNAL CHROUT"
+   0xffd5 "KERNAL LOAD"
+   0xffd8 "KERNAL SAVE"
+   0xffdb "KERNAL SETTIM"
+   0xffde "KERNAL RDTIM"
+   0xffe1 "KERNAL STOP"
+   0xffe4 "KERNAL GETIN"
+   0xffe7 "KERNAL CLALL"
+   0xffea "KERNAL UDTIM"
+   0xffed "KERNAL SCREEN"
+   0xfff0 "KERNAL PLOT"
+   0xfff3 "KERNAL IOBASE"
+   0xea31 "KERNAL IRQ service routine"
+   0xea81 "KERNAL IRQ exit"})
+
+;; Normalized form generation ------------------------------------------------
+
+(defn- synthesize-label
+  [address]
+  (keyword (format "L%04X" (bit-and (long address) 0xffff))))
+
+(defn- relative-displacement
+  "The signed displacement encoded in a relative instruction's template.
+
+  `:template` holds the operand bytes only (no opcode), and for a relative
+  branch the displacement is `template[0]`; `isa/relative-operand` expects the
+  displacement at index 1, so it is padded here."
+  [template]
+  (isa/relative-operand [0 (nth template 0 0)]))
+
+(defn- instruction-target
+  "The direct control-flow target of an instruction, or nil."
+  [{:keys [pc opcode template]}]
+  (let [mnemonic (aget ^objects isa/mnemonic-by-opcode opcode)
+        mode (aget ^objects isa/mode-by-opcode opcode)
+        lo (bit-and (long (nth template 0 0)) 0xff)
+        hi (bit-and (long (nth template 1 0)) 0xff)
+        word (bit-or lo (bit-shift-left hi 8))]
+    (case mode
+      :rel (bit-and (+ (long pc) 2 (relative-displacement template)) 0xffff)
+      :abs (when (contains? #{"JMP" "JSR"} mnemonic) word)
+      nil)))
+
+(defn- instruction-access-address
+  "The address an instruction reads/writes, for hardware remarks (nil for
+  immediates and implied/accumulator forms)."
+  [{:keys [pc opcode template]}]
+  (let [mode (aget ^objects isa/mode-by-opcode opcode)
+        lo (bit-and (long (nth template 0 0)) 0xff)
+        hi (bit-and (long (nth template 1 0)) 0xff)
+        word (bit-or lo (bit-shift-left hi 8))]
+    (case mode
+      (:zp :zpx :zpy :indx :indy) lo
+      (:abs :absx :absy :ind) word
+      :rel (bit-and (+ (long pc) 2 (relative-displacement template)) 0xffff)
+      nil)))
+
+(defn- label-map-for
+  "Map every address that needs a synthesized label to its keyword.
+
+  Only addresses that are actually reached by an instruction are labelled, so
+  a computed target in the middle of an encoding cannot produce an unresolved
+  reference."
+  [blocks]
+  (let [instruction-pcs (into #{}
+                              (comp (mapcat :instructions)
+                                    (map (comp long :pc)))
+                              blocks)
+        starts (into #{} (map (comp long :pc)) blocks)
+        targets (into #{}
+                      (comp (mapcat (fn [block]
+                                      (keep instruction-target (:instructions block))))
+                            (map long))
+                      blocks)
+        addresses (into starts (filter instruction-pcs) targets)]
+    (into {}
+          (map (fn [address] [address (synthesize-label address)]))
+          (sort addresses))))
+
+(defn- memory-form
+  [mode value]
+  (case mode
+    :zp ['%zp value]
+    :zpx ['%zp value 'x]
+    :zpy ['%zp value 'y]
+    :abs [value]
+    :absx [value 'x]
+    :absy [value 'y]
+    :ind [value]
+    :indx [[value 'x]]
+    :indy [[value] 'y]))
+
+(defn- instruction-form
+  [instruction label-map]
+  (let [{:keys [pc opcode template volatile-mask]} instruction
+        mnemonic (aget ^objects isa/mnemonic-by-opcode opcode)
+        mode (aget ^objects isa/mode-by-opcode opcode)
+        preferred (isa/preferred-opcode mnemonic mode)
+        base-sym (symbol (str/lower-case mnemonic))
+        lo (bit-and (long (nth template 0 0)) 0xff)
+        hi (bit-and (long (nth template 1 0)) 0xff)
+        word (bit-or lo (bit-shift-left hi 8))
+        volatile? (pos? (bit-and (long volatile-mask) 0x03))
+        value-form (or (get label-map word) word)
+        wrap (fn [operand] (if volatile? (list '%volatile operand) operand))
+        operand-form
+        (case mode
+          :imp nil
+          :acc 'a
+          :imm (wrap lo)
+          :rel (let [target (bit-and (+ (long pc) 2 (relative-displacement template))
+                                     0xffff)]
+                 (wrap (or (get label-map target) target)))
+          :abs (if (= "JMP" mnemonic)
+                 ;; A bracketed operand means indirect for JMP, so a direct
+                 ;; jump must use a bare value.
+                 (wrap value-form)
+                 (wrap (memory-form mode value-form)))
+          (:zp :zpx :zpy :absx :absy :ind :indx :indy)
+          (wrap (memory-form mode value-form))
+          nil)
+        ;; The operand's syntactic shape must infer back to the same mode when
+        ;; the form is re-assembled (a small absolute address would otherwise
+        ;; become zero page); a dotted mnemonic pins the exact opcode and mode.
+        inferred (try
+                   (assembler/infer-mode base-sym operand-form)
+                   (catch Throwable _ mode))
+        exact? (and (= opcode preferred) (= inferred mode))
+        mnemonic-sym (if exact?
+                       base-sym
+                       (symbol (str (str/lower-case mnemonic) "."
+                                    (format "%02x" (bit-and (long opcode) 0xff)))))]
+    (if (nil? operand-form)
+      (list mnemonic-sym)
+      (list mnemonic-sym operand-form))))
+
+(defn- instruction-size
+  [instruction]
+  (long (:width instruction)))
+
+(defn- block-end
+  [block]
+  (+ (long (:pc block))
+     (reduce + 0 (map instruction-size (:instructions block)))))
+
+(defn- merge-runs
+  "Group blocks into address-ordered runs, one `%org` fragment each.
+
+  Blocks are sorted by address. A block joins the current run when it starts
+  exactly where the run ends and shares its context, so fall-through code
+  reads linearly. Overlapping or gapped blocks start a new run, keeping every
+  discovered variant as its own fixed-address fragment."
+  [blocks]
+  (reduce (fn [runs block]
+            (let [run (peek runs)]
+              (if (and run
+                       (= (long (:pc block)) (long (:end run)))
+                       (= (:context-id block) (:context-id run)))
+                (conj (pop runs)
+                      (-> run
+                          (update :blocks conj block)
+                          (assoc :end (block-end block))))
+                (conj runs {:pc (long (:pc block))
+                            :end (block-end block)
+                            :context-id (:context-id block)
+                            :blocks [block]}))))
+          []
+          (sort-by (juxt :pc :block-id) blocks)))
+
+(defn- annotation-note
+  "A compact, human-readable form of a block's control-flow annotation."
+  [annotation]
+  (str "blk " (:block annotation)
+       " ctx " (:context annotation)
+       " pred " (:predecessors annotation)
+       " succ " (:successors annotation)
+       " exec " (:executions annotation)
+       " rep " (:repeats annotation)))
+
+(defn- run-entries
+  "The instructions of a run, each carrying the annotation to emit before it."
+  [run extra-meta]
+  (mapcat (fn [block]
+            (map-indexed (fn [index instruction]
+                           {:instruction instruction
+                            :annotation (when (zero? index)
+                                          (let [annotation (merge (:annotation block)
+                                                                  extra-meta)]
+                                            (assoc annotation
+                                                   :note (annotation-note annotation))))})
+                         (:instructions block)))
+          (:blocks run)))
+
+(defn- run-forms
+  "Forms for one merged run as a `%org` fragment, declaring new labels.
+
+  Returns `[forms form-addresses declared]`; `form-addresses` is parallel to
+  `forms` and carries the instruction address of each form (nil for labels
+  and `%org` directives)."
+  [run extra-meta label-map declared]
+  (loop [entries (run-entries run extra-meta)
+         declared declared
+         forms [(list '%org (:pc run))]
+         addresses [nil]
+         operands [nil]]
+    (if-let [{:keys [instruction annotation]} (first entries)]
+      (let [address (long (:pc instruction))
+            label (get label-map address)
+            declare? (and label (not (contains? declared label)))
+            form (instruction-form instruction label-map)
+            form (if annotation (list '%meta annotation form) form)]
+        (recur (rest entries)
+               (if declare? (conj declared label) declared)
+               (cond-> forms
+                 declare? (conj label)
+                 true (conj form))
+               (cond-> addresses
+                 declare? (conj nil)
+                 true (conj address))
+               (cond-> operands
+                 declare? (conj nil)
+                 true (conj (instruction-access-address instruction)))))
+      [forms addresses operands declared])))
+
+(defn- blocks->forms
+  [blocks extra-meta]
+  (let [label-map (label-map-for blocks)]
+    (loop [runs (merge-runs blocks)
+           declared #{}
+           forms []
+           addresses []
+           operands []]
+      (if-let [run (first runs)]
+        (let [[run-forms run-addresses run-operands declared]
+              (run-forms run extra-meta label-map declared)]
+          (recur (rest runs)
+                 declared
+                 (into forms run-forms)
+                 (into addresses run-addresses)
+                 (into operands run-operands)))
+        {:forms forms
+         :form-addresses addresses
+         :form-operands operands
+         :labels (vec (vals label-map))}))))
+
+;; Enrichment ----------------------------------------------------------------
+
+(defn- referenced-addresses
+  [object]
+  (into (into #{} (keep identity (:form-operands object)))
+        (comp (mapcat :items)
+              (keep :operand-address)
+              (map long))
+        (:sections object)))
+
+(defn enrich
+  "Return `object` enriched with C64 symbol names and hardware remarks.
+
+  Scans every instruction operand and attaches `:symbols` (KERNAL jump-table
+  names), `:comments` (VIC/SID/CIA/KERNAL remarks keyed by address), and
+  `:form-comments` (one remark per canonical source form). Serialization is
+  then a pure projection of the object."
+  [object]
+  (let [addresses (referenced-addresses object)
+        comments (select-keys c64-comments addresses)
+        form-comments (mapv (fn [address]
+                              (when address (get comments (long address))))
+                            (:form-operands object))]
+    (assoc object
+           :comments comments
+           :form-comments form-comments)))
+
+(defn- build-object
+  [blocks extra-meta header]
+  (let [{:keys [forms form-addresses form-operands]} (blocks->forms blocks extra-meta)]
+    (-> (assembler/assemble forms {})
+        (assoc :form-addresses form-addresses
+               :form-operands form-operands
+               :comment header)
+        (enrich))))
+
+;; Rendering -----------------------------------------------------------------
+
+(defn- render-instructions
+  [blocks extra-meta header]
+  (let [object (build-object blocks extra-meta header)]
+    {:object object
+     :clj-text (assembler/serialize-clj object)
+     :asm-text (assembler/serialize-asm object)}))
 
 (defn- render-segment
   [trace segment]
@@ -242,15 +599,15 @@
                        distinct sort vec)
         blocks (mapv #(block-record trace stats %) block-ids)
         [start end] (:event-range segment)
-        header (str ";; segment " (:segment-id segment)
+        header (str "segment " (:segment-id segment)
                     "  kind=" (name (:kind segment))
-                    "  events=[" start "," end ")"
-                    "  roles=" (if (seq (:roles segment))
-                                 (str/join "," (sort (map name (:roles segment))))
-                                 "-")
-                    "  handlers=" (if (seq (:handler-contexts segment))
-                                    (str/join "," (sort (:handler-contexts segment)))
-                                    "-"))]
+                    (when (seq (:roles segment))
+                      (str "  roles="
+                           (str/join "," (sort (map name (:roles segment))))))
+                    (when (seq (:handler-contexts segment))
+                      (str "  handlers="
+                           (str/join "," (sort (:handler-contexts segment))))))
+        rendered (render-instructions blocks nil header)]
     {:segment-id (:segment-id segment)
      :kind (:kind segment)
      :roles (vec (sort (:roles segment)))
@@ -258,7 +615,9 @@
      :event-range [start end]
      :blocks blocks
      :block-ids block-ids
-     :text (str header "\n" (blocks-text blocks) "\n")}))
+     :object (:object rendered)
+     :clj-text (:clj-text rendered)
+     :asm-text (:asm-text rendered)}))
 
 (defn- role-blocks
   "Blocks contributing to `role`, deduplicated by block id across all segments
@@ -283,12 +642,10 @@
 (defn- render-role
   [rendered role]
   (let [blocks (role-blocks rendered role)
-        header (str ";; role " (name role)
-                    "  segments=" (count (filter #(contains? (set (:roles %)) role) rendered))
-                    "  blocks=" (count blocks))]
+        rendered (render-instructions blocks nil (str "role " (name role)))]
     {:role role
      :count (count blocks)
-     :text (str header "\n" (blocks-text blocks) "\n")}))
+     :asm-text (:asm-text rendered)}))
 
 ;; Publication ---------------------------------------------------------------
 
@@ -298,6 +655,30 @@
    file
    (fn [^java.io.OutputStream out]
      (.write out (.getBytes ^String text "UTF-8")))))
+
+(defn- segment-file-specs
+  [directory rendered]
+  (mapcat
+   (fn [entry]
+     (let [id (:segment-id entry)
+           stem (format "segments/segment-%03d" id)
+           clj-file (str stem ".clj")
+           asm-file (str stem ".asm")
+           clj-spec (write-text! (io/file directory clj-file) (:clj-text entry))
+           asm-spec (write-text! (io/file directory asm-file) (:asm-text entry))]
+       [(assoc clj-spec
+               :kind :segment :file clj-file :segment-id id :format :clj)
+        (assoc asm-spec
+               :kind :segment :file asm-file :segment-id id :format :asm)]))
+   rendered))
+
+(defn- role-file-specs
+  [directory role-renders]
+  (map (fn [{:keys [role asm-text]}]
+         (let [relative-file (str "roles/" (name role) ".asm")
+               spec (write-text! (io/file directory relative-file) asm-text)]
+           (assoc spec :kind :role :file relative-file :role role)))
+       role-renders))
 
 (defn build!
   "Build and commit a `:disassembly` generation from `:dedupe` and `:segments`.
@@ -318,28 +699,16 @@
              roles (filterv (set (:roles configuration))
                             (distinct (mapcat :roles rendered)))
              role-renders (mapv #(render-role rendered %) roles)
-             files (into []
-                         (concat
-                          (map (fn [entry]
-                                 (let [relative-file (str "segments/"
-                                                          (format "segment-%03d.asm"
-                                                                  (:segment-id entry)))
-                                       spec (write-text! (io/file directory relative-file)
-                                                         (:text entry))]
-                                   (assoc spec
-                                          :kind :segment
-                                          :file relative-file
-                                          :segment-id (:segment-id entry))))
-                               rendered)
-                          (map (fn [{:keys [role text]}]
-                                 (let [relative-file (str "roles/" (name role) ".asm")
-                                       spec (write-text! (io/file directory relative-file)
-                                                         text)]
-                                   (assoc spec
-                                          :kind :role
-                                          :file relative-file
-                                          :role role)))
-                               role-renders)))
+             segment-specs (segment-file-specs directory rendered)
+             clj-files (->> segment-specs
+                            (filter #(= :clj (:format %)))
+                            (mapv #(select-keys % [:file :size :sha256])))
+             asm-files (->> segment-specs
+                            (filter #(= :asm (:format %)))
+                            (mapv #(select-keys % [:file :size :sha256])))
+             role-files (mapv (fn [{:keys [file size sha256]}]
+                                {:file file :size size :sha256 sha256})
+                              (role-file-specs directory role-renders))
              index {:format disassembly-format
                     :version disassembly-version
                     :capture-id (get-in segments-image [:index :capture-id])
@@ -351,23 +720,25 @@
                     :summary {:segment-count (count rendered)
                               :role-file-count (count role-renders)
                               :block-count (count (distinct (mapcat :block-ids rendered)))
-                              :file-count (count files)}
-                    :files (mapv (fn [{:keys [file size sha256]}]
-                                   {:file file :size size :sha256 sha256})
-                                 files)
+                              :file-count (+ (count clj-files)
+                                             (count asm-files)
+                                             (count role-files))}
+                    :files (vec (concat clj-files asm-files role-files))
                     :segments (mapv (fn [entry]
-                                      {:segment-id (:segment-id entry)
-                                       :kind (:kind entry)
-                                       :roles (:roles entry)
-                                       :handler-contexts (:handler-contexts entry)
-                                       :event-range (:event-range entry)
-                                       :block-count (count (:block-ids entry))
-                                       :block-ids (:block-ids entry)
-                                       :mappings (frequencies (map :mapping (:blocks entry)))
-                                       :rom-blocks (count (filter :mapped-rom? (:blocks entry)))
-                                       :file (str "segments/"
-                                                  (format "segment-%03d.asm"
-                                                          (:segment-id entry)))})
+                                      (let [stem (format "segments/segment-%03d"
+                                                         (:segment-id entry))]
+                                        {:segment-id (:segment-id entry)
+                                         :kind (:kind entry)
+                                         :roles (:roles entry)
+                                         :handler-contexts (:handler-contexts entry)
+                                         :event-range (:event-range entry)
+                                         :block-count (count (:block-ids entry))
+                                         :block-ids (:block-ids entry)
+                                         :mappings (frequencies (map :mapping (:blocks entry)))
+                                         :rom-blocks (count (filter :mapped-rom? (:blocks entry)))
+                                         :file (str stem ".asm")
+                                         :asm-file (str stem ".asm")
+                                         :clj-file (str stem ".clj")}))
                                     rendered)
                     :roles (mapv (fn [{:keys [role count]}]
                                    {:role role

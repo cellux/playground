@@ -1,5 +1,7 @@
 (ns omkamra.vice
+  (:refer-clojure :exclude [run!])
   (:require
+   [omkamra.vice.assembler :as assembler]
    [omkamra.vice.binary-monitor :as bm]))
 
 (def default-executable "x64sc")
@@ -77,18 +79,38 @@
       :command command
       :params params})))
 
-(defn stop
-  "Stop the subprocess referenced by a VICE instance descriptor."
-  [{:keys [process pid] :as instance}]
-  (validate-instance instance)
-  (cond
-    process (.destroy ^Process process)
-    pid (let [handle (java.lang.ProcessHandle/of (long pid))]
-          (when (.isPresent handle)
-            (.destroy ^java.lang.ProcessHandle (.get handle))))
-    :else (throw (IllegalArgumentException.
-                  "VICE instance descriptor must contain :process or :pid")))
+(defn stop!
+  "Close the monitor connection and terminate a VICE process.
+
+  Accepts either a plain instance descriptor or a runtime map returned by
+  `run!`. Idempotent: a missing or already-dead process is not an error."
+  [runtime-or-instance]
+  (when runtime-or-instance
+    (when-let [conn (:connection runtime-or-instance)]
+      (try
+        (bm/close conn)
+        (catch Throwable _ nil)))
+    (let [{:keys [process pid]} runtime-or-instance]
+      (cond
+        process (when (.isAlive ^Process process)
+                  (.destroy ^Process process))
+        pid (let [handle (java.lang.ProcessHandle/of (long pid))]
+              (when (.isPresent handle)
+                (let [p (.get handle)]
+                  (when (.isAlive p)
+                    (.destroy p))))))))
   nil)
+
+(defn stop
+  "Compatibility wrapper around `stop!` for a plain VICE instance descriptor."
+  [instance]
+  (validate-instance instance)
+  (stop! instance))
+
+(defn start!
+  "Canonical VICE process launcher. See `start`."
+  ([] (start! {}))
+  ([params] (start (or params {}))))
 
 (defn connect
   "Connect to the binary monitor described by `instance`.
@@ -117,3 +139,170 @@
        ~@body
        (finally
          (bm/close ~conn)))))
+
+;; Runner --------------------------------------------------------------------
+
+(def default-connect-timeout-ms 10000)
+(def default-connect-retry-ms 100)
+
+(defn connect!
+  "Connect to `instance`'s binary monitor, retrying until it is ready.
+
+  Throws if the process exits first or the timeout elapses. Options:
+  `:connect-timeout-ms`, `:connect-retry-ms`, and `:handle-event`."
+  ([instance]
+   (connect! instance {}))
+  ([instance {:keys [connect-timeout-ms connect-retry-ms handle-event]
+              :or {connect-timeout-ms default-connect-timeout-ms
+                   connect-retry-ms default-connect-retry-ms}}]
+   (let [deadline (+ (System/nanoTime) (* (long connect-timeout-ms) 1000000))]
+     (loop []
+       (when-let [process (:process instance)]
+         (when-not (.isAlive ^Process process)
+           (throw (ex-info "VICE exited before its binary monitor became ready"
+                           {:reason :vice-exited :pid (:pid instance)}))))
+       (let [conn (try
+                    (let [conn (connect instance (or handle-event (fn [_ _] nil)))]
+                      (bm/ping conn)
+                      conn)
+                    (catch Throwable _ nil))]
+         (cond
+           conn conn
+
+           (< (System/nanoTime) deadline)
+           (do (Thread/sleep (long connect-retry-ms))
+               (recur))
+
+           :else
+           (throw (ex-info "Timed out waiting for the VICE binary monitor"
+                           {:reason :connect-timeout
+                            :pid (:pid instance)
+                            :timeout-ms connect-timeout-ms}))))))))
+
+(defn- named-bank
+  [conn name]
+  (or (some (fn [bank]
+              (when (= name (:name bank)) bank))
+            (vals (bm/banks-available conn)))
+      (throw (ex-info (str "VICE has no bank named " name)
+                      {:reason :missing-bank :bank name}))))
+
+(defn- named-register
+  [conn name]
+  (or (some (fn [register]
+              (when (= name (:name register)) register))
+            (vals (bm/registers-available conn)))
+      (throw (ex-info (str "VICE has no register named " name)
+                      {:reason :missing-register :register name}))))
+
+(defn- inject-segments!
+  [conn bank-id segments]
+  (doseq [{:keys [start-address bytes]} segments]
+    (let [length (alength ^bytes bytes)]
+      (when (pos? length)
+        (bm/mem-set conn {:start start-address
+                          :end (+ (long start-address) (dec length))
+                          :bank bank-id
+                          :data bytes})))))
+
+(defn- verify-entry!
+  [conn entry segments]
+  (let [segment (some (fn [{:keys [start-address bytes]}]
+                        (let [length (alength ^bytes bytes)]
+                          (when (and (<= (long start-address) (long entry))
+                                     (< (long entry) (+ (long start-address) length)))
+                            {:start-address start-address :bytes bytes})))
+                      segments)]
+    (when-not segment
+      (throw (ex-info "Entry point is not inside any linked segment"
+                      {:reason :entry-not-in-segment :entry-point entry})))
+    (let [offset (- (long entry) (long (:start-address segment)))
+          bytes ^bytes (:bytes segment)
+          length (min 8 (- (alength bytes) offset))
+          response (bm/mem-get conn {:start entry
+                                     :end (dec (+ (long entry) length))
+                                     :bank 0})
+          visible ^bytes (:memory response)]
+      (dotimes [index length]
+        (when-not (= (bit-and (int (aget visible index)) 0xff)
+                     (bit-and (int (aget bytes (+ offset index))) 0xff))
+          (throw (ex-info "Entry point bytes are not CPU-visible"
+                          {:reason :entry-not-visible
+                           :entry-point entry
+                           :offset index
+                           :expected (bit-and (int (aget bytes (+ offset index))) 0xff)
+                           :actual (bit-and (int (aget visible index)) 0xff)}))))
+      length)))
+
+(defn- inject-and-resume!
+  [conn artifact]
+  (let [bank (named-bank conn "ram")
+        pc (named-register conn "PC")
+        segments (:segments artifact)
+        entry (:entry-point artifact)]
+    (when (nil? entry)
+      (throw (ex-info "The linked artifact has no entry point"
+                      {:reason :missing-entry-point})))
+    (inject-segments! conn (:id bank) segments)
+    (verify-entry! conn entry segments)
+    (bm/registers-set conn {:register-values [[(:id pc) entry]]})
+    (bm/resume conn)
+    {:entry-point entry
+     :bank (:id bank)
+     :pc-register (:id pc)
+     :injection {:bank-id (:id bank)
+                 :pc-register-id (:id pc)
+                 :entry-point entry
+                 :segments (mapv (fn [{:keys [start-address bytes]}]
+                                   {:start-address start-address
+                                    :length (alength ^bytes bytes)})
+                                 segments)
+                 :verified true}}))
+
+(defn- run-connected!
+  [instance artifact link-options run-options]
+  (let [conn (connect! instance run-options)]
+    (try
+      (merge instance
+             {:artifact artifact
+              :link-options link-options
+              :run-options run-options}
+             (inject-and-resume! conn artifact)
+             {:connection conn})
+      (catch Throwable error
+        (try
+          (bm/close conn)
+          (catch Throwable _ nil))
+        (throw error)))))
+
+(defn run!
+  "Link (if needed), inject, and start a program on a fresh VICE instance.
+
+  Given an artifact, it runs directly with `options` as run options. Given a
+  relocatable object, it links it first using `:link-options` and then runs it
+  using `:run-options`. Returns a runtime map extending the instance
+  descriptor with the monitor connection, linked artifact, entry point, bank
+  and register discovery, and injection metadata.
+
+  On any startup, injection, or execution-setup failure the monitor connection
+  is closed and the process is terminated."
+  ([target]
+   (run! target {}))
+  ([target options]
+   (let [object? (assembler/object? target)
+         link-options (if object? (:link-options options) {})
+         run-options (if object? (:run-options options) options)
+         artifact (if object?
+                    (assembler/link target link-options)
+                    target)]
+     (when-not (assembler/artifact? artifact)
+       (throw (IllegalArgumentException.
+               "run! expects a relocatable object or a linked artifact")))
+     (let [instance (start! (select-keys run-options
+                                         [:executable :address :port
+                                          :extra-args :options]))]
+       (try
+         (run-connected! instance artifact link-options run-options)
+         (catch Throwable error
+           (stop! instance)
+           (throw error)))))))

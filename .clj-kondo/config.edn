@@ -1,4 +1,6 @@
-{:hooks {:analyze-call {omkamra.cgen.core/defn hooks.cgen/defn
+{:hooks {:analyze-call {omkamra.vice.assembler/define-asm hooks.assembler/define-asm
+                         omkamra.vice.assembler/define-asset hooks.assembler/define-asset
+                         omkamra.cgen.core/defn hooks.cgen/defn
                          omkamra.cgen.core/fn hooks.cgen/anonymous-fn
                          omkamra.dsp/defn hooks.dsp/defn
                          squint.defclass/defclass hooks.squint/defclass}}}

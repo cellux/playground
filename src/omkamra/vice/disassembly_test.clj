@@ -7,12 +7,28 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
+            [omkamra.vice.assembler :as assembler]
             [omkamra.vice.dedupe :as dedupe]
+            [omkamra.vice.disassembly :as disassembly]
             [omkamra.vice.synthetic-test-support :as synthetic]))
 
-(defn- asm-block-ids [dir file]
+(defn- clj-block-ids
+  "Block ids from a committed canonical segment object. Each block's first
+  instruction is annotated with `(%meta {:block N ...} ...)`."
+  [dir file]
+  (->> (read-string (slurp (io/file dir file)))
+       (keep (fn [form]
+               (when (and (seq? form)
+                          (= '%meta (first form))
+                          (map? (second form)))
+                 (:block (second form)))))
+       vec))
+
+(defn- asm-block-ids
+  "Block ids from a committed `.asm` listing, read from its metadata comments."
+  [dir file]
   (->> (str/split-lines (slurp (io/file dir file)))
-       (keep #(second (re-find #"^; B:(\d+)" %)))
+       (keep #(second (re-find #":block (\d+)" %)))
        (mapv parse-long)))
 
 (defn- segment-lookup
@@ -56,13 +72,16 @@
         expected (occurrence-blocks-by-segment (:dedupe fixture) segments)]
     (is (seq segments))
     (doseq [[index segment] (map-indexed vector segments)]
-      (let [ids (asm-block-ids dir (:file segment))]
+      (let [ids (clj-block-ids dir (:clj-file segment))
+            asm-ids (asm-block-ids dir (:asm-file segment))]
         (testing (str "segment " index)
           (is (seq ids) "the segment rendered at least one block")
           (is (= (count ids) (count (distinct ids)))
               "no basic block appears twice in one file")
           (is (= (set ids) (set (:block-ids segment)))
-              "the file matches the committed index")
+              "the canonical file matches the committed index")
+          (is (= (set asm-ids) (set ids))
+              "the human-readable file matches the canonical file")
           (is (= (set ids) (nth expected index))
               "the file matches an independent occurrence recomputation"))))))
 
@@ -75,3 +94,58 @@
           (is (= (count ids) (long block-count)))
           (is (= (count ids) (count (distinct ids)))
               "no basic block appears twice in one file"))))))
+
+(deftest segment-objects-are-canonical-and-serializable
+  (let [image (:disassembly (synthetic/fixture))
+        dir (:directory image)
+        segment (first (:segments image))
+        forms (read-string (slurp (io/file dir (:clj-file segment))))]
+    (is (vector? forms))
+    (testing "every block fragment is fixed-address"
+      (let [orgs (keep (fn [form]
+                         (when (and (seq? form) (= '%org (first form)))
+                           (second form)))
+                       forms)]
+        (is (= (:block-count segment) (count orgs)))))
+    (testing "the human-readable listing renders the same addresses"
+      (is (str/includes? (slurp (io/file dir (:asm-file segment)))
+                         ".org $")))
+    (testing "the canonical forms re-assemble cleanly"
+      (is (map? (assembler/assemble forms {}))))))
+
+(deftest instruction-forms-preserve-encoding-shape
+  (let [label-map {0x1000 :L1000}
+        form #'disassembly/instruction-form]
+    (testing "direct JMP is bare, indirect JMP is bracketed"
+      (is (= '(jmp :L1000)
+             (form {:pc 0x0800 :opcode 0x4c :template [0x00 0x10]
+                    :volatile-mask 0}
+                   label-map)))
+      (is (= '(jmp [:L1000])
+             (form {:pc 0x0800 :opcode 0x6c :template [0x00 0x10]
+                    :volatile-mask 0}
+                   label-map))))
+    (testing "volatile operands are wrapped transparently"
+      (is (= '(lda (%volatile [%zp 32]))
+             (form {:pc 0x0000 :opcode 0xa5 :template [0x20 0]
+                    :volatile-mask 1}
+                   {}))))
+    (testing "undocumented variants use dotted mnemonics"
+      (is (= '(nop.1a)
+             (form {:pc 0x0000 :opcode 0x1a :template [0 0]
+                    :volatile-mask 0}
+                   {}))))
+    (testing "a small absolute address keeps its full-width opcode"
+      (let [roundtrip (fn [opcode]
+                        (let [instruction (form {:pc 0x081A :opcode opcode
+                                                 :template [0x2d 0]
+                                                 :volatile-mask 0}
+                                                {})
+                              object (assembler/assemble [instruction] {})]
+                          (-> object :sections first :items first :opcode)))]
+        ;; STA $002D,X must not be re-read as the shorter STA $2D,X
+        (is (= 0x9d (roundtrip 0x9d)))
+        (is (= 0x95 (roundtrip 0x95)))
+        ;; STA $002D must not be re-read as the shorter STA $2D
+        (is (= 0x8d (roundtrip 0x8d)))
+        (is (= 0x85 (roundtrip 0x85)))))))

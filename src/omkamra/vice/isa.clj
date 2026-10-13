@@ -15,6 +15,34 @@
   {:imp 1 :acc 1 :imm 2 :zp 2 :zpx 2 :zpy 2 :rel 2
    :abs 3 :absx 3 :absy 3 :ind 3 :indx 2 :indy 2})
 
+(def mode-operand-width
+  "Number of operand bytes encoded after the opcode for each mode."
+  {:imp 0 :acc 0 :imm 1 :zp 1 :zpx 1 :zpy 1 :rel 1
+   :abs 2 :absx 2 :absy 2 :ind 2 :indx 1 :indy 1})
+
+(def mode-operand-kind
+  "Syntactic shape of each addressing mode, shared by assembly and
+  disassembly."
+  {:imp :implied :acc :accumulator :imm :immediate
+   :zp :zero-page :zpx :zero-page-x :zpy :zero-page-y
+   :rel :relative :abs :absolute :absx :absolute-x :absy :absolute-y
+   :ind :indirect :indx :indexed-indirect :indy :indirect-indexed})
+
+(def mode-index-register
+  "Index register a mode implicitly uses, or nil for unindexed modes."
+  {:zpx :x :absx :x :indx :x
+   :zpy :y :absy :y :indy :y})
+
+(def memory-modes
+  "Modes whose operand names a memory location."
+  #{:zp :zpx :zpy :abs :absx :absy :ind :indx :indy})
+
+(def zero-page-modes
+  "Memory modes that encode a one-byte address."
+  #{:zp :zpx :zpy :indx :indy})
+
+(def relative-modes #{:rel})
+
 (def ^:private opcode-rows
   ["BRK/imp ORA/indx KIL/imp SLO/indx NOP/zp ORA/zp ASL/zp SLO/zp PHP/imp ORA/imm ASL/acc ANC/imm NOP/abs ORA/abs ASL/abs SLO/abs"
    "BPL/rel ORA/indy KIL/imp SLO/indy NOP/zpx ORA/zpx ASL/zpx SLO/zpx CLC/imp ORA/absy NOP/imp SLO/absy NOP/absx ORA/absx ASL/absx SLO/absx"
@@ -40,6 +68,80 @@
        (mapv (fn [token]
                (let [[mnemonic mode] (str/split token #"/")]
                  {:mnemonic mnemonic :mode (keyword mode)})))))
+
+(def documented-opcodes
+  "The legal NMOS 6502 opcode bytes. Everything else in `opcode-table` is an
+  undocumented variant."
+  #{0x00 0x01 0x05 0x06 0x08 0x09 0x0a 0x0d 0x0e
+    0x10 0x11 0x15 0x16 0x18 0x19 0x1d 0x1e
+    0x20 0x21 0x24 0x25 0x26 0x28 0x29 0x2a 0x2c 0x2d 0x2e
+    0x30 0x31 0x35 0x36 0x38 0x39 0x3d 0x3e
+    0x40 0x41 0x45 0x46 0x48 0x49 0x4a 0x4c 0x4d 0x4e
+    0x50 0x51 0x55 0x56 0x58 0x59 0x5d 0x5e
+    0x60 0x61 0x65 0x66 0x68 0x69 0x6a 0x6c 0x6d 0x6e
+    0x70 0x71 0x75 0x76 0x78 0x79 0x7d 0x7e
+    0x81 0x84 0x85 0x86 0x88 0x8a 0x8c 0x8d 0x8e
+    0x90 0x91 0x94 0x95 0x96 0x98 0x99 0x9a 0x9d
+    0xa0 0xa1 0xa2 0xa4 0xa5 0xa6 0xa8 0xa9 0xaa 0xac 0xad 0xae
+    0xb0 0xb1 0xb4 0xb5 0xb6 0xb8 0xb9 0xba 0xbc 0xbd 0xbe
+    0xc0 0xc1 0xc4 0xc5 0xc6 0xc8 0xc9 0xca 0xcc 0xcd 0xce
+    0xd0 0xd1 0xd5 0xd6 0xd8 0xd9 0xdd 0xde
+    0xe0 0xe1 0xe4 0xe5 0xe6 0xe8 0xe9 0xea 0xec 0xed 0xee
+    0xf0 0xf1 0xf5 0xf6 0xf8 0xf9 0xfd 0xfe})
+
+(def mnemonic-mode-opcodes
+  "Ascending opcode bytes for every `[mnemonic mode]` pair, mnemonic as a
+  string and mode as a keyword."
+  (reduce (fn [acc [opcode entry]]
+            (update acc [(:mnemonic entry) (:mode entry)]
+                    (fnil conj []) opcode))
+          {}
+          (map-indexed vector opcode-table)))
+
+(def documented-mnemonics
+  "Mnemonics that have at least one documented opcode. Some of these (for
+  example NOP) also have undocumented variants."
+  (into #{}
+        (keep (fn [[opcode entry]]
+                (when (contains? documented-opcodes opcode)
+                  (:mnemonic entry))))
+        (map-indexed vector opcode-table)))
+
+(defn documented-opcode?
+  "True when `opcode` is a legal, documented NMOS 6502 opcode."
+  [opcode]
+  (contains? documented-opcodes (bit-and (int opcode) 0xff)))
+
+(defn documented-mnemonic?
+  "True when `mnemonic` has at least one documented opcode."
+  [mnemonic]
+  (contains? documented-mnemonics mnemonic))
+
+(defn opcodes-for
+  "Ascending opcode bytes for a mnemonic and addressing mode, or `[]`."
+  [mnemonic mode]
+  (get mnemonic-mode-opcodes [mnemonic mode] []))
+
+(defn modes-for
+  "Set of addressing modes a mnemonic supports."
+  [mnemonic]
+  (into #{}
+        (keep (fn [[[m mode] _]] (when (= m mnemonic) mode)))
+        mnemonic-mode-opcodes))
+
+(defn preferred-opcode
+  "Opcode for a mnemonic and mode, preferring the documented opcode and
+  otherwise the lowest opcode."
+  [mnemonic mode]
+  (let [opcodes (opcodes-for mnemonic mode)
+        documented (first (filter documented-opcode? opcodes))]
+    (or documented (first opcodes))))
+
+(defn valid-opcode?
+  "True when `opcode` is a valid encoding of `mnemonic`."
+  [mnemonic opcode]
+  (let [opcode (bit-and (int opcode) 0xff)]
+    (= mnemonic (:mnemonic (nth opcode-table opcode)))))
 
 (def mnemonic-by-opcode
   "Per-opcode mnemonic, indexed by the raw opcode byte."
@@ -76,6 +178,11 @@
 
 (def branch-mnemonics
   #{"BPL" "BMI" "BVC" "BVS" "BCC" "BCS" "BNE" "BEQ"})
+
+(defn branch?
+  "True when `mnemonic` is a relative branch."
+  [mnemonic]
+  (contains? branch-mnemonics mnemonic))
 
 (def pull-mnemonics #{"PLA" "PLP"})
 
