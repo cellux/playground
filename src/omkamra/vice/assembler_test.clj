@@ -477,12 +477,12 @@
 (deftest link-primary-object
   (let [artifact (link-forms '((%entry :start) :start (lda 0x01) (rts)) {})]
     (is (assembler/artifact? artifact))
-    (is (= 0x800 (:entry-point artifact)))
+    (is (= 0x900 (:entry-point artifact)))
     (is (= 1 (count (:segments artifact))))
     (is (= [0xa9 1 0x60]
            (mapv (fn [b] (bit-and (int b) 0xff))
                  (:bytes (first (:segments artifact))))))
-    (is (= {:start 2048} (:labels (first (:objects artifact)))))
+    (is (= {:start 0x900} (:labels (first (:objects artifact)))))
     (is (identical? artifact (assembler/link artifact)))))
 
 (deftest link-discovers-object-dependencies
@@ -500,8 +500,8 @@
     (is (= [:t/common nil]
            (sort-by (fn [id] (if id 0 1))
                     (map :object-id (:objects artifact)))))
-    (is (= 0x800 (:entry-point artifact)))
-    (is (= 0x804 (get (:labels (second (:objects artifact))) :clear-screen-fn)))))
+    (is (= 0x900 (:entry-point artifact)))
+    (is (= 0x904 (get (:labels (second (:objects artifact))) :clear-screen-fn)))))
 
 ;; Object entries ------------------------------------------------------------
 
@@ -539,7 +539,7 @@
                                      (:object-id %))
                                  (:objects artifact)))]
       (is (some? handler))
-      (is (= 0x804 (get (:labels handler) :default-entry-object))))))
+      (is (= 0x904 (get (:labels handler) :default-entry-object))))))
 
 (deftest object-name-label-must-name-the-first-instruction
   (is (= :object-entry-label-mismatch
@@ -672,8 +672,8 @@
     (:start-address (first (filter #(= qualified (:name %)) (:assets artifact))))))
 
 (deftest align-true-uses-the-next-power-of-two
-  (is (= 0x0810 (placed-asset 'nine-bytes)) "9 bytes -> align 16")
-  (is (= 0x0820 (placed-asset 'twenty-one-bytes)) "21 bytes -> align 32")
+  (is (= 0x0900 (placed-asset 'nine-bytes)) "9 bytes -> align 16")
+  (is (= 0x0900 (placed-asset 'twenty-one-bytes)) "21 bytes -> align 32")
   (is (= {:align 32}
          (:constraints (assembler/build-asset 't {:data (vec (repeat 21 1))
                                                   :align true})))
@@ -753,7 +753,7 @@
 
 (deftest placement
   (testing "default first-fit"
-    (is (= 0x800
+    (is (= 0x900
            (:base (first (:sections
                           (:placement (first (:objects
                                               (link-forms '(:s (rts)) {}))))))))))
@@ -807,7 +807,7 @@
                 '((%entry :a) :a (%entry :b) :b (rts))
                 {:ns 'omkamra.vice.assembler-test})]
     (is (= :multiple-entries (error-reason #(assembler/link object))))
-    (is (= 0x800 (:entry-point (assembler/link object {:entry :b}))))))
+    (is (= 0x900 (:entry-point (assembler/link object {:entry :b}))))))
 
 ;; operand expressions --------------------------------------------------------
 

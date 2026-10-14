@@ -1720,6 +1720,15 @@
    [0xa000 0xc000]
    [0xe000 0x10000]])
 
+(def default-reserved-ranges
+  "Intervals the linker keeps clear unless `:reserved` overrides them.
+
+  `$0800-$08ff` is the BASIC `SYS` harness page a self-relocating PRG builds
+  at `$0801`: the `10 SYS ...` line at `$0801` and the relocation stub at
+  `$080d`. A linked object must never land there, whatever its own `%region`
+  says, or loading the PRG scrambles the line BASIC returns to."
+  [[0x0800 0x0900]])
+
 (defn- link-fail!
   [reason message data]
   (throw (ex-info message (assoc data :reason reason))))
@@ -2104,7 +2113,8 @@
   - `:objects` — additional named objects (map or collection) for resolution;
   - `:assets` — asset descriptors (map of qualified symbol to asset);
   - `:regions` — override every object's `%region` constraints;
-  - `:ranges` — override the default first-fit ranges.
+  - `:ranges` — override the default first-fit ranges;
+  - `:reserved` — override the default reserved intervals.
 
   Passing an artifact returns it unchanged (linking is idempotent)."
   ([primary]
@@ -2123,7 +2133,10 @@
              object-specs (mapcat #(object-section-specs % (:regions options))
                                   objects)
              asset-specs (mapv asset-section-spec assets)
-             reserved (vec (mapcat #(get-in % [:constraints :reserved]) objects))
+             reserved (vec (concat (or (:reserved options)
+                                       default-reserved-ranges)
+                                   (mapcat #(get-in % [:constraints :reserved])
+                                           objects)))
              placement (place-all (concat object-specs asset-specs) ranges reserved)
              asset-placement (into {} (map (fn [asset] [(:name asset)
                                                         (get placement (:name asset))])

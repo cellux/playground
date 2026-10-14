@@ -88,7 +88,7 @@
   (with-fake-vice*
     (fn [state _ _]
       (let [instance (vice/start! {:artifact (assembler/link (simple-object))})]
-        (is (= 0x800 (:entry-point instance)))
+        (is (= 0x900 (:entry-point instance)))
         (is (= 1 (:resumed @state)) "the program is resumed once")
         (is (:closed? @state) "the setup connection is released")
         (is (nil? (:awaited @state)) "no :from-pc means no extra stop")
@@ -248,7 +248,7 @@
                                  :connect-timeout-ms 15000
                                  :connect-retry-ms 100})]
       (try
-        (is (= 0x800 (:entry-point instance)))
+        (is (= 0x900 (:entry-point instance)))
         (is (pos? (long (:pid instance))))
         (vice/with-conn [conn instance]
           (is (= "ram" (:name (get (bm/banks-available conn) 1)))))

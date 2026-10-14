@@ -225,7 +225,9 @@
   [forms address]
   (let [object (assembler/assemble (into [(list '%org (long address))] forms)
                                    {:ns (the-ns 'omkamra.vice.prg)})
-        artifact (assembler/link object)
+        ;; The stub has to live in the harness page the default reserve keeps
+        ;; clear, so `prg`'s own fragments are linked without that reserve.
+        artifact (assembler/link object {:reserved []})
         segment (first (filter #(= (long address) (long (:start-address %)))
                                (:segments artifact)))]
     (when-not segment
