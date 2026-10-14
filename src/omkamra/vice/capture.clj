@@ -209,17 +209,30 @@
   [session fifo]
   (let [^ArrayBlockingQueue queue (:queue session)
         stop-requested (:stop-requested session)
+        reader-stop (:reader-stop session)
         reader-ref (:reader session)
         body (fn []
                (try
                  (loop []
-                   (when-not @stop-requested
+                   ;; `:reader-stop` is only set by `stop-fifo-reader!`, never
+                   ;; by `request-stop!`. The reader must keep draining (and
+                   ;; reopening) until explicit teardown, otherwise a stop that
+                   ;; races a chunk boundary can leave VICE blocked in
+                   ;; `fopen` on a FIFO with no reader.
+                   (when-not @reader-stop
                      (let [reader (io/reader fifo)]
                        (reset! reader-ref reader)
                        (try
                          (trace/reduce-records!
                           reader
-                          (fn [record] (.put queue record))
+                          (fn [record]
+                            ;; After a stop request the controller discards
+                            ;; records anyway. Discarding here keeps the FIFO
+                            ;; drained, so a VICE that is blocked inside a
+                            ;; monitor-log write can finish it and answer the
+                            ;; MonitorLogEnabled=0 request instead of deadlocking.
+                            (when-not @stop-requested
+                              (.put queue record)))
                           true)
                          (finally
                            (reset! reader-ref nil)))
@@ -252,6 +265,7 @@
 (defn- stop-fifo-reader!
   [session]
   (reset! (:stop-requested session) true)
+  (reset! (:reader-stop session) true)
   (when-let [reader @(:reader session)]
     (try (.close ^Reader reader) (catch Throwable _ nil)))
   (when-let [^Thread thread @(:reader-thread session)]
@@ -392,8 +406,11 @@
                     :timing nil
                     :events []
                     :closing? false}]
-    (set-logging! session 1)
-    (bm/resume! conn)
+    ;; A stop may have arrived while this boundary was being prepared; do not
+    ;; re-enable logging in that case, or VICE would keep writing past the stop.
+    (when-not @(:stop-requested session)
+      (set-logging! session 1)
+      (bm/resume! conn))
     (let [commit-ms (commit-chunk! session chunk
                                    {:kind :forced-size :reason :max-events})]
       (record-boundary-metrics!
@@ -420,16 +437,20 @@
 
 ;; Controller ----------------------------------------------------------------
 
+(declare disable-logging!)
+
 (defn- request-stop!
   "Flag the session for shutdown and pause VICE by disabling monitor logging.
 
   This closes the trace FIFO, so the reader reaches end of stream and the
-  controller finalizes the last chunk once the current chunk is drained."
+  controller finalizes the last chunk once the current chunk is drained. The
+  disable is retried so a VICE stalled inside a FIFO write still gets the
+  request; the monitor layer throws on timeout instead of silently returning
+  nil, which previously left logging enabled and hung the stop."
   [session]
   (reset! (:stop-requested session) true)
-  (when-let [conn @(:conn session)]
-    (try (bm/resource-set! conn {:name "MonitorLogEnabled" :value 0})
-         (catch Throwable _ nil))))
+  (disable-logging! session)
+  nil)
 
 (defn- controller-loop!
   "Consume trace records from the reader, close chunks at the target, commit,
@@ -443,8 +464,16 @@
   (let [^ArrayBlockingQueue queue (:queue session)]
     (loop [chunk initial-chunk
            committed 0]
-      (let [item (.take queue)]
+      (let [item (.poll queue 100 TimeUnit/MILLISECONDS)]
         (cond
+          ;; A stop can arrive while the reader is blocked (e.g. between chunk
+          ;; boundaries), so finalize on the stop flag rather than waiting
+          ;; only for the EOF sentinel.
+          (nil? item)
+          (if @(:stop-requested session)
+            (finish! session chunk)
+            (recur chunk committed))
+
           (= item eof-sentinel)
           (cond
             @(:stop-requested session) (finish! session chunk)
@@ -496,14 +525,40 @@
   [session]
   (swap! sessions dissoc (:session-id session)))
 
+(defn- disable-logging!
+  "Ask VICE to close its monitor-log file, retrying a few times.
+
+  Returns true when the resource set was acknowledged. VICE can be stalled
+  inside a blocking FIFO write, in which case one response timeout is not
+  enough; the monitor layer now throws on timeout, so each attempt is retried."
+  [session]
+  (if-let [conn @(:conn session)]
+    (loop [attempt 0]
+      (cond
+        (try (bm/resource-set! conn {:name "MonitorLogEnabled" :value 0})
+             (catch Throwable _ false))
+        true
+
+        (< attempt 5)
+        (do (Thread/sleep 200) (recur (inc attempt)))
+
+        :else false))
+    true))
+
 (defn- cleanup!
   [session]
-  (stop-fifo-reader! session)
   (let [conn @(:conn session)
-        external? (:external? session)]
+        external? (:external? session)
+        ;; Disable VICE's monitor log *before* removing the FIFO reader. VICE's
+        ;; monitor-log writer is a plain buffered FILE* on the FIFO and VICE
+        ;; installs a fatal SIGPIPE handler, so a write after the reader is gone
+        ;; kills it with "Received signal 13".
+        logging-off? (boolean (disable-logging! session))]
+    ;; Only tear the reader down once VICE has confirmed it stopped logging.
+    ;; Otherwise leave it parked on the FIFO as a safety net.
+    (when logging-off?
+      (stop-fifo-reader! session))
     (when conn
-      (try (bm/resource-set! conn {:name "MonitorLogEnabled" :value 0})
-           (catch Throwable _ nil))
       (when-let [number @(:trace-checkpoint session)]
         (try (bm/checkpoint-delete! conn {:number number})
              (catch Throwable _ nil)))
@@ -515,8 +570,8 @@
       ;; process alone instead of terminating it with the capture.
       (when external?
         (try (bm/resume! conn) (catch Throwable _ nil))))
-    (when-let [fifo @(:fifo session)]
-      (io/delete-file fifo true))
+    (when (and logging-off? (some? @(:fifo session)))
+      (io/delete-file @(:fifo session) true))
     (when-let [temp-input (:temp-input session)]
       (io/delete-file temp-input true))
     ;; Close the monitor connection before terminating the process, so the
@@ -525,7 +580,13 @@
       (try (driver/close! conn) (catch Throwable _ nil)))
     (when-let [instance @(:instance session)]
       (when-not external?
-        (try (driver/stop! instance) (catch Throwable _ nil))))
+        (try (driver/stop! instance) (catch Throwable _ nil))
+        ;; The process is gone, so it can no longer write to the FIFO; finish
+        ;; the teardown even if logging could not be disabled.
+        (when-not logging-off?
+          (stop-fifo-reader! session)
+          (when-let [fifo @(:fifo session)]
+            (io/delete-file fifo true)))))
     ;; Release the instance's exclusive capture ownership so a later capture or
     ;; monitor connection can claim it.
     (when-let [descriptor (:descriptor session)]
@@ -770,6 +831,7 @@
                      :conn (atom nil)
                      :queue (ArrayBlockingQueue. (int (queue-capacity options)))
                      :stop-requested (atom false)
+                     :reader-stop (atom false)
                      :reader (atom nil)
                      :reader-thread (atom nil)
                      :fifo (atom nil)

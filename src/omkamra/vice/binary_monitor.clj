@@ -370,7 +370,11 @@
        (.flush ^OutputStream out))
      (let [rv (deref request-promise response-timeout-ms nil)]
        (when (nil? rv)
-         (swap! pending-requests dissoc request-id))
+         (swap! pending-requests dissoc request-id)
+         (throw (ex-info "VICE monitor request timed out"
+                         {:reason :monitor-timeout
+                          :request-id request-id
+                          :timeout-ms response-timeout-ms})))
        (if (and (map? rv) (:error-code rv))
          (throw (ex-info "VICE monitor command failed" rv))
          rv)))))
