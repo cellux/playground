@@ -21,9 +21,11 @@
   Because the segments are packed in increasing destination order, the copy
   dependency graph (segment `i` must copy after `j` when `dst_i` overlaps
   `src_j`) is acyclic; the generator bakes a topological copy order into the
-  table. The mover chooses each segment's direction — high-to-low when the
-  destination is above the source — so destinations may sit anywhere in RAM,
-  including inside the loaded image, without corrupting an unread source."
+  table. From the same layout it emits only the copy direction the segments
+  need — forward when no destination overlaps its own source from above,
+  backward when none does from below, and both (with a runtime test) only when
+  they disagree — so destinations may sit anywhere in RAM, including inside the
+  loaded image, without corrupting an unread source."
   (:require [clojure.java.io :as io]
             [omkamra.vice.assembler :as assembler]))
 
@@ -95,65 +97,103 @@
 
 ;; Unpacker ------------------------------------------------------------------
 
+(defn- copy-direction
+  "The minimal copy direction that is correct for `layout`.
+
+  Forward copy is unsafe only for a segment whose destination lies inside its
+  own source range from above (`src < dst < src+len`); backward copy is unsafe
+  only from below (`dst < src < dst+len`). A layout with no self-overlap makes
+  both safe, and forward (the smaller loop) wins. `:both` is the general
+  memmove, needed only when the segments disagree."
+  [layout]
+  (let [forward-unsafe?
+        (some (fn [{:keys [dst len src]}]
+                (and (< (long src) (long dst))
+                     (< (long dst) (+ (long src) (long len)))))
+              layout)
+        backward-unsafe?
+        (some (fn [{:keys [dst len src]}]
+                (and (< (long dst) (long src))
+                     (< (long src) (+ (long dst) (long len)))))
+              layout)]
+    (cond
+      (not forward-unsafe?) :forward
+      (not backward-unsafe?) :backward
+      :else :both)))
+
 (defn- mover-forms
   "The unpacker, running from `scratch`.
 
   Entry layout in `table` is `dst-lo dst-hi len-lo len-hi src-lo src-hi`; a zero
   length terminates. Zero-page pointers are `$f9/$fa` length, `$fb/$fc` source,
-  `$fd/$fe` destination. A segment whose destination is above its source is
-  copied high-to-low (the memmove rule); the baked order handles the rest."
-  [table entry]
-  `[(sei)
-    (ldx 0x00)
-    (ldy 0x00)
-    :next
-    (lda [~table x]) (sta [0xfd])
-    (lda [~(+ table 1) x]) (sta [0xfe])
-    (lda [~(+ table 2) x]) (sta [0xf9])
-    (lda [~(+ table 3) x]) (sta [0xfa])
-    (ora [0xf9])
-    (beq :done)
-    (lda [~(+ table 4) x]) (sta [0xfb])
-    (lda [~(+ table 5) x]) (sta [0xfc])
-    ;; dst > src -> copy high to low
-    (lda [0xfe]) (cmp [0xfc]) (bcc :forward) (bne :backward)
-    (lda [0xfd]) (cmp [0xfb]) (bcc :forward)
-    :backward
-    (lda [0xfb]) (clc) (adc [0xf9]) (sta [0xfb])
-    (lda [0xfc]) (adc [0xfa]) (sta [0xfc])
-    (lda [0xfd]) (clc) (adc [0xf9]) (sta [0xfd])
-    (lda [0xfe]) (adc [0xfa]) (sta [0xfe])
-    :copy-back
-    (lda [0xfb]) (bne :src-down) (dec [0xfc])
-    :src-down
-    (dec [0xfb])
-    (lda [0xfd]) (bne :dst-down) (dec [0xfe])
-    :dst-down
-    (dec [0xfd])
-    (lda [[0xfb] y]) (sta [[0xfd] y])
-    (lda [0xf9]) (bne :back-count) (dec [0xfa])
-    :back-count
-    (dec [0xf9])
-    (lda [0xf9]) (ora [0xfa])
-    (bne :copy-back)
-    (jmp :advance)
-    :forward
-    :copy-fwd
-    (lda [[0xfb] y]) (sta [[0xfd] y])
-    (inc [0xfb]) (bne :src-up) (inc [0xfc])
-    :src-up
-    (inc [0xfd]) (bne :dst-up) (inc [0xfe])
-    :dst-up
-    (lda [0xf9]) (bne :fwd-count) (dec [0xfa])
-    :fwd-count
-    (dec [0xf9])
-    (lda [0xf9]) (ora [0xfa])
-    (bne :copy-fwd)
-    :advance
-    (inx) (inx) (inx) (inx) (inx) (inx)
-    (jmp :next)
-    :done
-    (jmp ~entry)])
+  `$fd/$fe` destination. `$fb-$fe` is FREKZP and `$f9/$fa` is ROBUF (RS-232
+  only), so clobbering them leaves BASIC's interpreter workspace alone.
+
+  `direction` (`:forward`, `:backward`, or `:both`) selects the emitted copy
+  loops; `copy-direction` derives it from the layout, so each PRG carries only
+  the paths its segments need. The baked table order handles inter-segment
+  overlap."
+  [table entry direction]
+  (let [prologue
+        `[(sei)
+          (ldx 0x00)
+          (ldy 0x00)
+          :next
+          (lda [~table x]) (sta [0xfd])
+          (lda [~(+ table 1) x]) (sta [0xfe])
+          (lda [~(+ table 2) x]) (sta [0xf9])
+          (lda [~(+ table 3) x]) (sta [0xfa])
+          (ora [0xf9])
+          (beq :done)
+          (lda [~(+ table 4) x]) (sta [0xfb])
+          (lda [~(+ table 5) x]) (sta [0xfc])]
+        select
+        `[(lda [0xfe]) (cmp [0xfc]) (bcc :forward) (bne :backward)
+          (lda [0xfd]) (cmp [0xfb]) (bcc :forward)]
+        backward
+        `[:backward
+          (lda [0xfb]) (clc) (adc [0xf9]) (sta [0xfb])
+          (lda [0xfc]) (adc [0xfa]) (sta [0xfc])
+          (lda [0xfd]) (clc) (adc [0xf9]) (sta [0xfd])
+          (lda [0xfe]) (adc [0xfa]) (sta [0xfe])
+          :copy-back
+          (lda [0xfb]) (bne :src-down) (dec [0xfc])
+          :src-down
+          (dec [0xfb])
+          (lda [0xfd]) (bne :dst-down) (dec [0xfe])
+          :dst-down
+          (dec [0xfd])
+          (lda [[0xfb] y]) (sta [[0xfd] y])
+          (lda [0xf9]) (bne :back-count) (dec [0xfa])
+          :back-count
+          (dec [0xf9])
+          (lda [0xf9]) (ora [0xfa])
+          (bne :copy-back)
+          (jmp :advance)]
+        forward
+        `[:forward
+          :copy-fwd
+          (lda [[0xfb] y]) (sta [[0xfd] y])
+          (inc [0xfb]) (bne :src-up) (inc [0xfc])
+          :src-up
+          (inc [0xfd]) (bne :dst-up) (inc [0xfe])
+          :dst-up
+          (lda [0xf9]) (bne :fwd-count) (dec [0xfa])
+          :fwd-count
+          (dec [0xf9])
+          (lda [0xf9]) (ora [0xfa])
+          (bne :copy-fwd)]
+        tail
+        `[:advance
+          (inx) (inx) (inx) (inx) (inx) (inx)
+          (jmp :next)
+          :done
+          (jmp ~entry)]]
+    (vec (concat prologue
+                 (when (= direction :both) select)
+                 (when (not= direction :forward) backward)
+                 (when (not= direction :backward) forward)
+                 tail))))
 
 (defn- stub-forms
   "The stub: copy `mover-length` bytes from `mover-image` to `scratch`, JMP there.
@@ -229,6 +269,7 @@
                                         :bytes (mapv u8 (:bytes segment))})))
                     acc))
          order (copy-order layout)
+         direction (copy-direction layout)
          payload (vec (mapcat :bytes layout))
          table (vec (mapcat (fn [i]
                               (let [{:keys [dst len src]} (layout i)]
@@ -237,11 +278,16 @@
                                  (u8 src) (hi src)]))
                             order))
          table (into table (repeat table-entry-length 0x00))
-         ;; the unpacker and its table live in scratch, so the table survives
-         code-length (count (assemble-bytes (mover-forms 0x0000 entry)
+         ;; the unpacker and its table live in scratch, so the table survives.
+         ;; Size the code with an absolute table address: a zero table address
+         ;; assembles the six table reads as zero-page indexed (2 bytes),
+         ;; undercounting the code and placing the table six bytes too early.
+         code-length (count (assemble-bytes (mover-forms scratch-address entry
+                                                         direction)
                                             scratch-address))
          table-address (+ scratch-address code-length)
-         code (assemble-bytes (mover-forms table-address entry) scratch-address)
+         code (assemble-bytes (mover-forms table-address entry direction)
+                              scratch-address)
          mover (into code table)
          mover-length (count mover)
          stub (stub-address load-address)
