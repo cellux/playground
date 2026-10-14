@@ -34,7 +34,7 @@
 (def snapshot-format :omkamra.vice/snapshot-v2)
 (def screen-png-format :omkamra.vice/screen-png-v1)
 (def chunk-format :omkamra.vice/chunk-v2)
-(def dedupe-version 4)
+(def dedupe-version 5)
 (def dedupe-format (format-keyword :dedupe dedupe-version))
 (def analysis-format :omkamra.vice/analysis-v2)
 (def stage-format :omkamra.vice/analysis-stage-v2)

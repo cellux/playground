@@ -99,18 +99,32 @@
     0xFFFA 0xFFFB 0xFFFC 0xFFFD 0xFFFE 0xFFFF})
 
 (def ^:private initial-vector-bytes
-  "Stock C64 interrupt vectors, in effect at every supported capture start.
+  "Fallback C64 interrupt vectors for bytes the capture does not pin.
 
-  An IRQ entry at `$FF48` is the KERNAL trampoline, which dispatches through the
-  user vector `$0314/$0315`; seeding the power-on values means that resolution
-  always succeeds, so `$FF48` itself never becomes a context (it resolves to the
-  KERNAL default `$EA31`, which `:segments` ignores as a ROM handler). An
-  observed store to a vector byte overrides the seeded value."
+  These are the stock power-on values. The user vectors `$0314-$0319` are
+  additionally overlaid with the capture's real initial RAM (see
+  `capture-user-vectors`), because a capture that starts mid-run never observes
+  the program's vector stores. The physical `$FFFA-$FFFF` values stay at the
+  ROM defaults: while the KERNAL is mapped they are read from ROM, not from the
+  underlying RAM."
   {0x0314 0x31 0x0315 0xEA
    0x0316 0x8B 0x0317 0xE3
    0xFFFA 0x43 0xFFFB 0xFE
    0xFFFC 0xE2 0xFFFD 0xFC
    0xFFFE 0x48 0xFFFF 0xFF})
+
+(defn- capture-user-vectors
+  "User interrupt vector bytes as they exist at the capture start.
+
+  `$0314-$0319` are always RAM, so the underlying RAM is the CPU-visible value
+  even when the capture begins mid-run. Seeding from here stops a program that
+  dispatches through the KERNAL `$FF48` trampoline from being resolved to the
+  stock `$EA31` and discarded as a ROM system context."
+  [reader]
+  (let [ram (:ram (reader/replay-state reader 0))]
+    (into {}
+          (for [address (range 0x0314 0x031a)]
+            [address (bit-and 0xff (aget ^bytes ram address))]))))
 
 ;; Little-endian primitives --------------------------------------------------
 
@@ -891,6 +905,7 @@
              state (-> (initial-state image window-events max-events progress
                                       (:max-window-occurrences configuration)
                                       (:leveling-threshold-events configuration))
+                       (update :vector-bytes merge (capture-user-vectors reader))
                        (process-all! reader)
                        (close-all!))
              state (if (pos? (.size ^java.util.ArrayList (:occurrences (:window state))))
