@@ -234,7 +234,7 @@
   Throws if the process exits first or the timeout elapses. Options:
   `:connect-timeout-ms`, `:connect-retry-ms`, and `:handle-event`."
   ([instance]
-   (connect! instance {}))
+   (connect-until-ready! instance {}))
   ([instance {:keys [connect-timeout-ms connect-retry-ms handle-event]
               :or {connect-timeout-ms default-connect-timeout-ms
                    connect-retry-ms default-connect-retry-ms}}]
