@@ -1,7 +1,7 @@
 ---
 name: c64-analysis
-description: Analyse a finalized omkamra.vice capture artifact: build the pipeline, inspect execution and hardware traces, and reconstruct C64 demo parts from code, memory, timing, audio, and screenshots.
-compatibility: Requires a finalized dataset root containing capture/ and the project's live Clojure nREPL.
+description: "Analyse a finalized omkamra.vice capture artifact: build the pipeline, inspect execution and hardware traces, and reconstruct C64 demo parts from code, memory, timing, audio, and screenshots."
+compatibility: "Requires a finalized dataset root containing capture/ and the project's live Clojure nREPL."
 ---
 
 # C64 analysis

@@ -1,7 +1,7 @@
 ---
 name: c64-capture
-description: Capture a C64 executable or running VICE instance with omkamra.vice.capture, monitor it, inject input, and finalize a capture artifact for later analysis.
-compatibility: Requires x64sc (or another compatible VICE executable), the project's live Clojure nREPL, and input paths visible to that process.
+description: "Capture a C64 executable or running VICE instance with omkamra.vice.capture, monitor it, inject input, and finalize a capture artifact for later analysis."
+compatibility: "Requires x64sc (or another compatible VICE executable), the project's live Clojure nREPL, and input paths visible to that process."
 ---
 
 # C64 capture
