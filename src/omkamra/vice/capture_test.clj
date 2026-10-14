@@ -436,3 +436,15 @@
                      (store/open-capture! directory))))
       (finally
         (store/delete-tree! (io/file dataset-root))))))
+
+(deftest connection-is-nil-without-a-capture
+  (is (nil? (capture/connection {:address "localhost" :port 6502}))))
+
+(deftest connection-exposes-the-active-capture-connection
+  (let [conn {:fake true}
+        descriptor {:address "localhost"
+                    :port 6502
+                    driver/state-key
+                    (atom {:connection nil
+                           :capture {:conn (atom conn)}})}]
+    (is (= conn (capture/connection descriptor)))))

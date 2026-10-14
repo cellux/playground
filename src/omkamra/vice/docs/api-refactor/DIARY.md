@@ -114,3 +114,28 @@ as inert, unread, and no-longer-accurate metadata, both were removed:
 
 Verification: `cljfmt` and `clj-kondo` clean, full suite 202 tests / 1889
 assertions with 0 failures.
+
+## Follow-up — `vice` skill and `capture/connection` (completed)
+
+Added the `vice` skill (`.agents/skills/vice/SKILL.md`): an overview of the
+`omkamra.vice` namespaces, the instance-descriptor/monitor-connection shapes,
+the public root API, a namespace map, the analysis stages, and the conventions,
+with pointers to the `c64-capture` and `c64-analysis` skills.
+
+Writing it exposed a gap left by the refactor: with capture and monitor
+ownership exclusive (D4), the old way of injecting input into a live capture
+(`@(:conn session)` on the returned session map) no longer existed, because
+`capture!` now returns an instance descriptor and the session is private. To
+restore the documented input-injection workflow, added
+`omkamra.vice.capture/connection` (D15), which lends the capture's own live
+connection; callers send monitor requests and `resume!`, and `capture/stop!`
+still closes it. Two tests cover the nil and active cases.
+
+Updated the existing `c64-capture` and `c64-analysis` skills to the refactored
+API (`capture/start!` → `capture/capture!`, `bm/resume` → `bm/resume!`,
+`bm/keyboard-feed`/`bm/joyport-set` → bang names, `omkamra.vice/run!` →
+`omkamra.vice/start!`, stage `open` → `open!`, and the session handle →
+instance descriptor + `capture/connection`).
+
+Verification: `cljfmt` and `clj-kondo` clean; `capture-test` 16 tests / 76
+assertions pass.

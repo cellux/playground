@@ -117,3 +117,12 @@ Because clj-kondo cannot infer the bindings of a custom macro, a
 The descriptor state atom lives under `:omkamra.vice/state`, exposed as
 `omkamra.vice.driver/state-key`. Both the root API and the capture namespace
 read it through the driver, so no circular namespace dependency is needed.
+
+## D15 — `capture/connection` lends the capture's connection
+
+Because capture and monitor ownership are mutually exclusive (D4), a caller
+cannot `connect!` while a capture runs, yet a live capture still needs input
+injection and other monitor requests. `omkamra.vice.capture/connection` returns
+the capture's own live connection (`nil` before it connects or after it stops).
+The capture keeps ownership: callers send `binary-monitor` requests and
+`resume!`, but must not `close!` it; `capture/stop!` closes it.

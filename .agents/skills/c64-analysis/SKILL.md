@@ -1,260 +1,182 @@
 ---
 name: c64-analysis
-description: "Analyse a finalized omkamra.vice capture artifact: build the pipeline, inspect execution and hardware traces, and reconstruct C64 demo parts from code, memory, timing, audio, and screenshots."
-compatibility: "Requires a finalized dataset root containing capture/ and the project's live Clojure nREPL."
+description: "Build and inspect omkamra.vice analysis images from a finalized C64 capture."
+compatibility: "Requires a finalized dataset root containing capture/ and the project nREPL. VICE is not needed."
 ---
 
 # C64 analysis
 
-`ds` below is the dataset root containing `capture/`, not `capture/` itself and
-not a directory containing several datasets. The reader validates the
-finalized manifest, artifacts, and checksums; do not analyze an active capture.
+`ds` is the dataset root containing `capture/`, not the `capture/` directory.
+The reader validates the finalized manifest, artifact sizes, and checksums.
+Analysis never modifies the raw capture. Evaluate examples through the project
+nREPL with `clojure_eval`; after source edits, use the `clj-reload` skill.
 
-## 1. Build the analysis images
+## Build stages
 
 ```clojure
 (require '[omkamra.vice.pipeline :as pipeline])
 
-(pipeline/build! ds :disassembly)
-;; builds :dedupe; :features and :audio; :classification; :segments;
-;; then :disassembly
-
-(pipeline/build! ds :all)                       ; includes :video and :assets
+(def result (pipeline/build! ds :disassembly))
+(pipeline/build! ds :all)
 (pipeline/build! ds :disassembly {:force #{:dedupe}})
 ```
 
 Targets are `:dedupe`, `:video`, `:assets`, `:audio`, `:features`,
-`:classification`, `:segments`, `:disassembly`, `:report`, a collection of
-targets, or `:all`. Builds are signature-based and reuse committed generations;
-`:force` rebuilds a stage and causes requested downstream stages to rebuild.
-Independent stages are built concurrently by default. Use `{:stage-parallelism n}` on a
-memory-constrained host.
+`:classification`, `:segments`, `:disassembly`, `:report`, a sequential
+collection of those keywords, or `:all`. `pipeline/build!` returns opened
+images for the required dependency closure in `:images`, plus `:built` and
+`:reused` lists. Independent stages run concurrently by default; use
+`{:stage-parallelism n}` to limit that. `:configuration` maps stage ids to
+stage options. `:force` rebuilds selected stages and any requested dependents.
+Reuse checks stage version, configuration, capture checksum, upstream
+signatures, and the exact upstream generations previously consumed.
 
-To inspect committed stage pointers:
+The capture is an implicit input to every stage signature. Stage-to-stage
+dependencies are:
+
+- `:audio` and `:features` depend on `:dedupe`;
+- `:classification` depends on both `:audio` and `:features`;
+- `:segments` depends on `:classification` and `:features`;
+- `:disassembly` depends on `:segments` and `:dedupe`;
+- `:report` depends on `:segments` and `:disassembly`;
+- `:assets` depends on `:video`; this branch is otherwise independent.
+
+To inspect committed pointers, use:
 
 ```clojure
-(omkamra.vice.analysis/read-manifest ds)
+(require '[omkamra.vice.analysis :as analysis])
+(analysis/read-manifest ds)
 ```
 
-## 2. Read the disassembly and report
+## Read the execution structure
 
 ```clojure
-(require '[omkamra.vice.disassembly :as disassembly])
-(def asm (disassembly/open ds))
-(:files asm) (:roles asm)
-(disassembly/read-file asm "roles/raster.asm")
+(require '[omkamra.vice.dedupe :as dedupe]
+         '[omkamra.vice.segments :as segments]
+         '[omkamra.vice.features :as features])
 
-(pipeline/build! ds :report)
-(require '[omkamra.vice.report :as report])
-(report/html (report/open ds))
-```
-
-Disassembly files are generated from executed, deduplicated blocks:
-
-- `segments/segment-NNN.asm` and `.clj` are per-semantic-segment views;
-- `roles/*.asm` are filtered views for `:raster`, `:music`, `:loader`, and
-  `:decruncher` by default;
-- the listing annotates block/context, predecessors, successors, execution
-  counts, and repeats, and adds C64 register comments.
-
-Executed blocks are not a complete static disassembly. Use a RAM image to
-inspect code or data that never executed.
-
-## 3. Establish the execution structure
-
-```clojure
-(require '[omkamra.vice.segments :as segments])
-(mapv #(select-keys % [:segment-id :kind :event-range :roles
-                       :handler-contexts :phases])
-      (segments/segments (segments/open ds)))
-```
-
-The pipeline distinguishes:
-
-- `:demopart`: a stable set of program IRQ handlers and/or visible raster work;
-- `:transition`: regions without those display handlers; it may contain loader
-  or decruncher evidence;
-- roles (`:raster`, `:music`, `:loader`, `:decruncher`, `:idle`) as evidence,
-  not necessarily part boundaries;
-- `:phases` as role intervals within a segment.
-
-For lower-level context information:
-
-```clojure
-(require '[omkamra.vice.dedupe :as dedupe])
-(def trace (dedupe/open ds))
-(dedupe/system-contexts trace) ; stock KERNAL IRQ/NMI/BRK contexts
+(def trace (dedupe/open! ds))
+(dedupe/system-contexts trace)
 (dedupe/read-context trace context-id)
-```
+(dedupe/read-range trace start end) ; half-open global event range
 
-Context id 0 is the initial main context. Interrupt contexts carry a handler
-address and retain their observed `:kind` (`:irq`, `:nmi`, or `:brk`), even
-when a long-lived interrupt frame is later marked `:effective-level :mainline`.
-A demo whose mainline is a self-loop may put nearly all useful work in IRQs,
-but verify this from the trace.
-
-`features` exposes logical execution units and write-to-execute handoffs:
-
-```clojure
-(require '[omkamra.vice.features :as features])
-(def fs (features/open ds))
-(features/reduce-units fs rf init) ; streaming; preferred for large captures
-(features/units fs)                ; eager convenience
+(def fs (features/open! ds))
+(features/reduce-units fs rf init)   ; streaming, preferred for large captures
 (features/handoffs fs)
+
+(def ss (segments/open! ds))
+(segments/segments ss)
+(segments/file-groups ss)
+(segments/audit ss)
 ```
 
-## 4. Reconstruct a frame or routine
+`dedupe` is a structural execution image: blocks, contexts, dynamic frames,
+occurrences, timing, and CPU-port changes. Its context ids include the initial
+main context and interrupt contexts; stock KERNAL contexts are exposed by
+`system-contexts` and are not automatically program behavior.
 
-Read deduplicated occurrences over a global event range and map block ids back
-to the disassembly:
+Segments classify ranges as `:demopart` or `:transition` and attach evidence
+roles such as `:raster`, `:music`, `:loader`, `:decruncher`, and `:idle`. Roles
+are evidence, not proof of a part boundary. `features` exposes behavioral units
+and write-to-execute handoffs; `classification` exposes role-tagged spans.
 
-```clojure
-(def r (dedupe/read-range trace start end))
-;; :occurrences, :port-timeline, :context-switches, :levelings
-;; occurrence: :frame-id :context-id :block-id :context-kind
-;;             :effective-level :fragments :start-cycle :end-cycle
-```
-
-Group occurrences by execution frame/context, then run-length encode
-consecutive equal block ids to reveal straight-line loops, waits, and effect
-order. If a loop alternates blocks, identify the repeating block sequence
-instead of only collapsing adjacent duplicates. `dedupe/scan-occurrences` is
-the allocation-free alternative.
-
-## 5. Measure hardware timing
+## Inspect timing, memory, and devices
 
 ```clojure
 (require '[omkamra.vice.reader :as reader])
-(def cap (reader/open ds))
-(def writes (reader/read-writes cap [start end]))
-;; :event-index :pc :address :value :kind :domain
-;; :canonical-address :register :global-cycle :raster-line :cpu-cycle
-```
+(def cap (reader/open! ds))
 
-Filter by `:domain` (`:vic`, `:sid`, `:cia1`, `:cia2`, `:color-ram`, `:ram`,
-`:cpu-port`, or generic `:io`) and collapse repeated `[pc address value]` writes
-when summarizing initialization. For raster effects, measure `$D011`, `$D016`, `$D021`, and
-`$D020` writes by `:raster-line`; do not infer timing from a single screenshot.
-Use `reader/scan-vic-writes` and `reader/scan-sid-writes` for filtered scans.
-
-For instruction-level data, `reader/read-events`/`reader/scan-events` provide decoded
-maps, while `reader/reduce-events` provides a reusable primitive buffer for
-large scans. Self-modifying operands can appear as `??` in disassembly; find
-the write to that operand address, then inspect the executed event's actual
-`:instruction-bytes` and registers.
-
-## 6. Inspect memory and replay state
-
-Each capture chunk contains a 64 KiB underlying RAM image (`.ram`) and a 64 KiB
-CPU-visible image (`.mem`). Colour RAM is separate and is available in the
-canonical snapshot. Useful snapshot fields are `:cpu`, `:timing`, `:registers`
-(`:vic`, `:sid`, `:cia1`, `:cia2`), `:cpu-port`, `:color-ram`, and `:semantics`.
-
-```clojure
+(reader/read-events cap [start end])
+(reader/read-writes cap [start end])
 (reader/boundary-snapshots cap)
-(reader/boundary-snapshot cap event-index) ; event-index must be a chunk start
 (reader/replay-state cap event-index)
 ```
 
-Replay reconstructs RAM, colour RAM, CPU-port state, and device write shadows
-from a boundary. It does not model every opaque hardware side effect; consult
-`:capabilities` in the result. `reader/scan-replay-states` and
-`reader/replay-states` avoid replaying the same prefix repeatedly.
+Ranges are half-open. `(reader/boundary-snapshot cap event-index)` requires the
+first event index of a committed raw chunk. `read-writes` infers logical CPU
+mutations and includes `:domain`, `:canonical-address`, `:register`, and timing
+fields; use `scan-vic-writes`/`scan-sid-writes` for filtered scans. The reader
+also offers
+streaming `reduce-events`, `event-pairs`, `scan-writes`, and replay-state scans.
 
-For display assets, build and open `:video` and `:assets`:
+Each chunk stores underlying RAM (`.ram`) and CPU-visible memory (`.mem`).
+`boundary-snapshot` returns canonical CPU/device registers, CPU-port state,
+colour RAM, and timing. `replay-state` returns the reconstructed state
+immediately before its event index: underlying RAM, colour RAM, CPU-port bytes,
+device write shadows, and explicit `:capabilities`. It does not model opaque
+VICE state such as SID phase or unexposed DMA. Trust
+write traces for write-only or opaque device effects.
+
+## Video, assets, audio, and screenshots
 
 ```clojure
-(require '[omkamra.vice.assets :as assets]
-         '[omkamra.vice.video :as video])
-(def vi (video/open ds))
+(require '[omkamra.vice.video :as video]
+         '[omkamra.vice.assets :as assets]
+         '[omkamra.vice.audio :as audio])
+
+(def vi (video/open! ds))
 (video/frames vi)
 (video/configurations vi)
 (video/expand-frame vi frame)
-(def ai (assets/open ds))
+
+(def ai (assets/open! ds))
 (assets/snapshots ai)
 (assets/snapshot-ram ai snapshot-id)
 (assets/snapshot-color-ram ai snapshot-id)
+
+(def au (audio/open! ds))
+(audio/music-candidates au)
 ```
 
-Assets snapshots cover the initial VIC layout and each layout change. Their
-payload is exact underlying RAM followed by 1 KiB colour RAM. Start with a
-region map: identify non-zero pages and code/data boundaries,
-then extract tables between them. Fit suspected motion tables (for example a
-sine) and check residuals rather than transcribing bytes blindly.
+`:video` derives ordered VIC-write patterns grouped by raster wraps and records
+effective layout changes. A capture's VIC value blacklist preserves write
+order/timing but appears from `expand-frame` as `:value nil` and
+`:value-known? false`. `:assets` snapshots exact underlying RAM plus 1 KiB
+colour RAM at layout changes. `:audio` reports SID evidence and music
+candidates, not a definitive music format or authorship.
 
-## 7. Decode common C64 structures
-
-- Screen matrix row: `screen-base + 40*row`; colour row: `$D800 + 40*row`.
-- Screen codes are not ASCII. For common PETSCII screen text, `$01–$1A` are
-  `A–Z`, `$20` is space, `$30–$39` digits, `$2E` `.`, `$3A` `:`, and `$27` `'`.
-- A charset is 2 KiB; if all used screen codes are ≤63, the first 512 bytes may
-  be sufficient.
-- A multicolour sprite is 63 bytes, three per line; pairs `00` are transparent,
-  `01`/`11` select `$D025`/`$D026`, and `10` selects the sprite colour. X-expanded
-  pixels are doubled.
-- Sprite data pointers are the last eight bytes of the VIC screen matrix
-  (`screen-base + $3F8`), not `$D027–$D02E` (sprite colours).
-- `$D020`/`$D021` streams often encode rasterbars; values are C64 palette
-  indices. `$D016` writes can be the horizontal-scroll part of a scroller.
-- SID writes at `$D400+` identify audio activity. A music routine may be a small
-  VM consuming its own bytecode; use the `:audio` stage's candidate blocks and
-  contexts as evidence, not as proof of a particular music format.
-
-## 8. Compare against screenshots
+Raw screenshots are full VICE debug frames, including the border. Use recorded
+`:width`, `:height`, `:x-offset`, `:y-offset`, `:inner-width`, and
+`:inner-height` rather than assuming a fixed PAL geometry:
 
 ```clojure
 (reader/chunk-screenshots cap)
-(reader/screenshot-file cap (first (:chunks cap))) ; expects a chunk entry
+(reader/screenshot-file cap (first (:chunks cap)))
 ```
 
-A screenshot is the full VICE debug frame, including the border. Current PAL
-VICE returns 504×312 with a 320×200 inner area at `(136, 51)`, but crop using
-the recorded geometry rather than assuming it. Classify pixels by palette
-colour per raster line to
-measure bars, sprites, gradients, and splits. The image is captured at a chunk
-boundary, so verify moving-object coordinates against the corresponding trace
-writes.
+A chunk screenshot belongs to that chunk's starting boundary. Chunk boundaries
+are storage boundaries, not video-frame or dedupe-frame boundaries. Compare
+nearby screenshots with measured VIC writes when a raster split or moving
+object looks partial.
 
-## 9. Record and verify findings
+## Disassembly and report
 
-Keep a short analysis beside the example or dataset: memory map, boot chain,
-per-frame timeline with measured raster lines, tables/assets, traps, and a
-reimplementation plan. Mark observations separately from inferences. Verify
-reimplemented code by comparing assembled bytes with RAM and comparing several
-boundary screenshots—not just one.
+```clojure
+(require '[omkamra.vice.disassembly :as disassembly]
+         '[omkamra.vice.report :as report])
 
-Run checks through the project nREPL rather than a fresh JVM. After changing
-Clojure source, use the `clj-reload` skill before evaluating it.
+(def asm (disassembly/open! ds))
+(disassembly/segments asm)
+(disassembly/role-files asm)
+(disassembly/read-file asm "roles/raster.asm")
 
-## API quick reference
+(def rp (report/open! ds))
+(report/html-file rp)
+(report/html rp)
+```
 
-| area | useful entry points |
-|---|---|
-| capture reader | `open`, `read-events`, `reduce-events`, `event-pairs`, `read-writes`, `scan-writes`, `scan-accesses`, `scan-vic-writes`, `scan-sid-writes`, `boundary-snapshot`, `replay-state`, `chunk-screenshots` |
-| dedupe | `open`, `read-range`, `read-block`, `read-context`, `scan-occurrences`, `system-contexts`, `port-at` |
-| features/classification | `features/open`, `units`, `handoffs`; `classification/open`, `spans` |
-| segments/disassembly | `segments/open`, `segments`, `file-groups`, `audit`; `disassembly/open`, `read-file` |
-| projections | `video/open`, `frames`, `expand-frame`, `vic-writes`; `assets/open`, `snapshots`, `read-payload`; `audio/open`, `evidence`, `music-candidates` |
-| pipeline/report | `pipeline/build!`; `analysis/read-manifest`; `report/open`, `html`, `html-file` |
+Disassembly is generated from executed, deduplicated blocks, not a complete
+static disassembly. Use RAM/assets to investigate code or data that never ran.
+An operand rendered as `??` varied between executions; inspect raw event bytes
+and the write history when its value matters. The report is one HTML overview
+with relative links to generated assembly and selected boundary screenshots;
+those linked artifacts remain in the dataset.
 
-## Traps
+## Investigation rules
 
-- Chunk boundaries are not frame boundaries. Dedupe frame ids are dynamic
-  execution frames: frame 0 starts the main context, interrupt entries get new
-  ids, and a long-lived interrupt frame may later have `:effective-level
-  :mainline`. Raw chunks are storage partitions and may cut across frames.
-- Device mirrors are canonicalized, so inspect `:canonical-address`/`:register`
-  rather than treating `$D0xx` mirrors as separate registers.
-- The capture's VIC value blacklist can preserve write order and timing while
-  omitting values. Required layout registers (`$D011`, `$D016`, `$D018`,
-  `$DD00`) are protected; use the trace for omitted or write-only values.
-- `dedupe/read-block` instruction records contain `:opcode`, `:width`, operand
-  `:template`, and `:volatile-mask`; `:template` is operand bytes, not a full
-  instruction byte sequence.
-- Snapshot device registers have the semantics recorded in `:semantics`, but
-  write-only or opaque device state is not generally recoverable from a read.
-  Trust the write trace when reconstructing it.
-- `:ram` is underlying RAM; `:mem` is CPU-visible memory. Colour RAM is neither.
-- Program-only captures begin at the program entry path. If initialization is
-  missing, inspect the `:transition` segment and the first segment before
-  assuming it was not traced.
+Separate observations from inferences. For raster work, measure register
+writes (especially `$D011`, `$D016`, `$D020`, and `$D021`) by raster line rather
+than inferring timing from one screenshot. For memory reconstruction, inspect
+screen/charset/sprite pointers and compare several boundary states. Keep a
+short record of the memory map, boot/transition path, per-frame evidence, and
+verification results.

@@ -1,129 +1,122 @@
 ---
 name: c64-capture
-description: "Capture a C64 executable or running VICE instance with omkamra.vice.capture, monitor it, inject input, and finalize a capture artifact for later analysis."
-compatibility: "Requires x64sc (or another compatible VICE executable), the project's live Clojure nREPL, and input paths visible to that process."
+description: "Capture a C64 program or running VICE instance with omkamra.vice.capture and produce a finalized dataset for analysis."
+compatibility: "Requires the project nREPL, a compatible VICE executable such as x64sc, and paths visible to the Clojure process."
 ---
 
 # C64 capture
 
-Record a finalized, chunked VICE execution trace. Use `c64-analysis` only after
-this capture has been finalized.
+A capture is an immutable, chunked execution trace. Analyze it only after it
+has been finalized.
 
-## Before starting
+## Before capture
 
 - Start the project nREPL with `clojure_start_dev`; do not start a second one.
-- Use an existing `.prg` or `.d64`, a linked `:artifact`, or a running VICE
-  `:instance`. Paths must be visible to the Clojure process.
-- Use a new dataset root. A finalized `dataset-root/capture/` is never replaced;
-  an unfinished capture may be removed and retried.
-- Ensure `x64sc` is on `PATH`, or pass `:executable`.
-
-## Start a capture
+- Use a dataset root with no finalized `capture/`. A leftover unfinished
+  capture is removed; a finalized capture is never overwritten. The root later
+  also owns `analysis/`.
+- Provide exactly one source: an existing `.prg`/`.d64`, an in-memory
+  `:artifact`, or a running `:instance` returned by `omkamra.vice/start!`. A
+  full capture may omit its source.
+- Ensure `x64sc` is on `PATH`, or set `:executable`.
 
 ```clojure
 (require '[omkamra.vice.capture :as capture])
 
-(def session
-  (capture/start!
+(def instance
+  (capture/capture!
    {:input "/workspace/input/demo.prg"
     :dataset-root "/workspace/captures/demo"
     :capture-id "demo"}))
 ```
 
-Useful options include:
+`capture!` returns immediately with the VICE instance descriptor. The worker
+starts in `:starting` and then progresses to `:running`; inspect it with
+`capture/status`.
 
-- `:events-per-chunk` — approximate events per raw chunk (default `100000`);
-- `:max-events` — exact event cap; stops and finalizes automatically;
-- `:from-pc` — 16-bit start address;
-- `:full-capture?` — capture a fresh boot, optionally autostarting `:input`;
-- `:instance` — attach to a running descriptor from `omkamra.vice/start!` or
-  `omkamra.vice/run!`; the instance remains running afterward;
-- `:executable`, `:address`, `:port`, `:extra-args`, `:speed`,
-  `:run-after-load?`, `:program-start-timeout-ms`, `:connect-timeout-ms`,
-  `:record-queue-capacity`, `:timing-model`, and `:vic-value-blacklist`.
+## Start policies
 
-Capture modes:
+- **Input (default):** autostart the PRG or D64 (file index 0), stop at BASIC
+  RUN `$E144`, then gate capture on the first BASIC `SYS` target. `:from-pc`
+  replaces the SYS-target gate, but not the BASIC RUN stop. If no SYS target is
+  found, the initial boundary remains at `$E144`.
+- **Artifact:** accept an assembler object or linked artifact, link an object
+  with `:link-options`, write a temporary self-relocating PRG, and gate on its
+  entry point unless `:from-pc` is supplied.
+- **Full capture:** `:full-capture? true` starts a fresh VICE and records from
+  the reset vector (normally `$FCE2`), or from `:from-pc`. Tracing is armed
+  before an optional `:input` is autostarted; without an input, the machine
+  simply continues through boot. It cannot be combined with `:instance` or
+  `:artifact`.
+- **Running instance:** record from the current CPU position, or gate on
+  `:from-pc`.
 
-- **Input (default):** autostarts the PRG/D64, waits at BASIC RUN `$E144`, then
-  begins at the PRG's first BASIC `SYS` target, or remains at `$E144` when no
-  target is found. `:from-pc` replaces that follow-up target wait; the `$E144`
-  wait still occurs. A D64 uses file index 0.
-- **Full capture:** powers on a fresh VICE and starts at the reset vector
-  (normally `$FCE2`), or at `:from-pc`. Without `:input` this records boot only;
-  with one, it is autostarted after boot. It cannot be combined with `:instance`.
-- **Running instance:** records from the current position, or waits for
-  `:from-pc` if supplied.
-- **Artifact:** `capture/start!` accepts `:artifact` instead of `:input`; the
-  artifact is written as a temporary PRG and captured from its entry point.
+An execute checkpoint establishes the initial snapshot at a gated address, but
+VICE consumes that checkpoint before capture arms its tracepoint. The first
+recorded event can therefore be the following instruction. The default full
+boot path resets again with tracing armed and does record the reset-vector
+instruction.
 
-Do not use `:warp? true` for cycle- or sound-sensitive programs. The option is
-supported, but normal speed is the reliable capture mode.
+Useful options are `:events-per-chunk` (approximate target, default `100000`),
+`:max-events` (exact total cap), `:from-pc`, `:full-capture?`, `:link-options`,
+`:executable`, `:address`, `:port`, `:extra-args`, `:speed`, `:warp?`,
+`:run-after-load?`, timeout values, `:record-queue-capacity`, `:timing-model`,
+and `:vic-value-blacklist`.
+Avoid `:warp? true` for cycle- or sound-sensitive programs.
 
-## Monitor and finish
+## Monitor, input, and shutdown
 
 ```clojure
-(capture/status session)
-;; :status, :event-count, :chunk-count, :capture-directory, :queue-depth, :metrics
+(capture/status instance)
+;; includes :status, :event-count, :chunk-count, :capture-directory,
+;; :queue-depth, :metrics
 
-(def result (capture/stop! session))
+(def result (capture/stop! instance))
 (select-keys result [:status :capture-directory :chunk-count :event-count])
 ```
 
-Let a live session run until the behaviour of interest is covered; do not stop
-solely because it has been idle or has reached an arbitrary elapsed-time or
-chunk-count threshold. `:max-events` is the exception when a deterministic cap
-is desired. Always stop live sessions, including error cleanup; use
-`(capture/live-sessions)` to find sessions left by this process.
+`stop!` blocks, commits the non-empty final chunk, and finalizes
+`capture/manifest.edn`; `stop-async!` only requests that shutdown. `:max-events`
+stops automatically. After an automatically completed session releases the
+descriptor, `status` and `stop!` return nil; the finalized dataset remains the
+authoritative result. A failed capture is aborted and its capture directory is
+removed; never analyze a `:capturing` manifest. Stop live sessions during
+cleanup; `capture/live-sessions` lists sessions currently registered by this
+process.
 
-`stop!` finalizes `capture/manifest.edn` and reports `:status :stopped`.
-Failures abort and remove the capture directory. Never analyze a `:capturing`
-manifest.
+A capture-created VICE process is terminated during cleanup. After capture of
+a caller-supplied `:instance`, that process is resumed and left running.
 
-## Screenshots
-
-Every committed chunk includes `chunks/chunk-NNNNNN.png`, the full VICE debug
-frame at its boundary, plus geometry in the chunk metadata. Current PAL VICE
-returns 504×312 with a 320×200 inner area at `(136, 51)`, but consumers should
-still use the recorded `:width`, `:height`, `:x-offset`, `:y-offset`,
-`:inner-width`, and `:inner-height`. Screenshots are views, not replayable
-state; use the RAM/memory snapshot for state. Raster splits can make a boundary
-image look partial, so compare nearby chunks.
-
-## Inject input
-
-Find the wait in the trace first: KERNAL keyboard input (`$C6`, commonly a
-`GETIN`/`CHRIN` path), joystick reads at `$DC00`/`$DC01`, or a flag polled by an
-IRQ. Monitor requests leave VICE paused, so finish with `bm/resume`:
+A running capture owns the monitor connection. Wait until `capture/status`
+reports `:monitor :connected` (or `:status :running`) before obtaining it:
 
 ```clojure
 (require '[omkamra.vice.binary-monitor :as bm])
-(def conn @(:conn session))
+(def conn (capture/connection instance))
 
-(bm/keyboard-feed conn {:text " "}) ; literal bytes: space
-(bm/resume conn)
+(bm/keyboard-feed! conn {:text " "})
+(bm/resume! conn)                    ; monitor requests pause VICE
 ```
 
-`keyboard-feed` fills the KERNAL buffer; RETURN is `(char 13)`. It does not
-emulate arbitrary key-matrix reads. For joystick input, enable VICE's Joyport
-I/O simulation device 37 (for example, at startup with
-`["-controlport1device" "37" "-controlport2device" "37"]`, or live by setting
-the matching `JoyPort1Device`/`JoyPort2Device` resource to 37) and set
-active-low values,
-for example:
+Do not close `conn`; `capture/stop!` closes it. Keyboard feed populates the
+KERNAL keyboard buffer and does not emulate arbitrary key-matrix reads. For
+joystick input, enable VICE's Joyport I/O simulation device 37—for example with
+`:extra-args ["-controlport1device" "37" "-controlport2device" "37"]`—then
+use active-low values:
 
 ```clojure
-(bm/joyport-set conn {:port 1 :value 0x0f}) ; control port 2: fire pressed
-(bm/resume conn)
+(bm/joyport-set! conn {:port 1 :value 0x0f}) ; C64 port 2, fire pressed
+(bm/resume! conn)
 ```
 
-Port 1 is C64 control port 2 (`$DC00`); port 0 is control port 1 (`$DC01`),
-which shares the keyboard rows. Bits 0–3 are directions and bit 4 is fire,
-all active low: `0x0f` presses only fire and `0x1f` releases everything.
-Release or restore the device after use. If the capture appears stalled while
-status is `:running`, a monitor request probably left VICE paused; send
-`bm/resume`.
+Port 1 is C64 control port 2 (`$DC00`); port 0 is control port 1
+(`$DC01`). Bits 0–3 are directions and bit 4 is fire. `0x1f` releases all
+buttons. Restore the device after testing.
+
+Each committed chunk also has a full VICE debug-frame PNG and recorded geometry
+for cropping. It is a view at the chunk's starting boundary, not replayable
+machine state; use the snapshot/RAM artifacts for state.
 
 ## Next
 
-Analyze the finalized dataset root (the directory containing `capture/`) with
-`c64-analysis`.
+Pass the dataset root—the directory containing `capture/`—to `c64-analysis`.

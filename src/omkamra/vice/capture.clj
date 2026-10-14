@@ -828,6 +828,19 @@
        (sort-by :session-id)
        vec))
 
+(defn connection
+  "The live binary-monitor connection of an active capture, or nil before the
+  capture has connected or after it has stopped.
+
+  The capture owns this connection while it runs; monitor requests are sent
+  with the usual `omkamra.vice.binary-monitor` functions (for example
+  `keyboard-feed!`, `joyport-set!`), and monitor requests leave VICE paused, so
+  finish with `omkamra.vice.binary-monitor/resume!`. Do not close the
+  connection yourself: finish the capture with `stop!` (or `stop-async!`),
+  which closes it."
+  [descriptor]
+  (some-> (capture-session descriptor) :conn deref))
+
 (defn stop-async!
   "Request capture shutdown without waiting.
 
