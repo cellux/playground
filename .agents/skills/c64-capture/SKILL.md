@@ -1,420 +1,129 @@
 ---
 name: c64-capture
-description: Capture a C64 executable from a PRG or D64 with VICE, run the analysis pipeline, and inspect or export the final annotated disassembly.
-compatibility: Requires a working x64sc VICE executable, an accessible .prg or .d64 input, and the project's live Clojure nREPL.
+description: Capture a C64 executable or running VICE instance with omkamra.vice.capture, monitor it, inject input, and finalize a capture artifact for later analysis.
+compatibility: Requires x64sc (or another compatible VICE executable), the project's live Clojure nREPL, and input paths visible to that process.
 ---
 
-# C64 capture, analysis, and disassembly
+# C64 capture
 
-Use this skill when a C64 executable must be captured and reconstructed from a
-`.prg` or `.d64` file. The workflow is:
+Record a finalized, chunked VICE execution trace. Use `c64-analysis` only after
+this capture has been finalized.
 
-1. start VICE through `omkamra.vice.capture`;
-2. let the executable run long enough to capture the behavior of interest;
-3. stop the session so the capture is finalized;
-4. run the dependency-aware analysis pipeline; and
-5. read the committed `.asm` artifacts from the `:disassembly` generation.
+## Before starting
 
-The capture is immutable after finalization. Analysis never needs VICE and
-writes immutable generations below the dataset's `analysis/` directory. Once
-started, leave the capture running until the user explicitly requests that it
-be stopped; do not infer a stop point from elapsed time, event count, or an
-apparently idle program.
+- Start the project nREPL with `clojure_start_dev`; do not start a second one.
+- Use an existing `.prg` or `.d64`, a linked `:artifact`, or a running VICE
+  `:instance`. Paths must be visible to the Clojure process.
+- Use a new dataset root. A finalized `dataset-root/capture/` is never replaced;
+  an unfinished capture may be removed and retried.
+- Ensure `x64sc` is on `PATH`, or pass `:executable`.
 
-## Preconditions
-
-- The input must be an existing `.prg` or `.d64` file.
-- `x64sc` must be on `PATH`, or its full path must be supplied as
-  `:executable`.
-- The input path and dataset path must be visible to the Clojure process. In a
-  sandbox, mount an external input read-only before starting the development
-  nREPL if necessary.
-- Use a fresh dataset root for each capture. A finalized `capture/` directory
-  is never overwritten.
-
-Start the project development nREPL with the project's normal `:dev` alias
-(using `clojure_start_dev` when operating through pi). Then use
-`clojure_eval` for the forms below. Do not start a second development process
-if one is already running.
-
-## Create a capture
-
-Choose an input and a dataset root. The root will contain `capture/` and,
-later, `analysis/`:
+## Start a capture
 
 ```clojure
 (require '[omkamra.vice.capture :as capture])
 
-(def input "/workspace/input/my-program.prg")
-(def dataset-root "/workspace/captures/my-program")
-
 (def session
   (capture/start!
-   {:input input
-    :dataset-root dataset-root
-    :capture-id "my-program"}))
+   {:input "/workspace/input/demo.prg"
+    :dataset-root "/workspace/captures/demo"
+    :capture-id "demo"}))
 ```
 
-The adapter starts `x64sc` with its binary monitor and a dummy sound device,
-connects to it, autostarts the supplied image, and records the continuous
-execute trace. The default capture mode is **program-only**: it skips the C64
-boot/loading trace and starts at the program start checkpoint. For a BASIC
-`SYS` stub, it follows the first `SYS` target so the capture normally begins at
-the machine-language entry point.
+Useful options include:
 
-Useful optional capture settings are:
+- `:events-per-chunk` — approximate events per raw chunk (default `100000`);
+- `:max-events` — exact event cap; stops and finalizes automatically;
+- `:from-pc` — 16-bit start address;
+- `:full-capture?` — capture a fresh boot, optionally autostarting `:input`;
+- `:instance` — attach to a running descriptor from `omkamra.vice/start!` or
+  `omkamra.vice/run!`; the instance remains running afterward;
+- `:executable`, `:address`, `:port`, `:extra-args`, `:speed`,
+  `:run-after-load?`, `:program-start-timeout-ms`, `:connect-timeout-ms`,
+  `:record-queue-capacity`, `:timing-model`, and `:vic-value-blacklist`.
 
-```clojure
-(def session
-  (capture/start!
-   {:input input
-    :dataset-root dataset-root
-    :capture-id "my-program"
-    :executable "/opt/vice/bin/x64sc"
-    :event-target 100000       ; approximate events per raw chunk
-    :program-start-timeout-ms 60000
-    :record-queue-capacity 65536
-    :extra-args ["-sounddev" "dummy"]}))
-```
+Capture modes:
 
-**Do not enable warp mode (`:warp? true`).** The option is accepted, but VICE's
-`-warp` is not merely a speed-up: with VICE's default warp handling the sound
-chips are not emulated (`-soundwarpmode 0`), so a capture taken under warp is
-not guaranteed to reproduce what a normal-speed run does. Programs that pace
-themselves against SID behavior or other cycle-exact side effects can diverge
-or stall. Capture at normal speed and accept the longer wall-clock
-time; `:warp?` is retained only for throwaway experiments that do not need
-faithful behavior.
+- **Input (default):** autostarts the PRG/D64, waits at BASIC RUN `$E144`, then
+  begins at the PRG's first BASIC `SYS` target, or remains at `$E144` when no
+  target is found. `:from-pc` replaces that follow-up target wait; the `$E144`
+  wait still occurs. A D64 uses file index 0.
+- **Full capture:** powers on a fresh VICE and starts at the reset vector
+  (normally `$FCE2`), or at `:from-pc`. Without `:input` this records boot only;
+  with one, it is autostarted after boot. It cannot be combined with `:instance`.
+- **Running instance:** records from the current position, or waits for
+  `:from-pc` if supplied.
+- **Artifact:** `capture/start!` accepts `:artifact` instead of `:input`; the
+  artifact is written as a temporary PRG and captured from its entry point.
 
-`:event-target` affects raw chunking only; it does not stop the capture or
-change the logical event coordinate. Chunk sizes may overshoot the target.
-The default event target and queue capacity are normally adequate. Reduce
-analysis `:stage-parallelism` later if memory is constrained.
+Do not use `:warp? true` for cycle- or sound-sensitive programs. The option is
+supported, but normal speed is the reliable capture mode.
 
-For a D64, VICE is asked to autostart file index `0`. A multi-program disk
-should therefore have the intended executable as its first/autostartable file;
-use a PRG when an exact file selection is needed. Programs that require
-special VICE command-line options can pass them through `:extra-args`.
-
-### Full-capture mode (do not use)
-
-`:full-capture? true` starts recording before autostart, so the trace opens in
-KERNAL/BASIC boot code, the program entry point is never pinned, and the
-capture spends its budget on boot and loader code. Many programs then never
-reach the demo at all and stay in the KERNAL IEC wait loop. Program-only mode
-already covers the autostart path through to the machine-code entry point,
-including anything the program loads at runtime, which is what analysis needs.
-The setting exists for completeness; do not enable it. The example below is
-kept only to document what the option does:
-
-```clojure
-(def session
-  (capture/start!
-   {:input input
-    :dataset-root dataset-root
-    :capture-id "my-program-full"
-    :full-capture? true}))
-```
-
-`:run-after-load? false` is only valid together with `:full-capture? true`, so
-it is not usable in the recommended program-only configuration.
-
-### Monitor progress and stop
-
-A capture runs continuously until the user explicitly requests that it be
-stopped. Do not stop automatically based on elapsed time, event count, chunk
-count, or apparent program idleness. Poll its lightweight status while the
-program is active:
+## Monitor and finish
 
 ```clojure
 (capture/status session)
-;; Includes :status, :event-count, :chunk-count, :capture-directory,
-;; :queue-depth, and :metrics.
+;; :status, :event-count, :chunk-count, :capture-directory, :queue-depth, :metrics
+
+(def result (capture/stop! session))
+(select-keys result [:status :capture-directory :chunk-count :event-count])
 ```
 
-Capture enough execution to cover the behavior of interest, then finalize it:
+Let a live session run until the behaviour of interest is covered; do not stop
+solely because it has been idle or has reached an arbitrary elapsed-time or
+chunk-count threshold. `:max-events` is the exception when a deterministic cap
+is desired. Always stop live sessions, including error cleanup; use
+`(capture/live-sessions)` to find sessions left by this process.
 
-```clojure
-(def capture-result (capture/stop! session))
+`stop!` finalizes `capture/manifest.edn` and reports `:status :stopped`.
+Failures abort and remove the capture directory. Never analyze a `:capturing`
+manifest.
 
-(select-keys capture-result
-             [:status :capture-directory :chunk-count :event-count :metrics])
-```
+## Screenshots
 
-Always stop a live session, including from cleanup code after an error. A
-successful result has `:status :stopped`; the capture manifest at
-`<dataset-root>/capture/manifest.edn` is then `:finalized`. A failed capture is
-aborted and its reserved capture directory is removed. If a session appears
-orphaned, inspect `(capture/live-sessions)` before starting another one.
+Every committed chunk includes `chunks/chunk-NNNNNN.png`, the full VICE debug
+frame at its boundary, plus geometry in the chunk metadata. Current PAL VICE
+returns 504×312 with a 320×200 inner area at `(136, 51)`, but consumers should
+still use the recorded `:width`, `:height`, `:x-offset`, `:y-offset`,
+`:inner-width`, and `:inner-height`. Screenshots are views, not replayable
+state; use the RAM/memory snapshot for state. Raster splits can make a boundary
+image look partial, so compare nearby chunks.
 
-Do not run analysis against an active or incomplete capture. The reader
-validates the finalized manifest, chunk artifacts, images, and checksums.
+## Inject input
 
-### Screenshots of every chunk
-
-Every committed chunk carries the VIC frame of its boundary instant as
-`chunks/chunk-NNNNNN.png`, next to its `.edn`, `.bin`, `.ram`, and `.mem`
-files. There is no option to disable it. The frame is read from the monitor
-while VICE is *already* paused for the boundary snapshot (`DISPLAY_GET` plus
-`PALETTE_GET`, two extra round trips, ~80 ms measured), and PNG encoding and
-the artifact write happen on their own thread during the chunk commit, so they
-never lengthen the pause. Nothing extra is needed to see them: list
-`<dataset-root>/capture/chunks/*.png` and step through the frames in order for
-a filmstrip of the run, one frame per ~0.3 s of demo time. They are ordinary
-image files, so an editor, an image viewer, or an image-capable read tool can
-open any of them directly.
-
-It is the **full VICE debug frame, border included** (504x312 on PAL), so
-border effects stay visible. The chunk metadata records the visible inner
-rectangle (`:x-offset`, `:y-offset`, `:inner-width`, `:inner-height`, here
-`(136, 51)` plus `320x200`) if a consumer needs to crop:
-
-```clojure
-(require '[omkamra.vice.reader :as reader])
-
-(def capture (reader/open dataset-root))
-(reader/chunk-screenshots capture)      ; one description per chunk
-(reader/chunk-screenshot capture entry) ; the entry from (:chunks capture)
-(reader/screenshot-file capture entry)  ; java.io.File of the PNG
-(reader/screenshot-bytes capture entry) ; raw PNG bytes
-```
-
-The screenshot is the fastest way to tell *what a program is waiting for*: a
-`READY.` prompt with a cursor means the program dropped to BASIC (often a
-failed loader), a "press space"/"turn disk" screen means input injection (see
-below), and a blank screen is usually `$D011.4 = 0` rather than a hang — check
-whether the chunk still executes code before concluding anything.
-
-Caveats: the screenshot is a *view*, not replayable state — use the boundary
-snapshot (`reader/boundary-snapshot`) for state, and the screenshot only to see
-what was displayed. Raster-split effects are recorded as whatever VICE had
-drawn at that instant, so such a frame can look partially drawn: compare
-several chunks before judging a part. `:screenshot-ms-total` and
-`:screenshot-ms-max` in `(capture/status session)` report the per-boundary
-cost.
-
-### Injecting input into a running capture
-
-Some programs stop and wait for input: a "press space" screen, a
-"press fire" screen, or the turn-disk prompt. When the user requests
-such an action, identify the wait from the trace first; the usual
-shapes are a KERNAL keyboard-buffer wait (`$E5CD`: `LDA $C6` / `BEQ`),
-a poll of `$DC00`/`$DC01`, or a spin on a flag that an IRQ handler
-never sets. Then inject through the capture's live monitor connection
-and **always finish with `bm/exit` (or `bm/resume`)**, because every
-monitor request leaves VICE paused:
+Find the wait in the trace first: KERNAL keyboard input (`$C6`, commonly a
+`GETIN`/`CHRIN` path), joystick reads at `$DC00`/`$DC01`, or a flag polled by an
+IRQ. Monitor requests leave VICE paused, so finish with `bm/resume`:
 
 ```clojure
 (require '[omkamra.vice.binary-monitor :as bm])
-(def conn @(:conn session))           ; the session's live connection
+(def conn @(:conn session))
 
-(bm/keyboard-feed conn {:text " "})   ; KERNAL keyboard buffer
-(bm/resume conn)                     ; required: requests leave VICE paused
+(bm/keyboard-feed conn {:text " "}) ; literal bytes: space
+(bm/resume conn)
 ```
 
-- **Keyboard (`bm/keyboard-feed`)** feeds raw bytes into the KERNAL keyboard
-  buffer (`$0277`, count `$C6`), so it works only when the program reads input
-  through the KERNAL (`GETIN`/`CHRIN`, the screen editor). The string is used
-  as-is: there is no keyname or escape parsing, so press space with a literal
-  `" "`, not `"SPACE"`, and RETURN as `(char 13)`. Verified on VICE 3.9:
-  feeding `PRINT "HI"` plus RETURN at the BASIC prompt echoes the line and
-  executes it. VICE queues the bytes and flushes at most one KERNAL buffer's
-  worth (10 on the C64) per frame, so longer strings trickle in.
-- **Joystick (`bm/joyport-set`)** presses directions and fire:
-  `(bm/joyport-set conn {:port 0 :value 0x0f})` presses fire on control port 1.
-  The port index is 0-based (`0` = control port 1 = `$DC01`, `1` = control
-  port 2 = `$DC00`). The value is active low: bits 0-3 are up/down/left/right,
-  bit 4 is fire, `0x1f` is everything released. The port must have the
-  **Joyport I/O simulation** device attached (device 37), either at startup
-  with `:extra-args ["-controlport1device" "37" "-controlport2device" "37"]`
-  or live with `(bm/resource-set conn {:name "JoyPort1Device" :value 37})`;
-  without that device the command succeeds but never reaches the machine.
-  Verify by reading `$DC00`/`$DC01` back: bits 0-4 track the value. Release
-  the joystick again afterwards. Control port 1's lines share `$DC01` with the
-  keyboard rows, so holding them low can look like stuck keys to the KERNAL
-  scan; prefer port 2 when the program reads the joystick from it.
-- **Key-matrix injection is not available.** The binary monitor has no command
-  for pressing individual matrix keys. When a program polls `$DC00`/`$DC01`
-  itself, the Joyport I/O simulation route above (if it reads the joystick) or
-  `bm/mem-set` on the flag the program polls are the only options, and the
-  latter is fragile.
-- **Never leave the emulator paused.** `capture/status` keeps reporting
-  `:running` while nothing is captured, so confirm that `:event-count` still
-  grows after any manual monitor traffic.
-
-## Run analysis
-
-The public orchestration API is `omkamra.vice.pipeline/build!`. It discovers
-dependencies, builds stages in dependency order, runs independent branches in
-parallel, commits generations transactionally, and reuses matching committed
-generations on later invocations.
+`keyboard-feed` fills the KERNAL buffer; RETURN is `(char 13)`. It does not
+emulate arbitrary key-matrix reads. For joystick input, enable VICE's Joyport
+I/O simulation device 37 (for example, at startup with
+`["-controlport1device" "37" "-controlport2device" "37"]`, or live by setting
+the matching `JoyPort1Device`/`JoyPort2Device` resource to 37) and set
+active-low values,
+for example:
 
 ```clojure
-(require '[omkamra.vice.pipeline :as pipeline])
-
-(def analysis-result
-  (pipeline/build!
-   dataset-root
-   :all
-   {:stage-parallelism 2}))
-
-(select-keys analysis-result [:built :reused])
+(bm/joyport-set conn {:port 1 :value 0x0f}) ; control port 2: fire pressed
+(bm/resume conn)
 ```
 
-`:all` builds the complete current graph:
+Port 1 is C64 control port 2 (`$DC00`); port 0 is control port 1 (`$DC01`),
+which shares the keyboard rows. Bits 0–3 are directions and bit 4 is fire,
+all active low: `0x0f` presses only fire and `0x1f` releases everything.
+Release or restore the device after use. If the capture appears stalled while
+status is `:running`, a monitor request probably left VICE paused; send
+`bm/resume`.
 
-```text
-capture -> dedupe
-        -> video -> assets
-        -> audio
-        -> features -> classification -> segments -> disassembly -> report
-```
+## Next
 
-The exact dependency closure for the final assembly is smaller. To build only
-the stages required for disassembly, use:
-
-```clojure
-(def disassembly-build
-  (pipeline/build! dataset-root :disassembly
-                   {:stage-parallelism 2}))
-```
-
-That target automatically builds or reuses `:dedupe`, `:features`, `:audio`,
-`:classification`, `:segments`, and `:disassembly`. `:video` and `:assets` are
-not required by the current disassembly closure, but use `:all` when their
-visual/asset projections are also wanted.
-
-Other valid targets include `:dedupe`, `:video`, `:assets`, `:audio`,
-`:features`, `:classification`, `:segments`, and `:report`; a collection of
-targets is also accepted. There is normally no need to call individual stage
-`build!` functions or pass upstream images by hand.
-
-A second invocation against the same finalized capture should mostly report
-`:reused`. To deliberately rebuild a stage and its affected downstream
-stages, pass `:force`:
-
-```clojure
-(pipeline/build! dataset-root :disassembly
-                 {:force #{:dedupe}
-                  :stage-parallelism 2})
-```
-
-The pipeline publishes all newly completed pointers in one manifest update.
-If a stage fails, previously committed generations remain usable and newly
-created unpublished generations are removed.
-
-## Read the final disassembly
-
-Open the committed output through the disassembly API:
-
-```clojure
-(require '[omkamra.vice.disassembly :as disassembly])
-
-(def asm (disassembly/open dataset-root))
-
-(select-keys asm [:directory :files :roles :segments])
-```
-
-The generation directory has this shape:
-
-```text
-<dataset-root>/analysis/disassembly/<generation>/
-  index.edn
-  segments/segment-000.asm
-  segments/segment-001.asm
-  roles/raster.asm
-  roles/music.asm
-  roles/loader.asm
-  roles/decruncher.asm
-```
-
-Only files for observed segments and roles are emitted. List the exact files
-from the checked index rather than guessing the generation name:
-
-```clojure
-(mapv :file (:files asm))
-(mapv :file (:roles asm))
-```
-
-Read an individual artifact:
-
-```clojure
-(disassembly/read-file asm "segments/segment-000.asm")
-(disassembly/read-file asm "roles/raster.asm")
-```
-
-Print every generated assembly file, suitable for redirecting from an nREPL
-client into a text file:
-
-```clojure
-(doseq [{:keys [file]} (:files asm)]
-  (println (str "\n===== " file " ====="))
-  (print (disassembly/read-file asm file)))
-```
-
-The `:directory` value is the absolute generation directory on disk, so the
-same artifacts can be opened directly by an editor or copied elsewhere. The
-segment files contain deduplicated blocks selected by semantic segment; role
-files contain the routine-oriented `:raster`, `:music`, `:loader`, and
-`:decruncher` views when those roles were observed. Volatile operand bytes are
-rendered as `??`, and each block has a compact context/control-flow annotation.
-
-## Read the report
-
-The `:report` stage turns a reconstruction into one HTML page: every semantic
-segment with its metadata, up to three screenshots, and links to its `.asm`
-file and the role files.
-
-```clojure
-(require '[omkamra.vice.pipeline :as pipeline]
-         '[omkamra.vice.report :as report])
-
-(pipeline/build! dataset-root :report {:stage-parallelism 2})
-
-(def report-image (report/open dataset-root))
-(:directory report-image)                    ; absolute generation directory
-(report/segments report-image)               ; one entry per segment
-(report/screenshots (first (report/segments report-image)))
-(report/html report-image)                   ; the page as a string
-```
-
-`<generation>/report.html` is a normal file, so it can also just be opened in a
-browser. Screenshots are chosen nearest to 25%, 50%, and 75% of each segment's
-span (`:configuration {:report {:screenshots-per-segment 3}}` overrides the
-count); a segment shorter than the chunk granularity shows fewer frames, and a
-frame that falls outside the segment is labelled as such. The page also lists
-the boundary audit's gap/overlap counts and the upstream generation
-directories.
-
-Everything in the page is a *relative* link — into `capture/chunks/` for
-screenshots and into the `:disassembly` generation for the `.asm` files — so the
-report stays small but only makes sense while the dataset and those generations
-stay together. A capture recorded before the screenshot feature has no PNGs, and
-the report then lists segments without images.
-
-## Troubleshooting
-
-- **Input rejected:** confirm the file exists and ends in `.prg` or `.d64`.
-- **VICE not found:** set `:executable` to the `x64sc` binary.
-- **VICE exits before capture:** check the VICE executable, its ROM/config
-  installation, and any values in `:extra-args`; capture setup errors are
-  returned by the session worker and `capture/stop!` rethrows them.
-- **No useful program trace:** stay in the default program-only mode for a PRG
-  or an autostartable D64, and verify the intended D64 file is index `0`.
-  `:full-capture? true` is not a remedy: it usually captures only boot and
-  loader code instead of the program.
-- **`:event-count` stops growing while `:status` is `:running`:** a monitor
-  request left VICE paused. Send `bm/resume` on the capture's connection; only
-  `EXIT`/`RESUME` restarts the emulator.
-- **The traced program stalls or diverges from a plain VICE run:** check that
-  the capture did not enable `:warp? true`, and repeat it at normal speed before
-  investigating the program itself.
-- **Analysis refuses the dataset:** ensure `capture/stop!` completed and that
-  `<dataset-root>/capture/manifest.edn` is finalized. Never point analysis at
-  a parent directory containing only an unfinished capture.
-- **Analysis is too memory-intensive:** lower `:stage-parallelism` (for
-  example to `1` or `2`) and rerun. Matching generations will still be reused.
-- **Need to inspect the current committed stages:**
-  `(omkamra.vice.analysis/read-manifest dataset-root)` shows the generation
-  pointers and summaries; `disassembly/open` validates the final artifact
-  checksums.
+Analyze the finalized dataset root (the directory containing `capture/`) with
+`c64-analysis`.
