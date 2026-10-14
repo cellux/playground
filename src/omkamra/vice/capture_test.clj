@@ -118,11 +118,11 @@
   ([dataset-root events target snapshot-provider]
    (let [capture (recorder/start-capture! {:dataset-root dataset-root
                                            :capture-id "synthetic"
-                                           :options {:event-target target}})]
+                                           :options {:events-per-chunk target}})]
      (recorder/ingest-trace-records!
       capture
       (string-source (trace-text events))
-      {:event-target target
+      {:events-per-chunk target
        :snapshot-provider snapshot-provider})
      (recorder/finalize-capture! capture))))
 
@@ -348,7 +348,7 @@
 (deftest session-registry-lifecycle
   (let [fake {:session-id "test-session"
               :capture-id "test-capture"
-              :input "in" :dataset-root "root" :event-target 1
+              :input "in" :dataset-root "root" :events-per-chunk 1
               :capture {:state (atom {})}
               :state (atom {:status :stopped})
               :metrics (atom nil)
@@ -413,7 +413,7 @@
       (recorder/ingest-trace-records!
        capture
        (string-source (trace-text sample-events))
-       {:event-target 4 :snapshot-provider test-snapshot-provider})
+       {:events-per-chunk 4 :snapshot-provider test-snapshot-provider})
       (is (thrown? clojure.lang.ExceptionInfo
                    (store/open-capture (io/file dataset-root "capture"))))
       (finally

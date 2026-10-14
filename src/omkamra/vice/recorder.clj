@@ -153,7 +153,7 @@
                       :chunk-number number
                       :event-range [start end]
                       :event-count event-count
-                      :target (get-in manifest [:options :event-target])
+                      :target (get-in manifest [:options :events-per-chunk])
                       :boundary boundary
                       :snapshot snapshot
                       :snapshot-timing snapshot-timing
@@ -256,13 +256,13 @@
 
   `read-source!` receives a consume callback and is expected to drive
   `omkamra.vice.trace/reduce-records!` with forensic samples enabled. Events
-  are batched to `:event-target` before each commit. `:snapshot-provider` is
+  are batched to `:events-per-chunk` before each commit. `:snapshot-provider` is
   called for each batch with `{:chunk-number :event-count :first-event
   :last-event}` and returns `{:ram :mem :snapshot :snapshot-timing}`. Any
   failure destroys the entire capture directory and rethrows."
   [capture read-source!
-   {:keys [event-target snapshot-provider boundary]
-    :or {event-target 50000 boundary default-boundary}}]
+   {:keys [events-per-chunk snapshot-provider boundary]
+    :or {events-per-chunk 50000 boundary default-boundary}}]
   (when-not (fn? read-source!)
     (fail :missing-record-source {}))
   (when-not (fn? snapshot-provider)
@@ -272,7 +272,7 @@
       (read-source!
        (fn [record]
          (let [next-batch (conj! @batch (event/trace-record->event record))]
-           (if (>= (count next-batch) event-target)
+           (if (>= (count next-batch) events-per-chunk)
              (do
                (commit-batch! capture (persistent! next-batch)
                               snapshot-provider boundary)

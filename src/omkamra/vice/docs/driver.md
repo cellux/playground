@@ -60,7 +60,7 @@ handed to `capture/start!` via `:instance`.
 `:connect-timeout-ms`, `:connect-retry-ms`), load options
 (`:autostart-timeout-ms`, `:program-start-timeout-ms`, `:run-after-load?`),
 start policy (`:full-capture?`, `:from-pc`), and capture options
-(`:dataset-root`, `:capture-id`, `:max-events`, `:event-target`,
+(`:dataset-root`, `:capture-id`, `:max-events`, `:events-per-chunk`,
 `:record-queue-capacity`, `:vic-value-blacklist`, `:timing-model`).
 
 ## Phases

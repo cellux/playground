@@ -1028,7 +1028,7 @@ Acceptance:
 - Implement VICE process/monitor lifecycle and PRG/D64 start policies.
 - Establish the initial paused snapshot for both program-only and full-capture modes.
 - Implement continuous FIFO setup.
-- Implement approximate event-target boundary requests.
+- Implement approximate events-per-chunk boundary requests.
 - Implement trace disable/pause, verified FIFO flush/EOF drain, reader re-establishment, snapshot, and resume sequencing.
 - Implement full underlying RAM read.
 - Implement CPU-visible memory read.
@@ -1490,7 +1490,7 @@ Use this format:
 - **Decisions or deviations:**
   - Reader and controller are separate threads with a bounded queue, matching
     the design's streaming/backpressure model; `status` exposes queue depth.
-  - The default `:event-target` is raised from 50,000 to 100,000 based on the
+  - The default `:events-per-chunk` is raised from 50,000 to 100,000 based on the
     measurement above, halving the per-event snapshot overhead while keeping a
     single chunk's events comfortably within heap. It stays configurable, and
     actual chunks overshoot it by roughly 9%.
@@ -2496,7 +2496,7 @@ Use this format:
   directory at `/c64`):
   `(capture/start! {:input "/c64/Triad/r676_No Booze__No_Booze_Triad.d64"
   :dataset-root "captures/no-booze-triad-v2" :capture-id "no-booze-triad-v2"
-  :event-target 100000})` — i.e. the **default program-entry mode**, not
+  :events-per-chunk 100000})` — i.e. the **default program-entry mode**, not
   `:full-capture? true`. Stopped on request at **47,763,778 events / 463
   chunks** (~32.5 min, ~24.5 k events/s); the trace shows the demo actually ran
   (5,149,643 VIC stores, 140,400 SID stores, 1,343,467 `$dd00` reads).

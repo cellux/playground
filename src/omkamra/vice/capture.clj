@@ -42,7 +42,7 @@
            [java.util.concurrent ArrayBlockingQueue TimeUnit]))
 
 (def ^:private default-connect-timeout-ms 30000)
-(def ^:private default-event-target 100000)
+(def ^:private default-events-per-chunk 100000)
 (def ^:private default-queue-capacity 65536)
 (def ^:private eof-sentinel ::eof)
 
@@ -113,12 +113,12 @@
             {:capture-id id}))
     id))
 
-(defn- event-target
+(defn- events-per-chunk
   [options]
-  (let [target (or (:event-target options) default-event-target)]
+  (let [target (or (:events-per-chunk options) default-events-per-chunk)]
     (when-not (pos-int? target)
-      (fail "Capture :event-target must be a positive integer"
-            {:event-target target}))
+      (fail "Capture :events-per-chunk must be a positive integer"
+            {:events-per-chunk target}))
     target))
 
 (defn- queue-capacity
@@ -284,7 +284,7 @@
 (defn- start-metrics!
   [session]
   (reset! (:metrics session)
-          {:event-target (:event-target session)
+          {:events-per-chunk (:events-per-chunk session)
            :events 0
            :chunks 0
            :overshoot-total 0
@@ -407,7 +407,7 @@
                                    {:kind :forced-size :reason :max-events})]
       (record-boundary-metrics!
        session {:events (count (:events chunk))
-                :overshoot (- (count (:events chunk)) (:event-target session))
+                :overshoot (- (count (:events chunk)) (:events-per-chunk session))
                 :snapshot-ms snapshot-ms
                 :screenshot-ms screenshot-ms
                 :boundary-ms (elapsed-ms boundary-start)
@@ -445,7 +445,7 @@
   and return the final capture result.
 
   `committed` counts events already written to earlier chunks. A chunk closes
-  when it reaches `:event-target`; the capture stops when the total reaches
+  when it reaches `:events-per-chunk`; the capture stops when the total reaches
   `:max-events` (dropping any queued excess so the count is exact) or when
   `stop-async!` sets the stop flag."
   [session initial-chunk]
@@ -484,7 +484,7 @@
                     (recur chunk committed))
 
                 (and (not (:closing? chunk))
-                     (>= (count (:events chunk)) (:event-target session)))
+                     (>= (count (:events chunk)) (:events-per-chunk session)))
                 (do (set-logging! session 0)
                     (recur (assoc chunk :closing? true) committed))
 
@@ -682,7 +682,7 @@
 
   Optional: `:capture-id`, `:executable`, `:address`, `:port`, `:extra-args`,
   `:speed`, `:warp?`, `:full-capture?`, `:run-after-load?`, `:from-pc`,
-  `:max-events`, `:event-target`, `:vic-value-blacklist`, `:timing-model`,
+  `:max-events`, `:events-per-chunk`, `:vic-value-blacklist`, `:timing-model`,
   `:connect-timeout-ms`, `:connect-retry-ms`, `:autostart-timeout-ms`,
   `:program-start-timeout-ms`, and `:record-queue-capacity`.
 
@@ -729,7 +729,7 @@
         max-events (max-events-option options)
         dataset-root (prepare-dataset-root! (:dataset-root options))
         capture-id (make-capture-id (:capture-id options))
-        target (event-target options)
+        target (events-per-chunk options)
         blacklist (set (or (:vic-value-blacklist options)
                            contract/default-vic-value-blacklist))
         _ (contract/validate-vic-value-blacklist! blacklist)
@@ -737,7 +737,7 @@
                  {:dataset-root dataset-root
                   :capture-id capture-id
                   :timing-model (:timing-model options)
-                  :options (cond-> {:event-target target
+                  :options (cond-> {:events-per-chunk target
                                     :vic-value-blacklist blacklist}
                              from-pc (assoc :from-pc from-pc)
                              max-events (assoc :max-events max-events))})
@@ -746,7 +746,7 @@
                  :input input
                  :temp-input temp-input
                  :dataset-root dataset-root
-                 :event-target target
+                 :events-per-chunk target
                  :from-pc from-pc
                  :max-events max-events
                  :external? (some? instance)
@@ -759,7 +759,7 @@
                                :input input
                                :dataset-root dataset-root
                                :capture-directory (:directory capture)
-                               :event-target target
+                               :events-per-chunk target
                                :from-pc from-pc
                                :max-events max-events})
                  :instance (atom nil)
@@ -786,7 +786,7 @@
     (throw (IllegalArgumentException. "Session must be a map")))
   (let [manifest (some-> (:capture session) :state deref)]
     (merge (select-keys session [:session-id :capture-id :input :dataset-root
-                                 :event-target])
+                                 :events-per-chunk])
            (dissoc @(:state session) :result)
            {:metrics @(:metrics session)
             :chunk-count (:chunk-count manifest 0)

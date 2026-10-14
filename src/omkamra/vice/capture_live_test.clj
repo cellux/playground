@@ -64,7 +64,7 @@
                                      :capture-id "boot"
                                      :full-capture? true
                                      :max-events 20000
-                                     :event-target 8000
+                                     :events-per-chunk 8000
                                      :record-queue-capacity 16384})]
         (try
           (let [status (await-worker! session 180000)]
@@ -97,7 +97,7 @@
       (let [session (capture/start! {:input (.getPath prg)
                                      :dataset-root dataset-root
                                      :capture-id "program"
-                                     :event-target 3000
+                                     :events-per-chunk 3000
                                      :max-events 9000
                                      :record-queue-capacity 16384})]
         (try
@@ -135,7 +135,7 @@
                                      :capture-id "instance"
                                      :from-pc 0xea31
                                      :max-events 8000
-                                     :event-target 4000
+                                     :events-per-chunk 4000
                                      :record-queue-capacity 16384})]
         (try
           (let [status (await-worker! session 120000)]
@@ -165,7 +165,7 @@
                                      :capture-id "live"
                                      :full-capture? true
                                      :warp? true
-                                     :event-target 10000
+                                     :events-per-chunk 10000
                                      :record-queue-capacity 16384})]
         (try
           (let [status (await-events! session 25000 120000)]

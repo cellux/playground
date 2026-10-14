@@ -231,7 +231,7 @@
      :directory directory
      :status :capturing
      :timing-model (merge default-timing-model timing-model)
-     :options (merge {:event-target 50000}
+     :options (merge {:events-per-chunk 50000}
                      options
                      {:vic-value-blacklist blacklist})
      :formats {:events contract/event-record-descriptor
