@@ -1,4 +1,4 @@
-(ns omkamra.vice.examples.fairlight-legendary-intro.core
+(ns omkamra.vice.examples.fairlight.legendary-intro.core
   "Clean-room reimplementation of the Fairlight “legendary” intro.
 
   Step 1 — the static screen. The intro runs in VIC bank 3 ($C000) with a
@@ -34,7 +34,7 @@
   codes and places; the pointer `$39/$3A` walks it a byte at a time and the
   handler remembers the pages it spans.
 
-  Step 6 — the SID player, in `omkamra.vice.examples.fairlight-legendary-intro.music`.
+  Step 6 — the SID player, in `omkamra.vice.examples.fairlight.legendary-intro.music`.
   The handler calls it first, before the sprite bar, and the initialisation
   before anything touches the VIC, both as in the original. It advances its
   voices only every tenth frame; the volume fade runs in between, every frame."
@@ -45,7 +45,7 @@
             ;; — inside bodies the assembler reads as data, which is invisible to
             ;; the linter.
             ^{:clj-kondo/ignore [:unused-namespace]}
-            [omkamra.vice.examples.fairlight-legendary-intro.music :as music]))
+            [omkamra.vice.examples.fairlight.legendary-intro.music :as music]))
 
 (assembler/define-asset charset
   {:resource "./charset.bin" :at 0xC800})

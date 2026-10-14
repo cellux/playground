@@ -1,15 +1,15 @@
-(ns omkamra.vice.examples.fairlight-legendary-intro-test
+(ns omkamra.vice.examples.fairlight.legendary-intro.core-test
   "Guards the example's assembly and linking without starting VICE."
   (:require [clojure.test :refer [deftest is testing]]
             [omkamra.vice.assembler :as assembler]
-            [omkamra.vice.examples.fairlight-legendary-intro.core :as intro]
-            [omkamra.vice.examples.fairlight-legendary-intro.music :as music]))
+            [omkamra.vice.examples.fairlight.legendary-intro.core :as intro]
+            [omkamra.vice.examples.fairlight.legendary-intro.music :as music]))
 
-(def ^:private core-ns
-  "omkamra.vice.examples.fairlight-legendary-intro.core")
+(def ^:private intro-ns
+  "omkamra.vice.examples.fairlight.legendary-intro.core")
 
 (def ^:private music-ns
-  "omkamra.vice.examples.fairlight-legendary-intro.music")
+  "omkamra.vice.examples.fairlight.legendary-intro.music")
 
 (defn- linked []
   (assembler/link intro/intro))
@@ -42,7 +42,7 @@
   (let [{:keys [base size]} (object-section artifact object-id)]
     (bytes-at artifact base size)))
 
-(defn- code-bytes [artifact] (object-bytes artifact (keyword core-ns "intro")))
+(defn- code-bytes [artifact] (object-bytes artifact (keyword intro-ns "intro")))
 
 (defn- matches-at?
   "True when `pattern` occurs in `bytes` at `index`; `nil` entries match any
@@ -60,17 +60,17 @@
 (defn- subsequence-indexes [bytes pattern]
   (filterv #(matches-at? bytes pattern %) (range (count bytes))))
 
-(defn- handler-bytes [artifact] (object-bytes artifact (keyword core-ns "irq")))
+(defn- handler-bytes [artifact] (object-bytes artifact (keyword intro-ns "irq")))
 
 (defn- object-base
   "The linked base address of the object named `object` — its entry label."
   [artifact object]
-  (:base (object-section artifact (keyword core-ns (name object)))))
+  (:base (object-section artifact (keyword intro-ns (name object)))))
 
 (defn- effect-bytes
   "The linked bytes of the per-frame effect object `object`."
   [artifact object]
-  (object-bytes artifact (keyword core-ns (name object))))
+  (object-bytes artifact (keyword intro-ns (name object))))
 
 (defn- music-labels
   "The music object's labels, relative to its own start."
@@ -87,17 +87,17 @@
   ;; Only the hardware-facing assets are pinned; the code and the CPU-only data
   ;; are placed by the linker, page-aligned where it matters.
   (let [artifact (linked)]
-    (is (= (:base (object-section artifact (keyword core-ns "intro")))
+    (is (= (:base (object-section artifact (keyword intro-ns "intro")))
            (:entry-point artifact))
         "the entry point is the intro object's placement")
     (testing "pinned assets stay at their VIC address"
       (doseq [[asset address] {:charset 0xC800 :screen 0xC400 :color-ram 0xD800}]
-        (is (= address (asset-address artifact (symbol core-ns (name asset))))
+        (is (= address (asset-address artifact (symbol intro-ns (name asset))))
             (str asset " stays at its VIC address"))))
     (testing "everything else is the linker's to place"
       (doseq [asset [:band-table :sprite-curve-bytes :sprite-bar-shades
                      :scroller-colors :scroller-text]]
-        (is (< (asset-address artifact (symbol core-ns (name asset))) 0xC000)
+        (is (< (asset-address artifact (symbol intro-ns (name asset))) 0xC000)
             (str asset " is placed by the linker, in low RAM"))))
     (testing "assets"
       (is (= #{:charset :screen :color-ram :band-table :sprite-curve-bytes
@@ -127,7 +127,7 @@
 (deftest the-handler-draws-the-sprite-bar
   (let [artifact (linked)
         bytes (effect-bytes artifact :sprite-bar)
-        curve (asset-address artifact (symbol core-ns "sprite-curve-bytes"))]
+        curve (asset-address artifact (symbol intro-ns "sprite-curve-bytes"))]
     (testing "one Y written to all eight sprite Y registers"
       (is (some? (find-subsequence bytes [0xBD (bit-and curve 0xff) (bit-shift-right curve 8)]))
           "LDA curve,X")
@@ -159,13 +159,13 @@
 (deftest the-handler-is-a-separate-object
   ;; `intro` names the handler through its Var, which resolves to the handler
   ;; object's default entry label; the linker discovers and places it.
-  (is (= (sort [:omkamra.vice.examples.fairlight-legendary-intro.core/irq
-                :omkamra.vice.examples.fairlight-legendary-intro.music/init])
+  (is (= (sort [:omkamra.vice.examples.fairlight.legendary-intro.core/irq
+                :omkamra.vice.examples.fairlight.legendary-intro.music/init])
          (sort (:objects (:dependencies intro/intro)))))
   (is (nil? (:entry intro/irq)))
   (is (contains? (:labels intro/irq) :irq))
   (let [artifact (linked)
-        handler (first (filter #(= (keyword core-ns "irq") (:object-id %))
+        handler (first (filter #(= (keyword intro-ns "irq") (:object-id %))
                                (:objects artifact)))]
     (is (= (get-in handler [:placement :sections 0 :base])
            (get (:labels handler) :irq))
@@ -229,7 +229,7 @@
   ;; line's first few, which is what the write has to do.
   (let [artifact (linked)
         bytes (effect-bytes artifact :bands)
-        table (asset-address artifact (symbol core-ns "band-table"))]
+        table (asset-address artifact (symbol intro-ns "band-table"))]
     (is (some? (find-subsequence bytes [0xa9 0x98 0xa2 0x00 0xcd 0x12 0xd0 0xd0 0xfb]))
         "LDA #$98 / LDX #$00 / CMP $D012 / BNE: wait for line 152")
     (is (some? (find-subsequence bytes [0xbd (bit-and table 0xff)
@@ -243,11 +243,11 @@
 (deftest the-handler-is-the-frames-running-order
   ;; The handler only acknowledges the interrupt and calls the frame's effects;
   ;; each effect is its own object, so the linker places them independently.
-  (is (= (sort [:omkamra.vice.examples.fairlight-legendary-intro.core/bands
-                :omkamra.vice.examples.fairlight-legendary-intro.core/scroller
-                :omkamra.vice.examples.fairlight-legendary-intro.core/sprite-bar
-                :omkamra.vice.examples.fairlight-legendary-intro.core/volume
-                :omkamra.vice.examples.fairlight-legendary-intro.music/play])
+  (is (= (sort [:omkamra.vice.examples.fairlight.legendary-intro.core/bands
+                :omkamra.vice.examples.fairlight.legendary-intro.core/scroller
+                :omkamra.vice.examples.fairlight.legendary-intro.core/sprite-bar
+                :omkamra.vice.examples.fairlight.legendary-intro.core/volume
+                :omkamra.vice.examples.fairlight.legendary-intro.music/play])
          (sort (:objects (:dependencies intro/irq)))))
   (let [artifact (linked)
         bytes (handler-bytes artifact)
@@ -277,7 +277,7 @@
   (is (= "L8R" (subs intro/scroller-text 498 501))
       "and ends where the pointer wraps")
   (let [artifact (linked)
-        address (asset-address artifact (symbol core-ns "scroller-text"))
+        address (asset-address artifact (symbol intro-ns "scroller-text"))
         encoded (bytes-at artifact address 512)]
     (is (zero? (mod address 512))
         "a page pair: the pointer walks it two pages at a time")

@@ -1,4 +1,4 @@
-(ns omkamra.vice.examples.fairlight-legendary-intro.music
+(ns omkamra.vice.examples.fairlight.legendary-intro.music
   "Music for the Fairlight “legendary” intro.
 
   The intro has one SID player, called once per frame from the raster IRQ.

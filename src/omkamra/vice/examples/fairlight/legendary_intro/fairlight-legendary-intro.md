@@ -7,8 +7,8 @@ Reimplementing the effects of the Fairlight intro
 transcribed; the capture is used as the reference for behaviour and for the
 artwork/data assets.
 
-Namespace: `omkamra.vice.examples.fairlight-legendary-intro.core`
-Resources: `src/omkamra/vice/examples/fairlight_legendary_intro/`
+Namespace: `omkamra.vice.examples.fairlight.legendary-intro.core`
+Resources: `src/omkamra/vice/examples/fairlight/legendary_intro/`
 
 Everything below was read out of the finalized capture with
 `omkamra.vice.reader` / `omkamra.vice.dedupe` (execution trace, CPU-visible
@@ -335,8 +335,11 @@ $1F` (it ends at `$18`).
 
 ## Namespace layout
 
-- `core.clj` — the screen, the init and the raster effects (steps 1–5). Five
-  assembly objects: `intro` (init and idle loop), and the per-frame work split
+- `fairlight.clj` — the `omkamra.vice.examples.fairlight` group namespace for
+  Fairlight productions;
+- `legendary_intro/core.clj` — the `omkamra.vice.examples.fairlight.legendary-intro.core`
+  production namespace: the screen, the init and the raster effects (steps 1–5).
+  Five assembly objects: `intro` (init and idle loop), and the per-frame work split
   into `irq` (acknowledge the interrupt, `JSR` each effect) plus `sprite-bar`,
   `bands` and `scroller`. All are linker-placed — only the VIC-facing assets
   are pinned — and `intro` names the handler through its
@@ -368,7 +371,7 @@ compiled image at `$CE00` from assembly source.
 
 The assembler resolves namespace-qualified labels to the unique `define-asm`
 object in the defining namespace and pulls in that object together with its
-assets and dependencies, so `core.clj` only needs e.g. `(jsr ::music/init)`
+assets and dependencies, so `legendary_intro/core.clj` only needs e.g. `(jsr ::music/init)`
 and `(jsr ::music/play)`; the player code and its tables stay in `music.clj`
 and are linked at their natural addresses (`$CC19`/`$CC5E`, data at `$CC00`
 and `$CE00`).
@@ -404,7 +407,7 @@ faithfully; the rest may be approximated:
 - Measured against the capture by classifying the boundary screenshots the
   same way: our bands cover screen lines 169-17x and 185-19x, matching where
   the capture's start.
-- `fairlight_legendary_intro_test.clj` guards the linked layout, the IRQ
+- `legendary_intro/core_test.clj` guards the linked layout, the IRQ
   installation, the band positions and colours, the exact-line wait and the
   single-handler structure.
 
@@ -762,7 +765,7 @@ Asset notes:
   asset map, or `:constraints {:at ADDRESS}`;
 - namespace-relative `:resource` paths: a value starting with `./` or `../`
   is resolved against the defining namespace's directory (here
-  `./charset.bin` finds the file next to `core.clj`);
+  `./charset.bin` finds the file in `legendary_intro/`);
 - an implicit asset: a plain Clojure Var holding a sequence of bytes, referenced
   in operand position, is inline data the linker places and resolves to its
   address. The band tables are therefore `(def red-band [0x02 0x0A …])`, with

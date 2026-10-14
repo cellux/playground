@@ -13,13 +13,20 @@
 
   `target` is a relocatable object or a linked artifact. Options are passed to
   `omkamra.vice/start!`. With an object, `:link-options` applies; every other
-  option is a start option.
+  option is a start option. Example runs use the ALSA sound device; any caller
+  supplied extra arguments are preserved.
 
   Returns an instance descriptor suitable for inspection and cleanup."
   ([target]
    (run! target {}))
   ([target options]
-   (vice/start! (assoc options :artifact target))))
+   (let [extra-args (or (:extra-args options)
+                        (:options options)
+                        [])]
+     (vice/start! (assoc options
+                         :artifact target
+                         :extra-args (into (vec extra-args)
+                                           ["-sounddev" "alsa"]))))))
 
 (defn stop!
   "Stop the instance's capture, close its connection, and terminate its VICE
