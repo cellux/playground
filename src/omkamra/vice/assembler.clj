@@ -1868,7 +1868,7 @@
   (vec (mapcat :bytes (:items section))))
 
 (defn- object-section-specs
-  [object regions-override]
+  [object regions]
   (mapv (fn [section]
           {:kind :object
            :key [object (:index section)]
@@ -1879,8 +1879,7 @@
            :align (long (or (:align section) 1))
            :size (long (:size section))
            :bytes (section-bytes section)
-           :regions (or regions-override
-                        (:regions (:constraints object)))})
+           :regions regions})
         (:sections object)))
 
 (defn- asset-regions
@@ -1892,7 +1891,7 @@
           [{:start (long address)}]))))
 
 (defn- asset-section-spec
-  [asset]
+  [asset regions]
   (let [data (:data asset)
         bytes (when data (vec data))]
     {:kind :asset
@@ -1902,7 +1901,67 @@
      :align (long (or (get-in asset [:constraints :align]) 1))
      :size (count bytes)
      :bytes (or bytes [])
-     :regions (asset-regions asset)}))
+     :regions regions}))
+
+;; Region inheritance --------------------------------------------------------
+
+(defn- object-parents
+  "The referrer of each object: the first object in link order that links it
+  in. The primary object has no referrer, so its `%region` seeds the walk."
+  [objects external-owners]
+  (reduce (fn [parents object]
+            (reduce (fn [parents reference]
+                      (let [owner (get external-owners reference)]
+                        (if (or (nil? owner) (contains? parents owner))
+                          parents
+                          (assoc parents owner object))))
+                    parents
+                    (:objects (:dependencies object))))
+          {}
+          objects))
+
+(defn- effective-object-regions
+  "Each object's placement region: its own `%region`, else the region of the
+  object that links it in, else `fallback` (the `:regions` link option).
+
+  `objects` is in link order, so a referrer's region is always known first."
+  [objects parents fallback]
+  (reduce (fn [regions object]
+            (assoc regions
+                   object
+                   (or (:regions (:constraints object))
+                       (get regions (get parents object))
+                       fallback)))
+          {}
+          objects))
+
+(defn- asset-referrers
+  "The objects that link in each asset, from their `:assets` dependencies."
+  [objects]
+  (reduce (fn [referrers object]
+            (reduce (fn [referrers asset]
+                      (update referrers asset (fnil conj []) object))
+                    referrers
+                    (:assets (:dependencies object))))
+          {}
+          objects))
+
+(defn- asset-effective-regions
+  "An asset's placement region: its own, else the region the objects that link
+  it in share. Several referrers may agree on it, but if they disagree the
+  asset has no single region to inherit and must declare its own."
+  [asset referrers object-regions fallback]
+  (or (asset-regions asset)
+      (let [referrers (get referrers (:name asset))
+            inherited (distinct (map #(get object-regions %) referrers))]
+        (cond
+          (empty? referrers) fallback
+          (= 1 (count inherited)) (first inherited)
+          :else (link-fail! :ambiguous-asset-regions
+                            (str "Asset " (:name asset) " is linked in by objects"
+                                 " with different regions and needs its own :regions")
+                            {:asset (:name asset)
+                             :objects (mapv :object-id referrers)})))))
 
 (defn- place-section
   [occupied spec ranges]
@@ -2112,7 +2171,9 @@
   - `:entry` — select the entry label, overriding object `%entry`;
   - `:objects` — additional named objects (map or collection) for resolution;
   - `:assets` — asset descriptors (map of qualified symbol to asset);
-  - `:regions` — override every object's `%region` constraints;
+  - `:regions` — fallback placement regions for objects and assets that name
+    none; an object inherits the region of the object that links it in, and an
+    asset inherits that of the object that links it in;
   - `:ranges` — override the default first-fit ranges;
   - `:reserved` — override the default reserved intervals.
 
@@ -2130,9 +2191,17 @@
        (let [{:keys [objects external-owners]} (discover-objects primary options)
              assets (discover-assets objects options)
              ranges (or (:ranges options) default-placement-ranges)
-             object-specs (mapcat #(object-section-specs % (:regions options))
+             fallback (:regions options)
+             parents (object-parents objects external-owners)
+             object-regions (effective-object-regions objects parents fallback)
+             referrers (asset-referrers objects)
+             object-specs (mapcat #(object-section-specs % (get object-regions %))
                                   objects)
-             asset-specs (mapv asset-section-spec assets)
+             asset-specs (mapv #(asset-section-spec
+                                 %
+                                 (asset-effective-regions % referrers object-regions
+                                                          fallback))
+                               assets)
              reserved (vec (concat (or (:reserved options)
                                        default-reserved-ranges)
                                    (mapcat #(get-in % [:constraints :reserved])

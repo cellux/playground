@@ -11,6 +11,10 @@
   (assembler/->Asset 'omkamra.vice.assembler-test/charset
                      (vec (range 8)) nil nil))
 
+(def region-asset
+  (assembler/->Asset 'omkamra.vice.assembler-test/region-asset
+                     (vec (range 4)) nil nil))
+
 (assembler/define-asm entry-object
   (%entry :start)
   :start
@@ -899,3 +903,71 @@
         "a qualified constant does not become an asset dependency")
     (is (= [0xad 0x42 0x20] (artifact-bytes artifact))
         "it folds to $2042")))
+
+;; Region inheritance --------------------------------------------------------
+
+(deftest a-linked-object-inherits-the-referrers-region
+  (let [helper (assembler/assemble
+                '(:helper-fn (rts))
+                {:ns 'omkamra.vice.assembler-test :object-id :t/region-helper})
+        primary (assembler/assemble
+                 '((%entry :start)
+                   (%region [0xC000 0xD000])
+                   :start
+                   (jsr :omkamra.vice.assembler-test/helper-fn)
+                   (rts))
+                 {:ns 'omkamra.vice.assembler-test})
+        artifact (assembler/link primary {:objects [helper]})
+        bases (mapv #(long (:base (first (get-in % [:placement :sections]))))
+                    (:objects artifact))]
+    (is (every? (fn [base] (<= 0xC000 base 0xD000)) bases)
+        "the linked-in helper inherits the primary's region")))
+
+(deftest an-explicit-region-overrides-the-inherited-one
+  (let [helper (assembler/assemble
+                '((%region [0x8000 0x9000])
+                  :helper-fn (rts))
+                {:ns 'omkamra.vice.assembler-test :object-id :t/region-explicit})
+        primary (assembler/assemble
+                 '((%entry :start)
+                   (%region [0xC000 0xD000])
+                   :start
+                   (jsr :omkamra.vice.assembler-test/helper-fn)
+                   (rts))
+                 {:ns 'omkamra.vice.assembler-test})
+        artifact (assembler/link primary {:objects [helper]})]
+    (is (= #{0xC000 0x8000}
+           (set (map :start-address (:segments artifact))))
+        "the helper keeps its own region")))
+
+(deftest a-linked-asset-inherits-the-referrers-region
+  (let [primary (assembler/assemble
+                 '((%entry :start)
+                   (%region [0xC000 0xD000])
+                   (%asset omkamra.vice.assembler-test/region-asset)
+                   :start
+                   (rts))
+                 {:ns 'omkamra.vice.assembler-test})
+        artifact (assembler/link primary)]
+    (is (<= 0xC000 (long (:start-address (first (:assets artifact)))) 0xD000))))
+
+(deftest an-asset-linked-in-by-diverging-regions-needs-its-own
+  (let [a (assembler/assemble
+           '((%region [0x8000 0x9000])
+             (%asset omkamra.vice.assembler-test/region-asset)
+             :a-fn (rts))
+           {:ns 'omkamra.vice.assembler-test :object-id :t/region-a})
+        b (assembler/assemble
+           '((%region [0x9000 0xA000])
+             (%asset omkamra.vice.assembler-test/region-asset)
+             :b-fn (rts))
+           {:ns 'omkamra.vice.assembler-test :object-id :t/region-b})
+        primary (assembler/assemble
+                 '((%entry :start)
+                   :start
+                   (jsr :omkamra.vice.assembler-test/a-fn)
+                   (jsr :omkamra.vice.assembler-test/b-fn)
+                   (rts))
+                 {:ns 'omkamra.vice.assembler-test})]
+    (is (= :ambiguous-asset-regions
+           (error-reason #(assembler/link primary {:objects [a b]}))))))
