@@ -729,6 +729,39 @@
   (is (= :empty-asset
          (error-reason #(link-forms '((lda (< empty-string-asset))) {})))))
 
+;; terminators ----------------------------------------------------------------
+
+(def ^{:charset :screen-codes :at 0x3300 :terminator 0xff} terminated-string "AB")
+(def ^{:at 0x3400 :terminator 0xff} terminated-bytes [7 8])
+(def ^{:align true :terminator 0xff} terminated-five-bytes "abcd")
+(def ^{:at 0x3500 :terminator 256} out-of-range-terminator "AB")
+
+(defn- asset-constraints
+  "The linked placement constraints of implicit asset `sym`."
+  [sym]
+  (let [object (assembler/assemble
+                (list '(%org 0x4000) (list 'lda (vector sym 'x)))
+                {:ns 'omkamra.vice.assembler-test
+                 :object-id (keyword "omkamra.vice.assembler-test"
+                                     (str "terminator-" (name sym)))})
+        qualified (symbol "omkamra.vice.assembler-test" (name sym))]
+    (:constraints (first (filter #(= qualified (:name %))
+                                 (:assets (assembler/link object)))))))
+
+(deftest an-asset-may-end-in-a-terminator-byte
+  (is (= [1 2 0xff] (asset-bytes 'terminated-string))
+      ":terminator appends a code the charset itself cannot spell")
+  (is (= [7 8 0xff] (asset-bytes 'terminated-bytes))
+      ":terminator appends to a byte-vector asset too"))
+
+(deftest a-terminator-counts-toward-the-asset-size
+  (is (= {:align 8} (asset-constraints 'terminated-five-bytes))
+      "four characters plus the terminator are five bytes, which align to 8"))
+
+(deftest a-terminator-must-fit-in-one-byte
+  (is (= :invalid-terminator
+         (error-reason #(link-forms '((lda (< out-of-range-terminator))) {})))))
+
 (deftest link-rejects-ambiguous-and-unresolved-externals
   (let [ns-sym 'omkamra.vice.assembler-test
         main (assembler/assemble

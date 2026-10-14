@@ -302,6 +302,20 @@ character the set has no code for is an error, as is an unknown `:charset`.
 (def ^{:charset :screen-codes :align true} credits "CRACKED ON THE 21ST …")
 ```
 
+`:terminator` appends one byte after the encoded data. The charset never has
+to be able to spell the value, so a code the encoder *cannot* produce — `$ff`
+in `:screen-codes` — is available as a sentinel that real text can never
+collide with, and a reader finds the end of the stream with a single `CMP`:
+
+```clojure
+(def ^{:charset :screen-codes :terminator 0xff} text "ONE PIXEL PER FRAME …")
+                         ; the data now ends in $ff, which the encoder can
+                         ; never emit by accident
+```
+
+`:terminator` also appends to a byte-vector asset, and counts toward the byte
+count `:align true` rounds up.
+
 A Var's metadata carries the same placement `define-asset` does: `:align` and
 `:at`/`:address`.
 

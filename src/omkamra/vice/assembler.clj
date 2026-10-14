@@ -159,17 +159,44 @@
                       address (assoc :address address))]
     (if align (assoc constraints :align align) constraints)))
 
+(defn- terminator-byte
+  "The `:terminator` metadata as one byte, or nil when none is declared.
+
+  A string or byte-vector asset may end in a sentinel: `:terminator 0xff`
+  appends that byte after the encoded data, so a reader can find the end of a
+  stream with a single `CMP` instead of carrying an end pointer. The charset
+  never has to be able to spell the value, so a code the encoder cannot produce
+  (`$ff` in `:screen-codes`) becomes a marker that real text cannot collide
+  with."
+  [meta]
+  (when-some [value (:terminator meta)]
+    (when-not (and (integer? value) (<= 0 (long value) 255))
+      (throw (ex-info "Asset :terminator must be a single byte"
+                      {:reason :invalid-terminator :value value})))
+    (unchecked-byte (long value))))
+
+(defn- append-terminator
+  [^bytes data terminator]
+  (let [length (alength data)
+        out (byte-array (inc length))]
+    (System/arraycopy data 0 out 0 length)
+    (aset-byte out length terminator)
+    out))
+
 (defn- implicit-asset
   "The asset for a Var whose value is inline asset data, named after the Var.
 
-  The Var's metadata may select the string's `:charset` and place the asset
-  (`:align`, `:at`/`:address`); `:align true` means the next power of two ≥
-  the byte count."
+  The Var's metadata may select the string's `:charset`, append a
+  `:terminator` byte and place the asset (`:align`, `:at`/`:address`); `:align
+  true` means the next power of two ≥ the byte count, terminator included."
   [name value meta]
   (when-let [bytes (inline-asset-bytes name value meta)]
-    (->Asset name bytes
-             (resolve-align (var-constraints meta) (alength ^bytes bytes))
-             nil)))
+    (let [bytes (if-some [terminator (terminator-byte meta)]
+                  (append-terminator bytes terminator)
+                  bytes)]
+      (->Asset name bytes
+               (resolve-align (var-constraints meta) (alength ^bytes bytes))
+               nil))))
 
 (defn- namespace-directory
   "The classpath directory of a namespace's source file, or nil.
