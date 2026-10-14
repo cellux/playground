@@ -9,7 +9,6 @@
    [clojure.core.cache :as cache]
    [clojure.string :as str]
    [clojure.stacktrace]
-   [omkamra.vice :as vice]
    [omkamra.vice.binary-monitor :as vice.bm])
   (:import
    [javafx.stage FileChooser]
@@ -31,8 +30,7 @@
             :reg/id->name nil
             :reg/id->size nil
             :bank/name->id nil
-            :bank/id->name nil
-            }
+            :bank/id->name nil}
      :log-lines []}
     cache/lru-cache-factory)))
 
@@ -130,13 +128,11 @@
                     (try
                       (dispatch! (log-info "Attempting to connect to VICE binary monitor at %s:%d"
                                            bm-host bm-port))
-                      (vice/connect {:address bm-host
-                                     :port bm-port}
-                                    event-handler)
+                      (vice.bm/connect! bm-host bm-port event-handler)
                       (catch Throwable t nil
-                        (do
-                          (dispatch! (log-error "Connection to binary monitor failed: %s" t))
-                          nil))))
+                             (do
+                               (dispatch! (log-error "Connection to binary monitor failed: %s" t))
+                               nil))))
           with-max-retries (fn [max-retries f]
                              (loop [result (f)
                                     current-retry 1]
@@ -183,7 +179,7 @@
                                     {::failed #{}}
                                     [fetch-banks fetch-regs])]
               (when (empty? (::failed vice-data))
-                (vice.bm/exit bm-conn)  ; resume execution
+                (vice.bm/exit! bm-conn)  ; resume execution
                 (dispatch! {:event/type :vice/connected
                             :vice/data (-> vice-data
                                            (assoc :bm-conn bm-conn)
@@ -192,7 +188,7 @@
 (defn vice-disconnect
   [{:keys [bm-conn]} dispatch!]
   (dispatch! (log-info "Closing connection to VICE monitor."))
-  (vice/close bm-conn)
+  (vice.bm/close! bm-conn)
   (dispatch! {:event/type :vice/disconnected}))
 
 (defmulti vice-send-request
@@ -203,7 +199,7 @@
   [{:keys [bm-conn]} dispatch!]
   (future
     (dispatch! (log-debug "Sending RESET to VICE."))
-    (vice.bm/reset bm-conn)))
+    (vice.bm/reset! bm-conn)))
 
 (defmethod vice-send-request :pause
   [{:keys [bm-conn]} dispatch!]
@@ -215,21 +211,21 @@
   [{:keys [bm-conn]} dispatch!]
   (future
     (dispatch! (log-debug "Resuming VICE."))
-    (vice.bm/exit bm-conn)))
+    (vice.bm/exit! bm-conn)))
 
 (defmethod vice-send-request :advance
   [{:keys [bm-conn step-over? count]} dispatch!]
-  (vice.bm/advance-instructions bm-conn {:step-over? (or step-over? false)
-                                         :count (or count 1)}))
+  (vice.bm/advance-instructions! bm-conn {:step-over? (or step-over? false)
+                                          :count (or count 1)}))
 
 (defmethod vice-send-request :autostart
   [{:keys [bm-conn file]} dispatch!]
   (future
     (let [filename (.getPath file)]
       (dispatch! (log-debug "Autostarting file: %s" filename))
-      (vice.bm/autostart bm-conn {:run-after-load? true
-                                  :file-index 0
-                                  :filename filename}))))
+      (vice.bm/autostart! bm-conn {:run-after-load? true
+                                   :file-index 0
+                                   :filename filename}))))
 
 (defn file-chooser-show
   [{:keys [window title on-file-selected]} dispatch!]

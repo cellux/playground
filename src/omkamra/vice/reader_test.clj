@@ -141,7 +141,7 @@
   (let [root (temp-dataset-root)
         reader (try
                  (write-synthetic-capture! root)
-                 (reader/open root)
+                 (reader/open! root)
                  (catch Throwable error
                    (is false (str "synthetic capture setup failed: " error))
                    nil))]
@@ -256,7 +256,7 @@
               :snapshot (snapshot-at {:global-cycle 100 :raster-line 1 :cpu-cycle 1})
               :snapshot-timing {:global-cycle 100 :raster-line 1 :cpu-cycle 1}})
             (recorder/finalize-capture! capture))
-          (let [reader (reader/open root)
+          (let [reader (reader/open! root)
                 writes (reader/read-writes reader [0 3])]
             (is (= [[:vic 0xd020 0x20] [:vic 0xd011 0x11] [:sid 0xd400 0x00]]
                    (mapv (fn [w] [(:domain w) (:canonical-address w)

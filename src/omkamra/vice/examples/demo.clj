@@ -35,7 +35,8 @@
 (defn run!
   "Run the border-cycle example on a fresh VICE instance.
 
-  Arguments are passed straight to `omkamra.vice/run!`; for this relocatable
-  object that means an optional map with `:link-options` and `:run-options`."
+  Arguments are passed straight to `omkamra.vice/start!`; for this relocatable
+  object that means an optional map with `:link-options` and start options such
+  as `:from-pc` and `:connect-timeout-ms`."
   [& args]
   (apply common/run! border-cycle args))

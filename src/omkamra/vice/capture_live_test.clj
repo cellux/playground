@@ -60,18 +60,18 @@
   ;; entry; it needs no input and records the boot up to the READY prompt.
   (let [dataset-root (temp-dataset-root)]
     (try
-      (let [session (capture/start! {:dataset-root dataset-root
-                                     :capture-id "boot"
-                                     :full-capture? true
-                                     :max-events 20000
-                                     :events-per-chunk 8000
-                                     :record-queue-capacity 16384})]
+      (let [session (capture/capture! {:dataset-root dataset-root
+                                       :capture-id "boot"
+                                       :full-capture? true
+                                       :max-events 20000
+                                       :events-per-chunk 8000
+                                       :record-queue-capacity 16384})]
         (try
           (let [status (await-worker! session 180000)]
             (is (true? (:worker-done? status)))
             (is (= 20000 (:event-count status))))
           (let [result (capture/stop! session)
-                opened (store/open-capture (:capture-directory result))
+                opened (store/open-capture! (:capture-directory result))
                 manifest (:manifest opened)
                 first-chunk (store/read-edn
                              (io/file (:directory opened)
@@ -94,18 +94,18 @@
   (let [dataset-root (temp-dataset-root)
         prg (write-test-prg!)]
     (try
-      (let [session (capture/start! {:input (.getPath prg)
-                                     :dataset-root dataset-root
-                                     :capture-id "program"
-                                     :events-per-chunk 3000
-                                     :max-events 9000
-                                     :record-queue-capacity 16384})]
+      (let [session (capture/capture! {:input (.getPath prg)
+                                       :dataset-root dataset-root
+                                       :capture-id "program"
+                                       :events-per-chunk 3000
+                                       :max-events 9000
+                                       :record-queue-capacity 16384})]
         (try
           (let [status (await-worker! session 120000)]
             (is (true? (:worker-done? status)))
             (is (= 9000 (:event-count status))))
           (let [result (capture/stop! session)
-                opened (store/open-capture (:capture-directory result))
+                opened (store/open-capture! (:capture-directory result))
                 manifest (:manifest opened)
                 first-chunk (store/read-edn
                              (io/file (:directory opened)
@@ -130,19 +130,19 @@
         port (+ 20000 (rand-int 30000))
         instance (vice/start! {:port port})]
     (try
-      (let [session (capture/start! {:instance instance
-                                     :dataset-root dataset-root
-                                     :capture-id "instance"
-                                     :from-pc 0xea31
-                                     :max-events 8000
-                                     :events-per-chunk 4000
-                                     :record-queue-capacity 16384})]
+      (let [session (capture/capture! {:instance instance
+                                       :dataset-root dataset-root
+                                       :capture-id "instance"
+                                       :from-pc 0xea31
+                                       :max-events 8000
+                                       :events-per-chunk 4000
+                                       :record-queue-capacity 16384})]
         (try
           (let [status (await-worker! session 120000)]
             (is (true? (:worker-done? status)))
             (is (= 8000 (:event-count status))))
           (let [result (capture/stop! session)
-                opened (store/open-capture (:capture-directory result))
+                opened (store/open-capture! (:capture-directory result))
                 manifest (:manifest opened)]
             (is (= :stopped (:status result)))
             (is (= 8000 (:event-count result)))
@@ -160,18 +160,18 @@
   (let [dataset-root (temp-dataset-root)
         prg (write-test-prg!)]
     (try
-      (let [session (capture/start! {:input (.getPath prg)
-                                     :dataset-root dataset-root
-                                     :capture-id "live"
-                                     :full-capture? true
-                                     :warp? true
-                                     :events-per-chunk 10000
-                                     :record-queue-capacity 16384})]
+      (let [session (capture/capture! {:input (.getPath prg)
+                                       :dataset-root dataset-root
+                                       :capture-id "live"
+                                       :full-capture? true
+                                       :warp? true
+                                       :events-per-chunk 10000
+                                       :record-queue-capacity 16384})]
         (try
           (let [status (await-events! session 25000 120000)]
             (is (>= (:chunk-count status) 2)))
           (let [result (capture/stop! session)
-                opened (store/open-capture (:capture-directory result))
+                opened (store/open-capture! (:capture-directory result))
                 manifest (:manifest opened)
                 chunks (:chunks manifest)]
             (is (= :stopped (:status result)))

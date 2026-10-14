@@ -125,7 +125,7 @@
 (defn build!
   "Build and commit an `:audio` generation.
 
-  `reader` is a `omkamra.vice.reader/open` handle and `trace` is an opened
+  `reader` is a `omkamra.vice.reader/open!` handle and `trace` is an opened
   `omkamra.vice.dedupe` image. Options: `:configuration` overriding
   `default-configuration`."
   ([reader trace] (build! reader trace {}))
@@ -203,7 +203,7 @@
                 :units (mapv #(select-keys % [:start :end :sid-writes :attributed])
                              evidence)}
          {:keys [generation directory relative]}
-         (analysis/new-generation dataset-root :audio)]
+         (analysis/new-generation! dataset-root :audio)]
      (try
        (store/atomic-write-edn! (io/file directory "index.edn") index)
        (analysis/commit-stage!
@@ -224,7 +224,7 @@
 
 ;; Readers -------------------------------------------------------------------
 
-(defn open
+(defn open!
   "Open the committed `:audio` generation for a dataset root."
   [dataset-root]
   (let [stage (analysis/stage-entry dataset-root :audio)]

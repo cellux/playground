@@ -93,7 +93,7 @@
   (let [root (temp-dataset-root)]
     (try
       (write-synthetic-capture! root)
-      (f (reader/open root) root)
+      (f (reader/open! root) root)
       (finally (store/delete-tree! root)))))
 
 ;; Video ---------------------------------------------------------------------
@@ -102,7 +102,7 @@
   (with-synthetic
     (fn [reader root]
       (video/build! reader)
-      (let [v (video/open root)]
+      (let [v (video/open! root)]
         (testing "repeated write shapes intern to one structural pattern"
           (is (= 1 (count (:patterns v))))
           (is (= 3 (count (video/frames v)))))
@@ -124,8 +124,8 @@
   (with-synthetic
     (fn [reader root]
       (video/build! reader)
-      (assets/build! reader (video/open root))
-      (let [a (assets/open root)
+      (assets/build! reader (video/open! root))
+      (let [a (assets/open! root)
             snapshots (assets/snapshots a)]
         (testing "one snapshot per effective layout point"
           (is (= 2 (count snapshots))))
@@ -149,11 +149,11 @@
   (with-synthetic
     (fn [reader root]
       (dedupe/build! reader {:window-events 5})
-      (audio/build! reader (dedupe/open root)
+      (audio/build! reader (dedupe/open! root)
                     {:configuration {:min-sid-writes-per-unit 2
                                      :min-sustained-units 2
                                      :candidate-min-writes 4}})
-      (let [a (audio/open root)
+      (let [a (audio/open! root)
             evidence (audio/evidence a)]
         (testing "SID writes are counted and joined with dedupe blocks"
           (is (= 6 (get-in evidence [:summary :sid-write-count])))

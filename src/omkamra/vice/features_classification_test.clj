@@ -86,7 +86,7 @@
   (let [root (temp-dataset-root)]
     (try
       (write-synthetic-capture! root)
-      (f (reader/open root) root)
+      (f (reader/open! root) root)
       (finally (store/delete-tree! root)))))
 
 ;; Feature evidence ----------------------------------------------------------
@@ -95,10 +95,10 @@
   (with-synthetic
     (fn [reader root]
       (dedupe/build! reader {:window-events 1000})
-      (features/build! reader (dedupe/open root)
+      (features/build! reader (dedupe/open! root)
                        {:configuration {:window-events 6
                                         :destination-min-address 512}})
-      (let [f (features/open root)
+      (let [f (features/open! root)
             units (features/units f)
             mainline (filter #(= :mainline-window (:kind %)) units)
             irq (filter #(= :irq-invocation (:kind %)) units)]
@@ -127,13 +127,13 @@
               (let [root (temp-dataset-root)]
                 (try
                   (write-synthetic-capture! root)
-                  (let [r (reader/open root)]
+                  (let [r (reader/open! root)]
                     (dedupe/build! r {:window-events 1000})
-                    (features/build! r (dedupe/open root)
+                    (features/build! r (dedupe/open! root)
                                      {:configuration {:window-events 6
                                                       :destination-min-address 512
                                                       :parallelism parallelism}})
-                    (features/units (features/open root)))
+                    (features/units (features/open! root)))
                   (finally (store/delete-tree! root)))))]
     (is (= (run 1) (run 4)))))
 
@@ -246,14 +246,14 @@
     (fn [reader root]
       (dedupe/build! reader {:window-events 1000})
       (video/build! reader)
-      (features/build! reader (dedupe/open root)
+      (features/build! reader (dedupe/open! root)
                        {:configuration {:window-events 6
                                         :destination-min-address 512}})
-      (classification/build! (features/open root) nil
+      (classification/build! (features/open! root) nil
                              {:configuration {:raster-write-threshold 1
                                               :music-write-threshold 1
                                               :enter-units 1 :exit-units 1}})
-      (let [c (classification/open root)]
+      (let [c (classification/open! root)]
         (is (pos? (get-in c [:index :summary :span-count])))
         (is (contains? (get-in c [:index :summary :role-counts]) :raster))
         (is (contains? (get-in c [:index :summary :role-counts]) :music))

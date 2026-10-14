@@ -1,15 +1,24 @@
 (ns omkamra.vice.driver
   "VICE instance driver.
 
-  Owns a running emulator and its binary-monitor connection: process launch
-  and teardown, connecting when the monitor is ready, and injecting a linked
-  artifact into RAM and starting it. The capture API and the examples' `run!`
-  are clients of this namespace.
+  Owns a running emulator and its binary-monitor connection: process launch,
+  teardown, and connecting once the monitor is ready. Programs are started by
+  `omkamra.vice/start!`, which autostarts a self-relocating PRG rather than
+  writing memory through the monitor.
 
   VICE's binary monitor serves exactly one client at a time, so the connection
   is an exclusive resource: callers take it with `connect!` and hand it back
-  with `close` (or `stop!`, which also terminates the process)."
+  with `close!` (or `stop!`, which also terminates the process)."
   (:require [omkamra.vice.binary-monitor :as bm]))
+
+(def state-key
+  "Key under which a root-created instance descriptor holds its private shared
+  state atom. The atom tracks the owned monitor connection and active capture."
+  :omkamra.vice/state)
+
+(defn- new-descriptor-state
+  []
+  (atom {:connection nil :capture nil}))
 
 (def default-executable "x64sc")
 (def default-address bm/default-host)
@@ -54,7 +63,7 @@
                   (format "ip4://%s:%d" address port)]
                  (map str extra-args)))))
 
-(defn start
+(defn start!
   "Start a VICE emulator asynchronously.
 
   `params` is a map containing the executable and command-line arguments. The
@@ -65,9 +74,10 @@
   captures; pass a different `-sounddev` option through `:extra-args` to
   override it.
 
-  Returns a VICE instance descriptor suitable for `connect` and `stop`."
+  Returns an instance descriptor carrying a private shared state atom; use it
+  with `connect!` and `stop!`."
   ([]
-   (start {}))
+   (start! {}))
   ([params]
    (when-not (map? params)
      (throw (IllegalArgumentException. "VICE parameters must be a map")))
@@ -79,17 +89,13 @@
          process (.start (doto (ProcessBuilder. ^java.util.List command)
                            (.redirectOutput java.lang.ProcessBuilder$Redirect/INHERIT)
                            (.redirectError java.lang.ProcessBuilder$Redirect/INHERIT)))]
-     {:process process
+     {state-key (new-descriptor-state)
+      :process process
       :pid (.pid process)
       :address address
       :port port
       :command command
       :params params})))
-
-(defn start!
-  "Canonical VICE process launcher. See `start`."
-  ([] (start! {}))
-  ([params] (start (or params {}))))
 
 (defn- destroy-process!
   "Terminate a process and wait briefly for it to release its port."
@@ -120,13 +126,12 @@
 (defn stop!
   "Close the monitor connection and terminate a VICE process.
 
-  Accepts either a plain instance descriptor or a runtime map returned by
-  `run!`. Idempotent: a missing or already-dead process is not an error."
+  Idempotent: a missing or already-dead process is not an error."
   [runtime-or-instance]
   (when runtime-or-instance
     (when-let [conn (:connection runtime-or-instance)]
       (try
-        (bm/close conn)
+        (bm/close! conn)
         (catch Throwable _ nil)))
     (if-let [process (:process runtime-or-instance)]
       (destroy-process! process)
@@ -134,11 +139,52 @@
         (destroy-pid! pid))))
   nil)
 
-(defn stop
-  "Compatibility wrapper around `stop!` for a plain VICE instance descriptor."
+;; Exclusive ownership -------------------------------------------------------
+
+(defn owned-state
+  "The private shared state atom of `instance`, or nil for a foreign
+  descriptor."
   [instance]
-  (validate-instance instance)
-  (stop! instance))
+  (get instance state-key))
+
+(defn owner
+  "The resource currently held under `key` (`:connection` or `:capture`), or
+  nil."
+  [instance key]
+  (some-> (owned-state instance) deref (get key)))
+
+(defn claim!
+  "Atomically occupy the exclusive ownership slot under `key` with `value`.
+
+  Returns true when claimed and false when the instance already holds a
+  connection or a capture. A descriptor without a state atom is considered
+  free."
+  [instance key value]
+  (if-let [state (owned-state instance)]
+    (let [claimed (volatile! false)]
+      (swap! state
+             (fn [s]
+               (if (or (:connection s) (:capture s))
+                 s
+                 (do (vreset! claimed true) (assoc s key value)))))
+      @claimed)
+    true))
+
+(defn install!
+  "Store `value` under `key` after a successful `claim!`."
+  [instance key value]
+  (when-let [state (owned-state instance)]
+    (swap! state assoc key value)))
+
+(defn release!
+  "Clear `key` when it still holds `expected`."
+  [instance key expected]
+  (when-let [state (owned-state instance)]
+    (swap! state
+           (fn [s]
+             (if (identical? (get s key) expected)
+               (assoc s key nil)
+               s)))))
 
 (defn free-port
   "An ephemeral localhost TCP port, so repeated runs never collide."
@@ -146,40 +192,43 @@
   (with-open [socket (java.net.ServerSocket. 0)]
     (.getLocalPort socket)))
 
-(defn connect
+(defn connect!
   "Connect to the binary monitor described by `instance`.
 
   Connecting to VICE enters the monitor and pauses emulation. Monitor
   requests also leave VICE paused; call
-  `omkamra.vice.binary-monitor/resume` (or `exit`) as the final request when
+  `omkamra.vice.binary-monitor/resume!` (or `exit!`) as the final request when
   execution should resume.
 
   An optional event handler receives unsolicited binary-monitor events; it
   defaults to `prn`."
   ([instance]
-   (connect instance prn))
+   (connect! instance prn))
   ([instance handle-event]
    (let [{:keys [address port]} (validate-instance instance)]
-     (bm/connect address port (or handle-event prn)))))
+     (bm/connect! address port (or handle-event prn)))))
 
-(defn close
+(defn close!
   [conn]
-  (bm/close conn))
+  (bm/close! conn))
 
 (defmacro with-conn
-  [conn instance & body]
-  `(let [~conn (connect ~instance)]
+  "Connect to `instance`, bind the connection to `conn`, and always close it.
+
+  Usage: `(with-conn [conn instance] body...)`."
+  [[conn instance] & body]
+  `(let [~conn (connect! ~instance)]
      (try
        ~@body
        (finally
-         (bm/close ~conn)))))
+         (close! ~conn)))))
 
 ;; Connecting when ready -----------------------------------------------------
 
 (def default-connect-timeout-ms 10000)
 (def default-connect-retry-ms 100)
 
-(defn connect!
+(defn connect-until-ready!
   "Connect to `instance`'s binary monitor, retrying until it is ready.
 
   Throws if the process exits first or the timeout elapses. Options:
@@ -196,7 +245,7 @@
            (throw (ex-info "VICE exited before its binary monitor became ready"
                            {:reason :vice-exited :pid (:pid instance)}))))
        (let [conn (try
-                    (let [conn (connect instance (or handle-event (fn [_ _] nil)))]
+                    (let [conn (connect! instance (or handle-event (fn [_ _] nil)))]
                       (bm/ping conn)
                       conn)
                     (catch Throwable _ nil))]
@@ -212,136 +261,6 @@
                            {:reason :connect-timeout
                             :pid (:pid instance)
                             :timeout-ms connect-timeout-ms}))))))))
-
-;; Program injection ---------------------------------------------------------
-
-(defn- named-bank
-  [conn name]
-  (or (some (fn [bank]
-              (when (= name (:name bank)) bank))
-            (vals (bm/banks-available conn)))
-      (throw (ex-info (str "VICE has no bank named " name)
-                      {:reason :missing-bank :bank name}))))
-
-(defn- named-register
-  [conn name]
-  (or (some (fn [register]
-              (when (= name (:name register)) register))
-            (vals (bm/registers-available conn)))
-      (throw (ex-info (str "VICE has no register named " name)
-                      {:reason :missing-register :register name}))))
-
-(def ^:private color-ram-start 0xd800)
-(def ^:private color-ram-end 0xdc00)
-
-(defn- write-segment!
-  [conn bank {:keys [start-address bytes]}]
-  (let [length (alength ^bytes bytes)]
-    (when (pos? length)
-      (bm/mem-set conn {:start start-address
-                        :end (+ (long start-address) (dec length))
-                        :bank bank
-                        :data bytes}))))
-
-(defn- write-color-ram!
-  "Write the colour-RAM window of a segment through the CPU-visible bank.
-
-  Colour RAM ($D800-$DBFF) is a separate 1 KiB chip that the RAM bank does not
-  reach. This is the one target the injector treats specially, and a future
-  PRG startup stub handles it the same way."
-  [conn {:keys [start-address bytes]}]
-  (let [start (long start-address)
-        end (+ start (alength ^bytes bytes))
-        from (max start color-ram-start)
-        to (min end color-ram-end)]
-    (when (< from to)
-      (let [offset (- from start)
-            data (java.util.Arrays/copyOfRange ^bytes bytes
-                                               (int offset)
-                                               (int (+ offset (- to from))))]
-        (bm/mem-set conn {:start from :end (dec to) :bank 0 :data data})))))
-
-(defn- inject-segments!
-  [conn bank-id segments]
-  (doseq [segment segments]
-    (write-segment! conn bank-id segment)
-    (write-color-ram! conn segment)))
-
-(defn- verify-entry!
-  [conn entry segments]
-  (let [segment (some (fn [{:keys [start-address bytes]}]
-                        (let [length (alength ^bytes bytes)]
-                          (when (and (<= (long start-address) (long entry))
-                                     (< (long entry) (+ (long start-address) length)))
-                            {:start-address start-address :bytes bytes})))
-                      segments)]
-    (when-not segment
-      (throw (ex-info "Entry point is not inside any linked segment"
-                      {:reason :entry-not-in-segment :entry-point entry})))
-    (let [offset (- (long entry) (long (:start-address segment)))
-          bytes ^bytes (:bytes segment)
-          length (min 8 (- (alength bytes) offset))
-          response (bm/mem-get conn {:start entry
-                                     :end (dec (+ (long entry) length))
-                                     :bank 0})
-          visible ^bytes (:memory response)]
-      (dotimes [index length]
-        (when-not (= (bit-and (int (aget visible index)) 0xff)
-                     (bit-and (int (aget bytes (+ offset index))) 0xff))
-          (throw (ex-info "Entry point bytes are not CPU-visible"
-                          {:reason :entry-not-visible
-                           :entry-point entry
-                           :offset index
-                           :expected (bit-and (int (aget bytes (+ offset index))) 0xff)
-                           :actual (bit-and (int (aget visible index)) 0xff)}))))
-      length)))
-
-(defn inject!
-  "Inject `artifact`'s segments into RAM, leaving the PC untouched and VICE
-  paused so a capture can arm its trace before the entry point is entered.
-
-  Returns the entry point, the RAM bank id, the PC register id, and injection
-  metadata. The caller owns `conn`; this does not connect, resume, or close."
-  [conn artifact]
-  (let [bank (named-bank conn "ram")
-        pc (named-register conn "PC")
-        segments (:segments artifact)
-        entry (:entry-point artifact)]
-    (when (nil? entry)
-      (throw (ex-info "The linked artifact has no entry point"
-                      {:reason :missing-entry-point})))
-    (inject-segments! conn (:id bank) segments)
-    (verify-entry! conn entry segments)
-    {:entry-point entry
-     :bank (:id bank)
-     :pc-register (:id pc)
-     :injection {:bank-id (:id bank)
-                 :pc-register-id (:id pc)
-                 :entry-point entry
-                 :segments (mapv (fn [{:keys [start-address bytes]}]
-                                   {:start-address start-address
-                                    :length (alength ^bytes bytes)})
-                                 segments)
-                 :verified true}}))
-
-(defn set-pc!
-  "Set the program counter to `address`."
-  [conn address]
-  (let [pc (named-register conn "PC")]
-    (bm/registers-set conn {:register-values [[(:id pc) address]]})))
-
-(defn resume!
-  "Resume a paused instance."
-  [conn]
-  (bm/resume conn))
-
-(defn inject-and-resume!
-  "Inject `artifact` and start it at its entry point."
-  [conn artifact]
-  (let [result (inject! conn artifact)]
-    (set-pc! conn (:entry-point artifact))
-    (resume! conn)
-    result))
 
 ;; Loading and start policy --------------------------------------------------
 
@@ -430,12 +349,12 @@
 
 (defn- set-execute-checkpoint!
   [conn address]
-  (bm/checkpoint-set conn {:start address
-                           :end address
-                           :stop? true
-                           :enabled? true
-                           :op bm/MON_CHECKPOINT_OP_EXECUTE
-                           :temporary? false}))
+  (bm/checkpoint-set! conn {:start address
+                            :end address
+                            :stop? true
+                            :enabled? true
+                            :op bm/MON_CHECKPOINT_OP_EXECUTE
+                            :temporary? false}))
 
 (defn- wait-for-stop-at!
   [conn checkpoint-number address timeout-ms]
@@ -464,7 +383,7 @@
   the temporary checkpoint on the hit; `checkpoint` records it so a caller can
   delete it when the wait fails beforehand."
   [conn address checkpoint timeout-ms]
-  (let [installed (bm/checkpoint-set
+  (let [installed (bm/checkpoint-set!
                    conn
                    {:start address
                     :end address
@@ -473,7 +392,7 @@
                     :op bm/MON_CHECKPOINT_OP_EXECUTE
                     :temporary? true})]
     (reset! checkpoint installed)
-    (bm/resume conn)
+    (bm/resume! conn)
     (wait-for-stop-at! conn (:number installed) address timeout-ms)
     (reset! checkpoint nil)
     address))
@@ -491,7 +410,7 @@
   of the boot sequence. VICE leaves the monitor after a reset, so no explicit
   resume is needed; the checkpoint pauses the freshly reset machine."
   [conn address checkpoint timeout-ms]
-  (let [installed (bm/checkpoint-set
+  (let [installed (bm/checkpoint-set!
                    conn
                    {:start address
                     :end address
@@ -500,7 +419,7 @@
                     :op bm/MON_CHECKPOINT_OP_EXECUTE
                     :temporary? true})]
     (reset! checkpoint installed)
-    (bm/reset conn {:what 1})
+    (bm/reset! conn {:what 1})
     (wait-for-stop-at! conn (:number installed) address timeout-ms)
     (reset! checkpoint nil)
     address))
@@ -508,13 +427,13 @@
 (defn autostart!
   "Autostart `input` (a PRG/D64 path) and return when RUN is under way."
   [conn input options]
-  (bm/autostart conn {:run-after-load? (if (contains? options :run-after-load?)
-                                         (:run-after-load? options)
-                                         true)
-                      :file-index 0
-                      :filename (str input)
-                      :timeout-ms (or (:autostart-timeout-ms options)
-                                      default-autostart-timeout-ms)}))
+  (bm/autostart! conn {:run-after-load? (if (contains? options :run-after-load?)
+                                          (:run-after-load? options)
+                                          true)
+                       :file-index 0
+                       :filename (str input)
+                       :timeout-ms (or (:autostart-timeout-ms options)
+                                       default-autostart-timeout-ms)}))
 
 (defn prepare-program-start!
   "Autostart `input`, wait for the BASIC RUN stop at `$E144`, and return the
@@ -540,5 +459,5 @@
           target))
       (finally
         (when-let [number (:number @checkpoint)]
-          (try (bm/checkpoint-delete conn {:number number})
+          (try (bm/checkpoint-delete! conn {:number number})
                (catch Throwable _ nil)))))))

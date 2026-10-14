@@ -335,7 +335,7 @@
                           :irq-span-count (count (filter #(= :irq (:effective-level %)) spans))}
                 :spans spans}
          {:keys [generation directory relative]}
-         (analysis/new-generation dataset-root :classification)]
+         (analysis/new-generation! dataset-root :classification)]
      (try
        (store/atomic-write-edn! (io/file directory "index.edn") index)
        (analysis/commit-stage!
@@ -356,7 +356,7 @@
 
 ;; Readers -------------------------------------------------------------------
 
-(defn open
+(defn open!
   [dataset-root]
   (let [stage (analysis/stage-entry dataset-root :classification)]
     (when-not stage

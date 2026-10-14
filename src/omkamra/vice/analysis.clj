@@ -67,7 +67,7 @@
   [capture-directory]
   (store/sha256-file (store/manifest-file capture-directory)))
 
-(defn new-generation
+(defn new-generation!
   "Create a fresh generation directory for `stage-id`.
 
   Returns `{:generation name :directory file :relative path}`. The directory is

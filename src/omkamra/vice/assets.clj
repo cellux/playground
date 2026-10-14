@@ -73,7 +73,7 @@
 (defn build!
   "Build and commit an `:assets` generation from a `:video` image.
 
-  `reader` is a `omkamra.vice.reader/open` handle and `video` is an opened
+  `reader` is a `omkamra.vice.reader/open!` handle and `video` is an opened
   `omkamra.vice.video` image. Options: `:configuration`."
   ([reader video] (build! reader video {}))
   ([reader video {:keys [configuration] :or {configuration default-configuration}}]
@@ -88,7 +88,7 @@
                                     (inc event-index))))
                               configs)
          {:keys [generation directory relative]}
-         (analysis/new-generation dataset-root :assets)]
+         (analysis/new-generation! dataset-root :assets)]
      (try
        (with-open [out (BufferedOutputStream.
                         (FileOutputStream. (io/file directory "assets.bin")))]
@@ -133,7 +133,7 @@
 
 ;; Readers -------------------------------------------------------------------
 
-(defn open
+(defn open!
   "Open the committed `:assets` generation for a dataset root."
   [dataset-root]
   (let [stage (analysis/stage-entry dataset-root :assets)]

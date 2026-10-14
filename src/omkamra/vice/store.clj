@@ -355,7 +355,7 @@
                   {:expected (:event-count manifest) :actual cursor})))))
     {:directory directory :manifest manifest}))
 
-(defn open-capture
+(defn open-capture!
   "Validate and open a finalized capture directory."
   [directory]
   (validate-capture! directory))

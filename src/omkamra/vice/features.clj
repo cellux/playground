@@ -695,7 +695,7 @@
                                                  (dedupe/read-block trace block-id)))]))
                          (range (count (:block-index trace))))
          {:keys [generation directory relative]}
-         (analysis/new-generation dataset-root :features)]
+         (analysis/new-generation! dataset-root :features)]
      (try
        (let [index (with-open [unit-writer (io/writer (io/file directory "units.edn"))
                                occurrence-writer (BufferedOutputStream.
@@ -767,7 +767,7 @@
                 (line-seq reader)))
       init)))
 
-(defn open
+(defn open!
   [dataset-root]
   (let [stage (analysis/stage-entry dataset-root :features)]
     (when-not stage

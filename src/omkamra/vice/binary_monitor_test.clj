@@ -40,10 +40,10 @@
 
 (deftest registers-set-uses-little-endian-values
   (let [request (atom nil)]
-    (with-redefs [bm/send-request
+    (with-redefs [bm/send-request!
                   (fn [_ command signature args]
                     (reset! request [command signature args]))]
-      (bm/registers-set {} {:register-values {1 0x1234}}))
+      (bm/registers-set! {} {:register-values {1 0x1234}}))
     (is (= [3 1 0x34 0x12]
            (mapv #(bit-and (int %) 0xff)
                  (last (last @request)))))))
@@ -57,7 +57,7 @@
                                     :debug-height 1
                                     :buffer (byte-array [0 1])})
                   bm/palette-get (fn [_ _] [[255 0 0] [0 255 0]])
-                  bm/resume (fn [_] (reset! resumed true))]
+                  bm/resume! (fn [_] (reset! resumed true))]
       (bm/screenshot! {} (.getPath file)))
     (let [image (javax.imageio.ImageIO/read file)]
       (is (= [2 1] [(.getWidth image) (.getHeight image)]))

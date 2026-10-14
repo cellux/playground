@@ -170,4 +170,4 @@
       (is (= report/report-version (:version (report/status root)))))
     (testing "reopening the generation validates the format"
       (is (= report/report-format
-             (get-in (report/open root) [:index :format]))))))
+             (get-in (report/open! root) [:index :format]))))))

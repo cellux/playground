@@ -420,7 +420,7 @@
    (let [configuration (merge default-configuration configuration)
          _ (screenshots-per-segment configuration)
          dataset-root (:dataset-root segments-image)
-         capture (reader/open dataset-root)
+         capture (reader/open! dataset-root)
          disassembly-stage (analysis/stage-entry dataset-root :disassembly)
          segments-stage (analysis/stage-entry dataset-root :segments)
          generation (or (:generation disassembly-stage)
@@ -453,7 +453,7 @@
                           :file-count 1}
                 :segments built}
          {:keys [generation directory relative]}
-         (analysis/new-generation dataset-root :report)
+         (analysis/new-generation! dataset-root :report)
          html (render-html (assoc index
                                   :generation generation
                                   :created-at (str (java.time.Instant/now))))]
@@ -486,7 +486,7 @@
 
 ;; Readers -------------------------------------------------------------------
 
-(defn open
+(defn open!
   [dataset-root]
   (let [stage (analysis/stage-entry dataset-root :report)]
     (when-not stage

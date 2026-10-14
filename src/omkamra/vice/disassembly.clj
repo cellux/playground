@@ -693,7 +693,7 @@
          segments (:segments segments-image)
          total-events (get-in segments-image [:index :event-count])
          {:keys [generation directory relative]}
-         (analysis/new-generation dataset-root :disassembly)]
+         (analysis/new-generation! dataset-root :disassembly)]
      (try
        (let [rendered (parallel/pmap-ordered #(render-segment dedupe-image %) segments)
              roles (filterv (set (:roles configuration))
@@ -764,7 +764,7 @@
 
 ;; Readers -------------------------------------------------------------------
 
-(defn open
+(defn open!
   [dataset-root]
   (let [stage (analysis/stage-entry dataset-root :disassembly)]
     (when-not stage

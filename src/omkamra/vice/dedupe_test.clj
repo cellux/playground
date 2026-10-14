@@ -81,9 +81,9 @@
    (let [root (temp-dataset-root)]
      (try
        (write-synthetic-capture! root)
-       (let [capture (reader/open root)]
+       (let [capture (reader/open! root)]
          (dedupe/build! capture (merge {:window-events 4} build-options))
-         (f (dedupe/open root)))
+         (f (dedupe/open! root)))
        (finally (store/delete-tree! root))))))
 
 (defn- occurrence-shape [occurrence]
@@ -156,7 +156,7 @@
   (let [root (temp-dataset-root)]
     (try
       (write-synthetic-capture! root)
-      (let [capture (reader/open root)]
+      (let [capture (reader/open! root)]
         (is (thrown? clojure.lang.ExceptionInfo
                      (dedupe/build! capture {:window-events 0})))
         (is (nil? (dedupe/status root))))

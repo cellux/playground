@@ -201,7 +201,7 @@
 (defn build!
   "Build and commit a `:video` generation for a finalized capture.
 
-  `reader` is a `omkamra.vice.reader/open` handle. Options: `:configuration`
+  `reader` is a `omkamra.vice.reader/open!` handle. Options: `:configuration`
   (recorded in the manifest). Returns the generation directory and index."
   ([reader] (build! reader {}))
   ([reader {:keys [configuration max-events]
@@ -215,7 +215,7 @@
          initial (initial-state (reader/boundary-snapshot reader 0))
          scan-end (or max-events (reader/event-count reader))
          {:keys [generation directory relative]}
-         (analysis/new-generation dataset-root :video)]
+         (analysis/new-generation! dataset-root :video)]
      (try
        (let [result (scan-vic-writes reader blacklist initial scan-end)
              index (write-generation! directory generation capture-id
@@ -239,7 +239,7 @@
 
 ;; Readers -------------------------------------------------------------------
 
-(defn open
+(defn open!
   "Open the committed `:video` generation for a dataset root."
   [dataset-root]
   (let [stage (analysis/stage-entry dataset-root :video)]

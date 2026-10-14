@@ -215,7 +215,7 @@
   (let [dataset-root (temp-dataset-root)]
     (try
       (let [result (record-event! dataset-root sample-events 4)
-            opened (store/open-capture (io/file dataset-root "capture"))
+            opened (store/open-capture! (io/file dataset-root "capture"))
             manifest (:manifest opened)
             chunks (:chunks manifest)
             chunk1 (store/read-edn (io/file (:directory opened)
@@ -252,13 +252,13 @@
     (try
       (record-event! dataset-root sample-events 4 screenshot-snapshot-provider)
       (let [directory (io/file dataset-root "capture")
-            opened (store/open-capture directory)
+            opened (store/open-capture! directory)
             manifest (:manifest opened)
             entry (first (:chunks manifest))
             chunk (store/read-edn (io/file (:directory opened) (:file entry)))
             artifact (get-in entry [:artifacts :screenshot])
             ^java.io.File png (io/file (:directory opened) (:file artifact))
-            reader (reader/open dataset-root)]
+            reader (reader/open! dataset-root)]
         (testing "the PNG artifact is declared and checksummed"
           (is (= contract/screen-png-format
                  (get-in manifest [:formats :screenshot :format])))
@@ -328,12 +328,12 @@
                  (#'capture/instance-option {:instance "localhost:6502"}))))
   (testing ":input and :instance are mutually exclusive"
     (is (thrown? clojure.lang.ExceptionInfo
-                 (capture/start! {:input "program.prg"
-                                  :instance {:address "localhost" :port 6502}}))))
+                 (capture/capture! {:input "program.prg"
+                                    :instance {:address "localhost" :port 6502}}))))
   (testing "a full capture powers on its own VICE"
     (is (thrown? clojure.lang.ExceptionInfo
-                 (capture/start! {:full-capture? true
-                                  :instance {:address "localhost" :port 6502}})))))
+                 (capture/capture! {:full-capture? true
+                                    :instance {:address "localhost" :port 6502}})))))
 
 (deftest basic-sys-stub-parsing
   (let [target (fn [text]
@@ -415,7 +415,7 @@
        (string-source (trace-text sample-events))
        {:events-per-chunk 4 :snapshot-provider test-snapshot-provider})
       (is (thrown? clojure.lang.ExceptionInfo
-                   (store/open-capture (io/file dataset-root "capture"))))
+                   (store/open-capture! (io/file dataset-root "capture"))))
       (finally
         (store/delete-tree! (io/file dataset-root))))))
 
@@ -433,6 +433,6 @@
         (Files/write (.toPath event-file) bytes
                      (make-array java.nio.file.OpenOption 0))
         (is (thrown? clojure.lang.ExceptionInfo
-                     (store/open-capture directory))))
+                     (store/open-capture! directory))))
       (finally
         (store/delete-tree! (io/file dataset-root))))))

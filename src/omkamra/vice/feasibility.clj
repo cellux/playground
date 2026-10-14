@@ -60,7 +60,7 @@
   (let [deadline (+ (System/currentTimeMillis) timeout-ms)]
     (loop []
       (let [conn (try
-                   (let [conn (vice/connect instance (fn [_ _] nil))]
+                   (let [conn (vice/connect! instance {:handle-event (fn [_ _] nil)})]
                      (bm/ping conn)
                      conn)
                    (catch Throwable _ nil))]
@@ -84,12 +84,12 @@
 
 (defn- write-block!
   [conn bank address values]
-  (bm/mem-set conn {:start address
-                    :end (+ address (dec (count values)))
-                    :memspace computer-memspace
-                    :bank bank
-                    :side-effects? true
-                    :data (byte-array (map unchecked-byte values))}))
+  (bm/mem-set! conn {:start address
+                     :end (+ address (dec (count values)))
+                     :memspace computer-memspace
+                     :bank bank
+                     :side-effects? true
+                     :data (byte-array (map unchecked-byte values))}))
 
 (defn- register-values
   [conn]
@@ -290,20 +290,20 @@
         checkpoint (atom nil)]
     (try
       (write-block! conn cpu-bank trace-program-address trace-program)
-      (bm/registers-set conn {:register-values [[3 trace-program-address]]})
+      (bm/registers-set! conn {:register-values [[3 trace-program-address]]})
       (reset! checkpoint
-              (bm/checkpoint-set conn {:start 0 :end 0xffff :stop? false
-                                       :enabled? true
-                                       :op bm/MON_CHECKPOINT_OP_EXECUTE
-                                       :temporary? false}))
+              (bm/checkpoint-set! conn {:start 0 :end 0xffff :stop? false
+                                        :enabled? true
+                                        :op bm/MON_CHECKPOINT_OP_EXECUTE
+                                        :temporary? false}))
       (bm/ignore-unsolicited-types!
        conn #{bm/MON_RESPONSE_CHECKPOINT_INFO})
       (let [reader1 (open-line-reader! fifo)]
-        (bm/resource-set conn {:name "MonitorLogFileName" :value fifo})
-        (bm/resource-set conn {:name "MonitorLogEnabled" :value 1})
-        (bm/resume conn)
+        (bm/resource-set! conn {:name "MonitorLogFileName" :value fifo})
+        (bm/resource-set! conn {:name "MonitorLogEnabled" :value 1})
+        (bm/resume! conn)
         (Thread/sleep (long sleep-ms))
-        (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
+        (bm/resource-set! conn {:name "MonitorLogEnabled" :value 0})
         (let [barrier1 (await-eof! reader1 5000)
               pc-before (:value (get (bm/registers-get conn) 3))
               flags (:value (get (bm/registers-get conn) 5))
@@ -322,10 +322,10 @@
               record-at (fn [pc] (first (filter #(= pc (record-pc %))
                                                 records1)))
               reader2 (open-line-reader! fifo)]
-          (bm/resource-set conn {:name "MonitorLogEnabled" :value 1})
-          (bm/resume conn)
+          (bm/resource-set! conn {:name "MonitorLogEnabled" :value 1})
+          (bm/resume! conn)
           (Thread/sleep 200)
-          (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
+          (bm/resource-set! conn {:name "MonitorLogEnabled" :value 0})
           (let [barrier2 (await-eof! reader2 5000)
                 records2 (parse-records @(:lines reader2))
                 first-record2 (first records2)
@@ -380,7 +380,7 @@
               :first-line-2 (first @(:lines reader2))}))))
       (finally
         (when-let [number (:number @checkpoint)]
-          (try (bm/checkpoint-delete conn {:number number})
+          (try (bm/checkpoint-delete! conn {:number number})
                (catch Throwable _ nil)))
         (io/delete-file fifo true)))))
 
@@ -404,12 +404,12 @@
      :or {connect-timeout-ms 30000 connect-retry-ms 100
           work-dir "/tmp/omkamra-vice-v2-feasibility" sleep-ms 400}}]
    (.mkdirs (io/file work-dir))
-   (let [instance (vice/start (cond-> {:port (or port (free-port))}
-                                executable (assoc :executable executable)))
+   (let [instance (vice/start! (cond-> {:port (or port (free-port))}
+                                 executable (assoc :executable executable)))
          conn (try
                 (connect! instance connect-timeout-ms connect-retry-ms)
                 (catch Throwable error
-                  (vice/stop instance)
+                  (vice/stop! instance)
                   (throw error)))]
      (try
        (let [results (mapv (fn [{:keys [id run]}]
@@ -439,10 +439,10 @@
                (newline))))
          report)
        (finally
-         (try (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
+         (try (bm/resource-set! conn {:name "MonitorLogEnabled" :value 0})
               (catch Throwable _ nil))
-         (vice/close conn)
-         (vice/stop instance))))))
+         (bm/close! conn)
+         (vice/stop! instance))))))
 
 (defn -main
   [& args]

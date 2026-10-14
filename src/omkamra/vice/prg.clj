@@ -265,3 +265,13 @@
   (with-open [out (io/output-stream file)]
     (.write out ^bytes (prg-bytes artifact)))
   (.getPath (io/file file)))
+
+(defn write-temp-artifact-prg!
+  "Write `artifact`'s self-relocating PRG to a fresh temp file and return its
+  path. The caller owns the file and is responsible for deleting it."
+  [artifact]
+  (let [directory (io/file "/tmp/omkamra-vice-v2")]
+    (.mkdirs directory)
+    (let [file (io/file directory (str "artifact-" (System/nanoTime) ".prg"))]
+      (write! artifact file)
+      (.getPath file))))

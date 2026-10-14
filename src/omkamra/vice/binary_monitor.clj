@@ -1,4 +1,5 @@
 (ns omkamra.vice.binary-monitor
+  (:refer-clojure :exclude [reset!])
   (:require [omkamra.vice.screen :as screen])
   (:import
    [java.io BufferedInputStream ByteArrayInputStream InputStream OutputStream]
@@ -10,6 +11,12 @@
 
 (def default-host "localhost")
 (def default-port 6502)
+
+(def on-close-key
+  "Optional private key holding a thunk `close!` invokes after closing. The
+  root API uses it so an owning instance descriptor can release its connection
+  slot when the connection is closed."
+  ::on-close)
 
 (def ^:private input-buffer-size 65536)
 (def ^:private discard-buffer-size 8192)
@@ -163,21 +170,21 @@
                            :read (- length remaining)})))
         (recur (- remaining read))))))
 
-(defn write-byte
+(defn write-byte!
   [^OutputStream out ^long val]
   (.write out (int val)))
 
-(defn write-short
+(defn write-short!
   [^OutputStream out ^long val]
   (.write out (int (bit-and val 0xff)))
   (.write out (int (bit-and (bit-shift-right val 8) 0xff))))
 
-(defn write-int
+(defn write-int!
   [^OutputStream out ^long val]
-  (write-short out (bit-and val 0xffff))
-  (write-short out (bit-and (bit-shift-right val 16) 0xffff)))
+  (write-short! out (bit-and val 0xffff))
+  (write-short! out (bit-and (bit-shift-right val 16) 0xffff)))
 
-(defn connect
+(defn connect!
   "Connect to VICE's binary monitor.
 
   `opts/:ignored-unsolicited-types` suppresses selected high-volume event
@@ -185,7 +192,7 @@
   are never suppressed. The set can be changed through
   `ignore-unsolicited-types!` on the returned connection."
   ([^String host ^long port handle-event]
-   (connect host port handle-event {}))
+   (connect! host port handle-event {}))
   ([^String host ^long port handle-event {:keys [ignored-unsolicited-types]
                                           :or {ignored-unsolicited-types #{}}}]
    (let [socket (Socket. host (int port))
@@ -266,21 +273,23 @@
   Suppression happens before response-body decoding and queueing, making this
   suitable for checkpoint-hit floods produced by non-stopping tracepoints."
   [conn response-types]
-  (reset! (:ignored-unsolicited-types conn) (set response-types)))
+  (clojure.core/reset! (:ignored-unsolicited-types conn) (set response-types)))
 
 (defn ignored-unsolicited-types
   [conn]
   @(:ignored-unsolicited-types conn))
 
-(defn close
+(defn close!
   [conn]
   (when-let [closed? (:closed? conn)]
-    (reset! closed? true))
+    (clojure.core/reset! closed? true))
   (.close ^Socket (:socket conn))
-  (reset! (:pending-requests conn) {})
-  (reset! (:next-request-id conn) 0)
+  (clojure.core/reset! (:pending-requests conn) {})
+  (clojure.core/reset! (:next-request-id conn) 0)
   (when-let [^LinkedBlockingQueue events (:events conn)]
     (.clear events))
+  (when-let [on-close (get conn on-close-key)]
+    (try (on-close) (catch Throwable _ nil)))
   nil)
 
 (defn await-event
@@ -329,14 +338,14 @@
                      \b (count arg)))
                  (map vector sig args))))
 
-(defn send-request
+(defn send-request!
   "Send one monitor request.
 
   VICE enters the monitor while handling requests, so callers that want the
   emulator to continue must make `exit`/`resume` the final request. The
   optional fifth argument controls how long to wait for a response."
   ([conn cmd body-sig body-args]
-   (send-request conn cmd body-sig body-args 1000))
+   (send-request! conn cmd body-sig body-args 1000))
   ([conn cmd body-sig body-args response-timeout-ms]
    (assert (= (count body-sig) (count body-args)))
    (let [{:keys [next-request-id pending-requests write-lock]} conn
@@ -345,18 +354,18 @@
          request-promise (promise)]
      (swap! pending-requests assoc request-id request-promise)
      (locking write-lock
-       (write-byte out 0x02)
-       (write-byte out vice-api-version)
-       (write-int out (body-length body-sig body-args))
-       (write-int out request-id)
-       (write-byte out cmd)
+       (write-byte! out 0x02)
+       (write-byte! out vice-api-version)
+       (write-int! out (body-length body-sig body-args))
+       (write-int! out request-id)
+       (write-byte! out cmd)
        (doseq [[code arg] (map vector body-sig body-args)]
          (case code
-           \1 (write-byte out (cond (nil? arg) 0
-                                    (boolean? arg) (if arg 1 0)
-                                    :else arg))
-           \2 (write-short out arg)
-           \4 (write-int out arg)
+           \1 (write-byte! out (cond (nil? arg) 0
+                                     (boolean? arg) (if arg 1 0)
+                                     :else arg))
+           \2 (write-short! out arg)
+           \4 (write-int! out arg)
            \b (.write ^OutputStream out arg 0 (alength ^bytes arg))))
        (.flush ^OutputStream out))
      (let [rv (deref request-promise response-timeout-ms nil)]
@@ -368,13 +377,13 @@
 
 (defn mem-get
   [conn {:keys [side-effects? start end memspace bank]}]
-  (send-request conn MON_CMD_MEM_GET
-                "12212"
-                [(if side-effects? 1 0)
-                 start
-                 end
-                 (or memspace 0)
-                 (or bank 0)]))
+  (send-request! conn MON_CMD_MEM_GET
+                 "12212"
+                 [(if side-effects? 1 0)
+                  start
+                  end
+                  (or memspace 0)
+                  (or bank 0)]))
 
 (defmethod read-response MON_RESPONSE_MEM_GET
   [_ in]
@@ -384,36 +393,36 @@
     {:length length
      :memory memory}))
 
-(defn mem-set
+(defn mem-set!
   [conn {:keys [side-effects? start end memspace bank data]}]
-  (send-request conn MON_CMD_MEM_SET
-                "12212b"
-                [side-effects?
-                 start
-                 end
-                 (or memspace 0)
-                 (or bank 0)
-                 data]))
+  (send-request! conn MON_CMD_MEM_SET
+                 "12212b"
+                 [side-effects?
+                  start
+                  end
+                  (or memspace 0)
+                  (or bank 0)
+                  data]))
 
 (defn checkpoint-get
   [conn {:keys [number]}]
-  (send-request conn MON_CMD_CHECKPOINT_GET "4" [number]))
+  (send-request! conn MON_CMD_CHECKPOINT_GET "4" [number]))
 
-(defn checkpoint-set
+(defn checkpoint-set!
   [conn {:keys [start end stop? enabled? op temporary? memspace]}]
-  (send-request conn MON_CMD_CHECKPOINT_SET
-                "2211111"
-                [start
-                 end
-                 stop?
-                 enabled?
-                 op
-                 temporary?
-                 (or memspace 0)]))
+  (send-request! conn MON_CMD_CHECKPOINT_SET
+                 "2211111"
+                 [start
+                  end
+                  stop?
+                  enabled?
+                  op
+                  temporary?
+                  (or memspace 0)]))
 
-(defn checkpoint-delete
+(defn checkpoint-delete!
   [conn {:keys [number]}]
-  (send-request conn MON_CMD_CHECKPOINT_DELETE "4" [number]))
+  (send-request! conn MON_CMD_CHECKPOINT_DELETE "4" [number]))
 
 (defn checkpoint-list
   "Return all checkpoints and their current monitor metadata.
@@ -422,7 +431,7 @@
   the final CHECKPOINT_LIST response, so this function collects both parts."
   [conn]
   (drain-events conn)
-  (let [first-response (send-request conn MON_CMD_CHECKPOINT_LIST "" [])
+  (let [first-response (send-request! conn MON_CMD_CHECKPOINT_LIST "" [])
         queued (drain-events conn)
         summary (or (when (contains? first-response :count)
                       first-response)
@@ -440,7 +449,7 @@
                          vec)]
     (assoc summary :checkpoints checkpoints)))
 
-(defn checkpoint-delete-all
+(defn checkpoint-delete-all!
   "Delete every checkpoint currently known to VICE and return its metadata.
 
   This is intentionally explicit because non-stopping tracepoints continue
@@ -448,7 +457,7 @@
   [conn]
   (let [checkpoints (:checkpoints (checkpoint-list conn))]
     (doseq [{:keys [number]} checkpoints]
-      (checkpoint-delete conn {:number number}))
+      (checkpoint-delete! conn {:number number}))
     checkpoints))
 
 (defmethod read-response MON_RESPONSE_CHECKPOINT_INFO
@@ -485,9 +494,9 @@
   [_ in]
   {:count (read-int in)})
 
-(defn checkpoint-toggle
+(defn checkpoint-toggle!
   [conn {:keys [number enabled?]}]
-  (send-request conn MON_CMD_CHECKPOINT_TOGGLE "41" [number enabled?]))
+  (send-request! conn MON_CMD_CHECKPOINT_TOGGLE "41" [number enabled?]))
 
 (defn ->bytes
   [x]
@@ -495,15 +504,15 @@
     x
     (.getBytes ^String x StandardCharsets/US_ASCII)))
 
-(defn condition-set
+(defn condition-set!
   [conn {:keys [number condition-str]}]
   (let [bytes (->bytes condition-str)]
     (assert (< (count bytes) 256))
-    (send-request conn MON_CMD_CONDITION_SET "41b" [number (count bytes) bytes])))
+    (send-request! conn MON_CMD_CONDITION_SET "41b" [number (count bytes) bytes])))
 
 (defn registers-get
   ([conn {:keys [memspace]}]
-   (send-request conn MON_CMD_REGISTERS_GET "1" [(or memspace 0)]))
+   (send-request! conn MON_CMD_REGISTERS_GET "1" [(or memspace 0)]))
   ([conn]
    (registers-get conn {:memspace 0})))
 
@@ -523,7 +532,7 @@
                         {:id register-id
                          :value register-value})))))))
 
-(defn registers-set
+(defn registers-set!
   [conn {:keys [memspace register-values]}]
   (let [data (byte-array (* 4 (count register-values)))]
     (doseq [[index [id value]] (map-indexed vector register-values)
@@ -533,26 +542,26 @@
       (aset-byte data (+ offset 2) (unchecked-byte value))
       (aset-byte data (+ offset 3)
                  (unchecked-byte (bit-shift-right value 8))))
-    (send-request conn MON_CMD_REGISTERS_SET "12b"
-                  [(or memspace 0) (count register-values) data])))
+    (send-request! conn MON_CMD_REGISTERS_SET "12b"
+                   [(or memspace 0) (count register-values) data])))
 
-(defn dump
+(defn dump!
   [conn {:keys [save-roms? save-disks? filename]}]
   (let [filename-bytes (->bytes filename)]
     (assert (< (count filename-bytes) 256))
-    (send-request conn MON_CMD_DUMP "111b"
-                  [save-roms?
-                   save-disks?
-                   (count filename-bytes)
-                   filename-bytes])))
+    (send-request! conn MON_CMD_DUMP "111b"
+                   [save-roms?
+                    save-disks?
+                    (count filename-bytes)
+                    filename-bytes])))
 
-(defn undump
+(defn undump!
   [conn {:keys [filename]}]
   (let [filename-bytes (->bytes filename)]
     (assert (< (count filename-bytes) 256))
-    (send-request conn MON_CMD_UNDUMP "1b"
-                  [(count filename-bytes)
-                   filename-bytes])))
+    (send-request! conn MON_CMD_UNDUMP "1b"
+                   [(count filename-bytes)
+                    filename-bytes])))
 
 (defmethod read-response MON_RESPONSE_UNDUMP
   [_ in]
@@ -562,11 +571,11 @@
   [conn {:keys [name]}]
   (let [name-bytes (->bytes name)]
     (assert (< (count name-bytes) 256))
-    (send-request conn MON_CMD_RESOURCE_GET "1b"
-                  [(count name-bytes)
-                   name-bytes])))
+    (send-request! conn MON_CMD_RESOURCE_GET "1b"
+                   [(count name-bytes)
+                    name-bytes])))
 
-(defn resource-set
+(defn resource-set!
   [conn {:keys [name value]}]
   (let [name-bytes (->bytes name)
         [value-type value-bytes]
@@ -589,12 +598,12 @@
       (throw (IllegalArgumentException. ":name is too long")))
     (when-not (< (count value-bytes) 256)
       (throw (IllegalArgumentException. ":value is too long")))
-    (send-request conn MON_CMD_RESOURCE_SET "11b1b"
-                  [value-type
-                   (count name-bytes)
-                   name-bytes
-                   (count value-bytes)
-                   value-bytes])))
+    (send-request! conn MON_CMD_RESOURCE_SET "11b1b"
+                   [value-type
+                    (count name-bytes)
+                    name-bytes
+                    (count value-bytes)
+                    value-bytes])))
 
 (defn read-sized-bytes
   [in]
@@ -620,17 +629,17 @@
       (= type 0) {:value (read-sized-string in)}
       (= type 1) {:value (read-sized-integer in)})))
 
-(defn advance-instructions
+(defn advance-instructions!
   [conn {:keys [step-over? count]}]
-  (send-request conn MON_CMD_ADVANCE_INSTRUCTIONS "12" [step-over? count]))
+  (send-request! conn MON_CMD_ADVANCE_INSTRUCTIONS "12" [step-over? count]))
 
-(defn advance-and-wait
+(defn advance-and-wait!
   "Advance instructions from a paused monitor and wait for its next stop event.
 
   `opts` accepts `:count`, `:step-over?`, and optional `:timeout-ms` (default
   1000). It returns the stopped-event response or throws on timeout."
   [conn {:keys [timeout-ms] :as opts}]
-  (advance-instructions conn opts)
+  (advance-instructions! conn opts)
   (let [event (await-event conn #(= MON_RESPONSE_STOPPED (:response-type %))
                            (or timeout-ms 1000))]
     (or (:response event)
@@ -638,25 +647,25 @@
                         {:timeout-ms (or timeout-ms 1000)
                          :options (dissoc opts :timeout-ms)})))))
 
-(defn keyboard-feed
+(defn keyboard-feed!
   [conn {:keys [text]}]
   (let [text-bytes (->bytes text)]
     (assert (< (count text-bytes) 256))
-    (send-request conn MON_CMD_KEYBOARD_FEED "1b"
-                  [(count text-bytes)
-                   text-bytes])))
+    (send-request! conn MON_CMD_KEYBOARD_FEED "1b"
+                   [(count text-bytes)
+                    text-bytes])))
 
-(defn execute-until-return
+(defn execute-until-return!
   [conn]
-  (send-request conn MON_CMD_EXECUTE_UNTIL_RETURN "" []))
+  (send-request! conn MON_CMD_EXECUTE_UNTIL_RETURN "" []))
 
 (defn ping
   [conn]
-  (send-request conn MON_CMD_PING "" []))
+  (send-request! conn MON_CMD_PING "" []))
 
 (defn banks-available
   [conn]
-  (send-request conn MON_CMD_BANKS_AVAILABLE "" []))
+  (send-request! conn MON_CMD_BANKS_AVAILABLE "" []))
 
 (defmethod read-response MON_RESPONSE_BANKS_AVAILABLE
   [_ in]
@@ -676,7 +685,7 @@
 
 (defn registers-available
   ([conn {:keys [memspace]}]
-   (send-request conn MON_CMD_REGISTERS_AVAILABLE "1" [(or memspace 0)]))
+   (send-request! conn MON_CMD_REGISTERS_AVAILABLE "1" [(or memspace 0)]))
   ([conn]
    (registers-available conn {:memspace 0})))
 
@@ -700,7 +709,7 @@
 
 (defn display-get
   [conn {:keys [use-vic-ii? format]}]
-  (send-request conn MON_CMD_DISPLAY_GET "11" [use-vic-ii? format]))
+  (send-request! conn MON_CMD_DISPLAY_GET "11" [use-vic-ii? format]))
 
 (defmethod read-response MON_RESPONSE_DISPLAY_GET
   [_ ^InputStream in]
@@ -731,7 +740,7 @@
 
 (defn vice-info
   [conn]
-  (send-request conn MON_CMD_VICE_INFO "" []))
+  (send-request! conn MON_CMD_VICE_INFO "" []))
 
 (defmethod read-response MON_RESPONSE_VICE_INFO
   [_ in]
@@ -800,12 +809,12 @@
           {:count count-or-options})]
     (when-not (pos-int? count)
       (throw (IllegalArgumentException. ":count must be positive")))
-    (send-request conn MON_CMD_CPUHISTORY_GET "14"
-                  [(or memspace 0) count])))
+    (send-request! conn MON_CMD_CPUHISTORY_GET "14"
+                   [(or memspace 0) count])))
 
 (defn palette-get
   [conn {:keys [use-vic-ii?]}]
-  (send-request conn MON_CMD_PALETTE_GET "1" [use-vic-ii?]))
+  (send-request! conn MON_CMD_PALETTE_GET "1" [use-vic-ii?]))
 
 (defmethod read-response MON_RESPONSE_PALETTE_GET
   [_ in]
@@ -822,7 +831,7 @@
                        b (read-byte in)]
                    (conj result [r g b]))))))))
 
-(declare resume)
+(declare resume!)
 
 (defn screenshot!
   "Capture the VICE display as a PNG and return `output-file`.
@@ -841,37 +850,37 @@
        (screen/write-png! frame palette output-file))
      (finally
        (when resume?
-         (resume conn))))))
+         (resume! conn))))))
 
-(defn joyport-set
+(defn joyport-set!
   [conn {:keys [port value]}]
-  (send-request conn MON_CMD_JOYPORT_SET "22" [port value]))
+  (send-request! conn MON_CMD_JOYPORT_SET "22" [port value]))
 
-(defn userport-set
+(defn userport-set!
   [conn {:keys [value]}]
-  (send-request conn MON_CMD_USERPORT_SET "2" [value]))
+  (send-request! conn MON_CMD_USERPORT_SET "2" [value]))
 
-(defn exit
+(defn exit!
   "Resume emulation; this should normally be the final monitor request."
   [conn]
-  (send-request conn MON_CMD_EXIT "" []))
+  (send-request! conn MON_CMD_EXIT "" []))
 
-(defn resume
+(defn resume!
   "Alias for `exit`, named for the effect on the emulator."
   [conn]
-  (exit conn))
+  (exit! conn))
 
-(defn quit
+(defn quit!
   [conn]
-  (send-request conn MON_CMD_QUIT "" []))
+  (send-request! conn MON_CMD_QUIT "" []))
 
-(defn reset
+(defn reset!
   ([conn]
-   (reset conn {:what 1}))
+   (reset! conn {:what 1}))
   ([conn {:keys [what]}]
-   (send-request conn MON_CMD_RESET "1" [what])))
+   (send-request! conn MON_CMD_RESET "1" [what])))
 
-(defn autostart
+(defn autostart!
   "Autostart a file and wait for VICE to leave the monitor.
 
   VICE's AUTOSTART command is special: it schedules the load/run operation
@@ -885,12 +894,12 @@
     ;; Discard state-transition events from the preceding monitor session so
     ;; the RESUMED event below belongs to this autostart request.
     (drain-events conn)
-    (let [response (send-request conn MON_CMD_AUTOSTART "121b"
-                                 [run-after-load?
-                                  file-index
-                                  (count filename-bytes)
-                                  filename-bytes]
-                                 timeout-ms)]
+    (let [response (send-request! conn MON_CMD_AUTOSTART "121b"
+                                  [run-after-load?
+                                   file-index
+                                   (count filename-bytes)
+                                   filename-bytes]
+                                  timeout-ms)]
       (when-not (await-event conn
                              #(= MON_RESPONSE_RESUMED (:response-type %))
                              timeout-ms)

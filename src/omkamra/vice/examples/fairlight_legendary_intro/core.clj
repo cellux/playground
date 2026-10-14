@@ -3,9 +3,9 @@
 
   Step 1 — the static screen. The intro runs in VIC bank 3 ($C000) with a
   custom multicolour charset at $C800, a screen matrix at $C400 and colour RAM
-  at $D800. The assets are placed directly at their VIC addresses: screen and
-  charset through the RAM bank, colour RAM through the injector's colour-RAM
-  path (the RAM bank cannot reach it).
+  at $D800. The assets are placed directly at their VIC addresses by the
+  self-relocating PRG: screen and charset through RAM, colour RAM through the
+  CPU-visible bank (the RAM bank cannot reach it).
 
   Step 2 — the raster IRQ and the rasterbars. One raster interrupt per frame,
   on line 1; the handler acknowledges it and paints the two colour bands, one
@@ -16,7 +16,8 @@
   Later steps slot into the same handler: the music (step 6) first, the sprite
   bar (step 3) before the bands, the text scroller (step 4) after them. The handler
   uses KERNAL *entry points* ($EA31), never KERNAL *vectors*, because the
-  runner injects into a cold machine whose vectors ($0316-$0333) are zero.
+  runner autostarts into a freshly booted machine whose vectors are only just
+  being set up.
 
   Step 3 — the sprite bar. Eight X-expanded multicolour sprites share one
   21-line gradient bitmap (`$C3C0`) and one Y per frame, from a generated sine
@@ -513,7 +514,8 @@
 (defn run!
   "Run the intro on a fresh VICE instance.
 
-  Arguments are passed straight to `omkamra.vice/run!`; for this relocatable
-  object that means an optional map with `:link-options` and `:run-options`."
+  Arguments are passed straight to `omkamra.vice/start!`; for this relocatable
+  object that means an optional map with `:link-options` and start options such
+  as `:from-pc` and `:connect-timeout-ms`."
   [& args]
   (apply common/run! intro args))

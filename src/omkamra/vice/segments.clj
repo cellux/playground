@@ -479,7 +479,7 @@
                 :file-groups file-groups
                 :segments segments}
          {:keys [generation directory relative]}
-         (analysis/new-generation dataset-root :segments)]
+         (analysis/new-generation! dataset-root :segments)]
      (try
        (store/atomic-write-edn! (io/file directory "index.edn") index)
        (store/atomic-write-edn! (io/file directory "boundary-audit.edn") audit)
@@ -502,7 +502,7 @@
 
 ;; Readers -------------------------------------------------------------------
 
-(defn open
+(defn open!
   [dataset-root]
   (let [stage (analysis/stage-entry dataset-root :segments)]
     (when-not stage

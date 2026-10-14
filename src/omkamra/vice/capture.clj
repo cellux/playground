@@ -29,6 +29,7 @@
   A stop commits the non-empty final chunk and finalizes the manifest. Any
   failure destroys the reserved capture directory."
   (:require [clojure.java.io :as io]
+            [omkamra.vice.assembler :as assembler]
             [omkamra.vice.binary-monitor :as bm]
             [omkamra.vice.driver :as driver]
             [omkamra.vice.prg :as prg]
@@ -60,16 +61,6 @@
 (defn- canonical-file
   ^java.io.File [path]
   (.getCanonicalFile (io/file path)))
-
-(defn- write-artifact-prg!
-  "Write `artifact`'s self-relocating PRG to a fresh temp file and return its
-  path; `cleanup!` deletes it."
-  [artifact]
-  (let [directory (io/file "/tmp/omkamra-vice-v2")]
-    (.mkdirs directory)
-    (let [file (io/file directory (str "artifact-" (System/nanoTime) ".prg"))]
-      (prg/write! artifact file)
-      (.getPath file))))
 
 ;; Input and dataset validation ---------------------------------------------
 
@@ -164,7 +155,7 @@
 
 (defn- set-logging!
   [session value]
-  (bm/resource-set @(:conn session) {:name "MonitorLogEnabled" :value value}))
+  (bm/resource-set! @(:conn session) {:name "MonitorLogEnabled" :value value}))
 
 ;; Program-entry start policy ------------------------------------------------
 
@@ -402,7 +393,7 @@
                     :events []
                     :closing? false}]
     (set-logging! session 1)
-    (bm/resume conn)
+    (bm/resume! conn)
     (let [commit-ms (commit-chunk! session chunk
                                    {:kind :forced-size :reason :max-events})]
       (record-boundary-metrics!
@@ -437,7 +428,7 @@
   [session]
   (reset! (:stop-requested session) true)
   (when-let [conn @(:conn session)]
-    (try (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
+    (try (bm/resource-set! conn {:name "MonitorLogEnabled" :value 0})
          (catch Throwable _ nil))))
 
 (defn- controller-loop!
@@ -511,10 +502,10 @@
   (let [conn @(:conn session)
         external? (:external? session)]
     (when conn
-      (try (bm/resource-set conn {:name "MonitorLogEnabled" :value 0})
+      (try (bm/resource-set! conn {:name "MonitorLogEnabled" :value 0})
            (catch Throwable _ nil))
       (when-let [number @(:trace-checkpoint session)]
-        (try (bm/checkpoint-delete conn {:number number})
+        (try (bm/checkpoint-delete! conn {:number number})
              (catch Throwable _ nil)))
       (when-let [prior @(:prior-ignored session)]
         (try (bm/ignore-unsolicited-types! conn prior)
@@ -523,7 +514,7 @@
       ;; A caller-supplied instance keeps running: resume it and leave its
       ;; process alone instead of terminating it with the capture.
       (when external?
-        (try (bm/resume conn) (catch Throwable _ nil))))
+        (try (bm/resume! conn) (catch Throwable _ nil))))
     (when-let [fifo @(:fifo session)]
       (io/delete-file fifo true))
     (when-let [temp-input (:temp-input session)]
@@ -531,10 +522,14 @@
     ;; Close the monitor connection before terminating the process, so the
     ;; connection reader sees an intentional close instead of a dropped stream.
     (when conn
-      (try (driver/close conn) (catch Throwable _ nil)))
+      (try (driver/close! conn) (catch Throwable _ nil)))
     (when-let [instance @(:instance session)]
       (when-not external?
-        (try (driver/stop! instance) (catch Throwable _ nil))))))
+        (try (driver/stop! instance) (catch Throwable _ nil))))
+    ;; Release the instance's exclusive capture ownership so a later capture or
+    ;; monitor connection can claim it.
+    (when-let [descriptor (:descriptor session)]
+      (driver/release! descriptor :capture session))))
 
 (defn- capture-running-instance!
   "Running-instance capture backend, shared by the input and instance paths.
@@ -567,7 +562,7 @@
       (bm/drain-events conn)
       (let [initial (snapshot/acquire conn)
             {:keys [screenshot]} (acquire-screenshot! session)
-            trace-checkpoint (bm/checkpoint-set
+            trace-checkpoint (bm/checkpoint-set!
                               conn
                               {:start 0
                                :end 0xffff
@@ -579,7 +574,7 @@
         (reset! (:prior-ignored session) (bm/ignored-unsolicited-types conn))
         (bm/ignore-unsolicited-types! conn #{bm/MON_RESPONSE_CHECKPOINT_INFO})
         (let [fifo (create-fifo! session)]
-          (bm/resource-set conn {:name "MonitorLogFileName" :value fifo})
+          (bm/resource-set! conn {:name "MonitorLogFileName" :value fifo})
           (start-fifo-reader! session fifo))
         ;; Enabling logging opens the FIFO writer so the reader can open it.
         (set-logging! session 1)
@@ -599,10 +594,10 @@
                 ;; drift-during-setup offset. An explicit :from-pc was already
                 ;; gated for, so it is resumed from instead.
                 (and full-capture? (nil? (:from-pc options)))
-                (bm/reset conn {:what 1})
+                (bm/reset! conn {:what 1})
 
                 :else
-                (bm/resume conn))
+                (bm/resume! conn))
               (catch Throwable error
                 (try (.put ^ArrayBlockingQueue (:queue session) {:error error})
                      (catch Throwable _ nil))))))
@@ -616,38 +611,31 @@
                                     :closing? false})))
       (finally
         (when-let [number (:number @checkpoint)]
-          (try (bm/checkpoint-delete conn {:number number})
+          (try (bm/checkpoint-delete! conn {:number number})
                (catch Throwable _ nil)))))))
 
-(defn- run-session!
+(defn- run-capture!
+  "Connect to the session's instance and drive the capture to completion."
   [session options]
-  (let [result (try
-                 (let [instance (or (:instance options)
-                                    (driver/start!
-                                     {:executable (or (:executable options)
-                                                      driver/default-executable)
-                                      :address (:address options)
-                                      :port (:monitor-port session)
-                                      :extra-args (vice-extra-args options)}))]
-                   (reset! (:instance session) instance)
+  (let [instance @(:instance session)
+        result (try
+                 (swap! (:state session) assoc :pid (:pid instance))
+                 (let [conn (driver/connect-until-ready!
+                             instance
+                             (assoc (select-keys options
+                                                 [:connect-retry-ms :handle-event])
+                                    :connect-timeout-ms
+                                    (or (:connect-timeout-ms options)
+                                        default-connect-timeout-ms)))]
+                   (reset! (:conn session) conn)
                    (swap! (:state session) assoc
-                          :pid (:pid instance)
-                          :status :connecting)
-                   (let [conn (driver/connect!
-                               instance
-                               (assoc options
-                                      :connect-timeout-ms
-                                      (or (:connect-timeout-ms options)
-                                          default-connect-timeout-ms)))]
-                     (reset! (:conn session) conn)
-                     (swap! (:state session) assoc
-                            :status :starting
-                            :monitor :connected)
-                     ;; The input path prepares autostart and computes the
-                     ;; backend start address before handing over.
-                     (capture-running-instance!
-                      session options
-                      (prepare-start-pc! session options))))
+                          :status :starting
+                          :monitor :connected)
+                   ;; The input path prepares autostart and computes the
+                   ;; backend start address before handing over.
+                   (capture-running-instance!
+                    session options
+                    (prepare-start-pc! session options)))
                  (catch Throwable error
                    (fail-session! session error)))]
     (cleanup! session)
@@ -662,66 +650,70 @@
 
 ;; Public API ----------------------------------------------------------------
 
-(defn start!
-  "Reserve a capture and start it on a background worker.
+(defn- capture-session
+  "Resolve the capture session from an instance descriptor (or, internally,
+  from a session map)."
+  [descriptor]
+  (when (map? descriptor)
+    (or (driver/owner descriptor :capture)
+        (when (and (:session-id descriptor) (:capture descriptor))
+          descriptor))))
 
-  A capture starts a fresh VICE from an `:input` file or an in-memory
-  `:artifact`, records the boot sequence (`:full-capture? true`, no input
-  needed), or attaches to an already running `:instance` (as returned by
-  `omkamra.vice/start!`). Exactly one of `:input`, `:artifact`, and `:instance`
-  is required, together with `:dataset-root`.
+(defn capture!
+  "Capture execution of a VICE instance and return its instance descriptor.
 
-  Input mode autostarts the `.prg`/`.d64`, waits for the BASIC RUN stop at
-  `$E144`, and starts the trace at the loaded stub's `SYS` target, or at
-  `:from-pc` when supplied. Instance mode records the running emulator from its
-  current position, or from `:from-pc` when supplied. A full capture powers on
-  a fresh VICE, stops at the reset entry (or at `:from-pc`), and records the
-  boot sequence; `:input` is optional and, when given, is autostarted after the
-  boot. A full capture cannot be combined with `:instance`. `:max-events` stops
-  the capture once that many events have been collected.
+  Exactly one of `:input` (an existing `.prg`/`.d64`), `:artifact` (a
+  relocatable object from `assemble` or a linked artifact from `link`), and
+  `:instance` (an already running instance descriptor) is required, together
+  with `:dataset-root`. An object artifact is linked with `:link-options`; a
+  linked artifact is used as is. Both become a temporary self-relocating PRG.
 
-  Optional: `:capture-id`, `:executable`, `:address`, `:port`, `:extra-args`,
-  `:speed`, `:warp?`, `:full-capture?`, `:run-after-load?`, `:from-pc`,
-  `:max-events`, `:events-per-chunk`, `:vic-value-blacklist`, `:timing-model`,
-  `:connect-timeout-ms`, `:connect-retry-ms`, `:autostart-timeout-ms`,
-  `:program-start-timeout-ms`, and `:record-queue-capacity`.
+  A fresh instance is launched and its descriptor is returned once the process
+  exists; the monitor connection and capture setup continue on a worker with
+  `:starting`/`:connecting` statuses. `:instance` attaches to an existing
+  instance instead, and `:full-capture?` powers on a fresh VICE and records the
+  boot sequence (an `:input` is optional and autostarted after the boot).
+  `:max-events` stops the capture once that many events have been collected.
 
-  Every committed chunk carries the VIC screenshot of its boundary instant as
-  `chunks/chunk-NNNNNN.png`. The frame is read from the monitor while VICE is
-  already paused for the boundary snapshot, and is encoded and stored on its
-  own thread during the chunk commit, off the pause path.
-
-  Returns a session handle immediately."
+  Capture owns the instance's exclusive ownership slot until it finishes, so no
+  monitor connection can be opened while a capture is active. Manage the
+  capture through the returned descriptor with `status`, `stop-async!`, and
+  `stop!`."
   [options]
-  (let [artifact (:artifact options)
+  (let [target (:artifact options)
+        artifact (when target
+                   (if (assembler/object? target)
+                     (assembler/link target (:link-options options))
+                     target))
+        _ (when (and artifact (not (assembler/artifact? artifact)))
+            (fail "Capture :artifact expects a relocatable object or a linked artifact"
+                  {:artifact target}))
         _ (when (and artifact (:instance options))
             (fail "Capture accepts either :artifact or :instance, not both" {}))
         _ (when (and artifact (:input options))
             (fail "Capture accepts either :input or :artifact, not both" {}))
         _ (when (and artifact (true? (:full-capture? options)))
-            (fail (str "Capture :full-capture? is meaningless for an injected "
-                       ":artifact")
-                  {}))
+            (fail "Capture :full-capture? is meaningless for an artifact" {}))
         ;; An artifact becomes a self-relocating PRG; the input path then
         ;; autostarts it and gates the trace at the entry point.
-        temp-input (when artifact (write-artifact-prg! artifact))
+        temp-input (when artifact (prg/write-temp-artifact-prg! artifact))
         options (if artifact
                   (-> options
-                      (dissoc :artifact)
+                      (dissoc :artifact :link-options)
                       (assoc :input temp-input)
                       (assoc :from-pc (or (:from-pc options)
                                           (:entry-point artifact))))
                   options)
-        instance (instance-option options)
+        external (instance-option options)
         full-capture? (true? (:full-capture? options))
-        _ (when (and instance full-capture?)
+        _ (when (and external full-capture?)
             (fail (str "Capture :full-capture? powers on a fresh VICE; "
                        "it cannot be combined with :instance")
                   {}))
-        _ (when (and instance (:input options))
+        _ (when (and external (:input options))
             (fail "Capture accepts either :input or :instance, not both" {}))
         ;; A full capture may omit the input and record a pure boot sequence.
-        input (if (or instance
+        input (if (or external
                       (and full-capture? (nil? (:input options))))
                 nil
                 (validate-input! (:input options)))
@@ -729,73 +721,100 @@
         max-events (max-events-option options)
         dataset-root (prepare-dataset-root! (:dataset-root options))
         capture-id (make-capture-id (:capture-id options))
-        target (events-per-chunk options)
+        target-size (events-per-chunk options)
         blacklist (set (or (:vic-value-blacklist options)
                            contract/default-vic-value-blacklist))
         _ (contract/validate-vic-value-blacklist! blacklist)
-        capture (recorder/start-capture!
-                 {:dataset-root dataset-root
-                  :capture-id capture-id
-                  :timing-model (:timing-model options)
-                  :options (cond-> {:events-per-chunk target
-                                    :vic-value-blacklist blacklist}
-                             from-pc (assoc :from-pc from-pc)
-                             max-events (assoc :max-events max-events))})
-        session {:session-id (str (UUID/randomUUID))
-                 :capture-id capture-id
-                 :input input
-                 :temp-input temp-input
-                 :dataset-root dataset-root
-                 :events-per-chunk target
-                 :from-pc from-pc
-                 :max-events max-events
-                 :external? (some? instance)
-                 :capture capture
-                 :monitor-port (if instance
-                                 (:port instance)
-                                 (or (:port options) (driver/free-port)))
-                 :state (atom {:status :starting
-                               :capture-id capture-id
-                               :input input
-                               :dataset-root dataset-root
-                               :capture-directory (:directory capture)
-                               :events-per-chunk target
-                               :from-pc from-pc
-                               :max-events max-events})
-                 :instance (atom nil)
-                 :conn (atom nil)
-                 :queue (ArrayBlockingQueue. (int (queue-capacity options)))
-                 :stop-requested (atom false)
-                 :reader (atom nil)
-                 :reader-thread (atom nil)
-                 :fifo (atom nil)
-                 :trace-checkpoint (atom nil)
-                 :prior-ignored (atom nil)
-                 :metrics (atom nil)
-                 :worker (atom nil)
-                 :completion (promise)}]
-    (register-session! session)
-    (start-metrics! session)
-    (reset! (:worker session) (future (run-session! session options)))
-    session))
+        monitor-port (if external
+                       (:port external)
+                       (or (:port options) (driver/free-port)))
+        instance (or external
+                     (driver/start!
+                      {:executable (or (:executable options)
+                                       driver/default-executable)
+                       :address (:address options)
+                       :port monitor-port
+                       :extra-args (vice-extra-args options)}))
+        reserved (atom nil)]
+    (try
+      (let [capture (recorder/start-capture!
+                     {:dataset-root dataset-root
+                      :capture-id capture-id
+                      :timing-model (:timing-model options)
+                      :options (cond-> {:events-per-chunk target-size
+                                        :vic-value-blacklist blacklist}
+                                 from-pc (assoc :from-pc from-pc)
+                                 max-events (assoc :max-events max-events))})
+            _ (reset! reserved capture)
+            session {:session-id (str (UUID/randomUUID))
+                     :capture-id capture-id
+                     :input input
+                     :temp-input temp-input
+                     :dataset-root dataset-root
+                     :events-per-chunk target-size
+                     :from-pc from-pc
+                     :max-events max-events
+                     :external? (some? external)
+                     :descriptor instance
+                     :capture capture
+                     :monitor-port monitor-port
+                     :state (atom {:status :starting
+                                   :capture-id capture-id
+                                   :input input
+                                   :dataset-root dataset-root
+                                   :capture-directory (:directory capture)
+                                   :events-per-chunk target-size
+                                   :from-pc from-pc
+                                   :max-events max-events})
+                     :instance (atom instance)
+                     :conn (atom nil)
+                     :queue (ArrayBlockingQueue. (int (queue-capacity options)))
+                     :stop-requested (atom false)
+                     :reader (atom nil)
+                     :reader-thread (atom nil)
+                     :fifo (atom nil)
+                     :trace-checkpoint (atom nil)
+                     :prior-ignored (atom nil)
+                     :metrics (atom nil)
+                     :worker (atom nil)
+                     :completion (promise)}]
+        (when-not (driver/claim! instance :capture session)
+          (fail "The VICE instance already has an active capture or monitor connection"
+                {:reason :instance-busy}))
+        (reset! reserved nil)
+        (register-session! session)
+        (start-metrics! session)
+        (reset! (:worker session) (future (run-capture! session options)))
+        instance)
+      (catch Throwable error
+        (when-let [capture @reserved]
+          (try (recorder/abort-capture! capture) (catch Throwable _ nil)))
+        (when (nil? external)
+          (try (driver/stop! instance) (catch Throwable _ nil)))
+        (when temp-input
+          (io/delete-file temp-input true))
+        (throw error)))))
 
 (defn status
-  "Return lightweight capture progress without stopping the capture."
-  [session]
-  (when-not (map? session)
-    (throw (IllegalArgumentException. "Session must be a map")))
-  (let [manifest (some-> (:capture session) :state deref)]
-    (merge (select-keys session [:session-id :capture-id :input :dataset-root
-                                 :events-per-chunk])
-           (dissoc @(:state session) :result)
-           {:metrics @(:metrics session)
-            :chunk-count (:chunk-count manifest 0)
-            :event-count (:event-count manifest 0)
-            :capture-directory (:directory (:capture session))
-            :queue-depth (.size ^ArrayBlockingQueue (:queue session))
-            :reader-alive? (some-> ^Thread @(:reader-thread session) .isAlive)
-            :worker-done? (some-> ^java.util.concurrent.Future @(:worker session) .isDone)
-            :stop-requested? (boolean @(:stop-requested session))})))
+  "Return lightweight capture progress for an instance descriptor without
+  stopping the capture.
+
+  Returns nil when the instance has no capture."
+  [descriptor]
+  (when-let [session (capture-session descriptor)]
+    (let [manifest (some-> (:capture session) :state deref)]
+      (merge (select-keys session [:session-id :capture-id :input :dataset-root
+                                   :events-per-chunk])
+             (dissoc @(:state session) :result)
+             {:metrics @(:metrics session)
+              :chunk-count (:chunk-count manifest 0)
+              :event-count (:event-count manifest 0)
+              :capture-directory (:directory (:capture session))
+              :queue-depth (.size ^ArrayBlockingQueue (:queue session))
+              :reader-alive? (some-> ^Thread @(:reader-thread session) .isAlive)
+              :worker-done? (some-> ^java.util.concurrent.Future
+                             @(:worker session) .isDone)
+              :stop-requested? (boolean @(:stop-requested session))}))))
 
 (defn live-sessions
   "Lightweight summaries of captures started by this process and still running.
@@ -813,26 +832,28 @@
   "Request capture shutdown without waiting.
 
   Sets the stop flag and disables monitor logging, which pauses VICE, closes the
-  log file, and lets the controller drain the final chunk and finalize."
-  [session]
-  (when-not (map? session)
-    (throw (IllegalArgumentException. "Session must be a map")))
-  (request-stop! session)
-  (status session))
+  log file, and lets the controller drain the final chunk and finalize. Returns
+  the capture's status, or nil when the instance has no capture."
+  [descriptor]
+  (when-let [session (capture-session descriptor)]
+    (request-stop! session)
+    (status descriptor)))
 
 (defn stop!
   "Stop a capture, finalize it, and return the paths and metrics.
 
-  Blocks until the worker completes. Throws on setup or capture failure with
-  the failed result in `ex-data`."
-  [session]
-  (stop-async! session)
-  (let [result (deref (:completion session) 60000 ::timeout)]
-    (cond
-      (= ::timeout result)
-      (do
-        (cleanup! session)
-        (throw (ex-info "Timed out waiting for capture shutdown" {})))
-      (= :failed (:status result))
-      (throw (ex-info "VICE capture failed" (dissoc result :error) (:error result)))
-      :else result)))
+  Blocks until the worker completes. Returns nil when the instance has no
+  capture. Throws on setup or capture failure with the failed result in
+  `ex-data`."
+  [descriptor]
+  (when-let [session (capture-session descriptor)]
+    (stop-async! descriptor)
+    (let [result (deref (:completion session) 60000 ::timeout)]
+      (cond
+        (= ::timeout result)
+        (do
+          (cleanup! session)
+          (throw (ex-info "Timed out waiting for capture shutdown" {})))
+        (= :failed (:status result))
+        (throw (ex-info "VICE capture failed" (dissoc result :error) (:error result)))
+        :else result))))

@@ -864,7 +864,7 @@
 (defn build!
   "Build a `:dedupe` generation for a finalized capture and commit it.
 
-  `reader` is a `omkamra.vice.reader/open` handle. Options: `:window-events`
+  `reader` is a `omkamra.vice.reader/open!` handle. Options: `:window-events`
   (positive integer logical-window target), `:configuration` (recorded in the
   analysis manifest), and `:max-events` (test-only prefix bound). Returns the
   generation directory and its index. On any failure the generation directory
@@ -880,7 +880,7 @@
          capture-id (reader/capture-id reader)
          capture-sha (analysis/capture-manifest-sha (reader/directory reader))
          {:keys [generation directory relative]}
-         (analysis/new-generation dataset-root :dedupe)]
+         (analysis/new-generation! dataset-root :dedupe)]
      (analysis/report! progress {:stage :dedupe
                                  :total-events (reader/event-count reader)
                                  :processed-events 0})
@@ -997,7 +997,7 @@
     (doseq [[sub sub-spec] (select-keys spec [:index :image])]
       (verify-artifact! directory (str (name key) "/" (name sub)) sub-spec))))
 
-(defn open
+(defn open!
   "Open the committed `:dedupe` generation for a dataset root.
 
   Validates the analysis manifest, index format/version, and artifact

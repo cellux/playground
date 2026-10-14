@@ -35,13 +35,13 @@
 
 ;; Opening and validation ----------------------------------------------------
 
-(defn open
+(defn open!
   "Validate a finalized capture under `dataset-root` and return a reader.
 
   Options: `:cache-size` (positive integer). Validation hashes every artifact
   once; after that the reader trusts the manifest and verifies sizes lazily."
   ([dataset-root]
-   (open dataset-root {}))
+   (open! dataset-root {}))
   ([dataset-root {:keys [cache-size] :or {cache-size default-cache-size}}]
    (when-not (pos-int? cache-size)
      (throw (ex-info "Reader :cache-size must be a positive integer"

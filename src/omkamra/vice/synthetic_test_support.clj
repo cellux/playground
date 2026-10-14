@@ -121,13 +121,13 @@
     (try
       (write-capture! root)
       (let [result (pipeline/build! root :all
-                                    {:reader (reader/open root)
+                                    {:reader (reader/open! root)
                                      :stage-parallelism 2})
             images (:images result)]
         (.addShutdownHook (Runtime/getRuntime)
                           (Thread. #(remove-root! root)))
         {:root root
-         :capture (reader/open root)
+         :capture (reader/open! root)
          :images images
          :dedupe (:dedupe images)
          :video (:video images)

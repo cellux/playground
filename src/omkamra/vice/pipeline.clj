@@ -121,15 +121,15 @@
 (defn- open-stage!
   [stage dataset-root]
   (case stage
-    :dedupe (dedupe/open dataset-root)
-    :video (video/open dataset-root)
-    :assets (assets/open dataset-root)
-    :audio (audio/open dataset-root)
-    :features (features/open dataset-root)
-    :classification (classification/open dataset-root)
-    :segments (segments/open dataset-root)
-    :disassembly (disassembly/open dataset-root)
-    :report (report/open dataset-root)))
+    :dedupe (dedupe/open! dataset-root)
+    :video (video/open! dataset-root)
+    :assets (assets/open! dataset-root)
+    :audio (audio/open! dataset-root)
+    :features (features/open! dataset-root)
+    :classification (classification/open! dataset-root)
+    :segments (segments/open! dataset-root)
+    :disassembly (disassembly/open! dataset-root)
+    :report (report/open! dataset-root)))
 
 (defn- build-stage!
   [stage {:keys [capture] :as context} configuration]
@@ -328,7 +328,7 @@
       (throw (ex-info "Analysis :stage-parallelism must be a positive integer"
                       {:reason :invalid-stage-parallelism
                        :stage-parallelism parallelism})))
-    (let [capture (or (:reader options) (reader/open dataset-root))
+    (let [capture (or (:reader options) (reader/open! dataset-root))
           transaction (atom {})
           context {:dataset-root dataset-root
                    :capture capture
@@ -396,7 +396,7 @@
   downstream generation must be rebuilt rather than adopted. Options: `:only`
   (a set of stages to adopt; defaults to all). Returns the signature map."
   [dataset-root & [{:keys [only]}]]
-  (let [capture (reader/open dataset-root)
+  (let [capture (reader/open! dataset-root)
         capture-sha (analysis/capture-manifest-sha (reader/directory capture))
         signatures (atom {})]
     (doseq [stage all-stages
