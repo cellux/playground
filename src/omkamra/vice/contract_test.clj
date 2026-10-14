@@ -122,21 +122,5 @@
   (is (not (contract/ranges-overlap? [10 20] [20 30])))
   (is (contract/ranges-adjacent? [10 20] [20 30])))
 
-(deftest annotation-vocabulary
-  (is (= "; B:12 C:m P:04 S:07 E:1234 R:18"
-         (contract/format-annotation
-          {:block 12 :context "m" :predecessors 4 :successors 7
-           :executions 1234 :repeats 18})))
-  (is (<= (count (contract/format-annotation
-                  {:block 12 :context "i8200" :predecessors 4 :successors 7
-                   :executions 1234 :repeats 18}))
-          contract/annotation-max-width))
-  (is (thrown? clojure.lang.ExceptionInfo
-               (contract/format-annotation {:block 1 :context "m"})))
-  (is (thrown? clojure.lang.ExceptionInfo
-               (contract/format-annotation
-                {:block 1 :context "m" :predecessors 100 :successors 1
-                 :executions 1 :repeats 1}))))
-
 (deftest all-contracts-validate
   (is (contract/validate-contracts!)))

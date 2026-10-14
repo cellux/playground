@@ -11,13 +11,11 @@
   * canonical CPU/VIC/SID/CIA register windows, color RAM, and the CPU port;
   * the capture-level VIC value-blacklist policy and its protected registers;
   * the half-open global event-range convention;
-  * the fixed, one-line disassembly annotation vocabulary;
   * descriptor and snapshot validators that run without VICE.
 
   Everything here is deliberately independent of `omkamra.vice.decoder` (v1).
   A malformed descriptor or snapshot throws an `ex-info` with a `:reason`; it
-  never silently degrades."
-  (:require [clojure.string :as str]))
+  never silently degrades.")
 
 ;; Versions and formats ------------------------------------------------------
 
@@ -475,55 +473,6 @@
   (validate-event-range! a)
   (validate-event-range! b)
   (= (second a) (first b)))
-
-;; Disassembly annotation vocabulary -----------------------------------------
-
-(def annotation-keys
-  "Fixed annotation identifiers. Every annotation is one comment line.
-  `:width` is the minimum zero-padded width; `:variable` means natural width."
-  [{:id "B" :key :block :description "global block id" :width :variable}
-   {:id "C" :key :context :description "context: m, or i<hex> for IRQ handler"
-    :width :variable}
-   {:id "P" :key :predecessors :description "selected-context predecessors"
-    :width 2}
-   {:id "S" :key :successors :description "selected-context successors"
-    :width 2}
-   {:id "E" :key :executions :description "occurrences in the selected range"
-    :width :variable}
-   {:id "R" :key :repeats :description "observed back-edge repeats"
-    :width :variable}])
-
-(def annotation-max-width 79)
-
-(defn- annotation-value
-  [{:keys [id key width]} annotation]
-  (let [value (get annotation key)]
-    (when (nil? value)
-      (throw (ex-info "Annotation is missing a required field"
-                      {:reason :invalid-annotation :id id :key key})))
-    (if (= :variable width)
-      (str value)
-      (let [text (str value)]
-        (when (> (count text) width)
-          (throw (ex-info "Annotation value exceeds its fixed width"
-                          {:reason :invalid-annotation
-                           :id id :value value :width width})))
-        (str (apply str (repeat (- width (count text)) \0)) text)))))
-
-(defn format-annotation
-  "Render one fixed, terse disassembly annotation comment line.
-
-  The result always starts with `; ` and always fits on one comment line."
-  [annotation]
-  (let [parts (map #(str (:id %) ":" (annotation-value % annotation))
-                   annotation-keys)
-        line (str "; " (str/join " " parts))]
-    (when (> (count line) annotation-max-width)
-      (throw (ex-info "Annotation does not fit on one comment line"
-                      {:reason :invalid-annotation
-                       :line line
-                       :max-width annotation-max-width})))
-    line))
 
 ;; Aggregate validation ------------------------------------------------------
 

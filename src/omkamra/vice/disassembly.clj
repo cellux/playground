@@ -716,7 +716,6 @@
                     (get-in segments-image [:index :capture-manifest-sha256])
                     :configuration configuration
                     :event-count total-events
-                    :annotation-vocabulary contract/annotation-keys
                     :summary {:segment-count (count rendered)
                               :role-file-count (count role-renders)
                               :block-count (count (distinct (mapcat :block-ids rendered)))

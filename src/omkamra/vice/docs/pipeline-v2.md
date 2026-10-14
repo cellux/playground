@@ -844,15 +844,19 @@ It:
 - emits compact block annotations;
 - emits routine-specific assemblies for raster/music/loader/decruncher roles when requested.
 
-The annotation vocabulary is fixed and documented by the disassembly format. Every annotation fits on one comment line and uses identifiers of one or two characters at most.
-
-Example shape:
+Every block's first instruction carries one compact annotation comment attached
+as `(%meta ...)` metadata, for example:
 
 ```asm
-; B:12 C:m P:04 S:07 E:1234 R:18
+1000  INC $0002  ; blk 12 ctx m pred 04 succ 07 exec 1234 rep 18
+1003  JMP L1000
 ```
 
-The exact identifiers and their meanings must be specified before implementation of the renderer.
+The annotation fields are the global `:block` id, the `:context` (`m`, or an
+IRQ/other handler id), the distinct `:predecessors`/`:successors` counts within
+the segment and context (saturated at 99), the `:executions` occurrence count,
+and the observed back-edge `:repeats`. `assembler/serialize-asm` renders the
+metadata map as the trailing comment via its `:note` field.
 
 ### 7.9 `:report`
 

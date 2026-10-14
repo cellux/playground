@@ -87,3 +87,30 @@ full suite runs 200 tests / 1884 assertions with 4 failures. Those four
 (`disassembly_test/segment-files-are-complete-and-unique` and
 `/role-files-are-complete-and-unique`) were confirmed to fail identically on the
 pristine `HEAD` checkout and are unrelated to this refactor.
+
+## Follow-up — Disassembly annotation test fix (completed)
+
+The four pre-existing `disassembly_test` failures were a stale test/format
+mismatch, not an API issue. Commit `8eb6fb4` replaced the
+`contract/format-annotation` listing (`; B:12 C:m …`) with the compact
+`annotation-note` (`; blk 12 ctx m …`) but rewrote `asm-block-ids` to look for
+`:block N`, which matches neither output, so every `asm-ids` assertion saw an
+empty set. `asm-block-ids` now parses the actual `blk N` annotation, and all
+four tests pass.
+
+Because `format-annotation` was then dead in production (only `contract-test`
+exercised it) and `annotation-keys` was only written into the disassembly index
+as inert, unread, and no-longer-accurate metadata, both were removed:
+
+- `contract/format-annotation`, `annotation-value`, `annotation-max-width`, and
+  `annotation-keys` were deleted, along with their test and the now-unused
+  `clojure.string` require and `ns` docstring bullet;
+- `disassembly`'s index no longer records `:annotation-vocabulary` (nothing
+  consumed it; `disassembly-version` was left at 1 because the dropped key was
+  never read);
+- the `:disassembly` spec section of `docs/pipeline-v2.md` now documents the
+  compact annotation; the append-only diary entries describing the original
+  `format-annotation` renderer were left untouched.
+
+Verification: `cljfmt` and `clj-kondo` clean, full suite 202 tests / 1889
+assertions with 0 failures.

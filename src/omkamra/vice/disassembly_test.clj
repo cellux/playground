@@ -25,10 +25,11 @@
        vec))
 
 (defn- asm-block-ids
-  "Block ids from a committed `.asm` listing, read from its metadata comments."
+  "Block ids from a committed `.asm` listing, read from its compact
+  `blk N ctx ...` annotation comments."
   [dir file]
   (->> (str/split-lines (slurp (io/file dir file)))
-       (keep #(second (re-find #":block (\d+)" %)))
+       (keep #(second (re-find #"\bblk (\d+)\b" %)))
        (mapv parse-long)))
 
 (defn- segment-lookup
