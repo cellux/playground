@@ -138,3 +138,22 @@ Decisions are never deleted. A decision whose answer changes is marked
   one namespace; a label may only be exported into the object's own namespace
   (`:foreign-label` otherwise). The object map gains an `:exports` vector.
 - **Relevant phases:** 4, 5.
+
+### D8 — GAS-style numeric local labels
+
+- **Status:** accepted
+- **Context:** reused throwaway branch targets inside one stream otherwise need
+  invented names, and `%labels` scoping only helps inside a macro body.
+- **Options:**
+  - Named private labels only (status quo).
+  - GAS-style numeric locals: `:1` defines, `:1f`/`:1b` refer to the nearest
+    following/preceding definition of `1`.
+- **Proposed default:** numeric locals, resolved by a rewriting pass after
+  macro expansion. Each definition gets a unique private keyword and each
+  reference resolves by position. A bare `:1` in operand position is a hard
+  error (a direction is required), `%entry` cannot name a numeric label, and
+  `:1f` is not a declaration.
+- **Consequences:** numeric locals are object-private and never exported; a
+  macro that uses them is hygienic without `%labels`; `serialize-clj` prints
+  the generated unique names, as it already does for `%labels`.
+- **Relevant phases:** 4, 5.

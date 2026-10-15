@@ -194,6 +194,26 @@ across expansions:
 
 Scopes are independent: a nested `%labels` keeps its own labels.
 
+### Numeric local labels
+
+For short-lived targets, a bare number can stand in for a name, GAS style. `:1`
+declares a definition (repeatable), and `:1f` / `:1b` refer to the nearest
+definition of `1` after or before the reference:
+
+```clojure
+:1 (dex)
+   (bne :1b)     ; the :1 just above
+   (jmp :2f)     ; the next :2 below
+:2
+```
+
+A numeric label needs a direction where it is used: a bare `:1` in operand
+position is an error, as is a direction with no such definition, and a numeric
+label cannot be an entry (`%entry`). `:1f` is a reference, not a declaration.
+The definitions are private to their object, and the pass runs after macro
+expansion, so each expansion gets its own definitions: a macro can use
+`:1f`/`:1b` without `%labels`.
+
 ## Symbol resolution and macros
 
 Keywords are labels/values; directives, mnemonics, registers, `%zp`, and mode

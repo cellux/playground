@@ -1028,6 +1028,174 @@
    {:labels {} :external #{} :assets #{}}
    (map-indexed vector forms)))
 
+;; Numeric local labels ------------------------------------------------------
+
+(def ^:private numeric-label-pattern #"([0-9]+)([fb]?)")
+
+(defn- numeric-label
+  "Classify `kw` as a GAS-style numeric local label.
+
+  `:1` is a definition; `:1f` and `:1b` are forward and backward references.
+  Any other keyword, including a namespace-qualified one, returns nil."
+  [kw]
+  (when (and (keyword? kw) (nil? (namespace kw)))
+    (when-let [[_ number direction] (re-matches numeric-label-pattern (name kw))]
+      {:number number
+       :direction (cond (= direction "f") :forward
+                        (= direction "b") :backward
+                        :else :definition)})))
+
+(defn- label-declaration
+  "The keyword `form` declares at the current offset, if any.
+
+  Peels the wrappers that code generation treats as transparent to a label."
+  [form]
+  (let [head (statement-head form)]
+    (cond
+      (keyword? form) form
+      (= '%meta head) (recur (nth form 2 nil))
+      (= '%volatile head) (recur (second form))
+      :else nil)))
+
+(defn- map-operand-keywords
+  "Return `x` with `f` applied to every keyword the assembler reads as an
+  operand, leaving directive heads, assets, and `%meta` annotations alone."
+  [f x]
+  (cond
+    (keyword? x) (f x)
+    (and (symbol? x) (namespace x)) x
+    (vector? x) (with-meta (mapv #(map-operand-keywords f %) x) (meta x))
+    (seq? x)
+    (let [head (first x)
+          hname (when (symbol? head) (name head))
+          rebuild (fn [& args] (with-meta (apply list args) (meta x)))]
+      (cond
+        (contains? #{"<" ">" "%volatile"} hname)
+        (rebuild head (map-operand-keywords f (second x)))
+
+        (= "%meta" hname)
+        (rebuild head (second x) (map-operand-keywords f (nth x 2 nil)))
+
+        :else
+        (apply rebuild head (map #(map-operand-keywords f %) (rest x)))))
+    :else x))
+
+(defn- map-statement-operands
+  "Return `form` with `f` applied to its operand subform."
+  [f form]
+  (if-not (seq? form)
+    ;; a bare label keyword declares a label; it has no operands
+    form
+    (let [head (first form)
+          hname (when (symbol? head) (name head))
+          rebuild (fn [& args] (with-meta (apply list args) (meta form)))]
+      (cond
+        (nil? hname) form
+        (contains? #{"%entry" "%align" "%region" "%reserve" "%org" "%opcode"}
+                   hname)
+        form
+        (= "%meta" hname) (rebuild head (second form) (f (nth form 2 nil)))
+        ;; instructions, `%db`/`%dw` and `%asset` carry one operand subform
+        (= 1 (count (rest form))) (rebuild head (f (second form)))
+        :else form))))
+
+(defn- replace-label-declaration
+  "Return `form` with its label keyword replaced by `unique`."
+  [form unique]
+  (let [head (statement-head form)]
+    (cond
+      (keyword? form) unique
+      (= '%meta head)
+      (with-meta (list '%meta (second form)
+                       (replace-label-declaration (nth form 2 nil) unique))
+        (meta form))
+      (= '%volatile head)
+      (with-meta (list '%volatile (replace-label-declaration (second form) unique))
+        (meta form))
+      :else form)))
+
+(defn- nearest-numeric-definition
+  "The definition of `number` nearest to `index` in `direction`."
+  [definitions index direction]
+  (case direction
+    :forward (some (fn [[at unique]] (when (> at index) unique)) definitions)
+    :backward (when-let [found (last (filter (fn [[at _]] (< at index)) definitions))]
+                (second found))
+    nil))
+
+(defn- resolve-numeric-labels
+  "Rewriting pass for GAS-style numeric local labels.
+
+  A definition (`:1`) is given a private unique keyword, and a reference
+  (`:1f`, `:1b`) is resolved to the nearest definition with the same number
+  after or before it. The pass runs after macro expansion, so each expansion
+  gets its own definitions. Objects that use no numeric labels pass through
+  unchanged."
+  [forms]
+  (let [forms (vec forms)
+        declarations
+        (reduce
+         (fn [acc index]
+           (let [form (nth forms index)]
+             (when (= '%entry (statement-head form))
+               (let [target (second form)]
+                 (when (numeric-label target)
+                   (fail! :numeric-label-entry
+                          "(%entry ...) cannot name a numeric label"
+                          {:label target} form index))))
+             (let [label (label-declaration form)]
+               (if-let [{:keys [number direction]} (numeric-label label)]
+                 (if (= :definition direction)
+                   (update acc number (fnil conj []) index)
+                   (fail! :invalid-numeric-label
+                          (str "Numeric label " label " is a reference; "
+                               "declare it as :" number)
+                          {:label label} form index))
+                 acc))))
+         {}
+         (range (count forms)))]
+    (if (empty? declarations)
+      forms
+      (let [names (into {}
+                        (map (fn [[number indexes]]
+                               [number (mapv (fn [index]
+                                               [index (keyword (gensym (str number "-")))])
+                                             indexes)]))
+                        declarations)]
+        (mapv
+         (fn [index]
+           (let [form (nth forms index)
+                 {:keys [number direction]} (numeric-label (label-declaration form))]
+             (if (= :definition direction)
+               (replace-label-declaration
+                form
+                (second (some #(when (= index (first %)) %) (get names number))))
+               (map-statement-operands
+                (fn [x]
+                  (map-operand-keywords
+                   (fn [kw]
+                     (if-let [{:keys [number direction]} (numeric-label kw)]
+                       (case direction
+                         :definition
+                         (fail! :numeric-label-needs-direction
+                                (str "Numeric label " kw " needs a direction: "
+                                     "write " kw "f or " kw "b")
+                                {:label kw} form index)
+                         :forward
+                         (or (nearest-numeric-definition (get names number) index :forward)
+                             (fail! :unresolved-numeric-label
+                                    (str "No definition of " kw " after this point")
+                                    {:label kw} form index))
+                         :backward
+                         (or (nearest-numeric-definition (get names number) index :backward)
+                             (fail! :unresolved-numeric-label
+                                    (str "No definition of " kw " before this point")
+                                    {:label kw} form index)))
+                       kw))
+                   x))
+                form))))
+         (range (count forms)))))))
+
 ;; Code generation -----------------------------------------------------------
 
 (defn- lcm
@@ -1513,6 +1681,7 @@
   ([source options]
    (let [ctx (make-context options)
          forms (normalize-source ctx source)
+         forms (resolve-numeric-labels forms)
          labels (defined-labels forms)
          duplicates (duplicate-labels labels)
          _ (when (seq duplicates)

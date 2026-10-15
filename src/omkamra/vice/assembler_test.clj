@@ -828,6 +828,77 @@
     (is (contains? (set (:exports default-entry-object))
                    :default-entry-object))))
 
+;; Numeric local labels ------------------------------------------------------
+
+(deftest numeric-labels-resolve-to-the-nearest-definition
+  (let [object (assembler/assemble
+                '(:1 (nop) :1 (rts) :2 (jmp :1b) (jmp :1f) :1 (rts))
+                {:ns 'omkamra.vice.assembler-test})
+        source (vec (:source object))]
+    (is (= (nth source 2) (second (nth source 5)))
+        ":1b picks the nearest preceding :1")
+    (is (= (nth source 7) (second (nth source 6)))
+        ":1f picks the nearest following :1")
+    (is (= 3 (count (set [(nth source 0) (nth source 2) (nth source 7)])))
+        "each :1 is a distinct private label")
+    (is (= 4 (count (:labels object))))))
+
+(deftest numeric-labels-link-directionally
+  (let [object (assembler/assemble
+                '((%org 0x1000)
+                  :1 (nop) (jmp :1b)
+                  (nop)
+                  :1 (nop) (jmp :1f)
+                  :1 (rts))
+                {:ns 'omkamra.vice.assembler-test})
+        bytes (mapv #(bit-and (int %) 0xff)
+                    (:bytes (first (:segments (assembler/link object)))))]
+    (is (= [0x4c 0x00 0x10] (subvec bytes 1 4)) ":1b jumps to $1000")
+    (is (= [0x4c 0x09 0x10] (subvec bytes 6 9)) ":1f jumps to $1009")))
+
+(deftest numeric-labels-coexist-with-ordinary-labels
+  (let [object (assembler/assemble
+                '((%entry :start)
+                  :start
+                  (ldx 0)
+                  :1 (inx)
+                  (cpx 8)
+                  (bne :1b)
+                  (rts))
+                {:ns 'omkamra.vice.assembler-test})]
+    (is (= :start (:entry object)))
+    (is (contains? (:labels object) :start))
+    (is (= 2 (count (:labels object))) "the ordinary label plus one :1")))
+
+(deftest a-bare-numeric-label-is-a-hard-error
+  (is (= :numeric-label-needs-direction
+         (error-reason #(assembler/assemble '(:1 (jmp :1))
+                                            {:ns 'omkamra.vice.assembler-test})))
+      "a definition given as a reference names no direction"))
+
+(deftest unresolved-numeric-labels-report-the-direction
+  (is (= :unresolved-numeric-label
+         (error-reason #(assembler/assemble '(:1 (jmp :1f))
+                                            {:ns 'omkamra.vice.assembler-test}))))
+  (is (= :unresolved-numeric-label
+         (error-reason #(assembler/assemble '((jmp :1b) :1 (rts))
+                                            {:ns 'omkamra.vice.assembler-test})))))
+
+(deftest numeric-labels-stay-out-of-entries-and-declarations
+  (is (= :numeric-label-entry
+         (error-reason
+          (fn [] (assembler/assemble '((%entry :1) :1 (rts))
+                                     {:ns 'omkamra.vice.assembler-test})))))
+  (is (= :invalid-numeric-label
+         (error-reason #(assembler/assemble '(:1f (rts))
+                                            {:ns 'omkamra.vice.assembler-test})))))
+
+(deftest objects-without-numeric-labels-are-untouched
+  (is (= '[(%entry :start) :start (jmp :start)]
+         (:source (assembler/assemble '((%entry :start) :start (jmp :start))
+                                      {:ns 'omkamra.vice.assembler-test})))
+      "the rewriting pass is a no-op when no numeric labels appear"))
+
 (deftest link-places-assets
   (let [artifact (link-forms '((%dw [inline-asset]) (rts)) {})]
     (is (= 1 (count (:assets artifact))))
