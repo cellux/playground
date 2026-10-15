@@ -448,6 +448,24 @@
 
 ;; Source coercion -----------------------------------------------------------
 
+(defn- check-label-namespace
+  "A label declaration is local, or exported into the object's own namespace.
+
+  An unqualified keyword needs no check. A namespace-qualified keyword may
+  only name the namespace the object is assembled in; exporting into a foreign
+  namespace would make the declaration's namespace a lie, since the linker
+  derives exports from the object's `:namespace`."
+  [ctx label form index]
+  (when-let [label-ns (namespace label)]
+    (let [object-ns (some-> (:namespace-symbol ctx) str)]
+      (when-not (and object-ns (= label-ns object-ns))
+        (fail! :foreign-label
+               (str "Label " label " must be declared in the object's own "
+                    "namespace " (or object-ns "(none)"))
+               {:label label :namespace object-ns}
+               form index))))
+  label)
+
 (defn- builtin-head? [x]
   (and (symbol? x) (or (directive-symbol? x) (mnemonic-symbol? x))))
 
@@ -499,9 +517,15 @@
 
 (defn- normalize-annotated
   [ctx target index]
-  (if (and (seq? target) (builtin-head? (first target)))
+  (cond
+    (and (seq? target) (builtin-head? (first target)))
     (first (normalize-statement ctx target index))
-    (normalize-operand ctx target index)))
+
+    ;; `(%meta m :foo)`/`(%meta m ::foo)` annotates a label declaration.
+    (keyword? target)
+    (check-label-namespace ctx target target index)
+
+    :else (normalize-operand ctx target index)))
 
 (defn- normalize-operand-list
   [ctx form index]
@@ -535,13 +559,13 @@
   An object referenced by its Var (or that Var's symbol) resolves to its entry:
   the `%entry` label when declared, otherwise the default entry label named
   after the object (see `with-object-entry-label`). Both are qualified with the
-  object's namespace, so the reference rides the external-label machinery."
+  object's namespace, and `assemble` exports that label, so the reference rides
+  the external-label machinery."
   [obj sym index]
   (let [id (:object-id obj)
         entry (:entry obj)
         self-label (keyword (name id))]
     (cond
-      (and entry (namespace entry)) entry
       entry (keyword (namespace id) (name entry))
       (contains? (:labels obj) self-label)
       (keyword (namespace id) (name self-label))
@@ -712,19 +736,19 @@
     (case (name head)
       "%entry"
       (let [target (first args)]
-        (when-not (and (keyword? target) (nil? (namespace target)))
+        (when-not (keyword? target)
           (fail! :invalid-entry
-                 "(%entry ...) expects a local label keyword"
+                 "(%entry ...) expects a label keyword"
                  {:form form} form index))
-        [(list '%entry target)])
+        [(list '%entry (check-label-namespace ctx target form index))])
 
       "%label"
       (let [target (first args)]
-        (when-not (and (keyword? target) (nil? (namespace target)))
+        (when-not (keyword? target)
           (fail! :invalid-label
-                 "(%label ...) expects a local label keyword"
+                 "(%label ...) expects a label keyword"
                  {:form form} form index))
-        [target])
+        [(check-label-namespace ctx target form index)])
 
       "%labels"
       (normalize-labels-directive ctx args form index)
@@ -805,11 +829,7 @@
   [ctx form index]
   (cond
     (keyword? form)
-    (if (namespace form)
-      (fail! :invalid-label
-             "A top-level label must be an unqualified keyword"
-             {:form form} form index)
-      [form])
+    [(check-label-namespace ctx form form index)]
 
     (symbol? form)
     (normalize-macro ctx (list form) index)
@@ -946,8 +966,14 @@
 (defn- statement-head [form]
   (when (seq? form) (first form)))
 
-(defn- defined-labels [forms]
-  (into [] (filter #(and (keyword? %) (nil? (namespace %)))) forms))
+(defn- defined-labels
+  "Every label the forms declare, as local (unqualified) keywords.
+
+  A declaration written `::foo`/`:ns/foo` exports the local label `:foo`; the
+  namespace is folded away here so duplicates and references are compared by
+  their local name."
+  [forms]
+  (into [] (comp (filter keyword?) (map #(keyword (name %)))) forms))
 
 (defn- entry-declarations [forms]
   (into []
@@ -985,10 +1011,10 @@
        (cond
          (nil? head) acc
          (= '%entry head)
+         ;; `%entry` always names a label in this object, whether it was
+         ;; declared local or exported.
          (let [label (second form)]
-           (if (namespace label)
-             (update acc :external conj label)
-             (update acc :labels assoc label [index form])))
+           (update acc :labels assoc (keyword (name label)) [index form]))
          (contains? #{"%db" "%dw"} (name head))
          (reduce (fn [a e] (collect-operand-refs a e index form))
                  acc (second form))
@@ -1212,7 +1238,8 @@
 
 (defn- empty-state []
   {:sections [(new-section)]
-   :constraints {}})
+   :constraints {}
+   :exports #{}})
 
 (defn- current-section [state] (peek (:sections state)))
 
@@ -1230,10 +1257,20 @@
                     (update :relocations into relocations))]
     (assoc-in state [:sections (dec (count (:sections state)))] section)))
 
-(defn- add-label [state label]
-  (let [section (current-section state)]
-    (assoc-in state [:sections (dec (count (:sections state))) :labels]
-              (assoc (:labels section) label (:size section)))))
+(defn- add-label
+  "Place a label at the current offset.
+
+  The label is stored by its local name. A namespace-qualified declaration
+  (`::foo`/`:ns/foo`) additionally records that name as exported, which is what
+  the linker's external resolution searches."
+  [state label]
+  (let [section (current-section state)
+        local (keyword (name label))
+        state (assoc-in state [:sections (dec (count (:sections state))) :labels]
+                        (assoc (:labels section) local (:size section)))]
+    (if (namespace label)
+      (update state :exports conj local)
+      state)))
 
 (defn- pad-count [base offset alignment]
   (let [address (if (integer? base) (+ (long base) (long offset)) (long offset))
@@ -1306,7 +1343,8 @@
   [state form meta]
   (let [head (statement-head form)]
     (cond
-      (and (keyword? form) (nil? (namespace form))) (add-label state form)
+      ;; A keyword statement declares a label; a qualified one also exports it.
+      (keyword? form) (add-label state form)
       (nil? head) state
 
       (= '%meta head)
@@ -1494,22 +1532,37 @@
          entries (entry-declarations forms)
          entry (or (:entry options)
                    (when (= 1 (count entries)) (first entries)))
+         ;; `entry` names a label in this object; a declaration's namespace is
+         ;; the export marker, not part of the local name.
+         entry (when entry (keyword (name entry)))
          program (build-program forms)
          sections (finalize-sections (:sections program))
-         sections (if-let [object-id (:object-id options)]
+         object-id (:object-id options)
+         self-label (when object-id (keyword (name object-id)))
+         ;; The entry is always public: the explicit `%entry` label, or the
+         ;; default label named after the object (which `define-asm` adds at
+         ;; the first instruction).
+         default-entry (when (and object-id (nil? entry)
+                                  (some? (first-instruction-offset sections)))
+                         self-label)
+         sections (if object-id
                     (with-object-entry-label sections object-id entry source)
                     sections)
+         exports (cond-> (set (:exports program))
+                   entry (conj entry)
+                   default-entry (conj default-entry))
          label-map (into {}
                          (for [section sections
                                [label offset] (:labels section)]
                            [label {:section (:index section) :offset offset}]))
          relocations (vec (mapcat :relocations sections))]
      {:kind :object
-      :object-id (:object-id options)
+      :object-id object-id
       :namespace (:namespace-symbol ctx)
       :source forms
       :sections sections
       :labels label-map
+      :exports (vec (sort exports))
       :relocations relocations
       :constraints (:constraints program)
       :entries (vec entries)
@@ -1772,10 +1825,14 @@
       :else {})))
 
 (defn- label-owner
+  "Objects in `namespace-symbol` that export `label`.
+
+  Only labels declared exported (`::foo`/`:ns/foo`), or a public entry label,
+  are visible here; an object's private labels stay invisible to the linker."
   [registry namespace-symbol label]
   (filterv (fn [object]
              (and (= namespace-symbol (:namespace object))
-                  (contains? (:labels object) label)))
+                  (contains? (set (:exports object)) label)))
            (vals registry)))
 
 (defn- external-target
@@ -2185,7 +2242,7 @@
     (let [label (or explicit (:entry primary))]
       (if (nil? label)
         nil
-        (or (get label-addresses label)
+        (or (get label-addresses (keyword (name label)))
             (link-fail! :unresolved-entry
                         (str "Entry label " label " is not defined")
                         {:entry label}))))))

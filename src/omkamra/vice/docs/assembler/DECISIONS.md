@@ -116,3 +116,25 @@ Decisions are never deleted. A decision whose answer changes is marked
 - **Consequences:** disassembled objects are sparse and overlapping by design;
   the linker rejects them as runnable until overlap is resolved.
 - **Relevant phases:** 5, 7.
+
+### D7 — Label visibility is declaration-controlled
+
+- **Status:** accepted
+- **Context:** an unqualified label was implicitly reachable from other objects
+  as `:ns/name`, so two objects in one namespace could not both define `:loop`
+  without making any `::loop` reference ambiguous, and nothing at the
+  declaration marked a label as part of the object's interface.
+- **Options:**
+  - Unqualified labels stay implicitly exported (status quo).
+  - A label is exported only when declared namespace-qualified (`::foo` /
+    `:ns/foo`); unqualified labels are private to their object.
+- **Proposed default:** declaration-controlled visibility. The linker's
+  external resolution searches an object's `:exports`, which holds the
+  qualified declarations plus the entry label. Object entry labels (`%entry`
+  or the default label named after the object) are always exported, so
+  referencing an object through its Var needs no explicit qualification.
+- **Consequences:** a non-entry label must be declared `::foo` to be referenced
+  from another namespace; private names may be reused freely across objects in
+  one namespace; a label may only be exported into the object's own namespace
+  (`:foreign-label` otherwise). The object map gains an `:exports` vector.
+- **Relevant phases:** 4, 5.

@@ -141,13 +141,18 @@ it, since a symbol resolving to a number is a concrete address:
 
 ## Labels and directives
 
-Labels are unqualified keywords, declared either bare or with `%label`.
+Labels are keywords, declared either bare or with `%label`. An unqualified
+label is **private** to its object. A namespace-qualified one (`::loop`, which
+the reader expands to `:current-ns/loop`) is also **exported**, making it
+visible to the linker under that namespace; the namespace must be the object's
+own.
 
 ```clojure
-:start
-(%label :loop)
+:start          ; private to this object
+(%label :loop)  ; private to this object
+::play          ; exported as :current-ns/play
 
-(%entry :start)          ; entry-point declaration
+(%entry :start)          ; entry point; the entry label is always exported
 (%labels [:loop :wait] body…) ; scope and rename local labels (see below)
 (%db [5 10 20 30])       ; bytes (range-checked)
 (%dw [0x1234])           ; little-endian words
@@ -162,7 +167,8 @@ Labels are unqualified keywords, declared either bare or with `%label`.
 
 Forward references are supported. Duplicate and unresolved local labels are
 reported with the source form, reader `:line`/`:column`, and the
-instruction/directive index.
+instruction/directive index. Private labels are scoped per object, so two
+objects may reuse the same private name.
 
 `%reserve` marks a range the linker must leave free — for memory the program
 fills at runtime. It takes an address and a length, or a `[start end]` interval
@@ -225,14 +231,18 @@ Both styles work; syntax-quote is usually easier to read, and only needs
 escaping for the values being spliced in.
 
 Namespace-qualified keywords (`::common/clear-screen`) are external labels;
-the linker finds the unique `define-asm` object in that namespace that defines
-the label, adds it and its transitive dependencies, and reports ambiguity.
+the linker finds the unique `define-asm` object in that namespace that
+**exports** the label, adds it and its transitive dependencies, and reports
+ambiguity. A label is exported by declaring it qualified — `::clear-screen`, or
+`:common/clear-screen` — so an object's private labels are invisible to the
+linker and two objects in one namespace may freely reuse a private name.
 
 An object can also be referenced by its Var: a symbol (or `(< sym)` / `(> sym)`)
 that resolves to a value produced by `define-asm` normalizes to that object's
 entry. The entry is the `%entry` label when declared, otherwise a default entry
 label named after the object — `(define-asm irq …)` gets `:irq` — which
-`define-asm` adds at the object's first instruction. A label already carrying
+`define-asm` adds at the object's first instruction. The entry label is always
+exported, so a Var reference needs no explicit `::`. A label already carrying
 the object's name must name that first instruction; a pure-data object has no
 first instruction and therefore no default entry, so referencing it without a
 `%entry` fails with `:no-object-entry`.

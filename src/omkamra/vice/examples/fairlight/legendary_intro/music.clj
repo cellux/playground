@@ -239,7 +239,7 @@
   (bpl :init-pointers)
   (rts)
 
-  :play
+  ::play
   ;; Nine calls in ten stop here: only the tick itself advances the voices.
   (dec [:tick])
   (beq :advance)

@@ -491,7 +491,7 @@
 
 (deftest link-discovers-object-dependencies
   (let [common (assembler/assemble
-                '(:clear-screen-fn (rts))
+                '(::clear-screen-fn (rts))
                 {:ns 'omkamra.vice.assembler-test :object-id :t/common})
         main (assembler/assemble
               '((%entry :start)
@@ -767,8 +767,8 @@
         main (assembler/assemble
               '((jsr :omkamra.vice.assembler-test/dup))
               {:ns ns-sym})
-        a (assembler/assemble '(:dup (rts)) {:ns ns-sym :object-id :t/a})
-        b (assembler/assemble '(:dup (rts)) {:ns ns-sym :object-id :t/b})]
+        a (assembler/assemble '(::dup (rts)) {:ns ns-sym :object-id :t/a})
+        b (assembler/assemble '(::dup (rts)) {:ns ns-sym :object-id :t/b})]
     (is (= :ambiguous-external
            (error-reason #(assembler/link main {:objects [a b]}))))
     (is (= :unresolved-external
@@ -777,6 +777,56 @@
                             '((jsr :omkamra.vice.assembler-test/nope))
                             {:ns ns-sym})
                            {}))))))
+
+;; Label visibility ----------------------------------------------------------
+
+(deftest unqualified-labels-are-private
+  (let [ns-sym 'omkamra.vice.assembler-test
+        ;; Two objects may reuse the same private label; neither is visible
+        ;; from outside.
+        a (assembler/assemble '(:loop (rts)) {:ns ns-sym :object-id :t/priv-a})
+        b (assembler/assemble '(:loop (rts)) {:ns ns-sym :object-id :t/priv-b})
+        caller (assembler/assemble
+                '((%entry :start)
+                  :start
+                  (jsr :omkamra.vice.assembler-test/loop)
+                  (rts))
+                {:ns ns-sym})]
+    (is (false? (contains? (set (:exports a)) :loop)))
+    (is (false? (contains? (set (:exports b)) :loop)))
+    (is (= :unresolved-external
+           (error-reason #(assembler/link caller {:objects [a b]}))))))
+
+(deftest qualified-labels-are-exported
+  (let [ns-sym 'omkamra.vice.assembler-test
+        helper (assembler/assemble '(::loop (rts))
+                                   {:ns ns-sym :object-id :t/pub})
+        caller (assembler/assemble
+                '((%entry :start)
+                  :start
+                  (jsr :omkamra.vice.assembler-test/loop)
+                  (rts))
+                {:ns ns-sym})
+        artifact (assembler/link caller {:objects [helper]})]
+    (is (contains? (set (:exports helper)) :loop))
+    (is (= 2 (count (:objects artifact))))))
+
+(deftest a-label-may-not-export-into-a-foreign-namespace
+  (is (= :foreign-label
+         (error-reason
+          #(assembler/assemble '(:other.ns/loop (rts))
+                               {:ns 'omkamra.vice.assembler-test}))))
+  (is (= :foreign-label
+         (error-reason
+          (fn [] (assembler/assemble '((%label :other.ns/loop) (rts))
+                                     {:ns 'omkamra.vice.assembler-test}))))))
+
+(deftest entry-labels-are-exported
+  (testing "an explicit %entry label"
+    (is (contains? (set (:exports entry-object)) :start)))
+  (testing "the default entry label named after the object"
+    (is (contains? (set (:exports default-entry-object))
+                   :default-entry-object))))
 
 (deftest link-places-assets
   (let [artifact (link-forms '((%dw [inline-asset]) (rts)) {})]
@@ -941,7 +991,7 @@
 
 (deftest a-linked-object-inherits-the-referrers-region
   (let [helper (assembler/assemble
-                '(:helper-fn (rts))
+                '(::helper-fn (rts))
                 {:ns 'omkamra.vice.assembler-test :object-id :t/region-helper})
         primary (assembler/assemble
                  '((%entry :start)
@@ -959,7 +1009,7 @@
 (deftest an-explicit-region-overrides-the-inherited-one
   (let [helper (assembler/assemble
                 '((%region [0x8000 0x9000])
-                  :helper-fn (rts))
+                  ::helper-fn (rts))
                 {:ns 'omkamra.vice.assembler-test :object-id :t/region-explicit})
         primary (assembler/assemble
                  '((%entry :start)
@@ -988,12 +1038,12 @@
   (let [a (assembler/assemble
            '((%region [0x8000 0x9000])
              (%asset omkamra.vice.assembler-test/region-asset)
-             :a-fn (rts))
+             ::a-fn (rts))
            {:ns 'omkamra.vice.assembler-test :object-id :t/region-a})
         b (assembler/assemble
            '((%region [0x9000 0xA000])
              (%asset omkamra.vice.assembler-test/region-asset)
-             :b-fn (rts))
+             ::b-fn (rts))
            {:ns 'omkamra.vice.assembler-test :object-id :t/region-b})
         primary (assembler/assemble
                  '((%entry :start)
