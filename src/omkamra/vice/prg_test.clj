@@ -29,6 +29,23 @@
 (def ^:private table-entry-length 6)
 (def ^:private table-terminator-length 6)
 
+(deftest basic-sys-line-is-plainly-formatted
+  (let [prg (prg/prg-bytes (one-segment-artifact))
+        byte-at (fn [offset]
+                  (bit-and (int (aget ^bytes prg (+ 2 offset))) 0xff))
+        line (mapv byte-at (range 13))]
+    (is (= [0x0c 0x08                 ; link to the next line
+            0x0a 0x00                 ; line number 10
+            0x9e 0x20                 ; SYS token, space
+            0x32 0x30 0x36 0x32       ; "2062", no zero padding
+            0x00                      ; line terminator
+            0x00 0x00]                ; end-of-program marker
+           line)
+        "LIST shows `10 SYS 2062`, not `10 SYS02062`")
+    (is (= 2062
+           (Integer/parseInt (apply str (map char (subvec line 6 10)))))
+        "the operand is the stub address")))
+
 (deftest mover-measures-its-code-with-an-absolute-table-address
   (let [artifact (one-segment-artifact)
         segment (first (:segments artifact))

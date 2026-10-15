@@ -13,7 +13,7 @@
   Layout, from the load address:
 
       $0801  BASIC line `10 SYS <stub>` + end marker
-      $080D  stub            disables IRQs, copies the unpacker to scratch, JMPs
+      $080E  stub            disables IRQs, copies the unpacker to scratch, JMPs
       $0900  payload         the segments in increasing destination order
       ...    unpacker        the mover routine with its copy table baked in
       $0334  scratch         where the stub copies the unpacker
@@ -35,27 +35,36 @@
 
 (def ^:private basic-token-sys 0x9e)
 (def ^:private basic-line-number 10)
-(def ^:private basic-digits 5) ; zero-padded decimal operand
-(def ^:private basic-line-length 11) ; link(2) number(2) token(1) digits(5) 00(1)
+(def ^:private basic-space 0x20)
 (def ^:private basic-end-marker-length 2)
+;; link(2) number(2) token(1), then a space, the operand digits, and the line
+;; terminator
+(def ^:private basic-line-fixed-length 7)
 (def ^:private table-entry-length 6) ; dst(2) len(2) src(2)
 
 (defn- u8 ^long [x] (bit-and (long x) 0xff))
 
 (defn- hi ^long [x] (u8 (bit-shift-right (long x) 8)))
 
-(defn- stub-address
-  [load-address]
-  (+ (long load-address) basic-line-length basic-end-marker-length))
-
 (defn- basic-sys-line
-  "Tokenized BASIC `10 SYS <stub>` line followed by the end-of-program marker."
-  [load-address stub]
-  (let [digits (mapv #(u8 (int %)) (format (str "%0" basic-digits "d")
-                                           (long stub)))
-        link (+ (long load-address) basic-line-length)]
-    (into [(u8 link) (hi link) basic-line-number 0x00 basic-token-sys]
-          (conj digits 0x00))))
+  "The tokenized BASIC `10 SYS <stub>` line, and the stub address.
+
+  The stub sits after the line and the end-of-program marker, so the line's
+  length depends on how many digits that address has; iterate to the fixed
+  point. The operand is a space and plain decimal digits, no zero padding, so
+  `LIST` shows `10 SYS 2062` rather than `10 SYS02062`."
+  [load-address]
+  (loop [length (+ basic-line-fixed-length 5)]
+    (let [stub (+ (long load-address) (long length) basic-end-marker-length)
+          operand (mapv #(u8 (int %)) (str (long stub)))
+          actual (+ basic-line-fixed-length (count operand))]
+      (if (= actual length)
+        (let [link (+ (long load-address) (long length))]
+          {:stub stub
+           :line (into [(u8 link) (hi link) basic-line-number 0x00
+                        basic-token-sys basic-space]
+                       (conj operand 0x00))})
+        (recur actual)))))
 
 ;; Copy order ----------------------------------------------------------------
 
@@ -292,8 +301,7 @@
                               scratch-address)
          mover (into code table)
          mover-length (count mover)
-         stub (stub-address load-address)
-         line (basic-sys-line load-address stub)
+         {stub :stub line :line} (basic-sys-line load-address)
          mover-address (+ payload-address (count payload))
          end (+ mover-address mover-length)
          stub-bytes (assemble-bytes (stub-forms mover-address mover-length
