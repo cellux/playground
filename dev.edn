@@ -1,2 +1,2 @@
 {:systems
- {:http omkamra.dev.http/system}}
+ {:on-demand-http omkamra.dev.on-demand-http/system}}

@@ -1,5 +1,5 @@
-(ns omkamra.dev
-  "Development-time lifecycle control."
+(ns omkamra.dev.systems.core
+  "Implementation of generic development-system lifecycle control."
   (:require [clojure.java.io :as io]
             [integrant.core :as ig]))
 
@@ -45,9 +45,18 @@
   []
   (:systems (current-config)))
 
+(defn- system-names
+  []
+  (-> (into (set (keys (configured-systems)))
+            (keys (:running @state)))
+      sort
+      vec))
+
+(declare system-status)
+
 (defn list-systems
-  "Return the names of systems available in dev.edn." []
-  (-> (configured-systems) keys sort vec))
+  "Return configured systems and their compact lifecycle status records." []
+  (mapv system-status (system-names)))
 
 (defn- require-system
   [name]
@@ -80,20 +89,13 @@
 (defn system-status
   "Return a small, printable status map for one configured system."
   [name]
-  {:system name
+  {:name name
    :configured? (contains? (configured-systems) name)
    :running? (boolean (running-entry name))})
 
 (defn status
-  "Return the available systems and their lifecycle status." []
-  (let [config (current-config)
-        names (into (set (keys (:systems config)))
-                    (keys (:running @state)))]
-    {:config-path (:config-path @state)
-     :systems (into (sorted-map)
-                    (map (fn [name]
-                           [name (system-status name)]))
-                    names)}))
+  "Return the compact lifecycle status record for one system." [name]
+  (system-status name))
 
 (defn- init-system
   [config]
@@ -140,12 +142,12 @@
     (stop! name)
     (start! name)))
 
-(defn stop-all!
+(defn shutdown!
   "Stop every currently-running system." []
   (locking lifecycle-lock
     (doseq [name (keys (:running @state))]
       (when-let [{:keys [system]} (running-entry name)]
         (ig/halt! system)))
     (swap! state assoc :running {})
-    (status)))
+    (list-systems)))
 

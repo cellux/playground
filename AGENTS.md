@@ -13,3 +13,26 @@ When an active local root points into the sibling checkout, resolve its host pat
 3. Use `clojure_start_dev` to start up the Clojure dev server.
 4. Use `clojure_eval` to evaluate forms in the dev server via nREPL.
 5. Use `clj_kondo` and `cljfmt` to lint and format source code.
+
+## Feature discovery
+
+Read the following entrypoint namespaces before exploring their implementation
+namespaces. Their public functions are lightweight discovery APIs, and their
+docstrings point to lower-level namespaces for details.
+
+- `omkamra.dev.systems` — discover and control the generic Integrant systems
+  listed in `dev.edn`.
+- `omkamra.dev.on-demand-http` — inspect and control the `:on-demand-http`
+  Ring/Shadow server, including route resolution and server configuration.
+- `omkamra.dev.frontend` — discover browser builds, connected runtimes, rebuild
+  a running Shadow build, and evaluate ClojureScript.
+- `omkamra.vice` — assemble, run, capture, and inspect VICE workflows; follow
+  its docstrings into the analysis and capture namespaces.
+- `omkamra.supercollider` — start or wrap SuperCollider sessions, create
+  players, define SynthDefs/UGens, and run performances. Use
+  `omkamra.supercollider.player` for manipulating an existing player.
+
+The `:on-demand-http` system discovers Ring handlers using the URI convention
+implemented by `omkamra.dev.on-demand-http/resolve-handler`; it also starts
+compatible Shadow watchers automatically when a page or generated asset is
+requested. Do not start a separate watcher process.

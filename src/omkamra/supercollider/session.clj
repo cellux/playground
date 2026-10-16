@@ -27,7 +27,7 @@
   (when-not (and (number? value) (pos? value))
     (throw (IllegalArgumentException.
             (str label " must be a positive number: " (pr-str value))))
-  value))
+    value))
 
 (defn- await-ready!
   [connection timeout-ms]
@@ -48,41 +48,61 @@
 
       :else result)))
 
+(defn- external-instance?
+  [instance]
+  (and (map? instance)
+       (some? (:pid instance))
+       (map? (:params instance))))
+
 (defn start!
-  "Start scsynth, connect to it, and make a new current performance session.
+  "Start or wrap scsynth, connect to it, and make a current session.
 
   Options:
-  * `:scsynth` — map accepted by `omkamra.supercollider.scsynth/start`
+  * `:scsynth` — map accepted by `omkamra.supercollider.scsynth/start`;
+    this starts a process owned by the session.
+  * `:instance` — an existing scsynth process descriptor, as returned by
+    `omkamra.supercollider.scsynth/start`; this wraps an external process and
+    does not stop it when the session ends.
   * `:lookahead-ms` — amount by which OSC bundles lead real time (default 100)
   * `:startup-delay-ms` — initial process boot delay (default 500)
   * `:startup-timeout-ms` — readiness timeout after that delay (default 5000)
 
-  Prefer `ensure-session!` in normal code; `start!` rejects replacing a live
-  current session accidentally."
+  `:scsynth` and `:instance` are mutually exclusive. Prefer
+  `ensure-session!` in normal code; `start!` rejects replacing a live current
+  session accidentally."
   ([]
    (start! {}))
-  ([{:keys [scsynth lookahead-ms startup-delay-ms startup-timeout-ms bpm tempo-map]
-     :or {scsynth {}
-          lookahead-ms default-lookahead-ms
+  ([{:keys [scsynth instance lookahead-ms startup-delay-ms startup-timeout-ms
+            bpm tempo-map]
+     :or {lookahead-ms default-lookahead-ms
           startup-delay-ms default-startup-delay-ms
           startup-timeout-ms default-startup-timeout-ms
           bpm 120.0}}]
    (when @current-session*
      (throw (IllegalStateException.
              "a current scsynth session already exists; call stop! first")))
-   (when-not (map? scsynth)
+   (when (and scsynth instance)
+     (throw (IllegalArgumentException.
+             ":scsynth and :instance are mutually exclusive")))
+   (when (and scsynth (not (map? scsynth)))
      (throw (IllegalArgumentException. ":scsynth must be a map")))
+   (when (and instance (not (external-instance? instance)))
+     (throw (IllegalArgumentException.
+             ":instance must be an scsynth process descriptor")))
    (require-positive-number ":lookahead-ms" lookahead-ms)
    (require-positive-number ":startup-delay-ms" startup-delay-ms)
    (require-positive-number ":startup-timeout-ms" startup-timeout-ms)
-   (let [process (scsynth/start scsynth)
-         _ (Thread/sleep (long startup-delay-ms))
+   (let [process-owned? (nil? instance)
+         process (or instance (scsynth/start (or scsynth {})))
+         _ (when process-owned?
+             (Thread/sleep (long startup-delay-ms)))
          connection (scsynth/connect process)]
      (try
        (await-ready! connection (long startup-timeout-ms))
        (let [logical-clock (clock/create (cond-> {:bpm bpm}
                                            tempo-map (assoc :tempo-map tempo-map)))
              session {:process process
+                      :process-owned? process-owned?
                       :connection connection
                       :default-clock logical-clock
                       :clocks (atom [logical-clock])
@@ -94,7 +114,8 @@
          session)
        (catch Throwable throwable
          (try (scsynth/close connection) (catch Throwable _))
-         (try (scsynth/stop process) (catch Throwable _))
+         (when process-owned?
+           (try (scsynth/stop process) (catch Throwable _)))
          (throw throwable))))))
 
 (defn ensure-session!
@@ -110,27 +131,16 @@
   []
   @current-session*)
 
-(defn set-current-session!
-  "Install an already-created performance session as the current session.
-
-  This is primarily useful when connecting a performance to externally managed
-  scsynth infrastructure."
-  [session]
-  (when-not (session? session)
-    (throw (IllegalArgumentException.
-            "current scsynth session has invalid shape")))
-  (reset! current-session* session))
-
 (defn stop!
   "Close and stop the current scsynth session. Returns true when one existed."
   []
   (locking current-session*
-    (when-let [{:keys [connection process clocks]} @current-session*]
+    (when-let [{:keys [connection process process-owned? clocks]} @current-session*]
       (reset! current-session* nil)
       (try (scsynth/close connection) (catch Throwable _))
       (doseq [clock-value @clocks]
         (clock/stop! clock-value))
-      (when process
+      (when (and process process-owned?)
         (try (scsynth/stop process) (catch Throwable _)))
       true)))
 
@@ -190,7 +200,7 @@
       (locking (:loaded-synthdefs session)
         (when-not (= definition (get @(:loaded-synthdefs session) name))
           (let [reply (scsynth/d_recv (:connection session)
-                                    (synthdef/serialize definition))]
+                                      (synthdef/serialize definition))]
             (when (:error reply)
               (throw (ex-info "scsynth rejected SynthDef"
                               {:name name :reply reply})))
