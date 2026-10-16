@@ -117,7 +117,8 @@
             (ensure-watch! compiler page)
             (when-let [file (asset-file page uri)]
               {:status 200
-               :headers {"content-type" (content-type file)}
+               :headers {"content-type" (content-type file)
+                         "cache-control" "no-store"}
                :body (Files/readAllBytes (.toPath file))})))
         (list-builds)))
 
@@ -127,7 +128,8 @@
   (when-let [{:keys [asset-path module] :as page} (browser-build namespace-name)]
     (ensure-watch! compiler page)
     {:status 200
-     :headers {"content-type" "text/html; charset=utf-8"}
+     :headers {"content-type" "text/html; charset=utf-8"
+               "cache-control" "no-store"}
      :body (str "<!doctype html>\n"
                 "<html>\n"
                 "  <head><meta charset=\"utf-8\"></head>\n"
