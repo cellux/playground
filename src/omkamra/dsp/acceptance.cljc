@@ -17,7 +17,14 @@
   ;; Some cases call DSP library functions by fully-qualified name.  The JVM
   ;; side links those definitions, so it must have the library loaded; the
   ;; browser receives compiled IR instead and never needs the namespace.
-  #?(:clj (:require [omkamra.dsp.library])))
+  #?(:clj (:require [omkamra.dsp.library.math]
+                    [omkamra.dsp.library.oscillator]
+                    [omkamra.dsp.library.noise]
+                    [omkamra.dsp.library.envelope]
+                    [omkamra.dsp.library.filter]
+                    [omkamra.dsp.library.delay]
+                    [omkamra.dsp.library.control]
+                    [omkamra.dsp.library.effect])))
 
 (def block-lengths [0 1 127 128 256])
 (def sample-rate 44100.0)
@@ -329,12 +336,12 @@
     (clamp-case :clamp -0.5 0.5)
     ;; P2 deliverable 5: reusable DSP library functions called from a process.
     (process-case {:id :library-clip
-                   :body '(omkamra.dsp.library/clip sample lo hi)
+                   :body '(omkamra.dsp.library.math/clip sample lo hi)
                    :params [{:name 'sample :type :float}]
                    :controls [{:name 'lo :type :float :default -0.5}
                               {:name 'hi :type :float :default 0.5}]})
     (process-case {:id :library-triangular-window
-                   :body '(omkamra.dsp.library/triangular-window sample)
+                   :body '(omkamra.dsp.library.math/triangular-window sample)
                    :params [{:name 'sample :type :float}]})
     (int-case :div-zero '(/ a b) 5 0)
     (int-case :div-min-neg1 '(/ a b) -2147483648 -1)
@@ -345,69 +352,153 @@
     (int-case :mod-neg '(mod a b) -7 3)
     (int-case :mod-flip '(mod a b) 7 -3)
     (int-case :mod-zero '(mod a b) 5 0)
+    ;; P7: a multi-output module projected by one field, so a record return is
+    ;; exercised through the ordinary inlining path on every target.
+    {:id :stereo-spread
+     :entry :process
+     :definition {:dsp/kind :function
+                  :name 'stereo-spread-probe
+                  :params ['sample 'width 'delay]
+                  :return-type :float
+                  :process {:controls ['width 'delay]}
+                  :body ['(let [out (omkamra.dsp.library.effect/stereo-spread
+                                     sample width delay)]
+                            (- (:right out) (:left out)))]}
+     :precisions [:f32 :f64]
+     :controls [0.7 8.0]
+     :input-samples sine-input-samples}
     ;; P3 done-when: a sine oscillator and an exponential ADSR envelope,
     ;; defined in `omkamra.dsp.library` and only in DSP source.
     (library-case {:id :sine-oscillator
-                   :definition-var 'omkamra.dsp.library/sine-oscillator
+                   :definition-var 'omkamra.dsp.library.oscillator/sine-oscillator
                    :controls [440.0]
                    :input-samples sine-input-samples})
+    ;; P7: band-limited oscillators. PolyBLEP corrects the saw's wrap and the
+    ;; pulse's two edges; the triangle integrates the band-limited square.
+    (library-case {:id :saw-oscillator
+                   :definition-var 'omkamra.dsp.library.oscillator/saw-oscillator
+                   :controls [440.0]
+                   :input-samples sine-input-samples})
+    (library-case {:id :pulse-oscillator
+                   :definition-var 'omkamra.dsp.library.oscillator/pulse-oscillator
+                   :controls [440.0 0.3]
+                   :input-samples sine-input-samples})
+    (library-case {:id :square-oscillator
+                   :definition-var 'omkamra.dsp.library.oscillator/square-oscillator
+                   :controls [440.0]
+                   :input-samples sine-input-samples})
+    (library-case {:id :triangle-oscillator
+                   :definition-var 'omkamra.dsp.library.oscillator/triangle-oscillator
+                   :controls [440.0]
+                   :input-samples sine-input-samples})
+    ;; P7: a modulation oscillator and the portable noise sources.
+    (library-case {:id :lfo
+                   :definition-var 'omkamra.dsp.library.oscillator/lfo
+                   :controls [2.0 1]
+                   :input-samples sine-input-samples})
+    (library-case {:id :white-noise
+                   :definition-var 'omkamra.dsp.library.noise/white-noise
+                   :controls [7]
+                   :input-samples sine-input-samples})
+    (library-case {:id :pink-noise
+                   :definition-var 'omkamra.dsp.library.noise/pink-noise
+                   :controls [7]
+                   :input-samples sine-input-samples})
+    ;; P7: control-rate helpers, a waveshaper, and cubic interpolation.
+    (library-case {:id :smoothing
+                   :definition-var 'omkamra.dsp.library.control/smoothing
+                   :controls [1.0 0.01]
+                   :input-samples sine-input-samples})
+    (library-case {:id :slew-limit
+                   :definition-var 'omkamra.dsp.library.control/slew-limit
+                   :controls [1.0 2.0]
+                   :input-samples sine-input-samples})
+    (library-case {:id :distortion
+                   :definition-var 'omkamra.dsp.library.effect/distortion
+                   :controls [4.0]
+                   :input-samples sine-input-samples})
+    (library-case {:id :cubic-interpolate
+                   :definition-var 'omkamra.dsp.library.math/cubic-interpolate
+                   :controls [1.0 2.0 3.0 0.5]
+                   :input-samples sine-input-samples})
+    ;; P7: the remaining library surface.
+    (library-case {:id :biquad-multimode
+                   :definition-var 'omkamra.dsp.library.filter/biquad-multimode
+                   :controls [1000.0 0.7 1]
+                   :input-samples sine-input-samples})
+    (library-case {:id :ar-envelope
+                   :definition-var 'omkamra.dsp.library.envelope/ar-envelope
+                   :controls [0.0002 0.0002]
+                   :input-samples adr-gate-samples})
+    (library-case {:id :linear-adsr
+                   :definition-var 'omkamra.dsp.library.envelope/linear-adsr
+                   :controls [0.0002 0.0001 0.4 0.0002]
+                   :input-samples adr-gate-samples})
+    (library-case {:id :chorus
+                   :definition-var 'omkamra.dsp.library.delay/chorus
+                   :controls [2.0 8.0 0.7]
+                   :input-samples sine-input-samples})
+    (library-case {:id :sync-oscillator
+                   :definition-var 'omkamra.dsp.library.oscillator/sync-oscillator
+                   :controls [220.0 2.0]
+                   :input-samples sine-input-samples})
     (library-case {:id :exponential-adsr
-                   :definition-var 'omkamra.dsp.library/exponential-adsr
+                   :definition-var 'omkamra.dsp.library.envelope/exponential-adsr
                    :controls [0.0002 0.0001 0.4 0.0002]
                    :input-samples adr-gate-samples})
     (library-case {:id :one-pole-record
-                   :definition-var 'omkamra.dsp.library/one-pole-record
+                   :definition-var 'omkamra.dsp.library.filter/one-pole-record
                    :controls [0.5]
                    :input-samples sine-input-samples})
     ;; P5: circular-buffer delay lines. The vectors cover zero delay, a small
     ;; fractional delay, a delay that wraps the 64-sample buffer over the run,
     ;; and an allpass-interpolated fractional tap.
     (library-case {:id :delay-line-zero
-                   :definition-var 'omkamra.dsp.library/delay-line-voice
+                   :definition-var 'omkamra.dsp.library.delay/delay-line-voice
                    :controls [0.0]
                    :input-samples sine-input-samples})
     (library-case {:id :delay-line-unit
-                   :definition-var 'omkamra.dsp.library/delay-line-voice
+                   :definition-var 'omkamra.dsp.library.delay/delay-line-voice
                    :controls [1.0]
                    :input-samples sine-input-samples})
     (library-case {:id :delay-line-fractional
-                   :definition-var 'omkamra.dsp.library/delay-line-voice
+                   :definition-var 'omkamra.dsp.library.delay/delay-line-voice
                    :controls [4.5]
                    :input-samples sine-input-samples})
     (library-case {:id :delay-line-wrap
-                   :definition-var 'omkamra.dsp.library/delay-line-voice
+                   :definition-var 'omkamra.dsp.library.delay/delay-line-voice
                    :controls [30.25]
                    :input-samples sine-input-samples})
     (library-case {:id :allpass-delay-line
-                   :definition-var 'omkamra.dsp.library/allpass-delay-line-voice
+                   :definition-var 'omkamra.dsp.library.delay/allpass-delay-line-voice
                    :controls [4.5]
                    :input-samples sine-input-samples})
     ;; P6b: the delay line as a *module*, called twice with different delays, so
     ;; the two buffers must be independent.
     (library-case {:id :delay-line-pair-voice
-                   :definition-var 'omkamra.dsp.library/delay-line-pair-voice
+                   :definition-var 'omkamra.dsp.library.delay/delay-line-pair-voice
                    :controls [4.5]
                    :input-samples sine-input-samples})
     ;; P6 done-when: a stateful biquad and a stateful ADSR envelope composed into
     ;; one voice module, exercised on all four targets.
     (library-case {:id :filter-voice
-                   :definition-var 'omkamra.dsp.library/filter-voice
+                   :definition-var 'omkamra.dsp.library.filter/filter-voice
                    :controls [2000.0 0.7 0.0002 0.0001 0.4 0.0002]
                    :input-samples adr-gate-samples})
     ;; P6 multi-output: a module returning a named record of three signals.
     (library-case {:id :svf-voice
-                   :definition-var 'omkamra.dsp.library/svf-voice
+                   :definition-var 'omkamra.dsp.library.filter/svf-voice
                    :controls [500.0 0.7]
                    :input-samples sine-input-samples})
     ;; P6: a stateful module composed through calls. Each call site owns its own
     ;; state, so the voice's two one-poles are independent.
     (library-case {:id :one-pole-voice
-                   :definition-var 'omkamra.dsp.library/one-pole-voice
+                   :definition-var 'omkamra.dsp.library.filter/one-pole-voice
                    :controls [0.5]
                    :input-samples sine-input-samples})
     ;; Nested ownership: a state-free module that itself owns two one-poles.
     (library-case {:id :one-pole-pair-voice
-                   :definition-var 'omkamra.dsp.library/one-pole-pair-voice
+                   :definition-var 'omkamra.dsp.library.filter/one-pole-pair-voice
                    :controls [0.5]
                    :input-samples sine-input-samples})]))
 

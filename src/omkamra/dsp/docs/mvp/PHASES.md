@@ -274,6 +274,18 @@ resampling helpers.
 documentation page describing each module's state, latency, and modulation
 inputs.
 
+**Slices.** P7a (done) — the sub-namespace seams, docstring capture, and the
+generated `LIBRARY.md` reference with a drift guard. P7b (done) — the
+band-limited PolyBLEP oscillator family. P7c (done) — `if` branches are separate
+scopes. P7d (done) — white/pink noise, an LFO, and a parameter-typing fix so a
+non-`float` control type also types its parameter. P7e (done) — parameter
+smoothing, slew limiting, a `tanh` waveshaper, and Catmull-Rom cubic
+interpolation. P7f (done) — a `mode`-selected multimode biquad, linear AR/ADSR
+envelopes, chorus, hard sync, and stereo spreading as a record-returning module;
+every substantive definition gained a docstring. **P7 is complete.** Stereo
+spreading's multi-channel *hosting* needs a multi-channel process and is
+deferred to P8, as are D23 (optional input ports) and D20 (coloring).
+
 ---
 
 ## P8 — Generalize process instances
@@ -294,6 +306,12 @@ and give every target an explicit create/reset/destroy lifecycle.
 4. ABI additions for instance handles and ownership, without leaking
    target-specific handles into portable IR.
 5. Differential tests for independence: two instances do not share state.
+6. **Optional input ports.** A process may declare `:input false`: it then has no
+   sample parameter and no `:input` buffer in the ABI, so a generator (oscillator,
+   noise, LFO) stops carrying an ignored `sample` and a dead `:buffer-load` that
+   falsely reports `:read-memory` in `:effects`. Done here rather than in P7
+   because this phase *already* moves the process ABI's argument indices (the
+   instance handle), so the descriptor/ABI/adapter rework is paid once.
 
 ---
 

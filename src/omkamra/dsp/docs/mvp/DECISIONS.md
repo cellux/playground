@@ -672,3 +672,29 @@ interpreter and every backend.
 **Consequences.** A zero-delay feedback loop is not expressible without an
 explicit state slot — the intended discipline, since such a loop has no
 well-defined sample-serial evaluation order.
+
+---
+
+## D23 — A process input port is optional
+
+**Status.** Decided; implementation scheduled with P8, because that phase already
+moves the process ABI's argument indices.
+
+**Decision.** A process may declare `:input false`. It then has no sample
+parameter, no `:input` buffer in `:buffers`/`:bindings`/`:memory`, and no
+input argument in any adapter; its `:controls` default to *all* its parameters.
+Absent or `nil` `:input` keeps today's meaning (the first parameter is the input
+port).
+
+**Rationale.** Generators have nothing to read, but the process ABI currently
+makes the first parameter the input port by construction, so every oscillator and
+noise source must name an ignored `sample`. That is not merely awkward: the
+ignored parameter still emits a real `:buffer-load`, so `:effects` claims
+`:read-memory` for a module that reads nothing, and that metadata is a real-time
+policy signal. It also forces the input to be the first parameter, which fights
+typed parameters (P7d).
+
+**Consequences.** The ABI's argument indices must be derived from the buffer list
+rather than hardcoded, and all four targets plus the conformance plan and the
+browser testbed move together — which is exactly why it is bundled with P8's
+instance-handle change instead of done separately.

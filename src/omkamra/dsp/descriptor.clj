@@ -189,6 +189,7 @@
    [:return-type {:optional true} ReturnType]
    ;; Attached by the linker when a struct-typed `:return-type` is resolved.
    [:return-record {:optional true} [:or nil? [:map]]]
+   [:doc {:optional true} [:or nil? string?]]
    [:state {:optional true} [:or nil? [:vector StateSource]]]
    [:body [:vector any?]]
    [:source {:optional true} [:or nil? SourceMetadata]]
@@ -754,6 +755,29 @@
     {:aliases (or (:aliases resolution) {})
      :refers (or (:refers resolution) {})}))
 
+(defn- annotate-control-types
+  "A control that declares a non-default type types the parameter it names.
+
+  The parameter shorthand can only express `:float`, so without this a parameter
+  would be `:int` when the definition is compiled as a process entry but
+  `:float` when the same definition is called as a module. Only a non-`:float`
+  control type overrides, so an explicitly typed parameter is left alone (and a
+  control that declares nothing keeps the parameter's own type)."
+  [params process]
+  (let [typed (into {}
+                    (keep (fn [control]
+                            (let [type (:type control)]
+                              (when (and type (not= :float type))
+                                [(:name control) type])))
+                          (:controls process)))]
+    (if (seq typed)
+      (mapv (fn [parameter]
+              (if-let [type (get typed (:name parameter))]
+                (assoc parameter :type type)
+                parameter))
+            params)
+      params)))
+
 (defn normalize
   "Normalize and validate a source descriptor before IR lowering."
   [definition]
@@ -789,11 +813,15 @@
       (validate-source-form! (first body) source [:body 0])
       (let [process (when (contains? definition :process)
                       (normalize-process (:process definition) params source))
+            ;; A control's declared type types its parameter, so a module call
+            ;; and a process entry agree on the parameter's type.
+            params (annotate-control-types params process)
             normalized {:dsp/kind :function
                         :name (:name definition)
                         :params params
                         :return-type return-type
                         :return-record (:return-record definition)
+                        :doc (:doc definition)
                         :state states
                         :process process
                         :body (vec body)

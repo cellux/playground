@@ -87,11 +87,15 @@
 
   Both forms capture source data; DSP bodies are never executed as ordinary
   Clojure expressions during definition or compilation."
-  [name params & body]
+  [name & args]
   (when-not (valid-definition-name? name)
     (macro-fail "dsp/defn name must be a non-blank symbol"
                 &form [:name] {:name name}))
-  (let [explicit-spec? (or (map? params)
+  (let [[doc args] (if (string? (first args))
+                     [(first args) (next args)]
+                     [nil args])
+        [params & body] args
+        explicit-spec? (or (map? params)
                            (and (vector? params)
                                 (= 2 (count params))
                                 (map? (first params))
@@ -144,6 +148,7 @@
                             :body (vec body)
                             :source source
                             :resolution (macro-resolution *ns* body)}
+                     (some? doc) (assoc :doc doc)
                      (contains? spec :process)
                      (assoc :process (:process spec))
                      (contains? spec :options)

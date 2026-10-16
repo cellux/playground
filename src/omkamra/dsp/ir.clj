@@ -80,6 +80,18 @@
     (swap! (:locals env) conj local)
     local))
 
+(defn- unique-local-name
+  "The IR name for a source local.
+
+  A local keeps its own name unless that name is already used elsewhere in the
+  compilation unit — for example by a sibling `if` branch, which is a separate
+  scope. The flat local list has to stay unambiguous, so a name reused in a
+  sibling scope gets a fresh one rather than a collision error."
+  [env name]
+  (if (some #(= name (:name %)) @(:locals env))
+    (symbol (str name "__" (swap! (:counter env) inc)))
+    name))
+
 (defn- fragment
   ([value] (fragment [] value))
   ([statements value]
@@ -426,9 +438,8 @@
         (do
           (when-not (valid-name? name)
             (fail "DSP local name must be a symbol" {:form form :name name}))
-          (when (or (contains? (:bindings env) name)
-                    (some #(= name (:name %)) @(:locals env)))
-            (fail "DSP local names must be unique and cannot shadow bindings"
+          (when (contains? (:bindings env) name)
+            (fail "DSP local names cannot shadow an in-scope binding"
                   {:form form :name name}))
           (if (array-form? init-form)
             (let [binding (array-declaration env name init-form)]
@@ -452,10 +463,11 @@
                 ;; A record value (multi-output) is one local per leaf: the
                 ;; interpreter holds a map, the backends split it when inlining.
                 (let [value (:value init)
-                      local {:name name :type :record :kind :record-value
+                      ir-name (unique-local-name env name)
+                      local {:name ir-name :type :record :kind :record-value
                              :record-leaves (:record-leaves value)}
                       declaration {:op :declare
-                                   :name name
+                                   :name ir-name
                                    :type :record
                                    :init value}]
                   (swap! (:locals env) conj (select-keys local [:name :type]))
@@ -464,9 +476,10 @@
                          (into statements (concat (:statements init) [declaration]))))
 
                 :else
-                (let [local {:name name :type (:type init) :kind :local}
+                (let [ir-name (unique-local-name env name)
+                      local {:name ir-name :type (:type init) :kind :local}
                       declaration {:op :declare
-                                   :name name
+                                   :name ir-name
                                    :type (:type init)
                                    :init (:value init)}]
                   (swap! (:locals env) conj (select-keys local [:name :type]))

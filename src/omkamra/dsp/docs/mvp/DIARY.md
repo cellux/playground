@@ -557,6 +557,209 @@ rarely today and matters most once P10 gives many sibling modules.
 
 ---
 
+## P7a — Library namespace seams and a generated reference (completed)
+
+P7's first decision was the sub-namespace seams the single `omkamra.dsp.library`
+was deferring. It is now five namespaces, each definition moved verbatim:
+
+- `omkamra.dsp.library.math` — `clip`, `triangular-window`,
+  `linear-interpolate`, `allpass-coefficient`
+- `omkamra.dsp.library.oscillator` — `sine-oscillator`
+- `omkamra.dsp.library.envelope` — `adsr-coefficient`, `exponential-adsr`
+- `omkamra.dsp.library.filter` — the one-pole, biquad, and state-variable families
+- `omkamra.dsp.library.delay` — the delay lines
+
+Cross-namespace DSP calls resolve through the linker's captured `:refer`
+mapping, so `delay-line` calls `linear-interpolate` unqualified (clj-kondo needs
+an inline ignore, because the call is quoted DSP data it cannot see as a use).
+
+`dsp/defn` now accepts an optional docstring after the name, like Clojure,
+captured on the descriptor as `:doc`. `omkamra.dsp.library.doc` links every
+public definition and renders `docs/mvp/LIBRARY.md` **from the descriptors** —
+parameters, controls, state, and return shape are derived, so the page cannot
+drift; only the latency/modulation prose a descriptor cannot carry is authored.
+A test regenerates the page and compares, so a stale reference fails the suite.
+
+**Verified.** JVM 70 tests / 600 assertions; browser 9/9 with 63 process cases on
+JavaScript and Wasm; `clj-kondo`/`cljfmt` clean.
+
+**Remaining P7.** Oscillators (band-limited PolyBLEP saw/square/triangle, pulse
+width, sync), noise (white, pink), LFOs, smoothing/slew, multimode biquad,
+effects (chorus, distortion), and cubic interpolation — each with acceptance
+cases and a docstring. Stereo spreading needs multi-channel stateful processes,
+so it belongs with P8.
+
+---
+
+## P7b — Band-limited oscillators (completed)
+
+`omkamra.dsp.library.oscillator` gained the PolyBLEP family:
+
+- `polyblep` — the two-sample polynomial band-limited step correction. Pure, no
+  state, no table, so it stays portable and allocation-free.
+- `saw-oscillator` — a ramp corrected at the wrap.
+- `pulse-oscillator` — two edges, so two corrections; `width` is a control.
+- `square-oscillator` — the half-width pulse, reached through the ordinary call
+  mechanism (a module calling a module), so it holds no state of its own.
+- `triangle-oscillator` — the integral of the band-limited square, held in a
+  record so the update order is explicit.
+
+Two language facts bit while writing these, both worth remembering:
+
+- `-` and `*` are **binary**; `(* 4.0 dt square)` must be nested.
+- **Each `if` branch is now its own scope** — see the entry below; the `polyblep`
+  workaround (`x` in one branch, `y` in the other) has been reverted.
+
+The triangle's leaky integrator trades DC removal against amplitude: the gain is
+scaled to reach ±1, the amplitude varies about ±1.5% across 50 Hz..2 kHz, and the
+first cycle has a start-up transient (the DC removal has no history yet). All
+three are documented in the module docstring rather than hidden.
+
+**Verified.** JVM 71 tests / 634 assertions; browser 9/9 with 67 process cases
+matched on JavaScript and Wasm (the four new oscillator cases included), plus a
+JVM test showing the corrected saw's largest sample step is far smaller than a
+naive sawtooth's — the measurable point of PolyBLEP. `clj-kondo`/`cljfmt` clean.
+
+---
+
+## P7c — `if` branches are separate scopes (completed)
+
+A language wart: `lower-if` lowers both branches with the same environment, and
+the flat `:locals` list carried a "names must be unique" rule, so a local name
+used in *both* branches — perfectly legal, since they are disjoint — failed with
+"cannot shadow bindings". `polyblep` had to use `x` in one branch and `y` in the
+other to work around it.
+
+A local now keeps its own IR name unless that name is **already used elsewhere
+in the compilation unit**, in which case it gets a fresh one
+(`(if c (let [x 1] x) (let [x 2] x))` yields locals `x` and `x__1`). The flat
+local list stays unambiguous, the two branches get separate slots even when their
+types differ, and the common case keeps readable names — the existing test that
+asserts `:locals` for an ordinary `let` is unchanged.
+
+Genuine shadowing is still rejected: a local may not rebind a name that is
+**in scope** at that point (`(let [sample 1.0] …)` where `sample` is a parameter,
+or a nested `let` rebinding an outer local). That is a deliberate language
+restriction, only the false positive across sibling branches was removed.
+
+**Verified.** JVM 72 tests / 640 assertions, including a new test that reuses one
+name in both branches, does it again with **different types** per branch (which
+would corrupt a shared slot), and asserts shadowing is still a diagnostic;
+browser 9/9 with 67 process cases. `clj-kondo`/`cljfmt` clean.
+
+---
+
+## P7d — Noise, LFO, and a parameter-typing fix (completed)
+
+**Noise** (`omkamra.dsp.library.noise`):
+
+- `white-noise` — a 32-bit xorshift written with the P1 integer bitwise
+  operations, so it is deterministic and identical on every target. The output
+  takes the top 24 bits of the state, which are exactly representable in both f32
+  and f64, giving uniform samples in [-1, 1) (measured rms 0.573 ≈ 1/√3).
+- `seed` is a **control**, not state: a compile-time `:init` cannot vary per
+  instance, and a voice needs decorrelated noise. The seed *rotates* the state
+  before extracting bits — a bit permutation, so it decorrelates seeds without
+  skewing the distribution, unlike adding or xoring a seed into the top bits.
+- `pink-noise` — white shaped by the seven one-pole sections of Kellet's filter,
+  the section outputs in a record so the update order is explicit. Measured lag-1
+  autocorrelation is **0.82** against white's **0.01**, which is the property the
+  test asserts.
+
+**LFO** (`oscillator/lfo`) — a unipolar [0, 1] modulation oscillator with a
+`shape` selector (saw, triangle, sine). The same module at audio rate is an
+ordinary oscillator.
+
+**The bug this surfaced: a shorthand parameter is always `:float`.** So a
+parameter was `:int` when a definition was compiled as a *process entry* (where
+`normalize`/`process-bindings` control typing already applied) but `:float` when
+the same definition was called as a *module*. `pink-noise` calls `white-noise` as
+a module and hit exactly that. `descriptor/normalize` now applies the same rule
+the IR used — a control that declares a **non-`:float`** type types its parameter
+— so both uses agree. The rule is deliberately narrow: only a non-default type
+overrides. The first attempt overrode *every* parameter from its control (because
+`normalize-control` always fills a default `:float`), which clobbered an
+explicitly typed parameter and broke the state-table test.
+
+**Verified.** JVM 73 tests / 665 assertions; browser 9/9 with 70 process cases
+matched on JavaScript and Wasm. `clj-kondo`/`cljfmt` clean.
+
+---
+
+## P7e — Control-rate helpers, distortion, cubic interpolation (completed)
+
+Three self-contained additions across two new namespaces:
+
+- `omkamra.dsp.library.control`:
+  - `smoothing` — one-pole approach to a target with a time constant, reusing
+    `envelope/adsr-coefficient` through the ordinary call mechanism. Measured:
+    one time constant reaches 1 - 1/e (0.633), as it should.
+  - `slew-limit` — bounded slope, so a step becomes a ramp of
+    `rate/sample-rate` per sample (measured 4.535e-5 = 2/44100).
+- `omkamra.dsp.library.effect/distortion` — `tanh` saturation normalised by
+  `tanh(drive)`, so full scale reaches ±1 at any drive; odd and stateless.
+- `omkamra.dsp.library.math/cubic-interpolate` — Catmull-Rom, **exact on a linear
+  ramp** (which the test asserts), for fractional delay taps and resampling.
+
+Nothing needed new language support: `adsr-coefficient` is reused across
+namespaces, and `slew-limit`'s `:next` and its body use the same local names
+(`step`, `delta`) — which only works because P7c made `if` branches separate
+scopes, with `unique-local-name` freshening the second occurrence.
+
+**Verified.** JVM 74 tests / 694 assertions; browser 9/9 with 74 process cases
+matched on JavaScript and Wasm. `clj-kondo`/`cljfmt` clean.
+
+**Remaining P7.** Chorus (a modulated delay reusing the LFO), a multimode biquad,
+and converting the older `;;` comments to docstrings. On the multimode biquad:
+`state-variable-filter` already yields low/band/high simultaneously, and an RBJ
+multimode cannot share one feedback history across three outputs — it would need
+three states or a `mode` selector that reuses one. The selector is the useful
+addition; three parallel biquads are already expressible with the call mechanism.
+
+---
+
+## P7f — Multimode, linear envelopes, chorus, spreading, sync (P7 complete)
+
+The last of the contents list:
+
+- `filter/biquad-multimode` — one biquad, four responses selected by `mode`
+  (lowpass, bandpass, highpass, notch). One feedback history suffices because
+  only one mode is active at a time, and all four share the RBJ denominator.
+  Lowpass mode is **bit-identical** to `biquad`, which the test asserts.
+- `envelope/linear-step`, `ar-envelope`, `linear-adsr` — straight-segment
+  envelopes sharing the exponential ADSR's stage machine. AR reaches 1.0 in
+  exactly `attack` seconds (asserted).
+- `delay/chorus` — a delay line whose tap is swept by the ordinary `lfo`, so the
+  modulation needs no machinery of its own; `mix` 0 is bit-exact dry (asserted).
+- `effect/stereo-spread` — Haas-style spreading as a **record-returning module**,
+  with one delay line shared by both outputs so they stay coherent. Writing the
+  two channels needs a multi-channel process, so a stereo *process* entry waits
+  for P8; the module itself is exercised on all four targets through an inline
+  catalog case that projects one field.
+- `oscillator/sync-oscillator` — hard sync with the reset placed at the master's
+  sub-sample zero crossing, which removes the timing quantisation. The reset step
+  is deliberately **not** BLEP-corrected and is documented as such: it is the one
+  oscillator here that is not band-limited.
+
+Earlier definitions also gained real docstrings (their prose lived in `;;`
+comments), so the generated reference now describes every substantive module.
+
+**P7 is complete.** Contents covered: band-limited saw/square/triangle/sine;
+white and pink noise; PWM and sync; linear and exponential AR/ADSR envelopes; an
+LFO; smoothing and slew limiting; one-pole, biquad, multimode biquad, and SVF
+filters; delay, chorus, and distortion; linear, cubic, and allpass
+interpolation; and stereo spreading as a module. Eight library namespaces, a
+generated reference, and every module in the shared acceptance catalog.
+
+**Verified.** JVM 75 tests / 714 assertions; browser 9/9 with 80 process cases
+matched on JavaScript and Wasm. `clj-kondo`/`cljfmt` clean.
+
+**Deferred out of P7.** Stereo spreading's multi-channel *hosting* (writing two
+output channels) needs multi-channel stateful processes, which P6 left closed;
+plus the D23 optional input port (P8) and the D20 coloring pass.
+
+---
+
 ## Handoff — current state after P6 (rolling entry)
 
 This is the one living entry, as opposed to the completed-phase entries above:
@@ -610,11 +813,11 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   (CodeMirror) and compile them there, which means the compiler itself becomes
   portable and runs in SCI (P13). The library and every new language form are
   therefore authored as portable `.cljc` source forms.
-- Verified through `clojure_eval` on the running nREPL: JVM 69 tests / 578
-  assertions, browser 9/9 (the process matrix matches 63 cases on JavaScript
+- Verified through `clojure_eval` on the running nREPL: JVM 75 tests / 714
+  assertions, browser 9/9 (the process matrix matches 80 cases on JavaScript
   and Wasm, covering the P4 array/record/table cases, the P5 delay-line and
-  place cases, and the P6 composition cases including `filter-voice` and
-  `svf-voice`), `clj-kondo`/`cljfmt` clean.
+  place cases, the P6 composition cases including `filter-voice` and
+  `svf-voice`, and the whole P7 library), `clj-kondo`/`cljfmt` clean.
 
 ### Architecture
 
@@ -667,6 +870,15 @@ omkamra.dsp.testbed           (.cljs)  browser differential suite
   through calls. P6b turned `delay-line` / `allpass-delay-line` into modules
   (with `-voice` wrappers and a `delay-line-pair-voice`). P6c added `biquad`
   (record-owned history) and `filter-voice`, the done-when ADSR + biquad voice.
+- **P7 (DSP standard library) is complete.** Eight namespaces
+  (`library.{math,oscillator,noise,envelope,filter,delay,control,effect}`) cover
+  the phase's contents list: band-limited oscillators (PolyBLEP saw/pulse/
+  square/triangle, plus non-band-limited hard sync), white/pink noise, an LFO,
+  linear and exponential AR/ADSR envelopes, smoothing and slew limiting,
+  one-pole/biquad/multimode/SVF filters, delay/chorus/distortion, linear/cubic/
+  allpass interpolation, and stereo spreading as a record-returning module. The
+  reference page `docs/mvp/LIBRARY.md` is generated from the descriptors by
+  `omkamra.dsp.library.doc` (with a drift-guard test).
 - The library is `:clj`-required by `acceptance.cljc` so the JVM linker can
   resolve the calls; the browser only receives compiled IR and never loads it.
 - Fully-qualified symbols (`omkamra.dsp.library/clip`) are used in catalog
@@ -696,7 +908,20 @@ omkamra.dsp.testbed           (.cljs)  browser differential suite
 
 ### Gotchas burned into this session
 
-- In Clojure/CLJS source, `-0` is **integer zero**; negative zero is `-0.0`.
+- **A stale Shadow cache can silently mask an editor's mistakes.** After the P7
+  namespace split, `.shadow-cljs` still held a cache entry for the *deleted*
+  `omkamra.dsp.library`, and it expanded `.cljc` library sources with a **stale
+  cached `omkamra.dsp/defn`** (from before docstring support), printing
+  `Syntax error macroexpanding dsp/defn … params must be a vector` on a
+  background thread while every eval and test still passed. Touching the macro
+  namespace did not help (Shadow keys its cache on content, not mtime). Fix:
+  stop the dev server, `rm -rf .shadow-cljs .dev` (both gitignored build
+  artifacts), restart. The restart then surfaced two genuine breakages that the
+  in-memory state had been hiding: two catalog cases still called
+  `omkamra.dsp.library/clip` and `…/triangular-window` (library calls *inside*
+  case bodies, which the split's rewrite had missed), and `LIBRARY.md` was stale
+  (caught by the drift-guard test, exactly as intended). Both fixed.
+- `-0` in source is **integer zero**; negative zero is `-0.0`.
 - Clojure's `(float x)` **throws** on infinity; use `unchecked-float` (JVM) and
   `unchecked-float`/`Math.fround` (CLJS).
 - ClojureScript `unchecked-remainder-int` is **floored** (it uses `mod`); use
@@ -723,14 +948,20 @@ omkamra.dsp.testbed           (.cljs)  browser differential suite
 
 ### Next steps
 
-1. Begin **P7 — the DSP standard library**. The composition machinery is in
-   place, so library entries can be reused modules rather than processes (the
-   P5/P6 workarounds are gone: `delay-line`, `one-pole`, `biquad`,
-   `state-variable-filter` are all callable modules).
-2. Keep a structured diagnostic for any operation a target cannot serve at all.
-3. Optionally add generated-target (JS/Wasm) development guards and restore the
+1. Finish **P7 — the DSP standard library**: smoothing/slew, multimode biquad,
+   effects (chorus, distortion), and cubic interpolation, plus converting the
+   older `;;` comments to docstrings. Composition is in place, so library entries
+   are reused modules rather than processes.
+2. **P8 must include optional input ports (D23).** A process with `:input false`
+   has no sample parameter and no `:input` buffer in the ABI, so generators stop
+   carrying an ignored `sample` and a dead buffer load that falsely reports
+   `:read-memory`. It belongs in P8 because that phase already moves the ABI's
+   argument indices (instance handle), so the index/descriptor/adapter rework is
+   paid once instead of twice.
+3. Keep a structured diagnostic for any operation a target cannot serve at all.
+4. Optionally add generated-target (JS/Wasm) development guards and restore the
    dropped Wasm f64 worklet checks.
-4. Deferred, optional: the D20 partition-coloring pass (dead-on-frame-entry
+5. Deferred, optional: the D20 partition-coloring pass (dead-on-frame-entry
    state and P4 scratch), most valuable once P10 gives many sibling modules.
 
 ### Wasm lookup table — done, with follow-ups
