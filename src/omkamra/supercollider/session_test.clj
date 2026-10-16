@@ -1,5 +1,6 @@
 (ns omkamra.supercollider.session-test
   (:require [clojure.test :refer [deftest is]]
+            [omkamra.supercollider :as supercollider]
             [omkamra.supercollider.scsynth :as scsynth]
             [omkamra.supercollider.session :as session]))
 
@@ -33,3 +34,27 @@
        #":scsynth and :instance are mutually exclusive"
        (session/start! {:scsynth {}
                         :instance {:pid 123 :params {}}}))))
+
+(deftest owned-session-defaults-to-the-standard-udp-port
+  (let [started (atom nil)
+        instance {:pid 123 :params {:udp-port 57110}}
+        connection {:connection :owned}]
+    (when (session/current-session)
+      (session/stop!))
+    (try
+      (with-redefs [scsynth/start (fn [params]
+                                    (reset! started params)
+                                    instance)
+                    scsynth/connect (fn [_] connection)
+                    scsynth/status (fn [_] {})
+                    scsynth/close (fn [_])
+                    scsynth/stop (fn [_])]
+        (let [value (supercollider/start-session!
+                     {:startup-delay-ms 1
+                      :startup-timeout-ms 100})]
+          (is (= {:udp-port 57110} @started))
+          (is (= instance (:process value)))
+          (supercollider/stop-session!)))
+      (finally
+        (when (session/current-session)
+          (session/stop!))))))

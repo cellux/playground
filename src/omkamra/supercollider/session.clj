@@ -4,6 +4,7 @@
             [omkamra.supercollider.scsynth :as scsynth]
             [omkamra.supercollider.synthdef :as synthdef]))
 
+(def ^:private default-udp-port 57110)
 (def ^:private default-lookahead-ms 100)
 (def ^:private default-startup-delay-ms 500)
 (def ^:private default-startup-timeout-ms 5000)
@@ -59,7 +60,8 @@
 
   Options:
   * `:scsynth` — map accepted by `omkamra.supercollider.scsynth/start`;
-    this starts a process owned by the session.
+    this starts a process owned by the session. When neither `:udp-port` nor
+    `:tcp-port` is supplied, UDP port 57110 is used.
   * `:instance` — an existing scsynth process descriptor, as returned by
     `omkamra.supercollider.scsynth/start`; this wraps an external process and
     does not stop it when the session ends.
@@ -93,7 +95,12 @@
    (require-positive-number ":startup-delay-ms" startup-delay-ms)
    (require-positive-number ":startup-timeout-ms" startup-timeout-ms)
    (let [process-owned? (nil? instance)
-         process (or instance (scsynth/start (or scsynth {})))
+         raw-scsynth-params (or scsynth {})
+         scsynth-params (if (or (contains? raw-scsynth-params :udp-port)
+                                (contains? raw-scsynth-params :tcp-port))
+                          raw-scsynth-params
+                          (assoc raw-scsynth-params :udp-port default-udp-port))
+         process (or instance (scsynth/start scsynth-params))
          _ (when process-owned?
              (Thread/sleep (long startup-delay-ms)))
          connection (scsynth/connect process)]
