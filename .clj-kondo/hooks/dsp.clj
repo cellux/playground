@@ -8,3 +8,11 @@
     {:node (api/list-node [(api/token-node 'def)
                            (api/token-node name)
                            (api/token-node nil)])}))
+
+(clojure.core/defn dsp-defstruct
+  "A DSP struct is a normal var definition; its fields are embedded data."
+  [{:keys [node]}]
+  (let [[_ name] (api/sexpr node)]
+    {:node (api/list-node [(api/token-node 'def)
+                           (api/token-node name)
+                           (api/token-node nil)])}))

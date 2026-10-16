@@ -7,7 +7,7 @@
   loads/stores, and a channel-configurable block-processing ABI.
   Definitions are data; their bodies are never run as ordinary Clojure
   expressions."
-  (:refer-clojure :exclude [compile defn reset!])
+  (:refer-clojure :exclude [compile defn defstruct reset!])
   (:require [clojure.string :as str]
             [omkamra.dsp.descriptor :as descriptor]
             [omkamra.dsp.interpreter :as interpreter]
@@ -152,6 +152,51 @@
                      (assoc :compiler-options (:compiler-options spec)))]
       (list 'def name (list 'quote captured)))))
 
+(clojure.core/defmacro defstruct
+  "Capture a DSP state-record shape as data bound to a Var.
+
+  Like `dsp/defn`, the shape takes a name followed by a body whose definitions
+  and options are embedded DSP data rather than executable Clojure:
+
+    (dsp/defstruct biquad-state
+      [x1 x2 y1 y2])                     ; shorthand: :float fields, 0.0
+
+    (dsp/defstruct biquad-state
+      [{:name x1 :type :float :init 0.0} ; explicit field descriptors
+       {:name taps :fields [{:name a} {:name b}]}]
+      {:constant true})                  ; optional options map
+
+  A process state declaration references the Var with `{:name z :struct
+  biquad-state}`; the linker resolves the reference using the declaring
+  namespace and inlines the fields. The description is portable data so a
+  browser compiler can read the same forms."
+  [name params & body]
+  (when-not (valid-definition-name? name)
+    (macro-fail "dsp/defstruct name must be a non-blank symbol"
+                &form [:name] {:name name}))
+  (when-not (vector? params)
+    (macro-fail "dsp/defstruct requires a vector of field definitions"
+                &form [:params] {:params params}))
+  (let [[options body] (if (and (seq body) (map? (first body)))
+                         [(first body) (next body)]
+                         [{} body])]
+    (when (seq body)
+      (macro-fail "dsp/defstruct takes field definitions and one optional options map"
+                  &form [:body] {:body body}))
+    (let [fields (mapv (fn [field]
+                         (if (symbol? field)
+                           {:name field :type :float :init 0.0}
+                           field))
+                       params)
+          source (merge (select-keys (meta &form) [:file :line :column])
+                        {:namespace (ns-name *ns*)})]
+      (list 'def name
+            (list 'quote (merge {:dsp/kind :struct
+                                 :name name
+                                 :fields fields
+                                 :source source}
+                                options))))))
+
 (clojure.core/defn link
   "Link a DSP descriptor or Var into a compilation unit.
 
@@ -205,7 +250,19 @@
         inputs (filterv #(= :input (:direction %)) buffers)
         outputs (filterv #(= :output (:direction %)) buffers)
         controls (mapv #(select-keys % [:name :type :default]) (:controls ir))
-        state (mapv #(select-keys % [:name :type :size :init]) (:state ir))
+        state (mapv #(select-keys % [:name :type :size :init :constant]) (:state ir))
+        scratch (mapv #(select-keys % [:name :type :size :index]) (:scratch ir))
+        scratch-values (mapv (fn [value] (assoc value :persistent? false))
+                             scratch)
+        records (mapv (fn [record]
+                        {:name (:name record)
+                         :struct (:struct-name record)
+                         :size (:size record)
+                         :constant (boolean (:constant record))
+                         :persistent? true
+                         :ownership :instance
+                         :fields (:leaves record)})
+                      (:records ir))
         state-values (mapv (fn [index value]
                              (assoc value
                                     :index index
@@ -214,7 +271,9 @@
                            state)
         physical-type (physical-type-policy ir)
         element-type (:element-type physical-type)
-        element-bytes (:element-bytes physical-type)]
+        element-bytes (:element-bytes physical-type)
+        state-slot-count (reduce + 0 (map #(or (:size %) 1) (:state ir)))
+        scratch-slot-count (reduce + 0 (map #(or (:size %) 1) (:scratch ir)))]
     {:abi-version 1
      :kind :process
      :name (:name ir)
@@ -265,6 +324,26 @@
      :state-layout {:ownership :instance
                     :persistent? true
                     :values state-values}
+     :scratch scratch
+     :scratch-layout {:ownership :instance
+                      :persistent? false
+                      :region :scratch
+                      :values scratch-values}
+     :records records
+     ;; Explicit logical layout of the one instance arena: persistent state
+     ;; first, then per-invocation local-array scratch.
+     :arena {:ownership :instance
+             :element-type element-type
+             :element-bytes element-bytes
+             :alignment element-bytes
+             :regions {:state {:role :state
+                               :offset 0
+                               :count state-slot-count
+                               :persistent? true}
+                       :scratch {:role :scratch
+                                 :offset state-slot-count
+                                 :count scratch-slot-count
+                                 :persistent? false}}}
      :lifecycle (:lifecycle ir)
      :lifecycle-operations (->> [:init :reset]
                                 (filter #(get (:lifecycle ir) %))
@@ -280,8 +359,8 @@
 
 (clojure.core/defn- compile-function-target
   [target lowered options]
-  (when (seq (:state lowered))
-    (throw (ex-info "stateful DSP definitions require the :process entry"
+  (when (or (seq (:state lowered)) (seq (:scratch lowered)))
+    (throw (ex-info "stateful or local-array DSP definitions require the :process entry"
                     {:name (:name lowered)})))
   (case target
     :interpreter

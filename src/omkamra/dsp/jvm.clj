@@ -369,14 +369,14 @@
     :local (if (= :float (:type expression))
              [[(real-local-load-op) (get slots (:name expression))]]
              [[:iload (get slots (:name expression))]])
-    :state-load (let [{:keys [slot index type]} (get (:state-layout slots)
-                                                     (:index expression))
-                      element-index (:element-index expression)]
-                  (vec (concat [[:aload slot] [:ldc index]]
-                               (when element-index
-                                 (concat (expression-instructions element-index slots labels)
-                                         [[:iadd]]))
-                               [[(if (= :float type) (real-load-op) :iaload)]])))
+    (:state-load :array-load) (let [{:keys [slot index type]} (get (:state-layout slots)
+                                                                   (:index expression))
+                                    element-index (:element-index expression)]
+                                (vec (concat [[:aload slot] [:ldc index]]
+                                             (when element-index
+                                               (concat (expression-instructions element-index slots labels)
+                                                       [[:iadd]]))
+                                             [[(if (= :float type) (real-load-op) :iaload)]])))
     :frame [[:iload (:frame slots)]]
     :frames [[:iload (:frames slots)]]
     :sample-rate [[(real-local-load-op) (:sample-rate slots)]]
@@ -458,15 +458,15 @@
                         (index-instructions (:index statement) slots labels)
                         (expression-instructions (:value statement) slots labels)
                         [[(real-store-op)]]))
-    :state-store (let [{:keys [slot index type]} (get (:state-layout slots)
-                                                      (:index statement))
-                       element-index (:element-index statement)]
-                   (vec (concat [[:aload slot] [:ldc index]]
-                                (when element-index
-                                  (concat (expression-instructions element-index slots labels)
-                                          [[:iadd]]))
-                                (expression-instructions (:value statement) slots labels)
-                                [[(if (= :float type) (real-store-op) :iastore)]])))
+    (:state-store :array-store) (let [{:keys [slot index type]} (get (:state-layout slots)
+                                                                     (:index statement))
+                                      element-index (:element-index statement)]
+                                  (vec (concat [[:aload slot] [:ldc index]]
+                                               (when element-index
+                                                 (concat (expression-instructions element-index slots labels)
+                                                         [[:iadd]]))
+                                               (expression-instructions (:value statement) slots labels)
+                                               [[(if (= :float type) (real-store-op) :iastore)]])))
     :if (let [then-label (next-label labels "if-then")
               else-label (next-label labels "if-else")
               done-label (next-label labels "if-done")]
@@ -637,6 +637,7 @@
   (check-state! layout state)
   (doseq [{:keys [index state-index storage type]} (:entries layout)
           :let [state-description (some #(when (= (:index %) state-index) %) (:state ir))]
+          :when state-description
           [element-index value] (map-indexed vector
                                              (if (= 1 (or (:size state-description) 1))
                                                [(:init state-description)]
@@ -820,7 +821,9 @@
       (let [channels (:channels ir)
             multi-channel? (> channels 1)
             control-layout (state-layout (:controls ir))
-            state-layout (state-layout (:state ir))
+            ;; State and local-array scratch share one arena, so scratch slots
+            ;; are additional entries in the same typed arrays.
+            state-layout (state-layout (concat (:state ir) (:scratch ir)))
             sample-rate-slot 4
             float-control-slot (+ sample-rate-slot (real-param-width))
             int-control-slot (inc float-control-slot)

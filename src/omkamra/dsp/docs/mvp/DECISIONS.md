@@ -354,3 +354,108 @@ implements the ops with the host `Math` (`.cljc`); JVM and JavaScript gain
 native lowerings; Wasm gains f64-internal emulations. `omkamra.dsp.conformance`
 and `omkamra.dsp.testbed` gain a target-dispatched matcher whose only tolerant
 specialization is `:wasm`.
+
+---
+
+## D15 — Local arrays are preallocated scratch in one instance arena
+
+**Status.** In force (adopted at P4).
+
+**Decision.** The language gains fixed-size local arrays:
+
+- declaration `(array :float N)` or `(array :int N)` as a `let` binding;
+- indexed access `(aget a i)` and `(aset a i v)`, with `array-load`/
+  `array-store` retained as equivalent aliases (matching the Clojure-core
+  naming convention of D3).
+
+Persistent state and local-array **scratch** share a single instance **arena**:
+scratch slots are assigned distinct logical offsets that continue immediately
+after state, and every backend realizes the arena in its existing storage — the
+flat primitive array (interpreter), the typed arrays (JVM, JavaScript), and one
+linear-memory region (Wasm). No new ABI parameters, method-signature changes, or
+storage concepts are introduced.
+
+Scratch is **preallocated and zero at instance creation**, and a declaration
+emits no run-time statement. Its contents therefore persist between frames
+within an instance, so a scratch array must be written before it is read in a
+frame. Nothing is allocated after initialization.
+
+Each declaration owns a **distinct** slot; lifetime-based slot aliasing is
+deferred. Constant indices are checked while lowering; dynamic indices are
+checked at run time by the interpreter and reported by a `:dynamic-array-index`
+diagnostic (they are not proven in bounds). Local arrays require the `:process`
+entry, exactly like persistent state.
+
+**Rationale.** Real-time safety forbids per-call allocation, so a local array
+cannot be a fresh array created inside `process()`; it must be reserved up front.
+That makes its "lexical" lifetime a compile-time discipline over instance
+storage, which collapses local arrays, aggregate state, and constant tables onto
+one layout model. Continuing offsets after state makes `state`, `scratch`, and
+the per-backend layout functions shape-identical, so the backends reuse their
+existing state load/store paths unchanged.
+
+**Consequences.** The ABI exposes `:scratch` and `:scratch-layout` alongside
+`:state`/`:state-layout`, and the Wasm memory plan gains a `:scratch` region.
+Because scratch is not reset, `reset` restores state only. P4's later slices
+(aggregate records, initialization-time constant tables) are expected to reuse
+this same arena layout.
+
+---
+
+## D16 — Records are named struct shapes referenced by `:struct`, laid out struct-of-arrays
+
+**Status.** In force (adopted at P4).
+
+**Decision.** Aggregate state records are declared as named *struct shapes* and
+referenced from state declarations:
+
+- `(dsp/defstruct name [f1 f2])` — shorthand: `:float` fields initialised to
+  `0.0`;
+- `(dsp/defstruct name [{:name f1 :type :float :init 0.0}
+  {:name f2 :fields [...]}] {:constant true})` — explicit descriptors,
+  possibly nested, plus an optional options map;
+- a state slot references the shape with `{:name slot :struct name}`,
+  optionally with `:size N` for an array of records. Inline `:fields [...]` is
+  also accepted for one-off records.
+
+The linker resolves `:struct` through the declaring namespace's captured
+resolution (the same mechanism as calls) and inlines the struct's fields,
+retaining the fully-qualified struct id as `:struct-name`. Field access comes in
+two equivalent spellings: the explicit `(field slot :a :b)` and
+`(set-field! slot :a :b value)`, and the Clojure-style `(:field slot)` (keyword
+in head position, like `(:key map)`), `(slot :field)` (the record name in call
+position), and `(set! (:field slot) value)`. An optional leading record index
+handles arrays of records in the explicit form: `(field voices i :phase)`.
+The linker treats a form headed by a record name as field access rather than a
+call, so `(slot :field)` is never mistaken for a function call.
+
+**Layout — struct of arrays.** A record's field tree is flattened into scalar
+leaves; for a slot of `:size N`, each leaf becomes one flat state entry of
+`:size N`, and leaves are laid out in declaration order. Field `j`'s record `i`
+lives at logical slot `leafOffset(j) + i`, where `leafOffset(j)` is the sum of
+the sizes of the preceding leaves. Nested records contribute their leaves under
+path-qualified names. Record slots continue the same arena as scalar state and
+scratch (D15), and each leaf is an ordinary `:state-load`/`:state-store` with a
+constant base offset and the record index as the element index — so every
+backend reuses the existing state paths unchanged.
+
+**Constant tables.** A state slot (or record) may be `:constant true`. It is
+materialized into instance state at initialization and is **read-only**; any
+`state-store`, `aset`, or `set-field!` targeting it is rejected while lowering.
+`:constant` requires an aggregate table or record and forbids `:next`.
+
+**Rationale.** Declaring the shape once outside the DSP body makes records
+reusable across definitions and keeps the shape portable data (P13). The
+struct-of-arrays layout keeps each leaf contiguous so it maps onto the existing
+flat state representation, and continuing the arena means records need no new
+storage concept. `:constant` is the natural place for wavetables and windows:
+materialize once, never write.
+
+**Consequences.** The ABI gains `:records` (named, with `:struct`, `:size`,
+`:fields` paths and offsets, and `:constant`) and `:arena` (region offsets,
+element size, alignment) alongside `:state`/`:state-layout` and
+`:scratch`/`:scratch-layout`; Wasm's state layout marks `:constant` entries.
+Float `:init` values stay double in the IR and are narrowed per precision at
+use, so an f64 table survives the EDN round trip to the browser. Structured
+`:dynamic-state-index` diagnostics join `:dynamic-array-index`; the reference
+interpreter is the development-time bounds checker.

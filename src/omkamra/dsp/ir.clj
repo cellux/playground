@@ -56,6 +56,10 @@
     :buffers buffers
     :loop-depth 0
     :locals (atom [])
+    ;; Fixed-size local arrays ("scratch"): a distinct, preallocated instance
+    ;; region whose logical offsets continue after persistent state, so every
+    ;; backend can realize state and scratch in one arena.
+    :scratch (atom {:next 0 :entries []})
     :counter (atom 0)}))
 
 (defn- fresh-local!
@@ -100,7 +104,8 @@
     (boolean? form) {:op :const :type :boolean :value form}
     :else nil))
 
-(declare lower-value lower-form lower-forms)
+(declare lower-value lower-form lower-forms array-form? array-declaration
+         lower-place-store!)
 
 (defn- frame-index
   "Lower a source buffer offset to an absolute per-frame index.
@@ -168,6 +173,10 @@
               :type (:type binding)
               :effects #{:read-state}})
     :buffer (:expression binding)
+    :array (fail "DSP local arrays must be accessed with aget/aset (array-load/array-store)"
+                 {:array (:name binding) :size (:size binding)})
+    :record (fail "DSP state records must be accessed with field/set-field!"
+                  {:record (:name binding) :size (:size binding)})
     :frames {:op :frames :type :int}
     :sample-rate {:op :sample-rate :type :float}
     {:op :local :name (:name binding) :type (:type binding)}))
@@ -377,38 +386,63 @@
                     (some #(= name (:name %)) @(:locals env)))
             (fail "DSP local names must be unique and cannot shadow bindings"
                   {:form form :name name}))
-          (let [init (lower-value init-form env)
-                local {:name name :type (:type init) :kind :local}
-                declaration {:op :declare
-                             :name name
-                             :type (:type init)
-                             :init (:value init)}]
-            (swap! (:locals env) conj (select-keys local [:name :type]))
-            (recur remaining
-                   (assoc-in env [:bindings name] local)
-                   (into statements (concat (:statements init) [declaration])))))
+          (if (array-form? init-form)
+            (let [binding (array-declaration env name init-form)]
+              (recur remaining
+                     (assoc-in env [:bindings name] binding)
+                     statements))
+            (let [init (lower-value init-form env)
+                  local {:name name :type (:type init) :kind :local}
+                  declaration {:op :declare
+                               :name name
+                               :type (:type init)
+                               :init (:value init)}]
+              (swap! (:locals env) conj (select-keys local [:name :type]))
+              (recur remaining
+                     (assoc-in env [:bindings name] local)
+                     (into statements (concat (:statements init) [declaration]))))))
         (let [body-fragment (lower-forms body env)]
           (assoc body-fragment
                  :statements (into (vec statements)
                                    (:statements body-fragment))))))))
 
+(defn- field-access
+  "Recognize Clojure-style field access.
+
+  `(:field record)` reads a field the way `(:key map)` reads a map entry, and
+  `(record :field)` uses the record name in call position. Either way it is a
+  two-element list whose head is a keyword and whose argument is a symbol, or
+  the reverse. Returns `[record-name path]`, or nil when it is not field
+  access."
+  [form]
+  (when (and (seq? form) (= 2 (count form)))
+    (let [[head argument] form]
+      (cond
+        (and (keyword? head) (symbol? argument)) [argument [head]]
+        (and (symbol? head) (keyword? argument)) [head [argument]]
+        :else nil))))
+
 (defn- lower-set!
   [form env]
-  (let [[_ name value-form & extra] form
-        binding (get-in env [:bindings name])]
-    (when (or (not (valid-name? name)) extra (nil? value-form))
-      (fail "DSP set! requires a local name and one value" {:form form}))
-    (when-not (= :local (:kind binding))
-      (fail "DSP set! can only update mutable locals" {:form form :name name}))
-    (let [value (lower-value value-form env)]
-      (expect-type! (:type binding) (:value value) form)
-      (fragment (conj (:statements value)
-                      {:op :assign
-                       :name name
-                       :type (:type binding)
-                       :value (:value value)
-                       :effects #{:write-local}})
-                {:op :local :name name :type (:type binding)}))))
+  (let [[_ target value-form & extra] form]
+    (when (or extra (nil? value-form))
+      (fail "DSP set! requires a target and one value" {:form form}))
+    (if-let [[record-name path] (field-access target)]
+      (lower-place-store! form record-name path value-form env)
+      (let [binding (get-in env [:bindings target])]
+        (when-not (valid-name? target)
+          (fail "DSP set! requires a local name or a field place" {:form form}))
+        (when-not (= :local (:kind binding))
+          (fail "DSP set! can only update mutable locals" {:form form :name target}))
+        (let [value (lower-value value-form env)]
+          (expect-type! (:type binding) (:value value) form)
+          (fragment (conj (:statements value)
+                          {:op :assign
+                           :name target
+                           :type (:type binding)
+                           :value (:value value)
+                           :effects #{:write-local}})
+                    {:op :local :name target :type (:type binding)}))))))
 
 (defn- loop-bound
   [form value source]
@@ -502,6 +536,13 @@
                :value (:value value)
                :effects #{:write-memory}}]))))
 
+(defn- reject-constant-store!
+  "Constant tables and records are materialized at initialization only."
+  [form binding]
+  (when (:constant binding)
+    (fail "DSP constant tables and records are read-only"
+          {:form form :state (:name binding)})))
+
 (defn- aggregate-state-binding!
   [form env state-id]
   (let [binding (get-in env [:bindings state-id])]
@@ -551,6 +592,7 @@
     (let [binding (aggregate-state-binding! form env state-id)
           index (aggregate-state-index form env binding index-form)
           value (lower-value value-form env)]
+      (reject-constant-store! form binding)
       (expect-type! (:type binding) (:value value) form)
       (void-fragment
        (concat (:statements index) (:statements value)
@@ -562,6 +604,200 @@
                  :type (:type binding)
                  :value (:value value)
                  :effects #{:write-state}}])))))
+
+(defn- array-form?
+  [form]
+  (and (seq? form) (= 'array (first form))))
+
+(defn- array-declaration
+  "Declare a fixed-size local array in the instance's scratch region.
+
+  Arrays get distinct logical slots and their offsets continue after persistent
+  state. The declaration emits no runtime statement: the region is zeroed when
+  the instance is created and retains its contents between frames, so a scratch
+  array must be written before it is read within a frame."
+  [env name init-form]
+  (let [[_ element size & extra] init-form]
+    (when (or extra
+              (not (contains? #{:float :int} element))
+              (not (and (integer? size) (pos? size))))
+      (fail "array requires a :float or :int element type and a positive constant size"
+            {:form init-form :name name :element element :size size}))
+    (let [{:keys [next]} @(:scratch env)
+          entry {:name name :type element :size size :index next}]
+      (swap! (:scratch env)
+             (fn [scratch]
+               (-> scratch
+                   (assoc :next (+ next size))
+                   (update :entries conj entry))))
+      (assoc entry :kind :array))))
+
+(defn- array-binding!
+  [form env array-id]
+  (let [binding (get-in env [:bindings array-id])]
+    (when-not (= :array (:kind binding))
+      (fail "DSP array access requires a declared local array"
+            {:form form :array array-id}))
+    binding))
+
+(defn- array-index
+  [form env binding index-form]
+  (let [index (lower-value index-form env)]
+    (expect-type! :int (:value index) form)
+    (when (and (= :const (get-in index [:value :op]))
+               (or (neg? (get-in index [:value :value]))
+                   (>= (get-in index [:value :value]) (:size binding))))
+      (fail "DSP array index is outside the declared range"
+            {:form form :array (:name binding) :size (:size binding)
+             :index (get-in index [:value :value])}))
+    index))
+
+(defn- lower-array-load
+  [form env]
+  (let [[_ array-id index-form & extra] form]
+    (when (or (not (symbol? array-id)) (nil? index-form) extra)
+      (fail (str (first form) " requires a local array name and one integer index")
+            {:form form}))
+    (let [binding (array-binding! form env array-id)
+          index (array-index form env binding index-form)]
+      (fragment (:statements index)
+                {:op :array-load
+                 :array-id (:name binding)
+                 :index (:index binding)
+                 :element-index (:value index)
+                 :size (:size binding)
+                 :type (:type binding)
+                 :effects #{:read-memory}}))))
+
+(defn- lower-array-store
+  [form env]
+  (let [[_ array-id index-form value-form & extra] form]
+    (when (or (not (symbol? array-id)) (nil? index-form) (nil? value-form) extra)
+      (fail (str (first form) " requires a local array name, integer index, and value")
+            {:form form}))
+    (let [binding (array-binding! form env array-id)
+          index (array-index form env binding index-form)
+          value (lower-value value-form env)]
+      (reject-constant-store! form binding)
+      (expect-type! (:type binding) (:value value) form)
+      (void-fragment
+       (concat (:statements index) (:statements value)
+               [{:op :array-store
+                 :array-id (:name binding)
+                 :index (:index binding)
+                 :element-index (:value index)
+                 :size (:size binding)
+                 :type (:type binding)
+                 :value (:value value)
+                 :effects #{:write-memory}}])))))
+
+(defn- record-binding!
+  [form env name]
+  (let [binding (get-in env [:bindings name])]
+    (when-not (= :record (:kind binding))
+      (fail "DSP field access requires a declared state record"
+            {:form form :state name}))
+    binding))
+
+(defn- field-selectors
+  "Split field selectors into an optional record-index form and a field path.
+
+  A leading non-keyword selector is the record index; the remaining selectors
+  are the field-name path."
+  [form selectors]
+  (let [[index selectors] (if (keyword? (first selectors))
+                            [nil selectors]
+                            [(first selectors) (rest selectors)])]
+    (when (or (empty? selectors) (not (every? keyword? selectors)))
+      (fail "DSP field access requires an optional record index and field names"
+            {:form form :selectors (vec selectors)}))
+    [index (vec selectors)]))
+
+(defn- field-leaf!
+  [form env binding index-form path]
+  (let [leaf (get (:leaf-index binding) path)]
+    (when-not leaf
+      (fail "DSP field path does not exist in the record"
+            {:form form :state (:name binding) :path path}))
+    (let [index (when index-form (lower-value index-form env))]
+      (when index
+        (expect-type! :int (:value index) form))
+      [leaf index])))
+
+(defn- lower-field
+  [form env]
+  (let [[_ name & selectors] form]
+    (when-not (symbol? name)
+      (fail "field requires a state record name" {:form form}))
+    (let [binding (record-binding! form env name)
+          [index-form path] (field-selectors form selectors)
+          [leaf index] (field-leaf! form env binding index-form path)]
+      (fragment (:statements index)
+                {:op :state-load
+                 :state-id (:name binding)
+                 :index (:index leaf)
+                 :element-index (:value index)
+                 :size (:size leaf)
+                 :type (:type leaf)
+                 :effects #{:read-state}}))))
+
+(defn- lower-set-field!
+  [form env]
+  (let [[_ name & arguments] form
+        value-form (last arguments)
+        selectors (butlast arguments)]
+    (when-not (and (symbol? name) (seq selectors) value-form)
+      (fail "set-field! requires a state record name, field path, and value"
+            {:form form}))
+    (let [binding (record-binding! form env name)
+          [index-form path] (field-selectors form selectors)
+          [leaf index] (field-leaf! form env binding index-form path)
+          value (lower-value value-form env)]
+      (reject-constant-store! form binding)
+      (expect-type! (:type leaf) (:value value) form)
+      (void-fragment
+       (concat (:statements index) (:statements value)
+               [{:op :state-store
+                 :state-id (:name binding)
+                 :index (:index leaf)
+                 :element-index (:value index)
+                 :size (:size leaf)
+                 :type (:type leaf)
+                 :value (:value value)
+                 :effects #{:write-state}}])))))
+
+(defn- lower-field-read
+  "Clojure-style field read for `(:field record)` and `(record :field)`."
+  [form env record-name path]
+  (let [binding (record-binding! form env record-name)
+        [leaf index] (field-leaf! form env binding nil path)]
+    (fragment (:statements index)
+              {:op :state-load
+               :state-id (:name binding)
+               :index (:index leaf)
+               :element-index (:value index)
+               :size (:size leaf)
+               :type (:type leaf)
+               :effects #{:read-state}})))
+
+(defn- lower-place-store!
+  "Field write for a `set!` place: `(set! (:field record) value)`."
+  [form record-name path value-form env]
+  (let [binding (record-binding! form env record-name)
+        [leaf index] (field-leaf! form env binding nil path)
+        value (lower-value value-form env)]
+    (reject-constant-store! form binding)
+    (expect-type! (:type leaf) (:value value) form)
+    (void-fragment
+     (concat (:statements index) (:statements value)
+             [{:op :state-store
+               :state-id (:name binding)
+               :index (:index leaf)
+               :element-index (:value index)
+               :size (:size leaf)
+               :type (:type leaf)
+               :value (:value value)
+               :effects #{:write-state}}]))))
 
 (defn- lower-call
   [form env]
@@ -612,6 +848,9 @@
     (seq? form)
     (let [op (first form)]
       (cond
+        (field-access form)
+        (let [[record-name path] (field-access form)]
+          (lower-field-read form env record-name path))
         (= 'dsp/call op) (lower-call form env)
         (= 'if op) (lower-if form env)
         (= 'let op) (lower-let form env)
@@ -624,6 +863,13 @@
         (= 'buffer-store op) (lower-buffer-store form env)
         (= 'state-load op) (lower-state-load form env)
         (= 'state-store op) (lower-state-store form env)
+        (= 'array op) (fail "array must be bound by a let binding" {:form form})
+        (= 'array-load op) (lower-array-load form env)
+        (= 'array-store op) (lower-array-store form env)
+        (= 'aget op) (lower-array-load form env)
+        (= 'aset op) (lower-array-store form env)
+        (= 'field op) (lower-field form env)
+        (= 'set-field! op) (lower-set-field! form env)
         (= 'int->float op) (lower-conversion form env :int->float :int :float)
         (= 'float->int op) (lower-conversion form env :float->int :float :int)
         (contains? logical-operators op)
@@ -687,30 +933,101 @@
                     :return-type (:return-type definition)}])
              definitions)))
 
-(defn- state-slots
-  "Assign stable element offsets to persistent state.
+(defn- record-leaves
+  "Flatten a record's field tree into scalar leaves carrying their path."
+  [fields prefix]
+  (mapcat (fn [field]
+            (let [path (conj prefix (:name field))]
+              (if (contains? field :fields)
+                (record-leaves (:fields field) path)
+                [{:path path :type (:type field) :init (:init field)}])))
+          fields))
 
-  The offsets are portable logical storage offsets, not target byte addresses.
-  Backends choose physical arrays or linear-memory layouts from this data."
+(defn- record-leaf-name
+  [record-name path]
+  (symbol (str (name record-name) "." (str/join "." (map name path)))))
+
+(defn- expand-record
+  "Expand one record entry into struct-of-arrays leaf slots from `offset`.
+
+  Each leaf `j` occupies the contiguous block `[offset + j*n, offset + (j+1)*n)`
+  for an array of `n` records, so element `i` of leaf `j` is stored at
+  `offset + j*n + i`. Returns `[slots offset' binding]`."
+  [state offset]
+  (let [n (or (:size state) 1)
+        leaves (vec (record-leaves (:fields state) []))
+        [slots offset']
+        (reduce (fn [[slots offset] leaf]
+                  (let [entry (cond-> {:name (record-leaf-name (:name state) (:path leaf))
+                                       :type (:type leaf)
+                                       :index offset}
+                                (> n 1) (assoc :size n
+                                               :init (vec (repeat n (:init leaf))))
+                                (= n 1) (assoc :init (:init leaf)))]
+                    [(conj slots entry) (+ offset n)]))
+                [[] offset]
+                leaves)
+        leaf-list (vec (map-indexed (fn [index leaf]
+                                      {:path (:path leaf)
+                                       :type (:type leaf)
+                                       :offset (+ offset (* index n))})
+                                    leaves))
+        leaf-index (into {}
+                         (map (fn [leaf]
+                                [(:path leaf)
+                                 {:index (:offset leaf) :type (:type leaf) :size n}]))
+                         leaf-list)
+        binding (cond-> {:name (:name state)
+                         :kind :record
+                         :size n
+                         :leaves leaf-list
+                         :leaf-index leaf-index}
+                  (:constant state) (assoc :constant true)
+                  (:struct-name state) (assoc :struct-name (:struct-name state)))]
+    [slots offset' binding]))
+
+(defn- expand-state
+  "Expand normalized state (including records) into flat logical slots plus
+  binding and layout descriptions.
+
+  Returns `{:slots [...] :bindings {name binding} :records [...]}`. Slots are
+  what the backends store; a record binding maps a field path to the slot that
+  holds it."
   [states]
-  (second
-   (reduce (fn [[offset result] state]
-             (let [size (or (:size state) 1)
-                   state (assoc state :index offset)]
-               [(+ offset size) (conj result state)]))
-           [0 []]
-           states)))
+  (loop [remaining states
+         offset 0
+         slots []
+         bindings {}
+         records []]
+    (if-let [state (first remaining)]
+      (if (contains? state :fields)
+        (let [[record-slots offset' binding] (expand-record state offset)]
+          (recur (rest remaining) offset'
+                 (into slots record-slots)
+                 (assoc bindings (:name state) binding)
+                 (conj records (select-keys binding
+                                            [:name :size :constant :struct-name :leaves]))))
+        (let [size (or (:size state) 1)
+              entry (assoc state :index offset)]
+          (recur (rest remaining) (+ offset size)
+                 (conj slots (select-keys entry
+                                          [:name :type :size :init :index :next :constant]))
+                 (assoc bindings (:name state) (assoc entry :kind :state))
+                 records)))
+      {:slots slots :bindings bindings :records records})))
+
+(defn- state-total
+  [states]
+  (reduce + 0 (map #(or (:size %) 1) states)))
 
 (defn- base-bindings
-  [definition states]
+  [definition state-bindings]
   (into {}
         (concat
          (map (fn [parameter]
                 [(:name parameter) (assoc parameter :kind :param)])
               (:params definition))
-         (map (fn [state]
-                [(:name state) (assoc state :kind :state)])
-              states))))
+         state-bindings)))
 
 (defn lower
   "Lower one normalized descriptor to explicit function IR."
@@ -718,8 +1035,10 @@
   ([definition {:keys [functions definition-id options]}]
    (normalized-definition! definition)
    (let [return-type (:return-type definition)
-         states (state-slots (:state definition))
-         env (environment (base-bindings definition states) (or functions {}) (or options {}))
+         expanded (expand-state (:state definition))
+         states (:slots expanded)
+         env (environment (base-bindings definition (:bindings expanded))
+                          (or functions {}) (or options {}))
          body (lower-forms (:body definition) env)]
      (when-not (:value body)
        (fail "DSP function body does not produce a value" {:body (:body definition)}))
@@ -737,6 +1056,8 @@
                :return-type return-type
                :locals @(:locals env)
                :state states
+               :records (:records expanded)
+               :scratch (vec (:entries @(:scratch env)))
                :precision (:precision options)
                :options (or options {})
                :body body}]
@@ -811,7 +1132,7 @@
                {:name :output :direction :output :type :float :channels channels}]))))
 
 (defn- process-bindings
-  [definition states channels]
+  [definition state-bindings channels]
   (let [process (:process definition)
         sample-name (or (get-in process [:input :name])
                         (get-in definition [:params 0 :name]))
@@ -859,9 +1180,7 @@
                  (map (fn [control]
                         [(:name control) (assoc control :kind :control)])
                       controls)
-                 (map (fn [state]
-                        [(:name state) (assoc state :kind :state)])
-                      states)))}))
+                 state-bindings))}))
 
 (defn- process-diagnostics
   "Return portable safety diagnostics for a process body.
@@ -873,10 +1192,25 @@
   (letfn [(walk [value path diagnostics]
             (cond
               (map? value)
-              (let [diagnostics (cond-> diagnostics
+              (let [dynamic-index? (let [index (:element-index value)]
+                                     (and index (not= :const (:op index))))
+                    dynamic-array? (and (#{:array-load :array-store} (:op value))
+                                        dynamic-index?)
+                    dynamic-state? (and (#{:state-load :state-store} (:op value))
+                                        (some? (:state-id value))
+                                        dynamic-index?)
+                    diagnostics (cond-> diagnostics
                                   (and (= :while (:op value))
                                        (nil? (:bound value)))
                                   (conj {:dsp/warning :unbounded-loop
+                                         :dsp/path path})
+                                  dynamic-array?
+                                  (conj {:dsp/warning :dynamic-array-index
+                                         :array-id (:array-id value)
+                                         :dsp/path path})
+                                  dynamic-state?
+                                  (conj {:dsp/warning :dynamic-state-index
+                                         :state-id (:state-id value)
                                          :dsp/path path}))]
                 (reduce-kv (fn [diagnostics key child]
                              (walk child (conj path key) diagnostics))
@@ -914,11 +1248,15 @@
          _ (when (and (> channels 1) (seq (:state definition)))
              (fail "stateful multi-channel DSP processes are not supported yet"
                    {:name (:name definition) :channels channels}))
-         states (state-slots (:state definition))
+         expanded (expand-state (:state definition))
+         states (:slots expanded)
          buffers (process-buffers definition channels)
-         {:keys [bindings channel controls frames sample-rate]} (process-bindings definition states channels)
+         {:keys [bindings channel controls frames sample-rate]} (process-bindings definition (:bindings expanded) channels)
          env (environment bindings (signatures definitions) (or options {})
                           (into {} (map (juxt :id identity) buffers)))
+         ;; Scratch offsets continue after persistent state so state and scratch
+         ;; form one arena; a stateful body never allocates at run time.
+         _ (reset! (:scratch env) {:next (state-total states) :entries []})
          output (lower-forms (:body definition) env)
          _ (when-not (:value output)
              (fail "DSP process body does not produce an output value"
@@ -987,7 +1325,9 @@
              :sample-rate sample-rate
              :controls controls
              :locals @(:locals env)
-             :state (mapv #(select-keys % [:name :type :size :init :index]) states)
+             :state (mapv #(select-keys % [:name :type :size :init :index :constant]) states)
+             :records (:records expanded)
+             :scratch (vec (:entries @(:scratch env)))
              :precision (:precision options)
              :lifecycle (merge {:init true :reset true}
                                (get-in definition [:process :lifecycle]))

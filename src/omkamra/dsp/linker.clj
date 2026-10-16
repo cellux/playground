@@ -10,7 +10,8 @@
 
 (def ^:private language-forms
   (into '#{if let do set! while break continue buffer-load buffer-store
-           state-load state-store int->float float->int
+           state-load state-store array array-load array-store aget aset
+           field set-field! int->float float->int
            + - * / = not= < <= > >= and or not
            bit-and bit-or bit-xor bit-not
            bit-shift-left bit-shift-right unsigned-bit-shift-right
@@ -33,6 +34,8 @@
   [v]
   (symbol (str (-> v meta :ns ns-name)) (str (-> v meta :name))))
 
+(declare resolve-structs)
+
 (defn- dsp-var-definition
   [v]
   (when-not (var? v)
@@ -41,13 +44,13 @@
     (when-not (and (map? value) (= :function (:dsp/kind value)))
       (fail "DSP reference must resolve to a value defined with dsp/defn"
             {:var v :value value}))
-    (descriptor/normalize value)))
+    (descriptor/normalize (resolve-structs value))))
 
 (defn- as-definition
   [entry]
   (cond
     (var? entry) [(var-id entry) (dsp-var-definition entry)]
-    (map? entry) (let [definition (descriptor/normalize entry)]
+    (map? entry) (let [definition (descriptor/normalize (resolve-structs entry))]
                    [(definition-id definition) definition])
     :else (fail "DSP linking expects a descriptor map or Var"
                 {:entry entry})))
@@ -83,11 +86,18 @@
    :dsp/form form
    :dsp/definition (definition-id definition)})
 
+(defn- state-record-names
+  "State names declared as records; a form headed by one is field access,
+  not a call to a function of that name."
+  [definition]
+  (into #{} (comp (filter :fields) (map :name)) (:state definition)))
+
 (defn- callable-form?
-  [form]
+  [record-names form]
   (and (seq? form)
        (symbol? (first form))
-       (not (contains? language-forms (first form)))))
+       (not (contains? language-forms (first form)))
+       (not (contains? record-names (first form)))))
 
 (defn- call-sites
   "Return call-head symbols in deterministic source order, with paths.
@@ -95,41 +105,42 @@
   The small DSP language has no quoted executable forms, so every nested list
   headed by a non-language symbol is an ordinary DSP call candidate."
   [definition]
-  (letfn [(walk [form path out]
-            (cond
-              (seq? form)
-              (let [out (if (callable-form? form)
-                          (conj out {:symbol (first form) :path path :form form})
-                          out)]
+  (let [record-names (state-record-names definition)]
+    (letfn [(walk [form path out]
+              (cond
+                (seq? form)
+                (let [out (if (callable-form? record-names form)
+                            (conj out {:symbol (first form) :path path :form form})
+                            out)]
+                  (reduce-kv (fn [out index child]
+                               (walk child (conj path index) out))
+                             out
+                             (vec form)))
+
+                (vector? form)
                 (reduce-kv (fn [out index child]
                              (walk child (conj path index) out))
-                           out
-                           (vec form)))
+                           out form)
 
-              (vector? form)
-              (reduce-kv (fn [out index child]
-                           (walk child (conj path index) out))
-                         out form)
+                (map? form)
+                (reduce (fn [out [key value]]
+                          (walk value (conj path key) out))
+                        out form)
 
-              (map? form)
-              (reduce (fn [out [key value]]
-                        (walk value (conj path key) out))
-                      out form)
+                (set? form)
+                (reduce (fn [out value] (walk value path out)) out (sort-by pr-str form))
 
-              (set? form)
-              (reduce (fn [out value] (walk value path out)) out (sort-by pr-str form))
-
-              :else out))]
-    (let [body-calls (reduce-kv (fn [out index form]
-                                  (walk form [:body index] out))
-                                []
-                                (:body definition))]
-      (reduce-kv (fn [out index state]
-                   (if (some? (:next state))
-                     (walk (:next state) [:state index :next] out)
-                     out))
-                 body-calls
-                 (vec (:state definition))))))
+                :else out))]
+      (let [body-calls (reduce-kv (fn [out index form]
+                                    (walk form [:body index] out))
+                                  []
+                                  (:body definition))]
+        (reduce-kv (fn [out index state]
+                     (if (some? (:next state))
+                       (walk (:next state) [:state index :next] out)
+                       out))
+                   body-calls
+                   (vec (:state definition)))))))
 
 (defn- resolve-symbol-id
   [definition reference]
@@ -142,6 +153,44 @@
                  (when caller-ns (symbol caller-ns (name reference)))
                  reference))]
     id))
+
+(defn- resolve-struct-var
+  [id]
+  (when-let [ns-part (namespace id)]
+    (when-let [target-ns (find-ns (symbol ns-part))]
+      (when-let [v (ns-resolve target-ns (symbol (name id)))]
+        (descriptor/normalize-struct @v)))))
+
+(defn- resolve-structs
+  "Inline `:struct <symbol>` state references with the struct's fields.
+
+  A struct reference resolves through the same captured namespace resolution
+  used for calls, so an aliased struct from another namespace resolves
+  identically. The struct's fully-qualified id is retained as `:struct-name`."
+  [definition]
+  (if (seq (:state definition))
+    (update definition :state
+            (fn [states]
+              (mapv (fn [state]
+                      (if-let [reference (:struct state)]
+                        (let [reference (if (and (seq? reference)
+                                                 (= 'quote (first reference)))
+                                          (second reference)
+                                          reference)
+                              id (resolve-symbol-id definition reference)
+                              resolved (or (resolve-struct-var id)
+                                           (fail "DSP :struct refers to a missing struct"
+                                                 (merge (source-data definition [:state] state)
+                                                        {:reference reference
+                                                         :resolved-id id})))]
+                          ;; Struct options are defaults for the state slot.
+                          (-> (merge (select-keys resolved [:constant]) state)
+                              (dissoc :struct)
+                              (assoc :struct-name id
+                                     :fields (:fields resolved))))
+                        state))
+                    states)))
+    definition))
 
 (defn- resolve-var-definition
   [id]
@@ -183,38 +232,39 @@
 
 (defn- rewrite-calls
   [definition resolve-call]
-  (letfn [(rewrite [form path]
-            (cond
-              (seq? form)
-              (let [items (map-indexed (fn [index item]
-                                         (rewrite item (conj path index)))
-                                       form)]
-                (if (callable-form? form)
-                  (let [[id _] (resolve-call {:symbol (first form)
-                                              :path path
-                                              :form form})]
-                    (list* 'dsp/call id (rest items)))
-                  (apply list items)))
+  (let [record-names (state-record-names definition)]
+    (letfn [(rewrite [form path]
+              (cond
+                (seq? form)
+                (let [items (map-indexed (fn [index item]
+                                           (rewrite item (conj path index)))
+                                         form)]
+                  (if (callable-form? record-names form)
+                    (let [[id _] (resolve-call {:symbol (first form)
+                                                :path path
+                                                :form form})]
+                      (list* 'dsp/call id (rest items)))
+                    (apply list items)))
 
-              (vector? form) (mapv #(rewrite % (conj path %2)) form (range))
-              (map? form) (into (empty form)
-                                (map (fn [[key value]]
-                                       [key (rewrite value (conj path key))])
-                                     form))
-              (set? form) (into #{} (map #(rewrite % path)) form)
-              :else form))]
-    (-> definition
-        (update :body
-                #(mapv (fn [form index] (rewrite form [:body index])) % (range)))
-        (update :state
-                #(mapv (fn [state index]
-                         (if (some? (:next state))
-                           (update state :next
-                                   (fn [form]
-                                     (rewrite form [:state index :next])))
-                           state))
-                       %
-                       (range))))))
+                (vector? form) (mapv #(rewrite % (conj path %2)) form (range))
+                (map? form) (into (empty form)
+                                  (map (fn [[key value]]
+                                         [key (rewrite value (conj path key))])
+                                       form))
+                (set? form) (into #{} (map #(rewrite % path)) form)
+                :else form))]
+      (-> definition
+          (update :body
+                  #(mapv (fn [form index] (rewrite form [:body index])) % (range)))
+          (update :state
+                  #(mapv (fn [state index]
+                           (if (some? (:next state))
+                             (update state :next
+                                     (fn [form]
+                                       (rewrite form [:state index :next])))
+                             state))
+                         %
+                         (range)))))))
 
 (defn link
   "Link a DSP descriptor/Var into a deterministic compilation unit.

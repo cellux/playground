@@ -22,10 +22,12 @@
   (case (:op expression)
     :const {:op :constant :value (:value expression) :type (:type expression)}
     :local {:op :local :name (:name expression) :type (:type expression)}
-    :state-load (cond-> {:op :state-load :index (:index expression) :type (:type expression)}
-                  (:element-index expression)
-                  (assoc :element-index (lower-expression (:element-index expression)
-                                                          channels)))
+    (:state-load :array-load)
+    (cond-> {:op (if (= :array-load (:op expression)) :array-load :state-load)
+             :index (:index expression) :type (:type expression)}
+      (:element-index expression)
+      (assoc :element-index (lower-expression (:element-index expression)
+                                              channels)))
     :frame {:op :frame :type :int}
     :frames {:op :frames :type :int}
     :sample-rate {:op :sample-rate :type :float}
@@ -85,13 +87,14 @@
                    :channels channels
                    :index (lower-expression (:index statement) channels)
                    :value (lower-expression (:value statement) channels)}
-    :state-store (cond-> {:op :state-store
-                          :index (:index statement)
-                          :type (:type statement)
-                          :value (lower-expression (:value statement) channels)}
-                   (:element-index statement)
-                   (assoc :element-index (lower-expression (:element-index statement)
-                                                           channels)))
+    (:state-store :array-store)
+    (cond-> {:op (if (= :array-store (:op statement)) :array-store :state-store)
+             :index (:index statement)
+             :type (:type statement)
+             :value (lower-expression (:value statement) channels)}
+      (:element-index statement)
+      (assoc :element-index (lower-expression (:element-index statement)
+                                              channels)))
     (:break :continue) statement
     (throw (ex-info "unsupported statement in JS lowering"
                     {:statement statement}))))
@@ -110,6 +113,7 @@
               :channels (:channels ir)
               :controls (:controls ir)
               :state (:state ir)
+              :scratch (:scratch ir)
               :frames (:frames ir)
               :sample-rate (:sample-rate ir)
               :frame-body (lower-statement (:frame-body ir) (:channels ir))}
@@ -171,11 +175,12 @@
   (case (:op expression)
     :constant (value-source expression)
     :local (coerce-source (:type expression) (identifier (:name expression)))
-    :state-load (coerce-source (:type expression)
-                               (str "state[" (:index expression)
-                                    (when-let [element-index (:element-index expression)]
-                                      (str " + " (emit-expression element-index)))
-                                    "]"))
+    (:state-load :array-load)
+    (coerce-source (:type expression)
+                   (str "state[" (:index expression)
+                        (when-let [element-index (:element-index expression)]
+                          (str " + " (emit-expression element-index)))
+                        "]"))
     :frame "frame"
     :frames "frames"
     :sample-rate "sampleRate"
@@ -314,13 +319,14 @@
                                 (emit-expression (:index statement)) "] = "
                                 (coerce-source :float
                                                (emit-expression (:value statement))) ";"))]
-    :state-store [(indent level
-                          (str "state[" (:index statement)
-                               (when-let [element-index (:element-index statement)]
-                                 (str " + " (emit-expression element-index)))
-                               "] = "
-                               (coerce-source (:type statement)
-                                              (emit-expression (:value statement))) ";"))]))
+    (:state-store :array-store)
+    [(indent level
+             (str "state[" (:index statement)
+                  (when-let [element-index (:element-index statement)]
+                    (str " + " (emit-expression element-index)))
+                  "] = "
+                  (coerce-source (:type statement)
+                                 (emit-expression (:value statement))) ";"))]))
 
 (defn- emit-lines
   [lines]
@@ -334,9 +340,9 @@
            (emit-statement-lines body 1)
            ["}"])))
 
-(defn- homogeneous-float-state?
-  [state]
-  (every? #(= :float (:type %)) state))
+(defn- homogeneous-float-arena?
+  [arena]
+  (every? #(= :float (:type %)) arena))
 
 (defn- emit-lifecycle-lines
   [state]
@@ -354,14 +360,23 @@
            "  }"]))
 
 (defn- emit-process
-  [{:keys [channels controls state frame-body]}]
-  (let [control-params (map #(identifier (:name %)) controls)
+  [{:keys [channels controls state scratch frame-body]}]
+  (let [arena (concat state scratch)
+        control-params (map #(identifier (:name %)) controls)
         state-init (str "[" (str/join ", "
-                                      (mapcat (fn [{:keys [type init size]}]
-                                                (map #(value-source {:type type :value %})
-                                                     (if (= 1 (or size 1)) [init] init)))
-                                              state)) "]")
-        state-decl (if (homogeneous-float-state? state)
+                                      (concat
+                                       (mapcat (fn [{:keys [type init size]}]
+                                                 (map #(value-source {:type type :value %})
+                                                      (if (= 1 (or size 1)) [init] init)))
+                                               state)
+                                       ;; Scratch occupies the arena after state
+                                       ;; and starts zeroed.
+                                       (mapcat (fn [{:keys [type size]}]
+                                                 (repeat (or size 1)
+                                                         (value-source {:type type :value 0})))
+                                               scratch)))
+                        "]")
+        state-decl (if (homogeneous-float-arena? arena)
                      (str "  const state = new " (if (f64?) "Float64Array" "Float32Array")
                           "(" state-init ");")
                      (str "  const state = " state-init ";"))]

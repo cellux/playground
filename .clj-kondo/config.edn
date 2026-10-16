@@ -3,6 +3,7 @@
                          omkamra.cgen.core/defn hooks.cgen/defn
                          omkamra.cgen.core/fn hooks.cgen/anonymous-fn
                          omkamra.dsp/defn hooks.dsp/defn
+                         omkamra.dsp/defstruct hooks.dsp/dsp-defstruct
                          squint.defclass/defclass hooks.squint/defclass
                          omkamra.vice/with-conn hooks.vice/with-binding-vector
                          omkamra.vice.driver/with-conn hooks.vice/with-binding-vector

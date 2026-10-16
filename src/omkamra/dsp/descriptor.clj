@@ -95,7 +95,14 @@
     ;; host-array type.
     [:size {:optional true} pos-int?]
     [:init {:optional true} any?]
-    [:next {:optional true} any?]]])
+    [:next {:optional true} any?]
+    ;; A record: typed named fields, possibly nested.  Combined with `:size` it
+    ;; is an array of records.  Validated recursively by `normalize-record`.
+    [:fields {:optional true} any?]
+    ;; A constant table is materialized at initialization and never written.
+    [:constant {:optional true} boolean?]
+    ;; Set by the linker when a `:struct` reference is inlined.
+    [:struct-name {:optional true} symbol?]]])
 
 (def ^:private ProcessPort
   [:map {:closed true}
@@ -219,7 +226,9 @@
   (case type
     :float
     (if (number? value)
-      (float value)
+      ;; Keep the full double. Narrowing happens per precision at use, so an
+      ;; f64 table's values survive the round trip to the browser as EDN.
+      (double value)
       (fail "DSP :float initializers must be numeric"
             source path {:value value :type type}))
 
@@ -264,39 +273,87 @@
             source [:params] {:params params}))
     params))
 
+(defn- normalize-field
+  [field source path]
+  (let [field (if (keyword? field) {:name field} field)]
+    (when-not (and (map? field) (:name field))
+      (fail "DSP record fields require a name" source path {:field field}))
+    (let [field-name (keyword (name (:name field)))]
+      (if (contains? field :fields)
+        {:name field-name
+         :fields (mapv (fn [child index]
+                         (normalize-field child source (conj path :fields index)))
+                       (:fields field) (range))}
+        (let [type (or (:type field) :float)]
+          (when (contains? field :next)
+            (fail "DSP record fields do not take :next" source (conj path :next)))
+          (when (contains? field :size)
+            (fail "DSP record fields do not support :size" source (conj path :size)))
+          {:name field-name
+           :type type
+           :init (normalize-initializer
+                  (if (contains? field :init) (:init field) (default-value type))
+                  type source (conj path :init))})))))
+
+(defn- normalize-record
+  [state source path]
+  (let [size (or (:size state) 1)]
+    (when (contains? state :next)
+      (fail "DSP record state uses explicit field access, not :next"
+            source (conj path :next) {:state (:name state)}))
+    (when (contains? state :init)
+      (fail "DSP record state does not take a top-level :init"
+            source (conj path :init) {:state (:name state)}))
+    (cond-> {:name (:name state)
+             :fields (mapv (fn [field index]
+                             (normalize-field field source (conj path :fields index)))
+                           (:fields state) (range))}
+      (> size 1) (assoc :size size)
+      (:constant state) (assoc :constant true)
+      (:struct-name state) (assoc :struct-name (:struct-name state)))))
+
 (defn- normalize-state
   [state source path]
-  (let [state (if (symbol? state) {:name state} state)
-        type (or (:type state) :float)
-        size (or (:size state) 1)
-        supplied-init? (contains? state :init)
-        init (if supplied-init?
-               (:init state)
-               (if (= 1 size)
-                 (default-value type)
-                 (vec (repeat size (default-value type)))))]
-    (when (contains? state :next)
-      (validate-source-form! (:next state) source (conj path :next)))
-    (when (and (> size 1) (contains? state :next))
-      (fail "DSP aggregate state uses explicit state-store, not :next"
-            source (conj path :next)
-            {:state (:name state) :size size}))
-    (let [init (if (= 1 size)
-                 (normalize-initializer init type source (conj path :init))
-                 (do
-                   (when-not (and (vector? init) (= size (count init)))
-                     (fail "DSP aggregate state initializers must be vectors of the declared size"
-                           source (conj path :init)
-                           {:state (:name state) :size size :init init}))
-                   (mapv (fn [value index]
-                           (normalize-initializer value type source
-                                                  (conj path :init index)))
-                         init (range))))]
-      (cond-> {:name (:name state)
-               :type type
-               :init init
-               :next (:next state)}
-        (> size 1) (assoc :size size)))))
+  (let [state (if (symbol? state) {:name state} state)]
+    (if (contains? state :fields)
+      (normalize-record state source path)
+      (let [type (or (:type state) :float)
+            size (or (:size state) 1)
+            supplied-init? (contains? state :init)
+            init (if supplied-init?
+                   (:init state)
+                   (if (= 1 size)
+                     (default-value type)
+                     (vec (repeat size (default-value type)))))]
+        (when (contains? state :next)
+          (validate-source-form! (:next state) source (conj path :next)))
+        (when (and (> size 1) (contains? state :next))
+          (fail "DSP aggregate state uses explicit state-store, not :next"
+                source (conj path :next)
+                {:state (:name state) :size size}))
+        (when (and (:constant state) (= 1 size))
+          (fail "DSP :constant requires an aggregate state table"
+                source (conj path :constant) {:state (:name state)}))
+        (when (and (:constant state) (contains? state :next))
+          (fail "DSP constant state has no :next"
+                source (conj path :next) {:state (:name state)}))
+        (let [init (if (= 1 size)
+                     (normalize-initializer init type source (conj path :init))
+                     (do
+                       (when-not (and (vector? init) (= size (count init)))
+                         (fail "DSP aggregate state initializers must be vectors of the declared size"
+                               source (conj path :init)
+                               {:state (:name state) :size size :init init}))
+                       (mapv (fn [value index]
+                               (normalize-initializer value type source
+                                                      (conj path :init index)))
+                             init (range))))]
+          (cond-> {:name (:name state)
+                   :type type
+                   :init init
+                   :next (:next state)}
+            (> size 1) (assoc :size size)
+            (:constant state) (assoc :constant true)))))))
 
 (defn- normalize-states
   [states source]
@@ -308,6 +365,28 @@
       (fail "DSP state names must be unique"
             source [:state] {:states states}))
     states))
+
+(defn normalize-struct
+  "Validate and normalize a struct (state-record shape) description.
+
+  Struct descriptions are bound to Vars by `omkamra.dsp/defstruct` and resolved
+  and inlined by the linker."
+  [value]
+  (when-not (and (map? value) (= :struct (:dsp/kind value)))
+    (fail "DSP struct reference must resolve to a value defined with dsp/defstruct"
+          (:source value) [:struct] {:value value}))
+  (let [source (:source value)
+        fields (:fields value)]
+    (when-not (vector? fields)
+      (fail "DSP struct fields must be a vector"
+            source [:fields] {:fields fields}))
+    (cond-> {:dsp/kind :struct
+             :name (:name value)
+             :fields (mapv (fn [field index]
+                             (normalize-field field source [:fields index]))
+                           fields (range))}
+      ;; Struct options are defaults for the state slots that reference it.
+      (:constant value) (assoc :constant true))))
 
 (defn- expression-type
   "Infer the type of the small source language for declaration checks.

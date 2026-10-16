@@ -61,7 +61,7 @@
         (range frames)))
 
 (defn- process-case
-  [{:keys [id body params controls precisions input-samples blocks]
+  [{:keys [id body params controls precisions input-samples blocks state]
     :or {precisions [:f32 :f64]
          input-samples builtin-input-samples
          controls []}}]
@@ -75,6 +75,7 @@
                   :params (into (vec params) control-params)
                   :process {:input (first params)
                             :controls controls}
+                  :state state
                   :return-type :float
                   :body [body]}
      :precisions precisions
@@ -188,7 +189,94 @@
                   :body ['(int->float (bit-and reg 65535))]}
      :precisions [:f32 :f64]
      :controls []
-     :input-samples sine-input-samples}]
+     :input-samples sine-input-samples}
+    (process-case
+     {:id :local-array
+      :body '(let [buf (array :float 4)]
+               (do (array-store buf 0 sample)
+                   (array-store buf 2 (+ sample 1.0))
+                   (array-store buf 3 (* sample sample))
+                   (+ (array-load buf 0) (array-load buf 3))))
+      :params [{:name 'sample :type :float}]
+      :input-samples sine-input-samples})
+    (process-case
+     {:id :local-array-int
+      ;; Control-driven so no sample-to-int conversion (whose non-finite
+      ;; contract is still open) is involved.
+      :body '(let [acc (array :int 4)]
+               (int->float
+                (do (array-store acc 0 seed)
+                    (array-store acc 2 (+ seed 5))
+                    (+ (array-load acc 0) (array-load acc 2)))))
+      :params [{:name 'sample :type :float}]
+      :controls [{:name 'seed :type :int :default 7}]
+      :input-samples sine-input-samples})
+    (process-case
+     {:id :local-array-dynamic
+      ;; Uses the `aget`/`aset` aliases of `array-load`/`array-store`.
+      :body '(let [buf (array :float 4)]
+               (do (aset buf i sample)
+                   (* 2.0 (aget buf i))))
+      :params [{:name 'sample :type :float}]
+      :controls [{:name 'i :type :int :default 2}]
+      :input-samples sine-input-samples})
+    (process-case
+     {:id :local-array-with-state
+      :body '(let [buf (array :float 2)]
+               (do (array-store buf 0 previous)
+                   (array-store buf 1 sample)
+                   (+ (array-load buf 0) (array-load buf 1))))
+      :params [{:name 'sample :type :float}]
+      :state [{:name 'previous
+               :init 0.0
+               :next '(+ sample (* 0.5 previous))}]
+      :input-samples sine-input-samples})
+    (process-case
+     {:id :state-record
+      :state [{:name 'z
+               :fields [{:name :x1 :type :float :init 0.0}
+                        {:name :x2 :type :float :init 0.0}]}]
+      :body '(let [previous (:x1 z)]
+               (do (set! (:x1 z) sample)
+                   (+ previous (z :x2))))
+      :params [{:name 'sample :type :float}]
+      :input-samples sine-input-samples})
+    (process-case
+     {:id :state-record-array
+      :state [{:name 'voices
+               :size 3
+               :fields [{:name :phase :type :float :init 0.0}
+                        {:name :gain :type :float :init 1.0}]}]
+      :body '(let [previous (field voices i :phase)]
+               (do (set-field! voices i :phase (+ previous sample))
+                   (* (field voices i :gain) previous)))
+      :params [{:name 'sample :type :float}]
+      :controls [{:name 'i :type :int :default 1}]
+      :input-samples sine-input-samples})
+    (process-case
+     {:id :state-record-nested
+      :state [{:name 'n
+               :fields [{:name :a :type :float :init 0.0}
+                        {:name :inner
+                         :fields [{:name :b :type :float :init 0.0}
+                                  {:name :c :type :int :init 0}]}]}]
+      :body '(let [previous (field n :inner :b)]
+               (do (set-field! n :inner :b (+ previous sample))
+                   (set-field! n :a previous)
+                   (+ (field n :a) (field n :inner :b))))
+      :params [{:name 'sample :type :float}]
+      :input-samples sine-input-samples})
+    (process-case
+     {:id :constant-table
+      :state [{:name 'wavetable
+               :type :float
+               :size 5
+               :init [0.0 0.25 0.5 0.75 1.0]
+               :constant true}]
+      :body '(state-load wavetable i)
+      :params [{:name 'sample :type :float}]
+      :controls [{:name 'i :type :int :default 2}]
+      :input-samples sine-input-samples})]
    [(unary-float-case :abs '(abs sample))
     (unary-float-case :floor '(floor sample))
     (unary-float-case :ceil '(ceil sample))
@@ -241,7 +329,11 @@
     (library-case {:id :exponential-adsr
                    :definition-var 'omkamra.dsp.library/exponential-adsr
                    :controls [0.0002 0.0001 0.4 0.0002]
-                   :input-samples adr-gate-samples})]))
+                   :input-samples adr-gate-samples})
+    (library-case {:id :one-pole-record
+                   :definition-var 'omkamra.dsp.library/one-pole-record
+                   :controls [0.5]
+                   :input-samples sine-input-samples})]))
 
 (def function-cases
   [{:id :float-arithmetic

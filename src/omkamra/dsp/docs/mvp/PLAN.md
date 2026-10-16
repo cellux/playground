@@ -310,8 +310,11 @@ statement IR. The implemented language includes:
 - `if`, `let`, `do`, and returns;
 - `while`, optional iteration bounds, `break`, and `continue`;
 - resolved function calls;
-- persistent typed scalar state and fixed-size typed state arrays;
-- explicit buffer loads/stores and indexed `state-load`/`state-store` operations;
+- persistent typed scalar state, fixed-size typed state arrays, named records
+  (`:struct`), and read-only constant tables (`:constant`);
+- explicit buffer loads/stores and indexed `state-load`/`state-store`
+  operations, and `field`/`set-field!` record access;
+- preallocated fixed-size local arrays (`array` with `aget`/`aset`);
 - frame, channel, frame-count, and sample-rate values.
 
 Process IR is lowered directly from process metadata. It contains canonical
@@ -510,13 +513,18 @@ The language must provide:
 - mixed physical numeric types when needed, such as integer phase with f32 audio;
 - complex or interleaved data layouts sufficient for FFT/IFFT and spectral work.
 
-The first aggregate-state slice is implemented: a state declaration may supply
-`:size` and a same-length typed initializer vector, and process bodies use
-`(state-load name index)` and `(state-store name index value)`. It lowers and
-executes on the interpreter, JVM, JavaScript, and Wasm backends. Local arrays,
-aggregate records, circular-buffer helpers, complex/interleaved layouts, and
-generated initialization-time tables remain to be designed before
-backend-specific FFT or filter implementations.
+Persistent state, local-array scratch, and record fields share one flat
+instance **arena**. A state declaration may supply `:size` and a same-length
+typed initializer vector accessed with `(state-load name index)` and
+`(state-store name index value)`; `(array :float N)` declares preallocated
+scratch indexed with `(aget a i)`/`(aset a i v)`; and `dsp/defstruct` names a
+record shape referenced with `{:name slot :struct shape}` and accessed with
+`field`/`set-field!` (or `(:field slot)`). Records are laid out struct-of-arrays
+across the same arena. All of this lowers and executes on the interpreter, JVM,
+JavaScript, and Wasm backends. Circular-buffer helpers (P5), stateful module
+composition (P6), complex/interleaved layouts, and generated
+initialization-time tables remain to be designed before backend-specific FFT or
+filter implementations.
 
 ### Math and DSP library
 
@@ -665,9 +673,10 @@ automated CI browser job. There is no separate Node conformance runner.
 - Stateful multichannel process definitions are rejected.
 - Process input/output buffers are currently float buffers with a fixed overall
   channel count.
-- Fixed-size state arrays/tables are available, but local arrays, aggregate
-  records, complex/interleaved layouts, circular-buffer helpers, and generated
-  initialization-time tables are not yet part of the language.
+- Fixed-size state arrays/tables, local arrays, named state records/`defstruct`,
+  and read-only constant tables are part of the language. Complex/interleaved
+  layouts, circular-buffer helpers, and generated initialization-time tables
+  are not yet.
 - Dynamic buffer indices are not statically proven safe.
 - Sample-accurate automation, timestamped musical events, and voice management
   are not yet part of the process ABI.
@@ -709,10 +718,11 @@ automated CI browser job. There is no separate Node conformance runner.
 
 ### 1. Extend the language for synth DSP
 
-The first vertical slice—fixed-size typed state arrays/tables with explicit
-indexed loads and stores—is complete across the interpreter, JVM, JavaScript,
-and Wasm. Next add local arrays, circular-buffer/delay helpers, aggregate state
-records, mixed numeric representations, bit operations, complex/interleaved
+P1–P4 are complete across the interpreter, JVM, JavaScript, and Wasm: bitwise
+operations, the portable scalar math builtins and transcendentals, fixed-size
+state arrays/tables, preallocated local arrays, named state records, and
+read-only constant tables. Next add circular-buffer/delay helpers (P5), stateful
+module composition (P6), mixed numeric representations, complex/interleaved
 data, and the math/DSP library needed for oscillators, envelopes, filters,
 modulation, resampling, and FFT/IFFT. Keep this work in the portable language
 and IR before introducing backend-specific kernels.

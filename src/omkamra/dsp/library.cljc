@@ -76,3 +76,20 @@
    :process {:controls [{:name attack} {:name decay}
                         {:name sustain} {:name release}]}}
   level)
+
+;; A named state-record shape, declared once and reused by a state declaration.
+;; The shorthand field list gives :float fields initialised to 0.0. The linker
+;; resolves the `:struct` reference and inlines the fields.
+(dsp/defstruct one-pole-state
+  [previous])
+
+;; The one-pole, with its state held in a named record rather than a bare slot.
+;; Field access uses the Clojure-style forms: `(:field record)` to read and
+;; `(set! (:field record) value)` to write.
+(dsp/defn one-pole-record
+  [sample coefficient]
+  {:state [{:name history :struct one-pole-state}]
+   :process {:controls [{:name coefficient}]}}
+  (let [previous (:previous history)]
+    (do (set! (:previous history) (+ sample (* coefficient previous)))
+        previous)))

@@ -222,7 +222,105 @@ the phase.
 
 ---
 
-## Handoff — current state after P3 (rolling entry)
+## P4 — Local arrays, constant tables, aggregate state (completed)
+
+P4 extends the language from scalar locals and flat state arrays to fixed-size
+memory for delay lines, wavetables, and structured filter state. It is being
+delivered as vertical slices.
+
+### Slice 1 (P4a) — local arrays and the instance scratch arena
+
+**Surface.** `(array :float N)` / `(array :int N)` declares a fixed-size local
+array as a `let` binding. Indexed access is `(aget a i)` / `(aset a i v)`, with
+`array-load` / `array-store` kept as equivalent aliases (Clojure-core names per
+D3). An array name is not a scalar value; using it directly is a diagnostic.
+
+**One arena.** A real-time kernel cannot allocate per call, so a local array is
+not created inside `process()`; it is **preallocated scratch**. Scratch slots
+get distinct logical offsets that continue immediately after persistent state,
+and the arena is realized in each backend's existing storage: the flat array for
+the interpreter, the typed arrays for JVM and JavaScript, and one linear-memory
+region for Wasm. Because `state`, `scratch`, and the per-backend layout
+functions are shape-identical, the load/store code paths are shared: JVM/JS/Wasm
+route `:array-load`/`:array-store` through the same `case` branches as
+`:state-load`/`:state-store`. No method signature or ABI parameter changed.
+
+**Semantics.** Scratch is zero at instance creation and a declaration emits no
+run-time statement, so its contents persist between frames: a scratch array must
+be written before it is read within a frame. Each declaration owns a distinct
+slot (lifetime-based aliasing is deferred). Constant indices are checked while
+lowering; dynamic indices are checked at run time by the interpreter and flagged
+by a `:dynamic-array-index` diagnostic. Local arrays require the `:process`
+entry, like state. `reset` restores state only, never scratch. Recorded as
+**D15**.
+
+**Landed through the full pipeline.** Descriptor/linker (the three forms are
+language forms), portable IR (`:array-load`/`:array-store` nodes, `:scratch`
+slots, `:dynamic-array-index`), the reference interpreter (arena allocation and
+runtime bounds checks), JVM, JavaScript, and Wasm (a `:scratch` memory region in
+the plan), plus four shared catalog cases: `:local-array`, `:local-array-int`,
+`:local-array-dynamic` (uses the `aget`/`aset` aliases), and
+`:local-array-with-state` (scratch offsets continue after state). The ABI now
+exposes `:scratch` and `:scratch-layout` next to `:state`/`:state-layout`.
+
+**Latent bug found (out of scope).** A sample-to-int conversion in an early
+int-array case exercised `float->int` of infinity, which throws in the
+interpreter (`logical-int`) while JVM `d2i` saturates — the special-value
+conversion contract is still open (`PLAN.md`). The case was made
+control-driven to avoid it; the divergence is recorded under open issues.
+
+**Verified.** JVM 61 tests / 495 assertions; browser 9/9 (the process matrix
+now covers the four array cases on JavaScript and Wasm at f32 and f64).
+`clj-kondo`/`cljfmt` clean.
+
+### Slice 2 (P4b) — aggregate records as named structs
+
+`dsp/defstruct` binds a named field-shape to a Var (shorthand bare field names,
+explicit descriptors, or an options map), and a state slot references it with
+`:name slot :struct shape` plus an optional `:size` for an array of records.
+The **linker** resolves the reference through the declaring namespace's captured
+resolution — the same path calls use — and inlines the fields, keeping the
+fully-qualified id as `:struct-name`. Inline `:fields [...]` is accepted for
+one-off records. Access is `field`/`set-field!`, with an optional leading record
+index, or the Clojure-style `(:field record)` / `(record :field)` reads and
+`(set! (:field record) value)` write; the linker treats a record-name-headed
+form as field access rather than a call.
+
+Records are laid out **struct-of-arrays**: the field tree flattens to scalar
+leaves, each leaf becomes one flat state entry of `:size N`, and record `i` of
+leaf `j` sits at `leafOffset(j) + i`. Every leaf is therefore an ordinary
+`state-load`/`state-store` with a constant base and the record index as the
+element index, so the four backends are unchanged. This is D16.
+
+### Slice 3 (P4c) — constant tables and layout metadata
+
+`:constant true` marks a table or record read-only: it is materialized at
+initialization and every store to it is rejected while lowering. The ABI now
+exposes `:records` and `:arena` (region offsets, element size, alignment), the
+Wasm state layout marks constant entries, and a `:dynamic-state-index`
+diagnostic joins `:dynamic-array-index`. Float `:init` values stay double in the
+IR (narrowed per precision at use), so an f64 table survives the EDN round trip
+to the browser; the earlier `(float value)` narrowing was the last place
+carrying a `Float`.
+
+### P4 complete
+
+All six deliverables are in: local arrays (1), aggregate records (2),
+initialization-time constant tables (3), explicit layout/alignment metadata (4),
+development-time bounds checks and unproven-index diagnostics (5), and
+primitive-array / linear-memory lowering with no allocation after
+initialization (6). Generated-target (JS/Wasm) *development guards* remain a
+tracked optimization: the reference interpreter is the development-time
+checker, and `PLAN.md` still notes the generated-target gap.
+
+**Final verification.** JVM 62 tests / 511 assertions; browser 9/9, with the
+process matrix covering local arrays, inline and `:struct` records (scalar,
+nested, and arrays of records), and a read-only constant table on JavaScript and
+Wasm at f32 and f64. `clj-kondo`/`cljfmt` clean.
+
+---
+
+## Handoff — current state after P4 (rolling entry)
 
 This is the one living entry, as opposed to the completed-phase entries above:
 what exists, how it fits together, what is open, and what to do next. It may be
@@ -241,6 +339,14 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   option selects the Wasm emulation strategy (`:polynomial` or the f32
   `:table`); and the library's `sine-oscillator` and `exponential-adsr`
   render on all four targets.
+- **P4 (local arrays, records, constant tables) is complete** under D15/D16.
+  `(array :float|:int N)` declares preallocated scratch; `aget`/`aset` (or
+  `array-load`/`array-store`) index it. `dsp/defstruct` names a record shape,
+  referenced with `{:name slot :struct shape}` (plus `:size` for arrays of
+  records) and accessed with `field`/`set-field!`; the linker inlines the
+  fields, laid out struct-of-arrays in the same arena as state and scratch.
+  `:constant` tables are read-only and materialized at initialization. The ABI
+  exposes `:records` and `:arena`.
 - **The conformance harness is interpreter-oracle-driven** (D7/D13): the shared
   catalog is pure data, and the reference interpreter is the single oracle on
   the JVM *and* in the browser.
@@ -248,9 +354,10 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   (CodeMirror) and compile them there, which means the compiler itself becomes
   portable and runs in SCI (P13). The library and every new language form are
   therefore authored as portable `.cljc` source forms.
-- Verified through `clojure_eval` on the running nREPL: JVM 59 tests / 455
-  assertions, browser 9/9 (the extra check is the f32 sine lookup table),
-  `clj-kondo`/`cljfmt` clean. The git working tree holds this uncommitted.
+- Verified through `clojure_eval` on the running nREPL: JVM 61 tests / 495
+  assertions, browser 9/9 (the process matrix covers the P4a array cases on
+  JavaScript and Wasm too), `clj-kondo`/`cljfmt` clean. The P4a changes are
+  uncommitted.
 
 ### Architecture
 
@@ -319,6 +426,11 @@ omkamra.dsp.testbed           (.cljs)  browser differential suite
 3. **Function-entry cases are JS-only.** Wasm is process-only by design, so the
    function matrix runs on interpreter/JVM/JS; Wasm coverage for the same
    operators comes from process cases.
+4. **Non-finite sample-to-int conversion is undefined across targets.**
+   `float->int` of NaN/infinity throws in the interpreter but saturates on the
+   JVM (`d2i`), with JavaScript/Wasm behavior of their own. The conversion
+   special-value contract is still open (`PLAN.md`); P4 hit it through an
+   int-array test and routed around it.
 
 ### Gotchas burned into this session
 
@@ -345,12 +457,12 @@ omkamra.dsp.testbed           (.cljs)  browser differential suite
 
 ### Next steps
 
-1. Begin **P4 — local arrays, constant tables, and aggregate state records**,
-   which the remaining phases (delay lines, filters, the DSP library) build
-   on. The transcendental machinery from P3 is done and awaits only the
-   deferred lookup-table benchmark.
+1. Begin **P5 — delay lines, circular buffers, and interpolation**, built in the
+   DSP language on top of the P4 arena (circular-buffer state with a wrap
+   cursor, fractional-delay reads, documented update ordering).
 2. Keep a structured diagnostic for any operation a target cannot serve at all.
-3. Optionally restore the dropped Wasm f64 worklet and generated-kernel checks.
+3. Optionally add generated-target (JS/Wasm) development guards and restore the
+   dropped Wasm f64 worklet checks.
 
 ### Wasm lookup table — done, with follow-ups
 

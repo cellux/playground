@@ -62,7 +62,7 @@
 
 (defn- state-memory-layout
   [states start]
-  (reduce (fn [{:keys [next entries] :as layout} {:keys [index type size]}]
+  (reduce (fn [{:keys [next entries] :as layout} {:keys [index type size constant]}]
             (let [element-bytes (if (= type :float) (float-bytes) 4)
                   size (or size 1)
                   offset (align next element-bytes)
@@ -70,6 +70,7 @@
                          :offset offset
                          :type type
                          :size size
+                         :constant (boolean constant)
                          :element-bytes element-bytes
                          :alignment element-bytes}]
               (assoc layout
@@ -77,6 +78,10 @@
                      :entries (assoc entries index entry))))
           {:next start :entries {}}
           states))
+
+(defn- arena-count
+  [slots]
+  (reduce + 0 (map #(or (:size %) 1) slots)))
 
 (defn- memory-layout
   [ir]
@@ -86,9 +91,12 @@
         input-bytes (* channels channel-stride-bytes)
         output-offset input-bytes
         output-bytes input-bytes
-        state-layout (state-memory-layout (:state ir) (+ output-offset output-bytes))
+        state-start (+ output-offset output-bytes)
+        state-layout (state-memory-layout (:state ir) state-start)
+        scratch-start (:next state-layout)
+        scratch-layout (state-memory-layout (:scratch ir) scratch-start)
         table? (table-active?)
-        table-offset (align (:next state-layout) table-stride-bytes)
+        table-offset (align (:next scratch-layout) table-stride-bytes)
         table-bytes (if table? (* (inc table-entry-count) table-stride-bytes) 0)
         required-bytes (+ table-offset table-bytes)]
     {:page-size page-size
@@ -101,7 +109,7 @@
      :required-bytes required-bytes
      :initial-pages (max 1 (long (Math/ceil (/ (double required-bytes)
                                                page-size))))
-     :state-layout (:entries state-layout)
+     :state-layout (merge (:entries state-layout) (:entries scratch-layout))
      :regions {:input {:offset 0
                        :channels channels
                        :frame-capacity frame-capacity
@@ -113,9 +121,14 @@
                         :bytes output-bytes
                         :storage :linear-memory}
                :state {:storage :linear-memory
-                       :offset (+ output-offset output-bytes)
-                       :bytes (- required-bytes (+ output-offset output-bytes))
-                       :count (reduce + 0 (map #(or (:size %) 1) (:state ir)))}
+                       :offset state-start
+                       :bytes (- scratch-start state-start)
+                       :count (arena-count (:state ir))}
+               :scratch {:storage :linear-memory
+                         :persistent? false
+                         :offset scratch-start
+                         :bytes (- (:next scratch-layout) scratch-start)
+                         :count (arena-count (:scratch ir))}
                :table {:storage :linear-memory
                        :read-only true
                        :offset table-offset
@@ -191,8 +204,8 @@
                                      (if (:value expression) 1 0)
                                      (int (:value expression)))))
     :local (wat-form "local.get" (local-name (:name expression)))
-    :state-load (wat-form (str (wasm-type (:type expression)) ".load")
-                          (emit-state-address expression))
+    (:state-load :array-load) (wat-form (str (wasm-type (:type expression)) ".load")
+                                        (emit-state-address expression))
     :frame (wat-form "local.get" (wat-symbol "$frame"))
     :frames (wat-form "local.get" (wat-symbol "$frames"))
     :sample-rate (wat-form "local.get" (wat-symbol "$sampleRate"))
@@ -748,9 +761,9 @@
      :buffer-store (wat-form (str (float-type) ".store")
                              (emit-buffer-address statement)
                              (emit-expression (:value statement)))
-     :state-store (wat-form (str (wasm-type (:type statement)) ".store")
-                            (emit-state-address statement)
-                            (emit-expression (:value statement)))
+     (:state-store :array-store) (wat-form (str (wasm-type (:type statement)) ".store")
+                                           (emit-state-address statement)
+                                           (emit-expression (:value statement)))
      :if (apply wat-form "if"
                 (concat [(emit-expression (:condition statement))]
                         [(apply wat-form "then"

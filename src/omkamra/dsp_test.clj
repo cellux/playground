@@ -20,6 +20,29 @@
 
 (def one-pole (:definition (acceptance/case-by-id :one-pole)))
 
+;; A named state-record shape and a definition that uses it, so the linker's
+;; `:struct` resolution is exercised from real source.
+(dsp/defstruct test-pole-state
+  [previous])
+
+(dsp/defn struct-pole
+  [sample coefficient]
+  {:state [{:name history :struct test-pole-state}]
+   :process {:controls [{:name coefficient}]}}
+  (let [previous (field history :previous)]
+    (do (set-field! history :previous (+ sample (* coefficient previous)))
+        previous)))
+
+;; A struct-level option is a default for every state slot that references it.
+(dsp/defstruct constant-shape
+  [a]
+  {:constant true})
+
+(dsp/defn constant-shape-write
+  [sample]
+  {:state [{:name z :struct constant-shape}] :process {}}
+  (do (set! (:a z) sample) (:a z)))
+
 (defn- thread-allocation-meter
   []
   (let [bean (ManagementFactory/getThreadMXBean)]
@@ -1375,6 +1398,167 @@
          clojure.lang.ExceptionInfo
          #"explicit state-store"
          (dsp/compile (assoc-in definition [:state 0 :next] 0.0)
+                      {:entry :process})))))
+
+(deftest local-arrays-use-the-instance-scratch-arena
+  (let [definition {:dsp/kind :function
+                    :name 'scratch-tap
+                    :params [{:name 'sample :type :float}]
+                    :state [{:name 'previous :init 0.0
+                             :next '(+ sample (* 0.5 previous))}]
+                    :process {:input :sample}
+                    :return-type :float
+                    :body ['(let [buf (array :float 2)]
+                              (do (aset buf 0 previous)
+                                  (aset buf 1 sample)
+                                  (+ (aget buf 0) (aget buf 1))))]}
+        artifact (dsp/compile definition {:entry :process})
+        jvm (dsp/compile definition {:target :jvm :entry :process})
+        js (dsp/compile definition {:target :js :entry :process})
+        wasm (dsp/compile definition {:target :wasm :entry :process})
+        input (float-array [1.0 2.0 3.0])
+        output (float-array 3)
+        jvm-output (float-array 3)]
+    ;; The ABI separates persistent state from per-invocation scratch, even
+    ;; though both share one arena.
+    (is (= [{:name 'buf :type :float :size 2 :index 1}]
+           (get-in artifact [:abi :scratch])))
+    (is (= {:ownership :instance :persistent? false :region :scratch
+            :values [{:name 'buf :type :float :size 2 :index 1
+                      :persistent? false}]}
+           (get-in artifact [:abi :scratch-layout])))
+    (is (= 0 (get-in artifact [:abi :state-layout :values 0 :index])))
+    ;; Interpreter and JVM agree; scratch offsets continue after state.
+    (dsp/invoke artifact input output 3)
+    (dsp/invoke jvm input jvm-output 3)
+    (is (= [1.0 3.0 5.5] (vec output)))
+    (is (= (vec output) (vec jvm-output)))
+    ;; JavaScript indexes the same arena array for scratch slots.
+    (is (str/includes? (:source js) "state[1 + 0]"))
+    ;; Wasm lays scratch out directly after state in linear memory.
+    (is (= {:storage :linear-memory :persistent? false
+            :offset 8196 :bytes 8 :count 2}
+           (get-in wasm [:memory :regions :scratch])))
+    (is (= 8192 (get-in wasm [:memory :regions :state :offset])))))
+
+(deftest local-array-bounds-and-diagnostics
+  (let [base {:dsp/kind :function
+              :name 'scratch-bounds
+              :params [{:name 'sample :type :float}]
+              :process {:input :sample}
+              :return-type :float
+              :body ['(let [buf (array :float 2)] (aget buf 0))]}
+        dynamic (assoc base
+                       :params [{:name 'sample :type :float}
+                                {:name 'i :type :int}]
+                       :process {:input :sample
+                                 :controls [{:name 'i :type :int}]}
+                       :body ['(let [buf (array :float 2)] (aget buf i))])]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"outside the declared range"
+         (dsp/compile (assoc-in base [:body 0]
+                                '(let [buf (array :float 2)] (aget buf 4)))
+                      {:entry :process})))
+    (is (some #(= :dynamic-array-index (:dsp/warning %))
+              (:diagnostics (:abi (dsp/compile dynamic {:entry :process})))))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"aget/aset"
+         (dsp/compile (assoc-in base [:body 0] '(let [buf (array :float 2)] buf))
+                      {:entry :process})))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"require the :process entry"
+         (dsp/compile base {:entry :function})))))
+
+(deftest state-records-and-constant-tables
+  (let [array-record {:dsp/kind :function
+                      :name 'record-array
+                      :params [{:name 'sample :type :float} {:name 'i :type :int}]
+                      :state [{:name 'voices
+                               :size 4
+                               :fields [{:name :phase :type :float :init 0.0}
+                                        {:name :gain :type :float :init 1.0}]}]
+                      :process {:input :sample :controls [{:name 'i :type :int}]}
+                      :return-type :float
+                      :body ['(let [previous (field voices i :phase)]
+                                (do (set-field! voices i :phase (+ previous sample))
+                                    (* (field voices i :gain) previous)))]}
+        artifact (dsp/compile array-record {:entry :process})
+        jvm (dsp/compile array-record {:target :jvm :entry :process})
+        input (float-array [1.0 2.0]) output (float-array 2) jvm-output (float-array 2)]
+    ;; A record's fields are laid out struct-of-arrays: one leaf block per
+    ;; field, each `:size` records wide, offsets continuing after state.
+    (is (= [{:name 'voices.phase :type :float :size 4
+             :init [0.0 0.0 0.0 0.0] :index 0}
+            {:name 'voices.gain :type :float :size 4
+             :init [1.0 1.0 1.0 1.0] :index 4}]
+           (:state (:ir artifact))))
+    (is (= [{:path [:phase] :type :float :offset 0}
+            {:path [:gain] :type :float :offset 4}]
+           (get-in artifact [:abi :records 0 :fields])))
+    (dsp/invoke artifact input output 2 1)
+    (dsp/invoke jvm input jvm-output 2 1)
+    (is (= (vec output) (vec jvm-output)))
+    ;; A named struct resolves through the linker and keeps its identity.
+    (is (= 'omkamra.dsp-test/test-pole-state
+           (get-in (dsp/compile struct-pole {:entry :process})
+                   [:abi :records 0 :struct])))
+    ;; A struct-level `:constant` default makes instances read-only.
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"read-only"
+         (dsp/compile constant-shape-write {:entry :process})))
+    ;; The shorthand field list defaults to :float / 0.0.
+    (is (= [{:name 'previous :type :float :init 0.0}]
+           (:fields @#'omkamra.dsp-test/test-pole-state)))
+    ;; Constant tables are materialized once and never written.
+    (let [constant-def {:dsp/kind :function
+                        :name 'table-write
+                        :params [{:name 'sample :type :float} {:name 'i :type :int}]
+                        :state [{:name 'w :type :float :size 4
+                                 :init [0.0 0.5 1.0 1.5] :constant true}]
+                        :process {:input :sample :controls [{:name 'i :type :int}]}
+                        :return-type :float
+                        :body ['(do (state-store w i sample) sample)]}]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"read-only"
+           (dsp/compile constant-def {:entry :process}))))))
+
+(deftest clojure-style-field-access
+  (let [definition {:dsp/kind :function
+                    :name 'field-forms
+                    :params [{:name 'sample :type :float}]
+                    :state [{:name 'z
+                             :fields [{:name :x1 :type :float :init 0.0}
+                                      {:name :x2 :type :float :init 0.0}]}]
+                    :process {:input :sample}
+                    :return-type :float
+                    ;; `(:x1 z)` reads, `(set! (:x1 z) ...)` writes, and
+                    ;; `(z :x2)` is the record in call position.
+                    :body ['(let [previous (:x1 z)]
+                              (do (set! (:x1 z) sample)
+                                  (+ previous (z :x2))))]}
+        artifact (dsp/compile definition {:entry :process})
+        jvm (dsp/compile definition {:target :jvm :entry :process})
+        input (float-array [1.0 2.0 3.0]) output (float-array 3) jvm-output (float-array 3)]
+    (dsp/invoke artifact input output 3)
+    (dsp/invoke jvm input jvm-output 3)
+    (is (= [0.0 1.0 2.0] (vec output)))
+    (is (= (vec output) (vec jvm-output)))
+    ;; `field`/`set-field!` remain equivalent spellings.
+    (is (= (:state (:ir artifact))
+           (let [equivalent (assoc-in definition [:body 0]
+                                      '(let [previous (field z :x1)]
+                                         (do (set-field! z :x1 sample)
+                                             (+ previous (field z :x2)))))]
+             (:state (:ir (dsp/compile equivalent {:entry :process}))))))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"declared state record"
+         (dsp/compile (assoc-in definition [:body 0] '(:missing nope))
                       {:entry :process})))))
 
 (deftest dynamic-memory-access-and-checks

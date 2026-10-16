@@ -262,33 +262,38 @@
               init))
           states))
 
-(defn- float-state?
+(defn- arena-slots
+  "Persistent state followed by local-array scratch: one instance arena."
   [ir]
-  (every? #(= :float (:type %)) (:state ir)))
+  (concat (:state ir) (:scratch ir)))
 
-(defn- state-length
+(defn- float-arena?
   [ir]
-  (reduce + 0 (map state-size (:state ir))))
+  (every? #(= :float (:type %)) (arena-slots ir)))
+
+(defn- arena-length
+  [ir]
+  (reduce + 0 (map state-size (arena-slots ir))))
 
 (defn- check-state!
   [ir state]
-  (if (float-state? ir)
+  (if (float-arena? ir)
     (do
       (when-not (real-buffer? state)
         (throw (ex-info "DSP process state has the wrong representation"
                         {:expected :float-array :value state :name (:name ir)})))
-      (when-not (= (state-length ir) (alength state))
+      (when-not (= (arena-length ir) (alength state))
         (throw (ex-info "DSP process state has the wrong size"
-                        {:expected (state-length ir)
+                        {:expected (arena-length ir)
                          :actual (alength state)
                          :name (:name ir)}))))
     (do
       (when-not (object-buffer? state)
         (throw (ex-info "DSP process state has the wrong representation"
                         {:expected :object-array :value state :name (:name ir)})))
-      (when-not (= (state-length ir) (alength state))
+      (when-not (= (arena-length ir) (alength state))
         (throw (ex-info "DSP process state has the wrong size"
-                        {:expected (state-length ir)
+                        {:expected (arena-length ir)
                          :actual (alength state)
                          :name (:name ir)})))))
   state)
@@ -323,15 +328,25 @@
 (defn create-state
   [ir]
   (binding [*precision* (precision! ir)]
-    (if (float-state? ir)
-      (make-real-array (state-elements (:state ir)))
+    (if (float-arena? ir)
+      ;; Scratch follows persistent state in one flat arena; its slots start
+      ;; zeroed and retain their contents between frames.
+      (make-real-array
+       (concat (state-elements (:state ir))
+               (mapcat (fn [{:keys [type size]}]
+                         (repeat (or size 1) (coerce-value type 0)))
+                       (:scratch ir))))
       (make-object-array
-       (mapcat (fn [{:keys [type] :as state}]
-                 (map #(coerce-value type %)
-                      (if (= 1 (state-size state))
-                        [(:init state)]
-                        (:init state))))
-               (:state ir))))))
+       (concat
+        (mapcat (fn [{:keys [type] :as state}]
+                  (map #(coerce-value type %)
+                       (if (= 1 (state-size state))
+                         [(:init state)]
+                         (:init state))))
+                (:state ir))
+        (mapcat (fn [{:keys [type size]}]
+                  (repeat (or size 1) (coerce-value type 0)))
+                (:scratch ir)))))))
 
 (defn reset-state!
   [ir state]
@@ -410,15 +425,15 @@
                                   (bit-and (nth args 0) 0xffffffff)
                                   (shift-distance (nth args 1)))))))
 
-(defn- state-element-index
+(defn- indexed-element-index
   [expression locals context]
   (let [element-index (if-let [index (:element-index expression)]
                         (logical-int (evaluate-expression index locals context))
                         0)
         size (or (:size expression) 1)]
     (when (or (neg? element-index) (>= element-index size))
-      (throw (ex-info "DSP aggregate state index is out of bounds"
-                      {:state-id (:state-id expression)
+      (throw (ex-info "DSP indexed element is out of bounds"
+                      {:id (or (:state-id expression) (:array-id expression))
                        :index element-index :size size})))
     (+ (:index expression) element-index)))
 
@@ -490,7 +505,10 @@
     :local (get @locals (:name expression))
     :state-load (coerce-value (:type expression)
                               (state-value (:state context)
-                                           (state-element-index expression locals context)))
+                                           (indexed-element-index expression locals context)))
+    :array-load (coerce-value (:type expression)
+                              (state-value (:state context)
+                                           (indexed-element-index expression locals context)))
     :frame (:frame context)
     :frames (:frames context)
     :sample-rate (:sample-rate context)
@@ -597,7 +615,14 @@
                     nil)
     :state-store (do
                    (set-state-value! (:state context)
-                                     (state-element-index statement locals context)
+                                     (indexed-element-index statement locals context)
+                                     (:type statement)
+                                     (evaluate-expression (:value statement)
+                                                          locals context))
+                   nil)
+    :array-store (do
+                   (set-state-value! (:state context)
+                                     (indexed-element-index statement locals context)
                                      (:type statement)
                                      (evaluate-expression (:value statement)
                                                           locals context))
@@ -612,8 +637,8 @@
   [ir args]
   (binding [*precision* (precision! ir)]
     (check-arity! ir args)
-    (when (seq (:state ir))
-      (throw (ex-info "stateful DSP definitions require the :process entry"
+    (when (or (seq (:state ir)) (seq (:scratch ir)))
+      (throw (ex-info "stateful or local-array DSP definitions require the :process entry"
                       {:name (:name ir)})))
     (let [locals (volatile!
                   (into {}
