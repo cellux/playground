@@ -45,7 +45,7 @@
   ```"
   (:require [clojure.java.io :as io]
             [clojure.set :as set]
-            [omkamra.vice.analysis :as analysis]
+            [omkamra.vice.analysis.core :as analysis]
             [omkamra.vice.contract :as contract]
             [omkamra.vice.features :as features]
             [omkamra.vice.store :as store]))

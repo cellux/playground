@@ -206,9 +206,17 @@
         (str "omkamra.vice/" sym " must be removed"))))
 
 (deftest documented-root-names-exist
-  (doseq [sym '[start! stop! connect! with-conn assemble link capture!]]
+  (doseq [sym '[start! stop! connect! with-conn assemble link capture!
+              build-pipeline! open-analysis list-segments get-segment]]
     (is (contains? (ns-publics 'omkamra.vice) sym)
         (str "omkamra.vice/" sym " must exist"))))
+
+(deftest implementation-defaults-live-in-core
+  (doseq [sym '[default-executable default-address default-port
+                default-connect-timeout-ms default-connect-retry-ms]]
+    (is (not (contains? (ns-publics 'omkamra.vice) sym)))
+    (is (contains? (ns-publics 'omkamra.vice.core) sym)
+        (str "omkamra.vice.core/" sym " must exist"))))
 
 (deftest side-effectful-names-are-bang-suffixed
   (doseq [[ns-sym sym] [['omkamra.vice.binary-monitor 'close]

@@ -36,7 +36,7 @@
   ```"
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [omkamra.vice.analysis :as analysis]
+            [omkamra.vice.analysis.core :as analysis]
             [omkamra.vice.contract :as contract]
             [omkamra.vice.dedupe :as dedupe]
             [omkamra.vice.parallel :as parallel]

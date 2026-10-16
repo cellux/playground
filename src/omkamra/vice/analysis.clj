@@ -1,229 +1,245 @@
 (ns omkamra.vice.analysis
-  "Shared analysis-dataset manifest and stage-generation helpers.
+  "High-level inspection API for finalized VICE/C64 analysis datasets.
 
-  Every v2 analysis stage publishes an immutable generation below
-  `<dataset-root>/analysis/<stage>/<generation>/` and then atomically updates
-  the single `analysis/manifest.edn` commit log. A stage entry records the
-  source capture identity/checksum, the stage version and configuration, the
-  generation directory, and a summary. A failed build removes its generation
-  and never touches the manifest.
+  This namespace is the analysis layer of the public `omkamra.vice` facade.
+  `build-pipeline!` explicitly creates or reuses committed generations;
+  `open-analysis` only opens the finalized capture and generations already
+  committed in its analysis manifest. `list-segments` and `get-segment`
+  provide compact execution overviews and references for drilling into raw
+  events, structural execution, disassembly, and screenshots.
 
-  Dependency-closure execution and reuse invalidation live in
-  `omkamra.vice.pipeline`, which builds on the commit primitive here."
-  (:require [clojure.java.io :as io]
-            [omkamra.vice.contract :as contract]
-            [omkamra.vice.store :as store])
-  (:import [java.nio.channels FileChannel]
-           [java.nio.file OpenOption StandardOpenOption]
-           [java.time Instant]
-           [java.util UUID]))
+  Manifest/generation persistence used by the pipeline and stage namespaces
+  lives in `omkamra.vice.analysis.core`. Detailed data access remains in
+  `omkamra.vice.reader`, `dedupe`, `segments`, `disassembly`, `report`, and
+  the other stage namespaces."
+  (:require
+   [clojure.set :as set]
+   [omkamra.vice.analysis.core :as core]
+   [omkamra.vice.assets :as assets]
+   [omkamra.vice.audio :as audio]
+   [omkamra.vice.classification :as classification]
+   [omkamra.vice.dedupe :as dedupe]
+   [omkamra.vice.disassembly :as disassembly]
+   [omkamra.vice.features :as features]
+   [omkamra.vice.pipeline :as pipeline]
+   [omkamra.vice.reader :as reader]
+   [omkamra.vice.report :as report]
+   [omkamra.vice.segments :as segments]
+   [omkamra.vice.video :as video]))
 
-(defn manifest-path
-  ^java.io.File [dataset-root]
-  (io/file dataset-root "analysis" "manifest.edn"))
+(def ^:private stage-openers
+  {:dedupe dedupe/open!
+   :video video/open!
+   :assets assets/open!
+   :audio audio/open!
+   :features features/open!
+   :classification classification/open!
+   :segments segments/open!
+   :disassembly disassembly/open!
+   :report report/open!})
 
-(def ^:dynamic *transaction*
-  "When bound to an atom holding a `{:stages {stage entry}}` map, stage
-  commits are staged there instead of being written to `analysis/manifest.edn`,
-  and `read-manifest`/`stage-entry` see the staged view. `pipeline/build!` binds
-  this for one invocation, so every newly completed pointer is published in a
-  single atomic rewrite and a failed invocation publishes nothing."
-  nil)
+(def ^:private stage-keys
+  [:dedupe :video :assets :audio :features :classification :segments
+   :disassembly :report])
 
-(defn- file-manifest
-  "Read the on-disk analysis manifest, ignoring any transaction."
+(defn build-pipeline!
+  "Build or reuse analysis stages for a finalized capture dataset.
+
+  `stage` is one stage keyword, a collection of stage keywords, or `:all`.
+  Dependencies are built first, independent stages may run concurrently, and
+  matching committed generations are reused. The result contains opened stage
+  images plus `:built` and `:reused` stage lists.
+
+  This is an explicit build step; `open-analysis` never builds missing stages.
+  See `omkamra.vice.pipeline/build!` for stage configuration, forcing,
+  parallelism, and the dependency graph."
+  ([dataset-root stage]
+   (pipeline/build! dataset-root stage))
+  ([dataset-root stage options]
+   (pipeline/build! dataset-root stage options)))
+
+(defn- stage-summary
+  [entry]
+  (select-keys entry [:generation :version :configuration :summary]))
+
+(defn- overview
+  [capture manifest]
+  (let [stages (or (:stages manifest) {})
+        available (set (keys (select-keys stages stage-keys)))]
+    {:capture-id (reader/capture-id capture)
+     :event-count (reader/event-count capture)
+     :chunk-count (reader/chunk-count capture)
+     :available-stages available
+     :missing-stages (set/difference (set stage-keys) available)
+     :stage-summaries (into (sorted-map)
+                            (map (fn [stage]
+                                   [stage (stage-summary (get stages stage))]))
+                            available)}))
+
+(defn open-analysis
+  "Open a finalized dataset and its already-committed analysis stages.
+
+  This function never builds stages. It returns a map with this shape:
+
+  ```clojure
+  {:dataset-root ...
+   :capture capture-reader
+   :overview {:capture-id ... :event-count ... :chunk-count ...
+              :available-stages #{...} :missing-stages #{...}
+              :stage-summaries {...}}
+   :dedupe ... :video ... :assets ... :audio ... :features ...
+   :classification ... :segments ... :disassembly ... :report ...}
+  ```
+
+  Stage keys are present with nil values when their generation is absent. The
+  raw capture is always validated and opened with `reader/open!`; a manifest
+  entry for a stage is opened with that stage's validating `open!` function.
+  Missing optional stages are therefore reported in `:overview`, while a
+  committed corrupt or incompatible stage raises its validation error instead
+  of being silently treated as missing.
+
+  Start with `(list-segments analysis)` and `(get-segment analysis id)`.
+  Their results contain event ranges and file/screenshot references; use the
+  returned `:capture` and stage images with the lower-level APIs documented in
+  `reader`, `dedupe`, `disassembly`, and `report` for full content."
   [dataset-root]
-  (let [file (manifest-path dataset-root)]
-    (when (.isFile file) (store/read-edn file))))
+  (let [capture (reader/open! dataset-root)
+        manifest (core/read-manifest (reader/dataset-root capture))
+        stages (or (:stages manifest) {})
+        opened (into {}
+                     (map (fn [stage]
+                            [stage (when (contains? stages stage)
+                                     ((get stage-openers stage)
+                                      (reader/dataset-root capture)))])
+                          stage-keys))]
+    (merge {:dataset-root (reader/dataset-root capture)
+            :capture capture
+            :overview (overview capture manifest)}
+           opened)))
 
-(defn read-manifest
-  "Read a dataset's analysis manifest, or nil when none exists.
+(defn- missing-stage!
+  [analysis-result stage operation]
+  (throw (ex-info (str operation " requires committed :" (name stage)
+                       " analysis stage")
+                  {:reason :missing-analysis-stage
+                   :stage stage
+                   :dataset-root (:dataset-root analysis-result)
+                   :operation operation
+                   :hint (str "Run (build-pipeline! dataset-root :" (name stage)
+                              ") first.")})))
 
-  Within a transaction the staged stage pointers are merged over the file
-  manifest, so a caller observes the invocation's would-be committed state.
-  The file manifest is read exactly once per call, so a reader pins the
-  generation set it resolved against a single snapshot."
-  [dataset-root]
-  (let [base (file-manifest dataset-root)]
-    (if (nil? *transaction*)
-      base
-      (let [staged (:stages @*transaction*)]
-        (if (seq staged)
-          (update (or base {}) :stages merge staged)
-          base)))))
+(defn- stage!
+  [analysis-result stage operation]
+  (or (get analysis-result stage)
+      (missing-stage! analysis-result stage operation)))
 
-(defn stage-entry
-  "Return the committed entry for `stage-id`, or nil."
-  [dataset-root stage-id]
-  (get-in (read-manifest dataset-root) [:stages stage-id]))
+(defn- report-segment
+  [report-image segment-id]
+  (some #(when (= segment-id (:segment-id %)) %)
+        (report/segments report-image)))
 
-(defn stage-directory
-  "Resolve a committed stage entry to its absolute generation directory."
-  [dataset-root entry]
-  (io/file dataset-root (:directory entry)))
+(defn- disassembly-segment
+  [disassembly-image segment-id]
+  (some #(when (= segment-id (:segment-id %)) %)
+        (disassembly/segments disassembly-image)))
 
-(defn capture-manifest-sha
-  "SHA-256 of a capture's authoritative `manifest.edn`."
-  [capture-directory]
-  (store/sha256-file (store/manifest-file capture-directory)))
+(defn- function-ref
+  [namespace functions]
+  {:namespace namespace
+   :functions (mapv symbol functions)})
 
-(defn new-generation!
-  "Create a fresh generation directory for `stage-id`.
+(defn- segment-references
+  [analysis-result segment]
+  (let [segment-id (:segment-id segment)
+        event-range (:event-range segment)
+        disassembly-image (:disassembly analysis-result)
+        report-image (:report analysis-result)
+        disassembly-entry (when disassembly-image
+                            (disassembly-segment disassembly-image segment-id))
+        report-entry (when report-image
+                       (report-segment report-image segment-id))]
+    {:raw-capture {:handle-key :capture
+                   :event-range event-range
+                   :functions (function-ref
+                               'omkamra.vice.reader
+                               ['read-events 'read-writes 'replay-state
+                                'boundary-snapshots 'chunk-screenshots])}
+     :dedupe (if (:dedupe analysis-result)
+               {:handle-key :dedupe
+                :functions (function-ref
+                            'omkamra.vice.dedupe
+                            ['read-range 'read-block 'read-context])}
+               {:available? false
+                :reason :missing-stage
+                :stage :dedupe})
+     :disassembly (if disassembly-entry
+                    {:handle-key :disassembly
+                     :segment-id segment-id
+                     :asm-file (:asm-file disassembly-entry)
+                     :clj-file (:clj-file disassembly-entry)
+                     :functions (function-ref
+                                 'omkamra.vice.disassembly
+                                 ['read-file 'segments])}
+                    {:available? false
+                     :reason :missing-stage-or-segment
+                     :stage :disassembly})
+     :screenshots (if report-entry
+                    {:handle-key :report
+                     :screenshots
+                     (mapv #(select-keys % [:chunk-number :event-index :timing
+                                            :target :fallback? :file])
+                           (report/screenshots report-entry))
+                     :functions (function-ref
+                                 'omkamra.vice.report
+                                 ['screenshots 'html-file 'html])}
+                    {:available? false
+                     :reason :missing-stage-or-segment
+                     :stage :report})
+     :segments {:handle-key :segments
+                :functions (function-ref
+                            'omkamra.vice.segments
+                            ['file-groups 'audit])}}))
 
-  Returns `{:generation name :directory file :relative path}`. The directory is
-  private until `commit-stage!` publishes it."
-  [dataset-root stage-id]
-  (let [generation (str (System/currentTimeMillis) "-"
-                        (subs (str (UUID/randomUUID)) 0 8))
-        relative (str "analysis/" (name stage-id) "/" generation)
-        directory (io/file dataset-root relative)]
-    (.mkdirs directory)
-    {:generation generation
-     :directory directory
-     :relative relative}))
+(defn- segment-overview
+  [analysis-result segment]
+  (assoc (select-keys segment [:segment-id :kind :roles :irq-roles :signals
+                               :confidence :event-range :event-count :phases
+                               :handler-contexts :context-ids])
+         :references (segment-references analysis-result segment)))
 
-;; JVM-wide lock serialising the analysis-manifest read-modify-write.
-;; Stages run concurrently under parallel pipeline scheduling, and a stage's
-;; own `build!` may commit at the same time the pipeline adds its signature, so
-;; every writer must be serialised or an update can be lost.
-(defonce ^:private manifest-lock (Object.))
+(defn list-segments
+  "Return compact overviews of the semantic execution segments.
 
-(defn with-manifest-lock
-  "Run `f` while holding the dataset's analysis-manifest write lock.
+  `analysis-result` is the map returned by `open-analysis`. Each overview
+  contains segment identity, kind, roles, event range, phase/context summaries,
+  and references to lower-level APIs. It deliberately does not contain raw
+  events, assembly text, or screenshot bytes.
 
-  Writes are serialised within this JVM by a private monitor and across JVMs by
-  an OS-visible `FileLock` on `analysis/.lock`, so two JVMs cannot interleave a
-  manifest read-modify-write (creating the lock file also creates the
-  `analysis/` directory). Not reentrant: do not call `commit-stage!` or
-  `publish!` from inside `f`."
-  [dataset-root f]
-  (locking manifest-lock
-    (let [directory (io/file dataset-root "analysis")
-          _ (.mkdirs directory)
-          lock-file (io/file directory ".lock")
-          options (into-array OpenOption [StandardOpenOption/CREATE
-                                          StandardOpenOption/WRITE])]
-      (with-open [channel (FileChannel/open (.toPath lock-file) options)]
-        (let [lock (.lock channel)]
-          (try (f) (finally (.release lock))))))))
+  If the segments generation is absent, this explains that the caller must
+  build `:segments` (or a dependent target) with `build-pipeline!` first."
+  [analysis-result]
+  (let [image (stage! analysis-result :segments "list-segments")]
+    (mapv #(segment-overview analysis-result %) (segments/segments image))))
 
-(defn commit-stage!
-  "Add or replace `stage-id`'s pointer in the analysis manifest.
+(defn get-segment
+  "Return one compact segment overview with drill-down references.
 
-  Outside a transaction the manifest is rewritten atomically while holding the
-  dataset write lock (`with-manifest-lock`). Within a transaction
-  (`*transaction*`) the entry is staged and nothing is written until `publish!`,
-  which is how the pipeline makes a whole invocation all-or-nothing. The
-  generation named by `entry` must already be fully written."
-  [dataset-root stage-id entry]
-  (if (nil? *transaction*)
-    (with-manifest-lock
-      dataset-root
-      (fn []
-        (let [existing (or (file-manifest dataset-root) {})
-              manifest (-> existing
-                           (assoc :format contract/analysis-format
-                                  :capture-id (or (:capture-id existing)
-                                                  (:capture-id entry))
-                                  :capture-manifest-sha256
-                                  (or (:capture-manifest-sha256 existing)
-                                      (:capture-manifest-sha256 entry))
-                                  :updated-at (str (Instant/now)))
-                           (update :stages (fnil assoc {}) stage-id entry))]
-          (store/atomic-write-edn! (manifest-path dataset-root) manifest)
-          manifest)))
-    (do (swap! *transaction* update-in [:stages stage-id] (fn [_] entry))
-        (read-manifest dataset-root))))
+  `segment-id` is the logical id returned by `list-segments`. The result points
+  to the raw capture reader and global half-open `:event-range`, the dedupe
+  image for structural occurrences, committed disassembly `:asm-file` and
+  `:clj-file` paths, and curated report screenshot descriptors when those
+  stages are available. It does not eagerly load any of those payloads.
 
-(defn publish!
-  "Atomically merge a transaction's staged stage pointers into the manifest.
-
-  Called once per successful invocation, after every staged generation is
-  complete, so all newly completed pointers become visible together. Hold the
-  dataset write lock across the rewrite. Returns the new manifest, or the
-  effective manifest when nothing was staged."
-  [dataset-root transaction]
-  (let [staged (:stages @transaction)]
-    (if (empty? staged)
-      (read-manifest dataset-root)
-      (with-manifest-lock
-        dataset-root
-        (fn []
-          (let [existing (or (file-manifest dataset-root) {})
-                sample (val (first staged))
-                manifest (-> existing
-                             (assoc :format contract/analysis-format
-                                    :capture-id (or (:capture-id existing)
-                                                    (:capture-id sample))
-                                    :capture-manifest-sha256
-                                    (or (:capture-manifest-sha256 existing)
-                                        (:capture-manifest-sha256 sample))
-                                    :updated-at (str (Instant/now)))
-                             (update :stages (fnil merge {}) staged))]
-            (store/atomic-write-edn! (manifest-path dataset-root) manifest)
-            manifest))))))
-
-(defn delete-generation!
-  "Delete an unpublished generation directory."
-  [directory]
-  (store/delete-tree! (io/file directory)))
-
-;; Progress handles ----------------------------------------------------------
-
-(defn report!
-  "Merge `data` into a stage progress handle atom, if one was supplied."
-  [handle data]
-  (when handle (swap! handle merge data)))
-
-(defn start-async!
-  "Run `build-fn` on a background future and return a deref-able handle atom.
-
-  `build-fn` receives the handle and should call `report!` as it progresses.
-  Dereferencing the returned atom yields the current progress map; on
-  completion it gains `:status :complete` and `:result`, and on failure
-  `:status :failed` and `:error`. While running it carries `:future` so a
-  caller can cancel the run; the future is dropped on completion so a retained
-  handle does not pin the build callable or its captured state.
-  `build-fn` should return a lightweight result (see `summarize-result`)."
-  [init build-fn]
-  (let [handle (atom (assoc init :status :running
-                            :started-at (System/currentTimeMillis)))
-        worker (future
-                 (try
-                   (let [result (build-fn handle)]
-                     (swap! handle assoc
-                            :status :complete
-                            :result result
-                            :finished-at (System/currentTimeMillis)
-                            :future nil))
-                   (catch Throwable error
-                     (swap! handle assoc
-                            :status :failed
-                            :error (.getMessage error)
-                            :finished-at (System/currentTimeMillis)
-                            :future nil))))]
-    (swap! handle assoc :future worker)
-    handle))
-
-(defn summarize-result
-  "Return a lightweight build result for a progress handle.
-
-  Progress handles may be kept by callers for a long time, so they must not
-  retain the heavy per-stage payload (full unit lists, span lists, or window
-  indexes). Keep only the generation location and the compact summary/counts."
-  [result]
-  (let [index (:index result)]
-    (cond-> {:dataset-root (:dataset-root result)
-             :directory (:directory result)}
-      (:summary index) (assoc :summary (:summary index))
-      (:counts index) (assoc :counts (:counts index))
-      (:event-count index) (assoc :event-count (:event-count index))
-      (:generation index) (assoc :generation (:generation index)))))
-
-(defn cancel-async!
-  "Request cancellation of a `start-async!` run. Returns true when the
-  underlying future accepted the request."
-  [handle]
-  (if-let [worker (:future @handle)]
-    (future-cancel worker)
-    false))
+  Use `(disassembly/read-file (:disassembly analysis-result) asm-file)` for
+  assembly text, `(reader/read-events (:capture analysis-result) event-range)`
+  for raw events, and the referenced report/reader functions for screenshots."
+  [analysis-result segment-id]
+  (let [image (stage! analysis-result :segments "get-segment")
+        segment (some #(when (= segment-id (:segment-id %)) %)
+                      (segments/segments image))]
+    (if segment
+      (segment-overview analysis-result segment)
+      (throw (ex-info (str "Unknown analysis segment " segment-id)
+                      {:reason :unknown-segment
+                       :segment-id segment-id
+                       :dataset-root (:dataset-root analysis-result)})))))

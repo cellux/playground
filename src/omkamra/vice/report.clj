@@ -26,7 +26,7 @@
   ```"
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [omkamra.vice.analysis :as analysis]
+            [omkamra.vice.analysis.core :as analysis]
             [omkamra.vice.contract :as contract]
             [omkamra.vice.disassembly :as disassembly]
             [omkamra.vice.reader :as reader]

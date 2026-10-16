@@ -13,7 +13,7 @@
   generation is opened instead of rebuilt. Upstream signatures flow forward, so
   rebuilding one stage automatically invalidates everything downstream of it,
   while unrelated stages stay reusable."
-  (:require [omkamra.vice.analysis :as analysis]
+  (:require [omkamra.vice.analysis.core :as analysis]
             [omkamra.vice.assets :as assets]
             [omkamra.vice.audio :as audio]
             [omkamra.vice.classification :as classification]

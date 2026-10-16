@@ -1,187 +1,165 @@
 (ns omkamra.vice
-  "Public VICE API: process lifecycle, program startup, monitor connections,
-  and capture.
+  "Single discoverable entrypoint for VICE and C64 capture/analysis workflows.
 
-  This is the supported entry point over the VICE implementation:
+  Start here when an agent needs to build a program, launch or control VICE,
+  capture an execution, or inspect a finalized capture. The normal workflow is:
 
-  * `assemble`/`link` build a program;
-  * `start!` launches a fresh instance, optionally autostarting a program;
-  * `connect!` opens the instance's exclusive binary-monitor connection
-    (close it with `omkamra.vice.binary-monitor/close!`);
-  * `with-conn` scopes a connection;
-  * `capture!` records execution through `omkamra.vice.capture`;
-  * `stop!` stops any capture, closes the connection, and terminates the
-    process.
+  1. use `assemble`/`link` when the program is assembler source;
+  2. use `capture!` to create and finalize a dataset;
+  3. use `build-pipeline!` explicitly to create the analysis generations needed;
+  4. use `open-analysis` to open the finalized capture and any committed stages;
+  5. use `list-segments` and `get-segment` for compact execution overviews;
+  6. follow their references into `omkamra.vice.reader`, `dedupe`, `segments`,
+     `disassembly`, `report`, and the other stage namespaces for full data.
 
-  The analysis pipeline and its projections remain available in their own
-  namespaces."
+  Lifecycle control (`start!`, `connect!`, `with-conn`, and `stop!`) is useful
+  when a caller needs to drive VICE directly. `capture!` owns the monitor and
+  asynchronous recording lifecycle for the higher-level capture workflow.
+
+  This namespace intentionally contains lightweight proxies. Detailed options,
+  data formats, and low-level operations are documented by the implementation
+  namespaces named by each function's docstring."
   (:require
-   [clojure.java.io :as io]
-   [omkamra.vice.assembler :as assembler]
-   [omkamra.vice.binary-monitor :as bm]
-   [omkamra.vice.capture :as capture]
-   [omkamra.vice.driver :as driver]
-   [omkamra.vice.prg :as prg]))
+   [omkamra.vice.analysis :as analysis]
+   [omkamra.vice.core :as core]))
 
-(def default-executable driver/default-executable)
-(def default-address driver/default-address)
-(def default-port driver/default-port)
-
-(def default-connect-timeout-ms driver/default-connect-timeout-ms)
-(def default-connect-retry-ms driver/default-connect-retry-ms)
-
-;; Assembly ------------------------------------------------------------------
+;; Program preparation -------------------------------------------------------
 
 (defn assemble
   "Assemble quoted source data into a relocatable object.
 
-  See `omkamra.vice.assembler/assemble`."
+  The returned object can be passed to `link`, `start!` as `:artifact`, or
+  `capture!` as `:artifact`. See `omkamra.vice.assembler/assemble` for source
+  forms, labels, macros, and options.
+
+  See `omkamra.vice.core/assemble` for the delegated implementation."
   ([source]
-   (assembler/assemble source))
+   (core/assemble source))
   ([source options]
-   (assembler/assemble source options)))
+   (core/assemble source options)))
 
 (defn link
-  "Link a relocatable object and its dependencies into a linked artifact.
+  "Link a relocatable assembler object and its dependencies into an artifact.
 
-  See `omkamra.vice.assembler/link`."
+  The artifact can be passed to `start!` or `capture!`. See
+  `omkamra.vice.assembler/link` for placement, range, and dependency options."
   ([object]
-   (assembler/link object))
+   (core/link object))
   ([object options]
-   (assembler/link object options)))
+   (core/link object options)))
 
 ;; Instance lifecycle --------------------------------------------------------
 
-(defn- start-options
-  [options]
-  (assoc (select-keys options [:executable :address :extra-args :options])
-         :port (or (:port options) (driver/free-port))))
-
-(defn- start-program!
-  "Link `target` when it is a relocatable object, autostart it on a fresh
-  instance, and return the instance descriptor once the program runs."
-  [target options]
-  (let [object? (assembler/object? target)
-        link-options (if object? (:link-options options) {})
-        artifact (if object? (assembler/link target link-options) target)]
-    (when-not (assembler/artifact? artifact)
-      (throw (IllegalArgumentException.
-              "start! :artifact expects a relocatable object or a linked artifact")))
-    (let [temp-input (prg/write-temp-artifact-prg! artifact)]
-      (try
-        (let [instance (driver/start! (start-options options))]
-          (try
-            (let [conn (driver/connect-until-ready!
-                        instance
-                        (select-keys options [:connect-timeout-ms :connect-retry-ms]))]
-              (try
-                (let [start-pc (driver/prepare-program-start! conn temp-input options)
-                      checkpoint (atom nil)]
-                  ;; `:from-pc` moves the startup stop from the BASIC RUN entry
-                  ;; to the requested address; otherwise execution resumes right
-                  ;; after the RUN checkpoint.
-                  (when (and start-pc (:from-pc options))
-                    (driver/await-pc! conn start-pc checkpoint
-                                      (or (:program-start-timeout-ms options)
-                                          driver/default-program-start-timeout-ms)))
-                  (bm/resume! conn))
-                (finally
-                  (bm/close! conn))))
-            (assoc instance
-                   :artifact artifact
-                   :entry-point (:entry-point artifact)
-                   :link-options link-options
-                   :from-pc (:from-pc options))
-            (catch Throwable error
-              (driver/stop! instance)
-              (throw error))))
-        (finally
-          (io/delete-file temp-input true))))))
-
 (defn start!
-  "Start a fresh VICE instance.
+  "Start a fresh VICE instance and return its instance descriptor.
 
-  Without `:artifact`, launch a blank emulator and return its instance
-  descriptor. With `:artifact` (a relocatable object from `assemble`, or a
-  linked artifact from `link`), link the object when needed using
-  `:link-options`, write a temporary self-relocating PRG, launch a fresh
-  instance, autostart the program, and return the descriptor while the program
-  runs.
-
-  `:from-pc` selects the execution checkpoint at which startup stops before the
-  program is resumed. `:port` (default: an ephemeral port), `:executable`,
-  `:address`, `:extra-args`, `:connect-timeout-ms`, `:connect-retry-ms`,
-  `:autostart-timeout-ms`, and `:program-start-timeout-ms` are honored.
-
-  On any startup failure the monitor connection is closed, the process is
-  terminated, and the temporary PRG is removed."
+  With no options this launches a blank emulator. With `:artifact` it accepts
+  an assembler object or linked artifact, autostarts it through a temporary
+  PRG, and returns while the program runs. See `omkamra.vice.core/start!` for
+  startup options such as `:executable`, `:address`, `:port`, `:extra-args`,
+  `:from-pc`, `:link-options`, and timeout settings. Use `stop!` for cleanup."
   ([]
-   (start! {}))
+   (core/start!))
   ([options]
-   (if-let [target (:artifact options)]
-     (start-program! target options)
-     (driver/start! (start-options options)))))
+   (core/start! options)))
 
 (defn connect!
-  "Claim `instance`'s binary monitor and return the connection.
+  "Claim an instance's exclusive VICE binary-monitor connection.
 
-  Throws when the instance already has an active capture or another monitor
-  connection. Close the connection with
-  `omkamra.vice.binary-monitor/close!`, which releases the claim.
-
-  Connecting to VICE enters the monitor and pauses emulation; monitor requests
-  also leave VICE paused. Options: `:connect-timeout-ms`, `:connect-retry-ms`,
-  and `:handle-event`."
+  The returned connection pauses VICE for monitor requests. Close it with
+  `omkamra.vice.binary-monitor/close!`, or prefer `with-conn` for scoped use.
+  A connection cannot coexist with a capture on the same managed instance. See
+  `omkamra.vice.core/connect!` and `omkamra.vice.binary-monitor` for details."
   ([instance]
-   (connect! instance {}))
+   (core/connect! instance))
   ([instance options]
-   (when-not (driver/claim! instance :connection ::connecting)
-     (throw (ex-info
-             "The VICE instance already has an active capture or monitor connection"
-             {:reason :instance-busy})))
-   (try
-     (let [holder (atom nil)
-           conn (driver/connect-until-ready! instance options)
-           conn (assoc conn bm/on-close-key
-                       (fn [] (driver/release! instance :connection @holder)))]
-       (reset! holder conn)
-       (driver/install! instance :connection conn)
-       conn)
-     (catch Throwable error
-       (driver/release! instance :connection ::connecting)
-       (throw error)))))
+   (core/connect! instance options)))
 
 (defmacro with-conn
-  "Connect to `instance`, bind the connection to `conn`, and always close it.
+  "Bind a monitor connection for a body and always close it.
 
-  Usage: `(with-conn [conn instance] body...)`."
+  Usage: `(with-conn [conn instance] body...)`. This is a macro so the body
+  remains in the caller's lexical context. Use `omkamra.vice.binary-monitor`
+  functions on `conn`; use `capture!` instead when recording an execution."
   [[conn instance] & body]
-  `(let [~conn (connect! ~instance)]
-     (try
-       ~@body
-       (finally
-         (bm/close! ~conn)))))
+  `(core/with-conn [~conn ~instance] ~@body))
 
 (defn stop!
-  "Stop an instance: stop any capture, close the monitor connection, and
-  terminate the process.
+  "Stop a VICE instance and clean up any capture or monitor connection.
 
-  Idempotent. A capture attached to an external instance is finalized but
-  leaves the process running, as documented by `omkamra.vice.capture/capture!`."
+  The operation is idempotent. A capture attached to a caller-owned external
+  instance is finalized while that process remains running, according to
+  `omkamra.vice.capture/stop!`. See `omkamra.vice.core/stop!` for ownership
+  details."
   [instance]
-  (when instance
-    (capture/stop! instance)
-    (when-let [conn (driver/owner instance :connection)]
-      (bm/close! conn))
-    (driver/stop! instance))
-  nil)
+  (core/stop! instance))
 
 ;; Capture -------------------------------------------------------------------
 
 (defn capture!
-  "Capture execution of a VICE instance and return its instance descriptor.
+  "Start asynchronous capture and return its instance descriptor.
 
-  See `omkamra.vice.capture/capture!` for the options and ownership rules. Use
-  the returned descriptor with `omkamra.vice.capture/{status,stop-async!,stop!}`."
+  Provide one source: `:input` for an existing `.prg`/`.d64`, `:artifact` for
+  an assembler object or linked artifact, or `:instance` for a running VICE
+  instance. Use `:dataset-root` for the output and `omkamra.vice.capture`
+  functions—especially `status`, `connection`, `stop-async!`, and `stop!`—to
+  monitor and finalize it. A finalized dataset is required before analysis.
+
+  See `omkamra.vice.capture/capture!` for start policies, full-capture mode,
+  event limits, timing options, input handling, and cleanup semantics."
   [options]
-  (capture/capture! options))
+  (core/capture! options))
+
+;; Analysis ------------------------------------------------------------------
+
+(defn build-pipeline!
+  "Build or reuse analysis stages for a finalized capture dataset.
+
+  `stage` may be one stage keyword, a collection of stage keywords, or `:all`.
+  Dependencies are built first, independent stages may run concurrently, and
+  matching committed generations are reused. The result contains opened stage
+  images plus `:built` and `:reused` stage lists.
+
+  This function builds analysis explicitly; call it before `open-analysis` when
+  the required stages are absent. See `omkamra.vice.analysis/build-pipeline!`
+  and `omkamra.vice.pipeline` for target, configuration, force, and
+  parallelism details."
+  ([dataset-root stage]
+   (analysis/build-pipeline! dataset-root stage))
+  ([dataset-root stage options]
+   (analysis/build-pipeline! dataset-root stage options)))
+
+(defn open-analysis
+  "Open a finalized capture and its already-committed analysis stages.
+
+  This never builds stages. It returns a map with `:capture`, an `:overview`,
+  and stage handles under keys such as `:dedupe`, `:segments`,
+  `:disassembly`, and `:report`; absent stages are nil and listed as missing.
+  A committed but corrupt or incompatible stage raises its validation error.
+
+  Read the returned overview first, then use `list-segments` and `get-segment`
+  for compact drill-down. See `omkamra.vice.analysis/open-analysis` for the
+  exact result shape and lower-level references."
+  [dataset-root]
+  (analysis/open-analysis dataset-root))
+
+(defn list-segments
+  "Return compact overviews of the semantic execution segments.
+
+  Accepts the map returned by `open-analysis`. Each overview contains segment
+  identity, kind, roles, event range, context/phase summaries, and references
+  to available disassembly and report screenshots, but does not load raw
+  events, assembly text, or screenshot bytes. Use `get-segment` for one
+  segment and follow its references into the lower-level APIs."
+  [analysis-result]
+  (analysis/list-segments analysis-result))
+
+(defn get-segment
+  "Return one compact segment overview with drill-down references.
+
+  `segment-id` is the logical segment id from `list-segments`. The result points
+  to the capture reader and global event range for raw events/replay, dedupe for
+  structural occurrences, disassembly files for assembly text, and report or
+  capture screenshot descriptors. It does not eagerly load those payloads."
+  [analysis-result segment-id]
+  (analysis/get-segment analysis-result segment-id))

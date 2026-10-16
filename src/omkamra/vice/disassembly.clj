@@ -34,7 +34,7 @@
   linker rejects it as a runnable artifact until the overlap is resolved."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [omkamra.vice.analysis :as analysis]
+            [omkamra.vice.analysis.core :as analysis]
             [omkamra.vice.assembler :as assembler]
             [omkamra.vice.contract :as contract]
             [omkamra.vice.dedupe :as dedupe]

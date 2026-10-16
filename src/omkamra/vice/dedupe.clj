@@ -47,7 +47,7 @@
   (`open`, `read-range`, `read-block`, `read-context`, `status`); callers never
   see offsets, windows, or binary layouts."
   (:require [clojure.java.io :as io]
-            [omkamra.vice.analysis :as analysis]
+            [omkamra.vice.analysis.core :as analysis]
             [omkamra.vice.contract :as contract]
             [omkamra.vice.isa :as isa]
             [omkamra.vice.reader :as reader]

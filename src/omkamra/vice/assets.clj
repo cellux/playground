@@ -21,7 +21,7 @@
     assets.bin
   ```"
   (:require [clojure.java.io :as io]
-            [omkamra.vice.analysis :as analysis]
+            [omkamra.vice.analysis.core :as analysis]
             [omkamra.vice.contract :as contract]
             [omkamra.vice.reader :as reader]
             [omkamra.vice.store :as store]

@@ -3,7 +3,7 @@
   commit / reuse-integrity behaviour."
   (:require [clojure.java.io :as io]
             [clojure.test :refer [deftest is testing]]
-            [omkamra.vice.analysis :as analysis]
+            [omkamra.vice.analysis.core :as analysis]
             [omkamra.vice.pipeline :as pipeline]
             [omkamra.vice.store :as store]
             [omkamra.vice.synthetic-test-support :as synthetic])

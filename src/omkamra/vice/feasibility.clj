@@ -25,7 +25,8 @@
             [omkamra.vice :as vice]
             [omkamra.vice.binary-monitor :as bm]
             [omkamra.vice.trace :as trace]
-            [omkamra.vice.contract :as contract])
+            [omkamra.vice.contract :as contract]
+            [omkamra.vice.driver :as driver])
   (:import [java.net ServerSocket]
            [java.time Instant]
            [java.util.concurrent TimeUnit]))
@@ -421,7 +422,7 @@
                            probes)
              report {:format :omkamra.vice/v2-feasibility-report
                      :vice-version contract/supported-vice-version
-                     :executable (or executable vice/default-executable)
+                     :executable (or executable driver/default-executable)
                      :generated-at (str (Instant/now))
                      :probes results
                      :summary {:passed (count (filter #(= :passed (:status %))

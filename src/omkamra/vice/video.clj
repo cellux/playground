@@ -25,7 +25,7 @@
     frames.edn   ; chronological frame records
   ```"
   (:require [clojure.java.io :as io]
-            [omkamra.vice.analysis :as analysis]
+            [omkamra.vice.analysis.core :as analysis]
             [omkamra.vice.reader :as reader]
             [omkamra.vice.store :as store]))
 

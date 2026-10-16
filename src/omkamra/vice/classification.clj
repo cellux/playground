@@ -26,7 +26,7 @@
     index.edn
   ```"
   (:require [clojure.java.io :as io]
-            [omkamra.vice.analysis :as analysis]
+            [omkamra.vice.analysis.core :as analysis]
             [omkamra.vice.audio :as audio]
             [omkamra.vice.contract :as contract]
             [omkamra.vice.features :as features]
