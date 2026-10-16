@@ -1,37 +1,32 @@
 (ns omkamra.dsp.acceptance
-  "Declarative DSP semantic acceptance cases shared by every target runner.
+  "Declarative DSP conformance cases shared by every target runner.
 
-  Add a case here with its DSP definition, trace generator, and reference step;
-  it will be exercised by the JVM/interpreter suite and browser JS/Wasm suite.")
+  Cases are pure data: a definition, an entry kind, precisions, and inputs.
+  They carry **no hand-written expected values or reference functions**.  The
+  JVM side runs the reference interpreter to produce expected outputs and the
+  browser side receives those expected vectors; the interpreter is therefore
+  the single oracle for every target (`DECISIONS.md` D2/D7).
+
+  - `cases` — process-entry block kernels.  Inputs are `:controls` plus an
+    `:input-samples` trace generator and optional `:blocks`.
+  - `function-cases` — function-entry scalars.  Inputs are `:vectors` of
+    argument lists.
+
+  Add a case by adding data here; it is exercised by the JVM suite and by the
+  browser JavaScript/Wasm matrix with no further wiring."
+  ;; Some cases call DSP library functions by fully-qualified name.  The JVM
+  ;; side links those definitions, so it must have the library loaded; the
+  ;; browser receives compiled IR instead and never needs the namespace.
+  #?(:clj (:require [omkamra.dsp.library])))
 
 (def block-lengths [0 1 127 128 256])
 (def sample-rate 44100.0)
 
 (defn- real
   [precision value]
-  #?(:clj (if (= :f64 precision) (double value) (float value))
+  ;; `unchecked-float` avoids Clojure's range check, which rejects infinities.
+  #?(:clj (if (= :f64 precision) (double value) (unchecked-float value))
      :cljs (if (= :f64 precision) value (js/Math.fround value))))
-
-(defn- i32
-  "Narrow to signed 32-bit two's-complement in both CLJ and CLJS."
-  [value]
-  #?(:clj (unchecked-int value)
-     :cljs (bit-or value 0)))
-
-(defn- ushr32
-  "Logical right shift with 32-bit semantics in both CLJ and CLJS."
-  [value distance]
-  (let [distance (bit-and distance 0x1f)]
-    #?(:clj (i32 (bit-shift-right (bit-and value 0xffffffff) distance))
-       ;; `unsigned-bit-shift-right` yields an unsigned JS number; the DSP
-       ;; `:int` result is the signed 32-bit reinterpretation.
-       :cljs (i32 (unsigned-bit-shift-right value distance)))))
-
-(defn- int-trunc
-  "Truncate toward zero to a signed 32-bit integer in both CLJ and CLJS."
-  [value]
-  #?(:clj (unchecked-int value)
-     :cljs (bit-or (js/Math.trunc value) 0)))
 
 (defn sine-input-samples
   "A deterministic trace whose alternating sign exercises conditionals."
@@ -42,146 +37,191 @@
                                 :cljs (js/Math.sin (+ frame (* 17 block)))))))
         (range frames)))
 
-(defn gain-step
-  [state sample control]
-  [state (* sample control)])
+(def ^:private builtin-pattern
+  [0.0 -0.0 0.5 -0.5 1.25 -1.25 2.0 -2.0 3.5 -3.5 0.25 -0.25
+   #?(:clj Double/NaN :cljs js/NaN)
+   #?(:clj Double/POSITIVE_INFINITY :cljs js/Infinity)
+   #?(:clj Double/NEGATIVE_INFINITY :cljs (- js/Infinity))])
 
-(defn one-pole-step
-  [state sample control]
-  (let [next (+ sample (* control state))]
-    [next next]))
+(defn builtin-input-samples
+  "A deterministic trace that includes signed zero, NaN, and infinities."
+  [precision block frames]
+  (mapv (fn [frame]
+          (real precision
+                (nth builtin-pattern
+                     (mod (+ frame (* 7 block)) (count builtin-pattern)))))
+        (range frames)))
 
-(defn gated-one-pole-step
-  [state sample control]
-  (if (> sample 0.0)
-    (one-pole-step state sample control)
-    [state 0.0]))
+(defn- process-case
+  [{:keys [id body params controls precisions input-samples blocks]
+    :or {precisions [:f32 :f64]
+         input-samples builtin-input-samples
+         controls []}}]
+  (let [control-params (mapv (fn [{:keys [name type]}]
+                               {:name name :type (or type :float)})
+                             controls)]
+    {:id id
+     :entry :process
+     :definition {:dsp/kind :function
+                  :name (symbol (str "dsp_" (name id)))
+                  :params (into (vec params) control-params)
+                  :process {:input (first params)
+                            :controls controls}
+                  :return-type :float
+                  :body [body]}
+     :precisions precisions
+     :controls (mapv :default controls)
+     :input-samples input-samples
+     :blocks blocks}))
 
-;; A portable integer recurrence exercising every bitwise operation.  All
-;; operands stay masked and non-negative, and shift distances are constants, so
-;; Clojure's 64-bit `bit-shift-*` and ClojureScript's 32-bit operators agree.
-(defn bitwise-lfsr-next
-  [reg]
-  (let [feedback (bit-xor (bit-and reg 1)
-                          (bit-and (unsigned-bit-shift-right reg 1) 1))
-        inverted (bit-and (bit-not feedback) 1)
-        mixed (bit-or (bit-shift-left feedback 15)
-                      (bit-xor (bit-and reg 32767)
-                               (bit-shift-right reg 2)))]
-    (bit-and (bit-or mixed (bit-shift-left inverted 14)) 65535)))
+(defn- unary-float-case
+  [id body]
+  (process-case {:id id
+                 :body body
+                 :params [{:name 'sample :type :float}]}))
 
-(defn bitwise-lfsr-step
-  [state _sample _control]
-  [(bitwise-lfsr-next state) (bit-and state 65535)])
-
-(def cases
-  [{:id :gain
-    :definition {:dsp/kind :function
-                 :name 'gain
-                 :params ['sample 'amount]
-                 :return-type :float
-                 :body ['(* sample amount)]}
-    :controls [2.0]
-    :precisions [:f32 :f64]
-    :initial-state 0.0
-    :input-samples sine-input-samples
-    :step gain-step}
-   {:id :one-pole
-    :definition {:dsp/kind :function
-                 :name 'one-pole
-                 :params ['sample 'coefficient]
-                 :return-type :float
-                 :state [{:name 'previous
-                          :init 0.0
-                          :next '(+ sample (* coefficient previous))}]
-                 :body ['(+ sample (* coefficient previous))]}
-    :controls [0.5]
-    :precisions [:f32 :f64]
-    :initial-state 0.0
-    :input-samples sine-input-samples
-    :step one-pole-step}
-   {:id :gated-one-pole
-    :definition {:dsp/kind :function
-                 :name 'gated-one-pole
-                 :params ['sample 'coefficient]
-                 :return-type :float
-                 :state [{:name 'previous
-                          :init 0.0
-                          :next '(if (> sample 0.0)
-                                   (+ sample (* coefficient previous))
-                                   previous)}]
-                 :body ['(if (> sample 0.0)
-                           (+ sample (* coefficient previous))
-                           0.0)]}
-    :controls [0.5]
-    :precisions [:f32 :f64]
-    :initial-state 0.0
-    :input-samples sine-input-samples
-    :step gated-one-pole-step}
-   {:id :bitwise-lfsr
-    :definition {:dsp/kind :function
-                 :name 'bitwise-lfsr
+(defn- binary-float-case
+  [id body control]
+  (process-case {:id id
+                 :body body
                  :params [{:name 'sample :type :float}]
-                 :process {:input :sample}
-                 :state [{:name 'reg
-                          :type :int
-                          :init 1
-                          :next '(let [feedback (bit-xor (bit-and reg 1)
-                                                         (bit-and
-                                                          (unsigned-bit-shift-right reg 1) 1))
-                                       inverted (bit-and (bit-not feedback) 1)
-                                       mixed (bit-or (bit-shift-left feedback 15)
-                                                     (bit-xor (bit-and reg 32767)
-                                                              (bit-shift-right reg 2)))]
-                                   (bit-and (bit-or mixed
-                                                    (bit-shift-left inverted 14))
-                                            65535))}]
-                 :return-type :float
-                 :body ['(int->float (bit-and reg 65535))]}
-    :controls []
-    :precisions [:f32 :f64]
-    :initial-state 1
-    :input-samples sine-input-samples
-    :step bitwise-lfsr-step}])
+                 :controls [{:name 'c :type :float :default control}]}))
 
-;; Function-entry cases exercise the scalar language directly.  They are run by
-;; the interpreter/JVM suite and by the browser JavaScript runner; the Wasm
-;; backend is process-only, so its coverage for the same operators comes from
-;; process cases such as `:bitwise-lfsr`.
-(defn- bounded-loop-reference
-  [_precision count]
-  (loop [index 0 total 0]
-    (if (< index count)
-      (let [index (inc index)]
-        (cond
-          (= index 3) (recur index total)
-          (= index 6) total
-          :else (recur index (+ total index))))
-      total)))
+(defn- clamp-case
+  [id lo hi]
+  (process-case {:id id
+                 :body '(clamp sample lo hi)
+                 :params [{:name 'sample :type :float}]
+                 :controls [{:name 'lo :type :float :default lo}
+                            {:name 'hi :type :float :default hi}]}))
+
+(defn- int-case
+  [id body a b]
+  (process-case {:id id
+                 :body (list 'int->float body)
+                 :params [{:name 'sample :type :float}]
+                 :controls [{:name 'a :type :int :default a}
+                            {:name 'b :type :int :default b}]
+                 :precisions [:f32]}))
+
+(def process-cases
+  (into
+   [{:id :gain
+     :entry :process
+     :definition {:dsp/kind :function
+                  :name 'gain
+                  :params ['sample 'amount]
+                  :return-type :float
+                  :body ['(* sample amount)]}
+     :precisions [:f32 :f64]
+     :controls [2.0]
+     :input-samples sine-input-samples}
+    {:id :one-pole
+     :entry :process
+     :definition {:dsp/kind :function
+                  :name 'one-pole
+                  :params ['sample 'coefficient]
+                  :state [{:name 'previous
+                           :init 0.0
+                           :next '(+ sample (* coefficient previous))}]
+                  :return-type :float
+                  :body ['(+ sample (* coefficient previous))]}
+     :precisions [:f32 :f64]
+     :controls [0.5]
+     :input-samples sine-input-samples}
+    {:id :gated-one-pole
+     :entry :process
+     :definition {:dsp/kind :function
+                  :name 'gated-one-pole
+                  :params ['sample 'coefficient]
+                  :state [{:name 'previous
+                           :init 0.0
+                           :next '(if (> sample 0.0)
+                                    (+ sample (* coefficient previous))
+                                    previous)}]
+                  :return-type :float
+                  :body ['(if (> sample 0.0)
+                            (+ sample (* coefficient previous))
+                            0.0)]}
+     :precisions [:f32 :f64]
+     :controls [0.5]
+     :input-samples sine-input-samples}
+    {:id :bitwise-lfsr
+     :entry :process
+     :definition {:dsp/kind :function
+                  :name 'bitwise-lfsr
+                  :params [{:name 'sample :type :float}]
+                  :process {:input :sample}
+                  :state [{:name 'reg
+                           :type :int
+                           :init 1
+                           :next '(let [feedback (bit-xor (bit-and reg 1)
+                                                          (bit-and
+                                                           (unsigned-bit-shift-right reg 1) 1))
+                                        inverted (bit-and (bit-not feedback) 1)
+                                        mixed (bit-or (bit-shift-left feedback 15)
+                                                      (bit-xor (bit-and reg 32767)
+                                                               (bit-shift-right reg 2)))]
+                                    (bit-and (bit-or mixed
+                                                     (bit-shift-left inverted 14))
+                                             65535))}]
+                  :return-type :float
+                  :body ['(int->float (bit-and reg 65535))]}
+     :precisions [:f32 :f64]
+     :controls []
+     :input-samples sine-input-samples}]
+   [(unary-float-case :abs '(abs sample))
+    (unary-float-case :floor '(floor sample))
+    (unary-float-case :ceil '(ceil sample))
+    (unary-float-case :trunc '(trunc sample))
+    (unary-float-case :fract '(fract sample))
+    (unary-float-case :sqrt '(sqrt sample))
+    (unary-float-case :sign '(sign sample))
+    (unary-float-case :round '(round sample))
+    (binary-float-case :min '(min sample c) 0.5)
+    (binary-float-case :max '(max sample c) -0.5)
+    (binary-float-case :copysign '(copysign sample c) -1.0)
+    (clamp-case :clamp -0.5 0.5)
+    ;; P2 deliverable 5: reusable DSP library functions called from a process.
+    (process-case {:id :library-clip
+                   :body '(omkamra.dsp.library/clip sample lo hi)
+                   :params [{:name 'sample :type :float}]
+                   :controls [{:name 'lo :type :float :default -0.5}
+                              {:name 'hi :type :float :default 0.5}]})
+    (process-case {:id :library-triangular-window
+                   :body '(omkamra.dsp.library/triangular-window sample)
+                   :params [{:name 'sample :type :float}]})
+    (int-case :div-zero '(/ a b) 5 0)
+    (int-case :div-min-neg1 '(/ a b) -2147483648 -1)
+    (int-case :div-neg '(/ a b) -7 3)
+    (int-case :rem-neg '(rem a b) -7 3)
+    (int-case :rem-flip '(rem a b) 7 -3)
+    (int-case :rem-zero '(rem a b) 5 0)
+    (int-case :mod-neg '(mod a b) -7 3)
+    (int-case :mod-flip '(mod a b) 7 -3)
+    (int-case :mod-zero '(mod a b) 5 0)]))
 
 (def function-cases
   [{:id :float-arithmetic
+    :entry :function
     :definition {:dsp/kind :function
                  :name 'float-arithmetic
                  :params ['a 'b]
                  :return-type :float
                  :body ['(+ (* a b) (- a b))]}
     :precisions [:f32 :f64]
-    :reference (fn [precision a b]
-                 (real precision (+ (* a b) (- a b))))
     :vectors [[1.0 2.0] [-3.5 0.25] [0.0 0.0] [10.0 0.125]]}
-
    {:id :float-comparison
+    :entry :function
     :definition {:dsp/kind :function
                  :name 'float-comparison
                  :params ['a 'b]
                  :return-type :boolean
                  :body ['(and (>= a b) (not (= a b)))]}
     :precisions [:f32 :f64]
-    :reference (fn [_precision a b] (and (>= a b) (not (= a b))))
     :vectors [[1.0 0.0] [0.0 1.0] [2.0 2.0] [-1.0 -2.0]]}
-
    {:id :boolean-logic
+    :entry :function
     :definition {:dsp/kind :function
                  :name 'boolean-logic
                  :params [{:name 'a :type :boolean}
@@ -189,10 +229,9 @@
                  :return-type :boolean
                  :body ['(or (and a (not b)) (and (not a) b))]}
     :precisions [:f32]
-    :reference (fn [_ a b] (or (and a (not b)) (and (not a) b)))
     :vectors [[true false] [false true] [true true] [false false]]}
-
    {:id :integer-sum
+    :entry :function
     :definition {:dsp/kind :function
                  :name 'integer-sum
                  :params [{:name 'count :type :int}]
@@ -205,10 +244,9 @@
                                  (set! index (+ index 1))))
                              total))]}
     :precisions [:f32]
-    :reference (fn [_precision count] (reduce + 0 (range count)))
     :vectors [[0] [1] [4] [10]]}
-
    {:id :bounded-loop-control
+    :entry :function
     :definition {:dsp/kind :function
                  :name 'bounded-loop-control
                  :params [{:name 'count :type :int}]
@@ -226,121 +264,100 @@
                                {:max-iterations 10})
                              total))]}
     :precisions [:f32]
-    :reference bounded-loop-reference
     :vectors [[0] [1] [4] [12]]}
-
    {:id :integer-conversion
+    :entry :function
     :definition {:dsp/kind :function
                  :name 'integer-conversion
                  :params ['sample]
                  :return-type :float
                  :body ['(int->float (+ (float->int sample) 2))]}
     :precisions [:f32 :f64]
-    :reference (fn [precision sample]
-                 (real precision (+ (int-trunc (real precision sample)) 2)))
     :vectors [[3.9] [-2.7] [0.0] [5.25]]}
-
    {:id :bitwise-and
+    :entry :function
     :definition {:dsp/kind :function
                  :name 'bitwise-and
                  :params [{:name 'a :type :int} {:name 'b :type :int}]
                  :return-type :int
                  :body ['(bit-and a b)]}
     :precisions [:f32]
-    :reference (fn [_ a b] (i32 (bit-and a b)))
     :vectors [[-1 255] [12345 6789] [0 0] [2147483647 -1]]}
-
    {:id :bitwise-or
+    :entry :function
     :definition {:dsp/kind :function
                  :name 'bitwise-or
                  :params [{:name 'a :type :int} {:name 'b :type :int}]
                  :return-type :int
                  :body ['(bit-or a b)]}
     :precisions [:f32]
-    :reference (fn [_ a b] (i32 (bit-or a b)))
     :vectors [[1 2] [-1 0] [1073741824 1073741823] [256 15]]}
-
    {:id :bitwise-xor
+    :entry :function
     :definition {:dsp/kind :function
                  :name 'bitwise-xor
                  :params [{:name 'a :type :int} {:name 'b :type :int}]
                  :return-type :int
                  :body ['(bit-xor a b)]}
     :precisions [:f32]
-    :reference (fn [_ a b] (i32 (bit-xor a b)))
     :vectors [[-1 -1] [255 15] [-2147483648 2147483647] [0 0]]}
-
    {:id :bitwise-not
+    :entry :function
     :definition {:dsp/kind :function
                  :name 'bitwise-not
                  :params [{:name 'a :type :int}]
                  :return-type :int
                  :body ['(bit-not a)]}
     :precisions [:f32]
-    :reference (fn [_ a] (i32 (bit-not a)))
     :vectors [[0] [-1] [2147483647] [-2147483648]]}
-
    {:id :bitwise-shift-left
+    :entry :function
     :definition {:dsp/kind :function
                  :name 'bitwise-shift-left
                  :params [{:name 'a :type :int} {:name 'b :type :int}]
                  :return-type :int
                  :body ['(bit-shift-left a b)]}
     :precisions [:f32]
-    :reference (fn [_ a b] (i32 (bit-shift-left a (bit-and b 0x1f))))
     :vectors [[1 31] [1 33] [-1 3] [123456 7] [1 -1]]}
-
    {:id :bitwise-shift-right
+    :entry :function
     :definition {:dsp/kind :function
                  :name 'bitwise-shift-right
                  :params [{:name 'a :type :int} {:name 'b :type :int}]
                  :return-type :int
                  :body ['(bit-shift-right a b)]}
     :precisions [:f32]
-    :reference (fn [_ a b] (i32 (bit-shift-right a (bit-and b 0x1f))))
     :vectors [[-1 1] [-8 2] [2147483647 31] [256 33]]}
-
    {:id :bitwise-unsigned-shift-right
+    :entry :function
     :definition {:dsp/kind :function
                  :name 'bitwise-unsigned-shift-right
                  :params [{:name 'a :type :int} {:name 'b :type :int}]
                  :return-type :int
                  :body ['(unsigned-bit-shift-right a b)]}
     :precisions [:f32]
-    :reference (fn [_ a b] (ushr32 a b))
     :vectors [[-1 0] [-1 1] [-2147483648 31] [256 33] [-1 -1]]}])
 
-(def all-cases (into (vec cases) function-cases))
+(def cases process-cases)
+
+(def all-cases (into (vec process-cases) function-cases))
+
+(defn function-case?
+  [case]
+  (= :function (:entry case)))
+
+(defn case-blocks
+  [case]
+  (or (:blocks case) block-lengths))
 
 (defn case-by-id
   [id]
   (or (some #(when (= id (:id %)) %) all-cases)
-      (throw (ex-info "Unknown DSP acceptance case"
+      (throw (ex-info "Unknown DSP conformance case"
                       {:case id
                        :available (mapv :id all-cases)}))))
 
-(defn function-case?
-  [case]
-  (not (contains? case :step)))
-
 (defn input-samples
-  "Return deterministic input samples for an acceptance block."
+  "Return deterministic input samples for one conformance block."
   [precision case block frames]
   ((:input-samples case) precision block frames))
-
-(defn initial-state
-  [case]
-  (:initial-state case))
-
-(defn reference-block
-  "Return `[next-state output]` for one acceptance block.
-
-  State is opaque to target runners, allowing a case to use scalars, vectors,
-  or maps without changing the runner API."
-  [precision {:keys [controls step]} state input]
-  (let [control (first controls)]
-    (reduce (fn [[state output] sample]
-              (let [[next-state value] (step state sample control)]
-                [next-state (conj output (real precision value))]))
-            [state []]
-            input)))

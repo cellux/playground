@@ -128,7 +128,8 @@
     (swap! (:next-temp slots) inc)
     slot))
 
-(declare expression-instructions statement-instructions condition-instructions)
+(declare expression-instructions statement-instructions condition-instructions
+         builtin-instructions)
 
 (defn- channel-instructions
   [channel slots labels]
@@ -159,7 +160,9 @@
 
 (defn- comparison-branch-instructions
   [comparison slots labels true-label false-label]
-  (if (= :int (get-in comparison [:left :type]))
+  ;; Only `:float` uses floating-point comparison; `:int` and `:boolean` are
+  ;; both represented as JVM ints.
+  (if (not= :float (get-in comparison [:left :type]))
     (let [branch (case (:operator comparison)
                    :< :if-icmplt :<= :if-icmple :> :if-icmpgt
                    :>= :if-icmpge := :if-icmpeq :not= :if-icmpne)]
@@ -216,6 +219,109 @@
           [[:mark true-label] [:iconst-1] [:goto done-label]
            [:mark false-label] [:iconst-0] [:mark done-label]]))))
 
+(defn- int-division-instructions
+  "Lower integer `/` or `rem` with the D12 zero-divisor guard.
+
+  Both operands are evaluated left-to-right into temporary slots so the guard
+  does not evaluate an effectful operand twice.  The JVM `idiv`/`irem` wrap
+  `INT_MIN / -1` to `INT_MIN` natively, so only the zero case needs handling."
+  [operator left right slots labels]
+  (let [left-slot (next-temp-slot slots)
+        right-slot (next-temp-slot slots)
+        nonzero-label (next-label labels "int-div-nonzero")
+        done-label (next-label labels "int-div-done")]
+    (vec (concat
+          (expression-instructions left slots labels)
+          [[:istore left-slot]]
+          (expression-instructions right slots labels)
+          [[:istore right-slot]
+           [:iload right-slot] [:ifne nonzero-label]
+           [:iconst-0] [:goto done-label]
+           [:mark nonzero-label]
+           [:iload left-slot] [:iload right-slot]
+           [(if (= operator :div) :idiv :irem)]
+           [:mark done-label]]))))
+
+(defn- real-jvm-type []
+  (if (f64?) Double/TYPE Float/TYPE))
+
+(defn- double-transcendental-instructions
+  "Emit `Math/<method>(double)` for a f32 or f64 unary operation."
+  [method expression slots labels]
+  (let [x (first (:args expression))]
+    (concat (expression-instructions x slots labels)
+            (when-not (f64?) [[:f2d]])
+            [[:invokestatic java.lang.Math method [Double/TYPE Double/TYPE]]]
+            (when-not (f64?) [[:d2f]]))))
+
+(defmulti builtin-instructions
+  "JVM lowering for a primitive builtin, dispatched on `[operator type]`."
+  (fn [expression _slots _labels] [(:builtin expression) (:type expression)]))
+
+(defmethod builtin-instructions :default
+  [expression _slots _labels]
+  (throw (ex-info "JVM backend does not implement this DSP builtin"
+                  {:builtin (:builtin expression) :type (:type expression)})))
+
+(defmethod builtin-instructions [:abs :float]
+  [expression slots labels]
+  (let [t (real-jvm-type)]
+    (concat (expression-instructions (first (:args expression)) slots labels)
+            [[:invokestatic java.lang.Math "abs" [t t]]])))
+
+(defmethod builtin-instructions [:abs :int]
+  [expression slots labels]
+  (concat (expression-instructions (first (:args expression)) slots labels)
+          [[:invokestatic java.lang.Math "abs" [Integer/TYPE Integer/TYPE]]]))
+
+(defn- min-max-instructions
+  [method expression slots labels]
+  (let [[x y] (:args expression)]
+    (concat (expression-instructions x slots labels)
+            (expression-instructions y slots labels)
+            (if (= :int (:type expression))
+              [[:invokestatic java.lang.Math method
+                [Integer/TYPE Integer/TYPE Integer/TYPE]]]
+              (let [t (real-jvm-type)]
+                [[:invokestatic java.lang.Math method [t t t]]])))))
+
+(defmethod builtin-instructions [:min :float] [e slots labels] (min-max-instructions "min" e slots labels))
+(defmethod builtin-instructions [:max :float] [e slots labels] (min-max-instructions "max" e slots labels))
+(defmethod builtin-instructions [:min :int] [e slots labels] (min-max-instructions "min" e slots labels))
+(defmethod builtin-instructions [:max :int] [e slots labels] (min-max-instructions "max" e slots labels))
+
+(defmethod builtin-instructions [:floor :float] [e slots labels]
+  (double-transcendental-instructions "floor" e slots labels))
+(defmethod builtin-instructions [:ceil :float] [e slots labels]
+  (double-transcendental-instructions "ceil" e slots labels))
+(defmethod builtin-instructions [:sqrt :float] [e slots labels]
+  (double-transcendental-instructions "sqrt" e slots labels))
+
+(defmethod builtin-instructions [:copysign :float]
+  [expression slots labels]
+  (let [[x y] (:args expression)
+        t (real-jvm-type)]
+    (concat (expression-instructions x slots labels)
+            (expression-instructions y slots labels)
+            [[:invokestatic java.lang.Math "copySign" [t t t]]])))
+
+(defmethod builtin-instructions [:trunc :float]
+  [expression slots labels]
+  (let [x (first (:args expression))]
+    (concat (expression-instructions x slots labels)
+            (when-not (f64?) [[:f2d]])
+            [[:invokestatic java.lang.Math "abs" [Double/TYPE Double/TYPE]]
+             [:invokestatic java.lang.Math "floor" [Double/TYPE Double/TYPE]]]
+            (expression-instructions x slots labels)
+            (when-not (f64?) [[:f2d]])
+            [[:invokestatic java.lang.Math "copySign" [Double/TYPE Double/TYPE Double/TYPE]]]
+            (when-not (f64?) [[:d2f]]))))
+
+(defmethod builtin-instructions [:rem :int]
+  [expression slots labels]
+  (int-division-instructions :rem (first (:args expression))
+                             (second (:args expression)) slots labels))
+
 (defn- expression-instructions
   [expression slots labels]
   (case (:op expression)
@@ -244,18 +350,22 @@
     :buffer-load (vec (concat (buffer-reference-instructions expression slots labels)
                               (index-instructions (:index expression) slots labels)
                               [[(real-load-op)]]))
-    :binary (vec
-             (concat
-              (expression-instructions (:left expression) slots labels)
-              (expression-instructions (:right expression) slots labels)
-              [(if (= :int (:type expression))
-                 (case (:operator expression)
-                   :+ [:iadd] :- [:isub] :* [:imul] :/ [:idiv])
-                 (case (:operator expression)
-                   :+ [(if (f64?) :dadd :fadd)]
-                   :- [(if (f64?) :dsub :fsub)]
-                   :* [(if (f64?) :dmul :fmul)]
-                   :/ [(if (f64?) :ddiv :fdiv)]))]))
+    :binary (if (and (= :int (:type expression)) (= :/ (:operator expression)))
+              (int-division-instructions :div (:left expression)
+                                         (:right expression) slots labels)
+              (vec
+               (concat
+                (expression-instructions (:left expression) slots labels)
+                (expression-instructions (:right expression) slots labels)
+                [(if (= :int (:type expression))
+                   (case (:operator expression)
+                     :+ [:iadd] :- [:isub] :* [:imul] :/ [:idiv])
+                   (case (:operator expression)
+                     :+ [(if (f64?) :dadd :fadd)]
+                     :- [(if (f64?) :dsub :fsub)]
+                     :* [(if (f64?) :dmul :fmul)]
+                     :/ [(if (f64?) :ddiv :fdiv)]))])))
+    :builtin (vec (builtin-instructions expression slots labels))
     :compare (boolean-value-instructions expression slots labels)
     :logical (boolean-value-instructions expression slots labels)
     :bitwise (vec

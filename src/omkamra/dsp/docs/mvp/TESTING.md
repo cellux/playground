@@ -14,15 +14,18 @@ below evaluates in it.
 
 | File | Role |
 |---|---|
-| `src/omkamra/dsp/acceptance.cljc` | Shared semantic catalog. Both the JVM suite and the browser suite read this file. |
+| `src/omkamra/dsp/acceptance.cljc` | Shared semantic catalog (pure data). Both testbeds read it. |
+| `src/omkamra/dsp/conformance.clj` | Builds target-neutral plans; JVM differential driver; plan serialization. |
+| `src/omkamra/dsp/interpreter.cljc` | Portable reference interpreter (the oracle), runs on JVM and in the browser. |
 | `src/omkamra/dsp_test.clj` | Interpreter/JVM suite plus compiler-internal checks (descriptor, linker, ABI, allocation). |
-| `src/omkamra/dsp/testbed.cljs` | Browser suite; runs the shared catalog on JavaScript/Wasm and the browser-only checks. |
-| `src/omkamra/dsp/testbed.clj` | On-demand HTTP endpoints that emit the JS modules and WAT for a case. |
+| `src/omkamra/dsp/testbed.cljs` | Browser differential suite; runs the in-page interpreter against JavaScript/Wasm kernels. |
+| `src/omkamra/dsp/testbed.clj` | On-demand HTTP endpoints: `source`, `wasm-source`, `wasm-metadata`, and `plan`. |
 | `src/omkamra/dsp/browser.clj` | Clojure-side browser driver (spel + `:on-demand-http`). |
 
-The split follows `DECISIONS.md` D7: **runtime semantics are described once in
-`acceptance.cljc`** and consumed by every testbed; compiler-internal checks stay
-in the JVM suite because they are not runtime semantics.
+The split follows `DECISIONS.md` D7/D13: **runtime semantics live once in
+`acceptance.cljc`**, and the **interpreter is the single oracle** for every
+target; compiler-internal checks stay in the JVM suite because they are not
+runtime semantics.
 
 ## Prerequisites
 
@@ -98,8 +101,14 @@ Evaluate in the dev nREPL:
 ```clojure
 (require '[omkamra.dsp.browser :as browser])
 (browser/run!)
-;; => {:passed? true, :passed 15, :total 15, :results [...]}
+;; => {:passed? true, :passed 8, :total 8, :results [...]}
 ```
+
+The browser suite is a **differential** test: it runs the portable
+`.cljc` reference interpreter (compiled into the page) on the IR served by
+`/omkamra/dsp/testbed/plan`, then runs the generated JavaScript/Wasm kernel on
+the same inputs and compares the two. No expected vectors are shipped from the
+JVM.
 
 `run!` starts `:on-demand-http` if needed (which starts the Shadow watcher on
 the first page request), opens
@@ -126,13 +135,12 @@ is process-only:
 ```clojure
 (->> (browser/run!)
      :results
-     (filter #(= "shared JS/Wasm acceptance matrix" (:name %)))
+     (filter #(= "shared process matrix f32" (:name %)))
      first
      ((juxt :targets :cases)))
 ;; => [[:js :wasm]
-;;     [{:case :gain        :precision :f32 :javascript true :wasm true}
-;;      {:case :gain        :precision :f64 :javascript true :wasm true}
-;;      {:case :one-pole    :precision :f32 :javascript true :wasm true}
+;;     [{:case :gain     :precision :f32 :javascript true :wasm true}
+;;      {:case :one-pole :precision :f32 :javascript true :wasm true}
 ;;      ...]]
 ```
 
@@ -149,22 +157,19 @@ runs; raise `:timeout` on a cold cache.
 checks**; the results render in the page. Append `?autorun=0` to prevent the
 automatic run.
 
-### What the 15 checks cover
+### What the 8 checks cover
 
-1. three handwritten CLJS block-ABI checks (gain, one-pole, zero-length block);
-2. the shared **process** acceptance matrix — every `acceptance/cases` entry,
-   f32 and f64, on JavaScript and Wasm;
-3. the shared **function-case** matrix — every `acceptance/function-cases`
+1. the shared **process** matrix — every `acceptance/cases` entry, f32 and f64,
+   on JavaScript and Wasm;
+2. the shared **function-case** matrix — every `acceptance/function-cases`
    entry, f32 and f64, on JavaScript;
-4. a WAT bounded-loop trap check;
-5. generated JavaScript f32 and f64 modules;
-6. generated Wasm f32 and f64 modules;
-7. the Squint JavaScript AudioWorklet adapters (f32 and f64);
-8. the Wasm AudioWorklet adapters (f32 and f64).
+3. a WAT bounded-loop trap check;
+4. the Squint JavaScript AudioWorklet adapters (f32 and f64);
+5. the Wasm AudioWorklet adapter (f32).
 
 Wasm is process-only, so function-entry cases run on the interpreter, JVM, and
 JavaScript; Wasm coverage for the same operators comes from process cases such
-as `:bitwise-lfsr`.
+as `:bitwise-lfsr` and the P2 builtin cases.
 
 ### Driving `cljs-eval` directly
 
@@ -177,23 +182,28 @@ driver above does not need a connected runtime; it launches its own browser.
 
 ## The shared catalog
 
-`omkamra.dsp.acceptance` has two vectors:
+`omkamra.dsp.acceptance` is **pure data** — there are no `:step` or `:reference`
+functions any more. It has two vectors:
 
-- `cases` / `process-cases` — block-processing kernels. Each entry carries a
-  `:definition`, `:controls`, `:initial-state`, an `:input-samples` trace
-  generator, and a `:step` reference that returns `[next-state output]`.
+- `process-cases` (alias `cases`) — block-processing kernels. Each entry
+  carries a `:definition`, `:entry :process`, `:precisions`, `:controls`, and
+  an `:input-samples` trace generator (with optional `:blocks`).
 - `function-cases` — scalar functions. Each entry carries a `:definition`,
-  `:precisions`, a `:reference` function, and `:vectors` of argument lists.
+  `:entry :function`, `:precisions`, and `:vectors` of argument lists.
 
-`all-cases` is both concatenated; `case-by-id` searches all of them.
-`function-case?` distinguishes the two, and the testbed endpoints use it to
-choose `:entry :function` or `:entry :process`.
+`all-cases` is both concatenated; `case-by-id` searches all of them;
+`function-case?` distinguishes the two.
 
-**To add a shared test**, add an entry to the appropriate vector. It is
-automatically run by the JVM suite and, because the browser suite reads the same
-file, by the browser matrix too. Keep references and traces in portable `.cljc`
-and avoid target-divergent special values unless the case is specifically about
-them.
+`omkamra.dsp.conformance` turns a case + precision into a **plan** (the compiled
+portable IR plus controls/vectors plus an invocation sequence including reset
+and special values). `conformance/run-plan` runs a plan on a target artifact.
+The interpreter computes expected outputs; the JVM backend and the browser's
+JavaScript/Wasm kernels are compared against it.
+
+**To add a shared test**, add data to the appropriate vector. It is
+automatically run by the JVM suite and by the browser matrix. Keep input
+generators in portable `.cljc` and avoid target-divergent special values unless
+the case is specifically about them.
 
 Use the JVM suite for compiler-internal checks (descriptor errors, linker
 diagnostics, ABI shape, allocation) and `testbed.cljs` for browser-only checks

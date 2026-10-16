@@ -106,7 +106,7 @@
   [memory]
   (:initial-pages memory))
 
-(declare emit-expression emit-statement)
+(declare emit-expression emit-statement emit-builtin emit-guarded-int-div)
 
 (defn- emit-index
   [index]
@@ -180,17 +180,20 @@
                           (emit-expression (:offset expression)))
     :buffer-load (wat-form (str (float-type) ".load")
                            (emit-buffer-address expression))
-    :binary (wat-form (if (= :int (:type expression))
-                        (case (:operator expression)
-                          :+ "i32.add" :- "i32.sub" :* "i32.mul" :/ "i32.div_s")
-                        (case (:operator expression)
-                          :+ (str (float-type) ".add")
-                          :- (str (float-type) ".sub")
-                          :* (str (float-type) ".mul")
-                          :/ (str (float-type) ".div")))
-                      (emit-expression (:left expression))
-                      (emit-expression (:right expression)))
-    :compare (wat-form (if (= :int (get-in expression [:left :type]))
+    :binary (if (and (= :int (:type expression)) (= :/ (:operator expression)))
+              (emit-guarded-int-div (emit-expression (:left expression))
+                                    (emit-expression (:right expression)))
+              (wat-form (if (= :int (:type expression))
+                          (case (:operator expression)
+                            :+ "i32.add" :- "i32.sub" :* "i32.mul" :/ "i32.div_s")
+                          (case (:operator expression)
+                            :+ (str (float-type) ".add")
+                            :- (str (float-type) ".sub")
+                            :* (str (float-type) ".mul")
+                            :/ (str (float-type) ".div")))
+                        (emit-expression (:left expression))
+                        (emit-expression (:right expression))))
+    :compare (wat-form (if (not= :float (get-in expression [:left :type]))
                          (case (:operator expression)
                            := "i32.eq" :not= "i32.ne" :< "i32.lt_s"
                            :<= "i32.le_s" :> "i32.gt_s" :>= "i32.ge_s")
@@ -215,6 +218,7 @@
                              (wat-form "then" (wat-form "i32.const" 1))
                              (wat-form "else"
                                        (emit-expression (second (:args expression))))))
+    :builtin (emit-builtin expression)
     :bitwise (if (= :bit-not (:operator expression))
                (wat-form "i32.xor" (emit-expression (first (:args expression)))
                          (wat-form "i32.const" -1))
@@ -232,6 +236,82 @@
                                      (emit-expression (:value expression)))
                :float->int (wat-form (str "i32.trunc_" (float-type) "_s")
                                      (emit-expression (:value expression))))))
+
+(defn- emit-guarded-int-div
+  "Emit signed integer division with the D12 guards.
+
+  Wasm `i32.div_s` traps both on a zero divisor and on `INT_MIN / -1`, so both
+  are lowered to defined values.  Operands are emitted twice; DSP expressions
+  are pure, so that only repeats reads and inlined pure computation."
+  [left right]
+  (wat-form "if" (wat-form "result" (wat-symbol "i32"))
+            (wat-form "i32.eqz" right)
+            (wat-form "then" (wat-form "i32.const" 0))
+            (wat-form "else"
+                      (wat-form "if" (wat-form "result" (wat-symbol "i32"))
+                                (wat-form "i32.and"
+                                          (wat-form "i32.eq" left
+                                                    (wat-form "i32.const" -2147483648))
+                                          (wat-form "i32.eq" right
+                                                    (wat-form "i32.const" -1)))
+                                (wat-form "then" (wat-form "i32.const" -2147483648))
+                                (wat-form "else" (wat-form "i32.div_s" left right))))))
+
+(defn- emit-guarded-int-rem
+  "Emit signed integer remainder with the D12 zero-divisor guard."
+  [left right]
+  (wat-form "if" (wat-form "result" (wat-symbol "i32"))
+            (wat-form "i32.eqz" right)
+            (wat-form "then" (wat-form "i32.const" 0))
+            (wat-form "else" (wat-form "i32.rem_s" left right))))
+
+(defmulti emit-builtin
+  "Wasm emission for a primitive builtin, dispatched on `[operator type]`."
+  (fn [expression] [(:builtin expression) (:type expression)]))
+
+(defmethod emit-builtin :default
+  [expression]
+  (throw (ex-info "Wasm backend does not implement this DSP builtin"
+                  {:builtin (:builtin expression) :type (:type expression)})))
+
+(defn- wat-unary
+  [operator expression]
+  (wat-form operator (emit-expression (first (:args expression)))))
+
+(defn- wat-binary
+  [operator expression]
+  (wat-form operator
+            (emit-expression (first (:args expression)))
+            (emit-expression (second (:args expression)))))
+
+(defmethod emit-builtin [:abs :float] [e] (wat-unary (str (float-type) ".abs") e))
+(defmethod emit-builtin [:abs :int] [e] (wat-unary "i32.abs" e))
+(defmethod emit-builtin [:min :float] [e] (wat-binary (str (float-type) ".min") e))
+(defmethod emit-builtin [:max :float] [e] (wat-binary (str (float-type) ".max") e))
+(defmethod emit-builtin [:min :int] [e] (wat-binary "i32.min_s" e))
+(defmethod emit-builtin [:max :int] [e] (wat-binary "i32.max_s" e))
+(defmethod emit-builtin [:floor :float] [e] (wat-unary (str (float-type) ".floor") e))
+(defmethod emit-builtin [:ceil :float] [e] (wat-unary (str (float-type) ".ceil") e))
+(defmethod emit-builtin [:trunc :float] [e] (wat-unary (str (float-type) ".trunc") e))
+
+(defmethod emit-builtin [:sqrt :float]
+  [expression]
+  (let [x (emit-expression (first (:args expression)))]
+    (if (f64?)
+      (wat-form "f64.sqrt" x)
+      ;; Match the Java/JavaScript double-rounded reference by computing the
+      ;; square root in f64 and narrowing the correctly rounded result.
+      (wat-form "f32.demote_f64"
+                (wat-form "f64.sqrt" (wat-form "f64.promote_f32" x))))))
+
+(defmethod emit-builtin [:copysign :float]
+  [expression]
+  (wat-binary (str (float-type) ".copysign") expression))
+
+(defmethod emit-builtin [:rem :int]
+  [expression]
+  (emit-guarded-int-rem (emit-expression (first (:args expression)))
+                        (emit-expression (second (:args expression)))))
 
 (defn- block-form
   [& forms]

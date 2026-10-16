@@ -5,7 +5,8 @@
             #_{:clj-kondo/ignore [:unused-namespace]}
             [omkamra.dsp.call-fixture :as calls]
             [omkamra.dsp.descriptor :as descriptor]
-            [omkamra.dsp.acceptance :as acceptance])
+            [omkamra.dsp.acceptance :as acceptance]
+            [omkamra.dsp.conformance :as conformance])
   (:import [com.sun.management ThreadMXBean]
            [java.lang.management ManagementFactory]))
 
@@ -457,16 +458,21 @@
     (is (= 6 (dsp/invoke artifact 4)))
     (is (= 45 (dsp/invoke artifact 10)))))
 
-(deftest shared-function-cases-match-interpreter-and-jvm
-  (doseq [case acceptance/function-cases
-          precision (:precisions case)
-          target [:interpreter :jvm]
-          args (:vectors case)]
-    (testing (str (:id case) " " (name precision) " " (name target) " " args)
-      (let [artifact (dsp/compile (:definition case)
-                                  {:target target :precision precision})
-            expected (apply (:reference case) precision args)]
-        (is (= expected (apply dsp/invoke artifact args)))))))
+(deftest interpreter-oracle-conformance
+  ;; The interpreter computes expected outputs from the case data; the JVM
+  ;; backend is compared against it. No hand-written reference is involved.
+  (doseq [case acceptance/all-cases
+          precision (:precisions case)]
+    (testing (str (:id case) " " (name precision)
+                  (when (acceptance/function-case? case) " function"))
+      (let [plan (conformance/plan case precision)
+            expected (conformance/run-plan
+                      (conformance/target-artifact case precision :interpreter)
+                      plan)
+            actual (conformance/run-plan
+                    (conformance/target-artifact case precision :jvm)
+                    plan)]
+        (is (conformance/results-match? expected actual))))))
 
 (deftest bitwise-operators-reject-invalid-forms
   (is (thrown-with-msg?
@@ -860,53 +866,6 @@
                 (is (= 77.0 (aget output 0)))
                 (is (= (vec expected) (vec output))))
               (recur (inc block) next-previous))))))))
-
-(deftest acceptance-cases-match-interpreter-and-jvm
-  (doseq [case acceptance/cases
-          precision (:precisions case)
-          target [:interpreter :jvm]]
-    (testing (str (:id case) " " (name precision) " " (name target))
-      (let [artifact (dsp/compile (:definition case)
-                                  {:target target
-                                   :entry :process
-                                   :precision precision})
-            real-array (if (= :f64 precision) double-array float-array)]
-        (dsp/reset! artifact)
-        (loop [block 0
-               state (acceptance/initial-state case)]
-          (when (< block (count acceptance/block-lengths))
-            (let [frames (nth acceptance/block-lengths block)
-                  samples (acceptance/input-samples precision case block frames)
-                  input (real-array samples)
-                  output (real-array (if (zero? frames)
-                                       [77.0]
-                                       (repeat frames 0.0)))
-                  [next-state expected] (acceptance/reference-block
-                                         precision case state samples)]
-              (dsp/process! artifact {:input input
-                                      :output output
-                                      :frames frames
-                                      :sample-rate acceptance/sample-rate
-                                      :controls (:controls case)})
-              (if (zero? frames)
-                (is (= 77.0 (aget output 0)))
-                (is (every? true?
-                            (map (fn [actual expected]
-                                   (< (Math/abs (- actual expected))
-                                      (if (= :f64 precision) 1.0e-12 1.0e-6)))
-                                 (vec output) expected))))
-              (recur (inc block) next-state))))
-        (dsp/reset! artifact)
-        (let [input (real-array [0.0])
-              output (real-array [99.0])
-              [_ expected] (acceptance/reference-block
-                            precision case (acceptance/initial-state case) [0.0])]
-          (dsp/process! artifact {:input input
-                                  :output output
-                                  :frames 1
-                                  :sample-rate acceptance/sample-rate
-                                  :controls (:controls case)})
-          (is (= expected (vec output))))))))
 
 (deftest process-abi-describes-instance-bindings-and-physical-memory
   (let [f32 (dsp/compile one-pole {:target :interpreter

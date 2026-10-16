@@ -6,7 +6,8 @@
   reports source-aware errors before IR lowering begins."
   (:require [clojure.string :as str]
             [malli.core :as m]
-            [malli.error :as me]))
+            [malli.error :as me]
+            [omkamra.dsp.builtins :as builtins]))
 
 (def logical-types #{:float :int :boolean :void})
 (def value-types #{:float :int :boolean})
@@ -351,6 +352,12 @@
           (when (= expected (count args))
             (when (every? #{:int} (map #(expression-type % env source path) args))
               :int)))
+
+        (builtins/builtin? op)
+        (when (builtins/accepts-arity? op (count args))
+          (let [types (mapv #(expression-type % env source path) args)]
+            (when (every? some? types)
+              (builtins/infer-return op types))))
 
         (= op 'if)
         (let [[condition then else] args]

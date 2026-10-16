@@ -5,7 +5,8 @@
   declarations live on process roots; memory operations refer to those buffers
   by ID. Effects are attached only to inherently effectful nodes and summarized
   on function/process roots."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [omkamra.dsp.builtins :as builtins]))
 
 (def ^:private arithmetic-operators
   {'+ :+ '- :- '* :* '/ :/})
@@ -227,6 +228,74 @@
                           :operator operator
                           :args (mapv :value args)
                           :type :int}))))
+
+(defn- lower-builtin-primitive
+  [form env entry]
+  (let [operator (:operator entry)
+        args (mapv #(lower-value % env) (rest form))
+        param-types (mapv #(get-in % [:value :type]) args)
+        signature (builtins/resolve-signature operator param-types)]
+    (when-not signature
+      (fail "DSP builtin does not support these operand types"
+            {:form form :operator (first form)
+             :types param-types
+             :supported (mapv :params (builtins/signatures operator))}))
+    (combine-fragments args
+                       {:op :builtin
+                        :builtin operator
+                        :args (mapv :value args)
+                        :type (:return signature)
+                        :effects (:effects entry)})))
+
+(defn- lower-builtin-derived
+  "Expand a derived builtin.
+
+  Each argument is bound to a fresh local before the expansion is lowered, so
+  an argument that is a call or buffer load is evaluated exactly once even when
+  the expansion references it more than once (D13)."
+  [form env entry]
+  (let [{:keys [params return]} (first (:signatures entry))
+        expand (:expand entry)
+        arg-forms (vec (rest form))]
+    (loop [arg-forms arg-forms
+           params params
+           env env
+           statements []
+           names []]
+      (if-let [arg-form (first arg-forms)]
+        (let [lowered (lower-value arg-form env)]
+          (expect-type! (first params) (:value lowered) arg-form)
+          (let [local (fresh-local! env (str (name (:operator entry)) "_arg")
+                                    (:type lowered))]
+            (recur (vec (rest arg-forms))
+                   (vec (rest params))
+                   (assoc-in env [:bindings (:name local)]
+                             {:name (:name local) :type (:type local) :kind :local})
+                   (into statements
+                         (concat (:statements lowered)
+                                 [{:op :declare
+                                   :name (:name local)
+                                   :type (:type local)
+                                   :init (:value lowered)}]))
+                   (conj names (:name local)))))
+        (let [expanded (lower-value (expand names) env)]
+          (expect-type! return (:value expanded) form)
+          {:statements (into statements (:statements expanded))
+           :value (:value expanded)
+           :type (:type expanded)})))))
+
+(defn- lower-builtin
+  [form env operator]
+  (let [entry (builtins/entry operator)
+        arg-forms (vec (rest form))]
+    (when-not (builtins/accepts-arity? operator (count arg-forms))
+      (fail "DSP builtin has the wrong number of arguments"
+            {:form form :operator (first form)
+             :expected (builtins/arities operator)
+             :actual (count arg-forms)}))
+    (case (:kind entry)
+      :primitive (lower-builtin-primitive form env entry)
+      :derived (lower-builtin-derived form env entry))))
 
 (defn- branch-type
   [form then-fragment else-fragment]
@@ -560,6 +629,8 @@
         (lower-binary form env (get arithmetic-operators op) false)
         (contains? comparison-operators op)
         (lower-binary form env (get comparison-operators op) true)
+        (builtins/builtin? op)
+        (lower-builtin form env op)
         :else (fail "unsupported DSP expression" {:form form :operator op})))
 
     :else (fail "unsupported DSP expression value" {:form form})))
@@ -936,6 +1007,8 @@
                                          (substitute-expression arg substitutions)) %))
     :bitwise (update expr :args #(mapv (fn [arg]
                                          (substitute-expression arg substitutions)) %))
+    :builtin (update expr :args #(mapv (fn [arg]
+                                         (substitute-expression arg substitutions)) %))
     :convert (update expr :value substitute-expression substitutions)
     :buffer-load expr
     :state-load expr
@@ -967,6 +1040,7 @@
                               :right (inline* (:right expr)))
               :logical (update expr :args #(mapv inline* %))
               :bitwise (update expr :args #(mapv inline* %))
+              :builtin (update expr :args #(mapv inline* %))
               :convert (update expr :value inline*)
               expr))]
     (inline* expr)))
@@ -1023,6 +1097,7 @@
         (concat (keys comparison-operators)
                 (keys logical-operators)
                 (keys bitwise-operators)
+                builtins/operators
                 ['if 'let 'do 'set! 'while 'break 'continue
                  'buffer-load 'buffer-store 'state-load 'state-store
                  'int->float 'float->int])))

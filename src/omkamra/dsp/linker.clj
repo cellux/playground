@@ -5,15 +5,17 @@
   unit contains every reachable definition in dependency-before-dependent
   order, and rewrites ordinary source calls to resolved `(dsp/call id ...)`
   forms for portable IR lowering."
-  (:require [omkamra.dsp.descriptor :as descriptor]))
+  (:require [omkamra.dsp.builtins :as builtins]
+            [omkamra.dsp.descriptor :as descriptor]))
 
 (def ^:private language-forms
-  '#{if let do set! while break continue buffer-load buffer-store
-     state-load state-store int->float float->int
-     + - * / = not= < <= > >= and or not
-     bit-and bit-or bit-xor bit-not
-     bit-shift-left bit-shift-right unsigned-bit-shift-right
-     dsp/call})
+  (into '#{if let do set! while break continue buffer-load buffer-store
+           state-load state-store int->float float->int
+           + - * / = not= < <= > >= and or not
+           bit-and bit-or bit-xor bit-not
+           bit-shift-left bit-shift-right unsigned-bit-shift-right
+           dsp/call}
+        builtins/operators))
 
 (defn- fail
   [message data]

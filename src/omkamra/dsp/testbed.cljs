@@ -1,15 +1,32 @@
 (ns omkamra.dsp.testbed
+  "Browser conformance testbed.
+
+  Every shared case is run as a differential test against the portable
+  reference interpreter, which is compiled into this bundle from
+  `omkamra.dsp.interpreter` (`.cljc`).  The JVM serves a target-neutral plan
+  (compiled IR, controls, and the invocation sequence); this page runs the
+  interpreter on that IR to compute expected outputs, runs the generated
+  JavaScript or Wasm kernel, and compares the two.  No expected vectors are
+  shipped from the JVM."
   (:require [clojure.string :as str]
+            [cljs.reader :as reader]
             [goog.object :as gobj]
             [omkamra.dsp.acceptance :as acceptance]
+            [omkamra.dsp.interpreter :as interpreter]
             ["wabt" :default wabt]))
 
 (defonce app-state (atom nil))
-
-(defonce ^:private last-results
-  (atom nil))
+(defonce ^:private last-results (atom nil))
 
 (def block-lengths acceptance/block-lengths)
+
+;; ---------------------------------------------------------------------------
+;; Small utilities
+;; ---------------------------------------------------------------------------
+
+(defn- response-text
+  [url]
+  (-> (js/fetch url) (.then (fn [response] (.text response)))))
 
 (defn- fetch-json
   [url]
@@ -18,138 +35,347 @@
                (if (.-ok response)
                  (.json response)
                  (js/Promise.reject
-                  (js/Error. (str "metadata endpoint returned "
-                                  (.-status response)))))))
+                  (js/Error. (str "endpoint returned " (.-status response)))))))
       (.then #(js->clj % :keywordize-keys true))))
 
-(defn- float-array
-  [values]
-  (js/Float32Array. (clj->js values)))
-
-(defn- values
-  [array]
-  (mapv #(aget array %) (range (.-length array))))
-
-(defn- wasm-array
-  [memory buffer offset length]
-  (if (= "f64" (:element-type memory))
-    (js/Float64Array. buffer offset length)
-    (js/Float32Array. buffer offset length)))
-
-(defn- close?
-  [actual expected]
-  (or (= actual expected)
-      (and (js/Number.isNaN actual)
-           (js/Number.isNaN expected))
-      (< (js/Math.abs (- actual expected)) 0.00001)))
-
-(defn- arrays-close?
-  [actual expected]
-  (and (= (.-length actual) (count expected))
-       (every? true?
-               (map close? (values actual) expected))))
-
-(defn- value-match?
-  "Compare a JavaScript return value with a shared reference value."
-  [actual expected]
-  (cond
-    (boolean? expected) (= (boolean actual) expected)
-    (number? expected) (close? actual expected)
-    :else (= actual expected)))
+(defn- real-array
+  [precision values]
+  (if (= :f64 precision)
+    (js/Float64Array. (clj->js values))
+    (js/Float32Array. (clj->js values))))
 
 (defn- require!
   [condition message]
   (when-not condition
     (throw (js/Error. message))))
 
-(defn- block-input
-  [block frames]
-  (float-array (acceptance/input-samples :f32 (acceptance/case-by-id :one-pole) block frames)))
+(defn- matches-value?
+  [actual expected]
+  (if (and (number? actual) (number? expected))
+    (cond
+      (and (js/Number.isNaN actual) (js/Number.isNaN expected)) true
+      (or (js/Number.isNaN actual) (js/Number.isNaN expected)) false
+      (and (zero? actual) (zero? expected))
+      (= (js/Object.is actual -0.0) (js/Object.is expected -0.0))
+      :else (= actual expected))
+    (= actual expected)))
 
-(defn- reference-one-pole
-  [previous input _coefficient]
-  (let [[next output] (acceptance/reference-block
-                       :f32 (acceptance/case-by-id :one-pole) previous
-                       (values input))]
-    [next (float-array output)]))
+(defn- results-match?
+  [actual expected]
+  (and (= (count actual) (count expected))
+       (every? true?
+               (map (fn [a e]
+                      (if (and (sequential? e) (sequential? a))
+                        (results-match? a e)
+                        (matches-value? a e)))
+                    actual expected))))
 
-(defn- reference-one-pole-f64
-  [previous input _coefficient]
-  (let [[next output] (acceptance/reference-block
-                       :f64 (acceptance/case-by-id :one-pole) previous
-                       (values input))]
-    [next (js/Float64Array. (clj->js output))]))
+(defn- show-number
+  [x]
+  (if (and (number? x) (zero? x))
+    (if (js/Object.is x -0.0) "-0" "+0")
+    (str x)))
 
-(defn- gain-process!
-  "The block ABI shape that the generated JS kernel must implement."
-  [input output frames amount]
-  (dotimes [frame frames]
-    (aset output frame (float (* (aget input frame) amount))))
-  nil)
+(defn- describe-mismatch
+  [actual expected]
+  (or (first
+       (for [i (range (min (count actual) (count expected)))
+             :let [a (nth actual i) e (nth expected i)]
+             :when (not (results-match? a e))
+             j (range (min (count a) (count e)))
+             :when (not (matches-value? (nth a j) (nth e j)))]
+         (str "block " i " sample " j " actual " (show-number (nth a j))
+              " expected " (show-number (nth e j)))))
+      (str "block count actual " (count actual) " expected " (count expected))))
 
-(defn- one-pole-process!
-  "A stateful reference kernel used to exercise block boundaries and reset."
-  [state input output frames coefficient]
-  (let [previous (atom @state)]
-    (dotimes [frame frames]
-      (let [next (+ (aget input frame)
-                    (* coefficient @previous))]
-        (aset output frame (float next))
-        (reset! previous next)))
-    (reset! state @previous))
-  nil)
+(defn- dynamic-import
+  [url]
+  (js* "import(~{})" url))
 
-(defn- test-gain
+;; ---------------------------------------------------------------------------
+;; Plan decoding and the browser-side interpreter oracle
+;; ---------------------------------------------------------------------------
+
+(defn- decode-number
+  [value]
+  (cond
+    (= value "NaN") js/NaN
+    (= value "Inf") js/Infinity
+    (= value "-Inf") (- js/Infinity)
+    :else (js/parseFloat value)))
+
+(defn- decode-value
+  [value]
+  (if (string? value) (decode-number value) value))
+
+(defn- decode-values
+  [xs]
+  (mapv decode-value xs))
+
+(defn- process-case?
+  [case]
+  (not (acceptance/function-case? case)))
+
+(defn- plan-ir
+  [plan]
+  (reader/read-string (:ir plan)))
+
+(defn- interpreter-process-outputs
+  [ir controls sample-rate invocations]
+  (let [state (interpreter/create-state ir)
+        precision (:precision ir)
+        controls (decode-values controls)
+        sample-rate (decode-value sample-rate)]
+    (reduce (fn [outputs {:keys [op input]}]
+              (case op
+                "reset" (do (interpreter/reset-state! ir state) outputs)
+                "process" (let [input (decode-values input)
+                                frames (count input)
+                                in (real-array precision input)
+                                out (real-array precision (repeat frames 0.0))]
+                            (interpreter/process-context
+                             ir {:input in :output out :frames frames
+                                 :sample-rate sample-rate
+                                 :controls controls :state state})
+                            (conj outputs (vec out)))))
+            [] invocations)))
+
+(defn- interpreter-function-values
+  [ir vectors]
+  (mapv (fn [args] (interpreter/invoke ir (decode-values args))) vectors))
+
+;; ---------------------------------------------------------------------------
+;; Kernel runners
+;; ---------------------------------------------------------------------------
+
+(defn- js-process-runner
+  [module precision]
+  (let [kernel ((gobj/get module "createKernel"))
+        reset (.bind (gobj/get kernel "reset") kernel)
+        process (gobj/get kernel "process")]
+    {:reset reset
+     :process (fn [input controls]
+                (let [frames (count input)
+                      in (real-array precision input)
+                      out (real-array precision (repeat frames 0.0))]
+                  (.apply process kernel
+                          (to-array (concat [in out frames acceptance/sample-rate]
+                                            controls)))
+                  (vec out)))}))
+
+(defn- replay-process
+  [plan {:keys [reset process]}]
+  (let [controls (decode-values (:controls plan))]
+    (reset)
+    (reduce (fn [outputs {:keys [op input]}]
+              (case op
+                "reset" (do (reset) outputs)
+                "process" (conj outputs (process (decode-values input) controls))))
+            [] (:invocations plan))))
+
+;; ---------------------------------------------------------------------------
+;; Case runners
+;; ---------------------------------------------------------------------------
+
+(defn- acceptance-query
+  [c precision]
+  (str "?case=" (name (:id c)) "&precision=" (name precision)))
+
+(defn- run-process-case-on-js
+  [c precision]
+  (let [query (acceptance-query c precision)
+        source-url (str "/omkamra/dsp/testbed/source" query)
+        plan-url (str "/omkamra/dsp/testbed/plan" query)]
+    (-> (js/Promise.all #js [(response-text source-url) (fetch-json plan-url)])
+        (.then
+         (fn [[source plan]]
+           (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
+                 url (js/URL.createObjectURL blob)]
+             (-> (dynamic-import url)
+                 (.then
+                  (fn [module]
+                    (let [expected (interpreter-process-outputs
+                                    (plan-ir plan) (:controls plan)
+                                    (:sample-rate plan) (:invocations plan))
+                          actual (replay-process plan
+                                                 (js-process-runner module precision))]
+                      (require! (results-match? actual expected)
+                                (str (:id c) " " (name precision)
+                                     " JavaScript mismatch: "
+                                     (describe-mismatch actual expected)))
+                      {:target :js :passed? true})))
+                 (.finally #(js/URL.revokeObjectURL url)))))))))
+
+(declare compile-wasm)
+
+(defn- run-process-case-on-wasm
+  [c precision]
+  (let [query (acceptance-query c precision)
+        plan-url (str "/omkamra/dsp/testbed/plan" query)
+        wat-url (str "/omkamra/dsp/testbed/wasm-source" query)]
+    (-> (js/Promise.all #js [(fetch-json plan-url) (response-text wat-url)])
+        (.then
+         (fn [[plan wat]]
+           (-> (compile-wasm wat)
+               (.then
+                (fn [bytes]
+                  (-> (js/WebAssembly.instantiate bytes)
+                      (.then
+                       (fn [result]
+                         (let [exports (.-exports (.-instance result))
+                               memory (gobj/get exports "memory")
+                               reset (gobj/get exports "reset")
+                               process (gobj/get exports "process")
+                               input-offset 0
+                               output-offset 4096
+                               expected (interpreter-process-outputs
+                                         (plan-ir plan) (:controls plan)
+                                         (:sample-rate plan) (:invocations plan))
+                               controls (decode-values (:controls plan))
+                               input-view (fn [frames]
+                                            (if (= :f64 precision)
+                                              (js/Float64Array. (.-buffer memory) input-offset (max 1 frames))
+                                              (js/Float32Array. (.-buffer memory) input-offset (max 1 frames))))
+                               output-view (fn [frames]
+                                             (if (= :f64 precision)
+                                               (js/Float64Array. (.-buffer memory) output-offset (max 1 frames))
+                                               (js/Float32Array. (.-buffer memory) output-offset (max 1 frames))))
+                               actual (do
+                                        (.call reset nil)
+                                        (reduce
+                                         (fn [outputs {:keys [op input]}]
+                                           (case op
+                                             "reset" (do (.call reset nil) outputs)
+                                             "process"
+                                             (let [samples (decode-values input)
+                                                   frames (count samples)]
+                                               (.set (input-view frames) (real-array precision samples))
+                                               (.apply process nil
+                                                       (to-array (concat [input-offset output-offset frames
+                                                                          acceptance/sample-rate]
+                                                                         controls)))
+                                               (conj outputs
+                                                     (if (zero? frames)
+                                                       []
+                                                       (vec (output-view frames)))))))
+                                         [] (:invocations plan)))]
+                           (require! (results-match? actual expected)
+                                     (str (:id c) " " (name precision)
+                                          " Wasm mismatch: "
+                                          (describe-mismatch actual expected)))
+                           {:target :wasm :passed? true}))))))))))))
+
+(defn- run-process-case!
+  [c precision]
+  (-> (js/Promise.all
+       #js [(-> (run-process-case-on-js c precision)
+                (.catch (fn [error]
+                          {:target :js :passed? false
+                           :detail (str (:case c) " | " (or (.-message error) (str error))
+                                        " | " (or (.-stack error) ""))})))
+            (-> (run-process-case-on-wasm c precision)
+                (.catch (fn [error]
+                          {:target :wasm :passed? false
+                           :detail (str (:case c) " | " (or (.-message error) (str error))
+                                        " | " (or (.-stack error) ""))})))])
+      (.then (fn [[js wasm]]
+               {:case (:id c)
+                :precision precision
+                :javascript (:passed? js)
+                :wasm (:passed? wasm)
+                :passed? (and (:passed? js) (:passed? wasm))
+                :detail (or (:detail js) (:detail wasm))}))))
+
+(defn- run-function-case!
+  [c precision]
+  (let [query (acceptance-query c precision)
+        source-url (str "/omkamra/dsp/testbed/source" query)
+        plan-url (str "/omkamra/dsp/testbed/plan" query)]
+    (-> (js/Promise.all #js [(response-text source-url) (fetch-json plan-url)])
+        (.then
+         (fn [[source plan]]
+           (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
+                 url (js/URL.createObjectURL blob)]
+             (-> (dynamic-import url)
+                 (.then
+                  (fn [module]
+                    (let [invoke (gobj/get module "invoke")
+                          ir (plan-ir plan)
+                          expected (interpreter-function-values ir (:vectors plan))
+                          actual (mapv (fn [args] (apply invoke (decode-values args)))
+                                       (:vectors plan))]
+                      (require! (results-match? actual expected)
+                                (str (:id c) " " (name precision)
+                                     " function mismatch"))
+                      {:target :js :passed? true})))
+                 (.finally #(js/URL.revokeObjectURL url)))))))))
+
+;; ---------------------------------------------------------------------------
+;; Matrices
+;; ---------------------------------------------------------------------------
+
+(defn- run-process-matrix-precision!
+  [precision]
+  (letfn [(run [remaining results]
+            (if-let [c (first remaining)]
+              (-> (run-process-case! c precision)
+                  (.then #(run (next remaining) (conj results %))))
+              (js/Promise.resolve results)))]
+    (run (filter process-case? acceptance/cases) [])))
+
+(defn- run-function-matrix-precision!
+  [precision]
+  (letfn [(run [remaining results]
+            (if-let [c (first remaining)]
+              (-> (run-function-case! c precision)
+                  (.then (fn [result]
+                           (run (next remaining)
+                                (conj results (assoc result
+                                                     :javascript
+                                                     (not (false? (:passed? result)))))))))
+              (js/Promise.resolve results)))]
+    (run (filter #(and (acceptance/function-case? %)
+                       (some #{precision} (:precisions %)))
+                 acceptance/all-cases)
+         [])))
+
+(defn- matrix-result
+  [label targets cases]
+  {:name label
+   :passed? (every? :passed? cases)
+   :targets targets
+   :detail (str "matched " (count cases) " cases"
+                (when-let [failure (first (remove :passed? cases))]
+                  (str "; first failure: " (:case failure)
+                       " — " (:detail failure))))
+   :cases (mapv (fn [entry]
+                  (-> entry
+                      (select-keys [:case :precision :javascript :wasm :passed?])
+                      (update :case str)
+                      (update :precision str)))
+                cases)})
+
+(defn- run-process-matrix!
   []
-  (let [input (float-array [1.0 -2.0 0.5])
-        output (float-array [99.0 99.0 99.0 99.0])]
-    (gain-process! input output 2 2.0)
-    (require! (arrays-close? output [2.0 -4.0 99.0 99.0])
-              (str "expected [2 -4 99 99], got " (values output)))
-    {:detail (str "partial block -> " (values output))}))
+  (-> (run-process-matrix-precision! :f32)
+      (.then (fn [f32]
+               (-> (run-process-matrix-precision! :f64)
+                   (.then (fn [f64]
+                            [(matrix-result "shared process matrix f32" [:js :wasm] f32)
+                             (matrix-result "shared process matrix f64" [:js :wasm] f64)])))))))
 
-(defn- test-one-pole
+(defn- run-function-matrix!
   []
-  (let [state (atom 0.0)
-        first-input (float-array [1.0 0.0 0.0])
-        second-input (float-array [0.0])
-        output (float-array 3)]
-    (one-pole-process! state first-input output 3 0.5)
-    (require! (arrays-close? output [1.0 0.5 0.25])
-              (str "first block mismatch: " (values output)))
-    (one-pole-process! state second-input output 1 0.5)
-    (require! (close? (aget output 0) 0.125)
-              (str "state was not preserved: " (aget output 0)))
-    (reset! state 0.0)
-    (one-pole-process! state second-input output 1 0.5)
-    (require! (close? (aget output 0) 0.0)
-              (str "reset did not clear state: " (aget output 0)))
-    {:detail "state preserved across blocks and reset correctly"}))
+  (-> (run-function-matrix-precision! :f32)
+      (.then (fn [f32]
+               (-> (run-function-matrix-precision! :f64)
+                   (.then (fn [f64]
+                            [(matrix-result "shared function matrix f32" [:js] f32)
+                             (matrix-result "shared function matrix f64" [:js] f64)])))))))
 
-(defn- test-zero-length-block
-  []
-  (let [input (float-array [])
-        output (float-array [7.0])]
-    (gain-process! input output 0 2.0)
-    (require! (arrays-close? output [7.0])
-              (str "zero-length block changed output: " (values output)))
-    {:detail "zero-length block left output untouched"}))
-
-(defn- run-test
-  [name test-fn]
-  (try
-    (let [{:keys [detail]} (test-fn)]
-      {:name name :passed? true :detail detail})
-    (catch :default error
-      {:name name
-       :passed? false
-       :detail (or (.-message error) (str error))})))
-
-(defn- run-suite
-  []
-  [(run-test "stateless gain block" test-gain)
-   (run-test "stateful one-pole block" test-one-pole)
-   (run-test "zero-length block" test-zero-length-block)])
+;; ---------------------------------------------------------------------------
+;; DOM
+;; ---------------------------------------------------------------------------
 
 (defn- make-element
   [tag]
@@ -178,109 +404,14 @@
     (text! summary (str passed "/" total " checks passed"))
     (set! (.-textContent results-list) "")
     (doseq [{:keys [name passed? detail]} results]
-      (let [item (make-element "li")
-            marker (if passed? "PASS" "FAIL")]
-        (text! item (str marker "  " name " — " detail))
+      (let [item (make-element "li")]
+        (text! item (str (if passed? "PASS" "FAIL") "  " name " — " detail))
         (style! item "color" (if passed? "#166534" "#b91c1c"))
         (append! results-list item)))))
 
-(defn- dynamic-import
-  [url]
-  (js* "import(~{})" url))
-
-(defn- generated-kernel-test
-  [source]
-  (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
-        url (js/URL.createObjectURL blob)]
-    (-> (dynamic-import url)
-        (.then (fn [module]
-                 (let [create-kernel (gobj/get module "createKernel")
-                       kernel (create-kernel)
-                       process (gobj/get kernel "process")
-                       reset (gobj/get kernel "reset")]
-                   (.call reset kernel)
-                   (loop [block 0
-                          previous 0.0]
-                     (if (= block (count block-lengths))
-                       nil
-                       (let [frames (nth block-lengths block)
-                             input (block-input block frames)
-                             output (float-array (if (zero? frames)
-                                                   [77.0]
-                                                   (repeat frames 0.0)))
-                             [next-previous expected] (reference-one-pole
-                                                       previous input 0.5)]
-                         (.call process kernel input output frames 44100.0 0.5)
-                         (if (zero? frames)
-                           (require! (close? (aget output 0) 77.0)
-                                     "generated kernel changed zero-length output")
-                           (require! (arrays-close? output (values expected))
-                                     (str "generated kernel mismatch at block " block
-                                          ": " (values output))))
-                         (recur (inc block) next-previous))))
-                   (.call reset kernel)
-                   (let [reset-output (float-array [99.0])]
-                     (.call process kernel (float-array [0.0]) reset-output 1 44100.0 0.5)
-                     (require! (close? (aget reset-output 0) 0.0)
-                               (str "generated kernel reset mismatch: "
-                                    (aget reset-output 0))))
-                   (doseq [special [js/NaN js/Infinity]]
-                     (.call reset kernel)
-                     (let [input (float-array [special])
-                           output (float-array 1)
-                           [_ expected] (reference-one-pole 0.0 input 0.5)]
-                       (.call process kernel input output 1 44100.0 0.5)
-                       (require! (arrays-close? output (values expected))
-                                 (str "generated kernel special-value mismatch: "
-                                      (values output)))))
-                   {:name "generated JavaScript module"
-                    :passed? true
-                    :detail "loaded through ES module import; matched shared f32 vectors, reset, NaN, and infinity"})))
-        (.finally #(js/URL.revokeObjectURL url)))))
-
-(defn- generated-f64-kernel-test
-  [source]
-  (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
-        url (js/URL.createObjectURL blob)]
-    (-> (dynamic-import url)
-        (.then
-         (fn [module]
-           (let [kernel ((gobj/get module "createKernel"))
-                 process (gobj/get kernel "process")
-                 reset (gobj/get kernel "reset")]
-             (.call reset kernel)
-             (loop [block 0
-                    previous 0.0]
-               (if (= block (count block-lengths))
-                 (do
-                   (.call reset kernel)
-                   (let [reset-output (js/Float64Array. #js [99.0])]
-                     (.call process kernel (js/Float64Array. #js [0.0])
-                            reset-output 1 acceptance/sample-rate (first (:controls (acceptance/case-by-id :one-pole))))
-                     (require! (close? (aget reset-output 0) 0.0)
-                               "generated f64 kernel reset mismatch"))
-                   {:name "generated JavaScript f64 module"
-                    :passed? true
-                    :detail "loaded through ES module import and matched shared f64 vectors"})
-                 (let [frames (nth block-lengths block)
-                       samples (acceptance/input-samples
-                                :f64 (acceptance/case-by-id :one-pole) block frames)
-                       input (js/Float64Array. (clj->js samples))
-                       output (if (zero? frames)
-                                (js/Float64Array. #js [77.0])
-                                (js/Float64Array. frames))
-                       [next-previous expected] (acceptance/reference-block
-                                                 :f64 (acceptance/case-by-id :one-pole) previous samples)]
-                   (.call process kernel input output frames
-                          acceptance/sample-rate (first (:controls (acceptance/case-by-id :one-pole))))
-                   (if (zero? frames)
-                     (require! (close? (aget output 0) 77.0)
-                               "generated f64 kernel changed zero-length output")
-                     (require! (arrays-close? output expected)
-                               (str "generated f64 kernel mismatch at block "
-                                    block ": " (values output))))
-                   (recur (inc block) next-previous)))))))
-        (.finally #(js/URL.revokeObjectURL url)))))
+;; ---------------------------------------------------------------------------
+;; Worklet and Wasm trap checks
+;; ---------------------------------------------------------------------------
 
 (defn- compile-wasm
   [wat]
@@ -299,215 +430,22 @@
   [wat]
   (compile-wasm wat))
 
-(defn- wasm-module-test
-  [bytes memory-layout]
-  (let [input-offset (:input-offset memory-layout)
-        output-offset (:output-offset memory-layout)
-        reference-one-pole (if (= "f64" (:element-type memory-layout))
-                             reference-one-pole-f64
-                             reference-one-pole)]
-    (-> (js/WebAssembly.instantiate bytes)
-        (.then
-         (fn [result]
-           (let [exports (.-exports (.-instance result))
-                 memory (gobj/get exports "memory")
-                 process (gobj/get exports "process")
-                 reset (gobj/get exports "reset")
-                 memory-buffer (.-buffer memory)]
-             (.call reset nil)
-             (loop [block 0
-                    previous 0.0]
-               (if (= block (count block-lengths))
-                 nil
-                 (let [frames (nth block-lengths block)
-                       input (wasm-array memory-layout memory-buffer
-                                         input-offset frames)
-                       output (wasm-array memory-layout memory-buffer
-                                          output-offset (max 1 frames))
-                       source (block-input block frames)
-                       [next-previous expected] (reference-one-pole
-                                                 previous source 0.5)]
-                   (.set input source)
-                   (when (zero? frames)
-                     (aset output 0 77.0))
-                   (.call process nil input-offset output-offset frames 44100.0 0.5)
-                   (if (zero? frames)
-                     (require! (close? (aget output 0) 77.0)
-                               "Wasm kernel changed zero-length output")
-                     (require! (arrays-close? output (values expected))
-                               (str "Wasm kernel mismatch at block " block
-                                    ": actual " (values output)
-                                    ", expected " (values expected))))
-                   (recur (inc block) next-previous))))
-             (.call reset nil)
-             (let [input (wasm-array memory-layout memory-buffer input-offset 1)
-                   output (wasm-array memory-layout memory-buffer output-offset 1)]
-               (.set input #js [0.0])
-               (.call process nil input-offset output-offset 1 44100.0 0.5)
-               (require! (close? (aget output 0) 0.0)
-                         (str "Wasm reset mismatch: " (aget output 0))))
-             (let [check-special!
-                   (fn [special]
-                     (.call reset nil)
-                     (let [input (wasm-array memory-layout memory-buffer input-offset 1)
-                           output (wasm-array memory-layout memory-buffer output-offset 1)]
-                       (.set input #js [special])
-                       (.call process nil input-offset output-offset 1 44100.0 0.5)
-                       (let [[_ expected] (reference-one-pole
-                                           0.0
-                                           (float-array [special])
-                                           0.5)]
-                         (require! (arrays-close? output (values expected))
-                                   (str "Wasm special-value mismatch: "
-                                        (values output))))))]
-               (doseq [special [js/NaN js/Infinity]]
-                 (check-special! special)))
-             {:name "WABT WebAssembly module"
-              :passed? true
-              :detail "compiled WAT; matched shared f32 vectors, artifact memory metadata, reset, NaN, and infinity"}))))))
-
-(defn- real-array
-  [precision samples]
-  (if (= :f64 precision)
-    (js/Float64Array. (clj->js samples))
-    (float-array samples)))
-
-(defn- process-arguments
-  [prefix case]
-  (to-array (concat prefix [acceptance/sample-rate] (:controls case))))
-
-(defn- generated-acceptance-case-test
-  [case precision source]
-  (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
-        url (js/URL.createObjectURL blob)]
-    (-> (dynamic-import url)
-        (.then
-         (fn [module]
-           (let [kernel ((gobj/get module "createKernel"))
-                 process (gobj/get kernel "process")
-                 reset (gobj/get kernel "reset")]
-             (.call reset kernel)
-             (loop [block 0
-                    state (acceptance/initial-state case)]
-               (when (< block (count acceptance/block-lengths))
-                 (let [frames (nth acceptance/block-lengths block)
-                       samples (acceptance/input-samples precision case block frames)
-                       input (real-array precision samples)
-                       output (real-array precision (if (zero? frames)
-                                                      [77.0]
-                                                      (repeat frames 0.0)))
-                       [next-state expected] (acceptance/reference-block
-                                              precision case state samples)]
-                   (.apply process kernel (process-arguments [input output frames] case))
-                   (if (zero? frames)
-                     (require! (close? (aget output 0) 77.0)
-                               (str (:id case) " changed zero-length output"))
-                     (require! (arrays-close? output expected)
-                               (str (:id case) " mismatch at block " block)))
-                   (recur (inc block) next-state))))
-             (.call reset kernel)
-             (let [input (real-array precision [0.0])
-                   output (real-array precision [99.0])
-                   [_ expected] (acceptance/reference-block
-                                 precision case (acceptance/initial-state case)
-                                 (values input))]
-               (.apply process kernel (process-arguments [input output 1] case))
-               (require! (arrays-close? output expected)
-                         (str (:id case) " reset mismatch")))
-             (doseq [special [js/NaN js/Infinity]]
-               (.call reset kernel)
-               (let [input (real-array precision [special])
-                     output (real-array precision [0.0])
-                     [_ expected] (acceptance/reference-block
-                                   precision case (acceptance/initial-state case)
-                                   (values input))]
-                 (.apply process kernel (process-arguments [input output 1] case))
-                 (require! (arrays-close? output expected)
-                           (str (:id case) " special-value mismatch"))))
-             {:target :js
-              :case (:id case)
-              :precision precision
-              :passed? true})))
-        (.finally #(js/URL.revokeObjectURL url)))))
-
-(defn- wasm-acceptance-case-test
-  [case precision bytes memory-layout]
-  (let [input-offset (:input-offset memory-layout)
-        output-offset (:output-offset memory-layout)]
-    (-> (js/WebAssembly.instantiate bytes)
-        (.then
-         (fn [result]
-           (let [exports (.-exports (.-instance result))
-                 memory (gobj/get exports "memory")
-                 process (gobj/get exports "process")
-                 reset (gobj/get exports "reset")
-                 memory-buffer (.-buffer memory)]
-             (.call reset nil)
-             (loop [block 0
-                    state (acceptance/initial-state case)]
-               (when (< block (count acceptance/block-lengths))
-                 (let [frames (nth acceptance/block-lengths block)
-                       samples (acceptance/input-samples precision case block frames)
-                       input (wasm-array memory-layout memory-buffer input-offset frames)
-                       output (wasm-array memory-layout memory-buffer output-offset (max 1 frames))
-                       [next-state expected] (acceptance/reference-block
-                                              precision case state samples)]
-                   (.set input (real-array precision samples))
-                   (when (zero? frames) (aset output 0 77.0))
-                   (.apply process nil
-                           (process-arguments [input-offset output-offset frames] case))
-                   (if (zero? frames)
-                     (require! (close? (aget output 0) 77.0)
-                               (str (:id case) " changed zero-length output"))
-                     (require! (arrays-close? output expected)
-                               (str (:id case) " mismatch at block " block)))
-                   (recur (inc block) next-state))))
-             (.call reset nil)
-             (let [input (wasm-array memory-layout memory-buffer input-offset 1)
-                   output (wasm-array memory-layout memory-buffer output-offset 1)
-                   samples [0.0]
-                   [_ expected] (acceptance/reference-block
-                                 precision case (acceptance/initial-state case) samples)]
-               (.set input (real-array precision samples))
-               (.apply process nil (process-arguments [input-offset output-offset 1] case))
-               (require! (arrays-close? output expected)
-                         (str (:id case) " reset mismatch")))
-             (doseq [special [js/NaN js/Infinity]]
-               (.call reset nil)
-               (let [input (wasm-array memory-layout memory-buffer input-offset 1)
-                     output (wasm-array memory-layout memory-buffer output-offset 1)
-                     samples [special]
-                     [_ expected] (acceptance/reference-block
-                                   precision case (acceptance/initial-state case) samples)]
-                 (.set input (real-array precision samples))
-                 (.apply process nil (process-arguments [input-offset output-offset 1] case))
-                 (require! (arrays-close? output expected)
-                           (str (:id case) " special-value mismatch"))))
-             {:target :wasm
-              :case (:id case)
-              :precision precision
-              :passed? true}))))))
-
 (defn- worklet-ready
   [node]
   (js/Promise.
    (fn [resolve reject]
      (let [timeout (js/setTimeout
-                    #(reject (js/Error.
-                              "worklet kernel did not become ready"))
+                    #(reject (js/Error. "worklet kernel did not become ready"))
                     5000)]
        (set! (.-onmessage (.-port node))
              (fn [event]
                (let [message (.-data event)]
                  (cond
                    (= "ready" (.-type message))
-                   (do
-                     (js/clearTimeout timeout)
-                     (resolve))
+                   (do (js/clearTimeout timeout) (resolve))
                    (= "error" (.-type message))
-                   (do
-                     (js/clearTimeout timeout)
-                     (reject (js/Error. (.-message message))))))))
+                   (do (js/clearTimeout timeout)
+                       (reject (js/Error. (.-message message))))))))
        (.postMessage (.-port node) #js {:type "status"})))))
 
 (defn- worklet-reset!
@@ -520,11 +458,9 @@
        (set! (.-onmessage (.-port node))
              (fn [event]
                (let [message (.-data event)]
-                 (cond
-                   (= "reset" (.-type message))
-                   (do
-                     (js/clearTimeout timeout)
-                     (resolve))))))
+                 (when (= "reset" (.-type message))
+                   (js/clearTimeout timeout)
+                   (resolve)))))
        (.postMessage (.-port node) #js {:type "reset"})))))
 
 (defn- audio-worklet-test
@@ -535,9 +471,6 @@
          worklet-url (if f64?
                        "/omkamra/dsp/testbed/squint-worklet-f64"
                        "/omkamra/dsp/testbed/squint-worklet")
-         kernel-url (if f64?
-                      "/omkamra/dsp/testbed/source-f64"
-                      "/omkamra/dsp/testbed/source")
          label (if f64?
                  "Squint AudioWorklet f64 adapter"
                  "Squint AudioWorklet adapter")]
@@ -546,14 +479,15 @@
          (.then
           (fn [_]
             (let [node (js/AudioWorkletNode.
-                        context
-                        "omkamra-dsp-kernel"
+                        context "omkamra-dsp-kernel"
                         #js {:numberOfInputs 1
                              :numberOfOutputs 1
                              :channelCount 2
                              :channelCountMode "explicit"
                              :outputChannelCount #js [2]
-                             :processorOptions #js {:kernelUrl kernel-url
+                             :processorOptions #js {:kernelUrl (if f64?
+                                                                 "/omkamra/dsp/testbed/source-f64"
+                                                                 "/omkamra/dsp/testbed/source")
                                                     :channels 2
                                                     :frameCapacity 256
                                                     :elementBytes (if f64? 8 4)
@@ -572,8 +506,7 @@
           (fn [buffer]
             (let [data (.getChannelData buffer 0)
                   peak (reduce max 0 (map #(js/Math.abs %) (array-seq data)))]
-              (require! (> peak 0.0001)
-                        "AudioWorklet output was silent")
+              (require! (> peak 0.0001) "AudioWorklet output was silent")
               (require! (= 2 (.-numberOfChannels buffer))
                         "JavaScript worklet did not preserve configured channels")
               {:name label
@@ -591,13 +524,9 @@
         output-offset (:output-offset memory)
         channels (get-in memory [:regions :output :channels])
         frame-capacity (:frame-capacity memory)
-        element-bytes (or (:element-bytes physical-type)
-                          (:element-bytes memory))
-        element-type (or (:element-type physical-type)
-                         (:element-type memory))
-        element-type (if (keyword? element-type)
-                       (name element-type)
-                       element-type)
+        element-bytes (or (:element-bytes physical-type) (:element-bytes memory))
+        element-type (or (:element-type physical-type) (:element-type memory))
+        element-type (if (keyword? element-type) (name element-type) element-type)
         channel-stride (:channel-stride memory)
         label (if (= "f64" precision)
                 "Wasm AudioWorklet f64 adapter"
@@ -608,8 +537,7 @@
         (.then
          (fn [_]
            (let [node (js/AudioWorkletNode.
-                       context
-                       "omkamra-dsp-wasm-kernel"
+                       context "omkamra-dsp-wasm-kernel"
                        #js {:numberOfInputs 1
                             :numberOfOutputs 1
                             :channelCount 2
@@ -638,317 +566,13 @@
          (fn [buffer]
            (let [data (.getChannelData buffer 0)
                  peak (reduce max 0 (map #(js/Math.abs %) (array-seq data)))]
-             (require! (> peak 0.0001)
-                       "Wasm AudioWorklet output was silent")
+             (require! (> peak 0.0001) "Wasm AudioWorklet output was silent")
              (require! (= 2 (.-numberOfChannels buffer))
                        "Wasm worklet did not preserve configured channels")
              {:name label
               :passed? true
               :detail (str "rendered 256 frames across "
                            (.-numberOfChannels buffer) " channels, peak " peak)}))))))
-
-(defn- run-wasm-f64-test!
-  [summary results-list previous-results]
-  (-> (js/fetch "/omkamra/dsp/testbed/wasm-source-f64")
-      (.then (fn [response]
-               (if (.-ok response)
-                 (.text response)
-                 (js/Promise.reject
-                  (js/Error. (str "f64 Wasm endpoint returned "
-                                  (.-status response)))))))
-      (.then compile-wasm)
-      (.then
-       (fn [bytes]
-         (-> (fetch-json "/omkamra/dsp/testbed/wasm-metadata-f64")
-             (.then
-              (fn [metadata]
-                (-> (wasm-module-test bytes (:memory metadata))
-                    (.then
-                     (fn [module-result]
-                       (let [module-result (assoc module-result
-                                                  :name "WABT WebAssembly f64 module")
-                             results (conj previous-results module-result)]
-                         (render-results! summary results-list results)
-                         (-> (wasm-audio-worklet-test bytes metadata)
-                             (.then
-                              (fn [worklet-result]
-                                (let [results (conj results worklet-result)]
-                                  (render-results! summary results-list results)
-                                  results)))))))))))))
-      (.catch
-       (fn [error]
-         (render-results!
-          summary
-          results-list
-          (conj previous-results
-                {:name "WABT WebAssembly f64 module"
-                 :passed? false
-                 :detail (or (.-message error) (str error))}))))))
-
-(defn- run-wasm-test!
-  [summary results-list previous-results]
-  (-> (js/fetch "/omkamra/dsp/testbed/wasm-source")
-      (.then (fn [response]
-               (if (.-ok response)
-                 (.text response)
-                 (js/Promise.reject
-                  (js/Error. (str "Wasm endpoint returned " (.-status response)))))))
-      (.then compile-wasm)
-      (.then
-       (fn [bytes]
-         (-> (fetch-json "/omkamra/dsp/testbed/wasm-metadata")
-             (.then
-              (fn [memory-metadata]
-                (-> (wasm-module-test bytes (:memory memory-metadata))
-                    (.then
-                     (fn [module-result]
-                       (let [results (conj previous-results module-result)]
-                         (render-results! summary results-list results)
-                         (-> (wasm-audio-worklet-test
-                              bytes memory-metadata)
-                             (.then
-                              (fn [worklet-result]
-                                (let [results (conj results worklet-result)]
-                                  (render-results! summary results-list results)
-                                  (run-wasm-f64-test! summary results-list results))))))))))))))
-      (.catch (fn [error]
-                (render-results!
-                 summary
-                 results-list
-                 (conj previous-results
-                       {:name "WABT WebAssembly / AudioWorklet"
-                        :passed? false
-                        :detail (or (.-message error) (str error))}))))))
-
-(defn run-cross-target!
-  "Run generated JavaScript and Wasm kernels against the same browser-side
-  reference trace. Public for shadow/cljs-eval and browser automation."
-  []
-  (let [result-promise
-        (-> (js/fetch "/omkamra/dsp/testbed/source")
-            (.then (fn [response] (.text response)))
-            (.then generated-kernel-test)
-            (.then
-             (fn [javascript-result]
-               (-> (js/fetch "/omkamra/dsp/testbed/wasm-source")
-                   (.then (fn [response] (.text response)))
-                   (.then compile-wasm)
-                   (.then
-                    (fn [bytes]
-                      (-> (fetch-json "/omkamra/dsp/testbed/wasm-metadata")
-                          (.then
-                           (fn [metadata]
-                             (wasm-module-test bytes (:memory metadata)))))))
-                   (.then
-                    (fn [wasm-result]
-                      {:javascript javascript-result
-                       :wasm wasm-result
-                       :differential? (and (:passed? javascript-result)
-                                           (:passed? wasm-result))}))))))]
-    (.then result-promise
-           (fn [result]
-             (swap! app-state assoc :cross-target result)
-             result))))
-
-(defn- response-text
-  [url]
-  (-> (js/fetch url)
-      (.then (fn [response] (.text response)))))
-
-(defn- acceptance-query
-  [case precision]
-  (str "?case=" (name (:id case)) "&precision=" (name precision)))
-
-(defn- run-acceptance-case!
-  [case precision]
-  (let [query (acceptance-query case precision)
-        source-url (str "/omkamra/dsp/testbed/source" query)
-        wasm-url (str "/omkamra/dsp/testbed/wasm-source" query)
-        metadata-url (str "/omkamra/dsp/testbed/wasm-metadata" query)]
-    (-> (response-text source-url)
-        (.then #(generated-acceptance-case-test case precision %))
-        (.then
-         (fn [javascript]
-           (-> (response-text wasm-url)
-               (.then compile-wasm)
-               (.then
-                (fn [bytes]
-                  (-> (fetch-json metadata-url)
-                      (.then
-                       (fn [metadata]
-                         (-> (wasm-acceptance-case-test case precision bytes
-                                                        (:memory metadata))
-                             (.then
-                              (fn [wasm]
-                                {:case (:id case)
-                                 :precision precision
-                                 :javascript javascript
-                                 :wasm wasm
-                                 :passed? (and (:passed? javascript)
-                                               (:passed? wasm))}))))))))))))))
-
-(defn- run-shared-target-precision!
-  [precision]
-  (letfn [(run-cases [remaining results]
-            (if-let [case (first remaining)]
-              (-> (run-acceptance-case! case precision)
-                  (.then #(run-cases (next remaining) (conj results %))))
-              (js/Promise.resolve
-               {:precision precision
-                :cases results
-                :passed? (every? :passed? results)})))]
-    (run-cases (filter #(some #{precision} (:precisions %)) acceptance/cases) [])))
-
-(defn run-shared-target-vectors!
-  "Run every shared acceptance case in the browser for both precisions.
-
-  `omkamra.dsp.acceptance/cases` is also run by the default
-  interpreter/JVM test, so adding a case extends every semantic target."
-  []
-  (-> (run-shared-target-precision! :f32)
-      (.then
-       (fn [f32]
-         (-> (run-shared-target-precision! :f64)
-             (.then
-              (fn [f64]
-                (let [result {:cases (mapv :id acceptance/cases)
-                              :f32 f32
-                              :f64 f64
-                              :passed? (and (:passed? f32) (:passed? f64))}]
-                  (swap! app-state assoc :shared-target-vectors result)
-                  result))))))))
-
-(defn- case-target-breakdown
-  "Flatten per-precision case results into `{:case :precision :javascript :wasm}`."
-  [result]
-  (mapv (fn [entry]
-          {:case (:case entry)
-           :precision (:precision entry)
-           :javascript (boolean (:passed? (:javascript entry)))
-           :wasm (boolean (:passed? (:wasm entry)))})
-        (concat (get-in result [:f32 :cases])
-                (get-in result [:f64 :cases]))))
-
-(defn- shared-target-suite-result
-  [result]
-  {:name "shared JS/Wasm acceptance matrix"
-   :passed? (:passed? result)
-   :targets [:js :wasm]
-   :detail (str "matched " (count acceptance/cases)
-                " cases across f32/f64 JavaScript and Wasm")
-   :cases (case-target-breakdown result)})
-
-(defn- run-shared-target-suite-test!
-  [summary results-list previous-results]
-  (-> (run-shared-target-vectors!)
-      (.then
-       (fn [result]
-         (let [results (conj previous-results
-                             (shared-target-suite-result result))]
-           (render-results! summary results-list results)
-           results)))
-      (.catch
-       (fn [error]
-         (let [results (conj previous-results
-                             {:name "shared JS/Wasm acceptance matrix"
-                              :passed? false
-                              :detail (or (.-message error) (str error))})]
-           (render-results! summary results-list results)
-           results)))))
-
-;; Function-entry cases run in the browser on the JavaScript backend.  The Wasm
-;; backend is process-only, so the same operators are covered there by process
-;; cases such as `:bitwise-lfsr`.
-(defn- generated-function-case-test
-  [case precision source]
-  (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
-        url (js/URL.createObjectURL blob)]
-    (-> (dynamic-import url)
-        (.then
-         (fn [module]
-           (let [invoke (gobj/get module "invoke")]
-             (doseq [args (:vectors case)]
-               (let [expected (apply (:reference case) precision args)
-                     actual (apply invoke args)]
-                 (require! (value-match? actual expected)
-                           (str (:id case) " " (pr-str args)
-                                " expected " (pr-str expected)
-                                " got " (pr-str actual)))))
-             {:target :js
-              :case (:id case)
-              :precision precision
-              :passed? true})))
-        (.finally #(js/URL.revokeObjectURL url)))))
-
-(defn- run-function-case!
-  [case precision]
-  (let [url (str "/omkamra/dsp/testbed/source" (acceptance-query case precision))]
-    (-> (response-text url)
-        (.then #(generated-function-case-test case precision %))
-        (.catch
-         (fn [error]
-           {:target :js
-            :case (:id case)
-            :precision precision
-            :passed? false
-            :detail (or (.-message error) (str error))})))))
-
-(defn- run-function-cases-precision!
-  [precision]
-  (letfn [(run [remaining results]
-            (if-let [case (first remaining)]
-              (-> (run-function-case! case precision)
-                  (.then #(run (next remaining) (conj results %))))
-              (js/Promise.resolve results)))]
-    (run (filter #(some #{precision} (:precisions %)) acceptance/function-cases)
-         [])))
-
-(defn run-function-case-matrix!
-  "Run every shared function-entry case against generated JavaScript."
-  []
-  (-> (run-function-cases-precision! :f32)
-      (.then
-       (fn [f32]
-         (-> (run-function-cases-precision! :f64)
-             (.then (fn [f64]
-                      {:f32 f32 :f64 f64
-                       :passed? (and (every? :passed? f32)
-                                     (every? :passed? f64))})))))))
-
-(defn- function-case-suite-result
-  [precision results]
-  {:name (str "shared JS function-case matrix " (name precision))
-   :passed? (every? :passed? results)
-   :targets [:js]
-   :detail (str "matched " (count results) " function cases"
-                "; Wasm is process-only"
-                (when-let [failure (first (remove :passed? results))]
-                  (str "; first failure: " (:case failure)
-                       " — " (:detail failure))))
-   :cases (mapv (fn [entry]
-                  {:case (:case entry)
-                   :precision precision
-                   :javascript (boolean (:passed? entry))})
-                results)})
-
-(defn- run-function-suite-test!
-  [summary results-list previous-results]
-  (-> (run-function-case-matrix!)
-      (.then
-       (fn [{:keys [f32 f64]}]
-         (let [results (conj previous-results
-                             (function-case-suite-result :f32 f32)
-                             (function-case-suite-result :f64 f64))]
-           (render-results! summary results-list results)
-           results)))
-      (.catch
-       (fn [error]
-         (let [results (conj previous-results
-                             {:name "shared JS function-case matrix"
-                              :passed? false
-                              :detail (or (.-message error) (str error))})]
-           (render-results! summary results-list results)
-           results)))))
 
 (defn- bounded-loop-wasm-test
   []
@@ -969,16 +593,14 @@
                   (.call init nil)
                   (.set input #js [1.0])
                   (.call process nil 0 4096 1 44100.0 1)
-                  (require! (close? (aget output 0) 2.0)
-                            (str "expected bounded-loop output 2, got "
-                                 (aget output 0)))
+                  (require! (matches-value? (aget output 0) 2.0)
+                            (str "expected bounded-loop output 2, got " (aget output 0)))
                   (.call reset nil)
                   (let [trapped? (try
                                    (.call process nil 0 4096 1 44100.0 3)
                                    false
                                    (catch :default _ true))]
-                    (require! trapped?
-                              "bounded Wasm loop did not trap on exhaustion")
+                    (require! trapped? "bounded Wasm loop did not trap on exhaustion")
                     {:name "WAT bounded-loop module"
                      :passed? true
                      :detail "compiled WAT; completed within bound and trapped on exhaustion"})))))))
@@ -988,94 +610,98 @@
           :passed? false
           :detail (or (.-message error) (str error))}))))
 
-(defn- run-bounded-loop-wasm-suite-test!
-  [summary results-list previous-results]
-  (-> (bounded-loop-wasm-test)
-      (.then
-       (fn [result]
-         (let [results (conj previous-results result)]
-           (render-results! summary results-list results)
-           results)))))
+;; ---------------------------------------------------------------------------
+;; Suite
+;; ---------------------------------------------------------------------------
 
-(defn- run-generated-f64-test!
-  [summary results-list previous-results]
-  (-> (js/fetch "/omkamra/dsp/testbed/source-f64")
-      (.then (fn [response]
-               (if (.-ok response)
-                 (.text response)
-                 (js/Promise.reject
-                  (js/Error. (str "f64 JavaScript endpoint returned "
-                                  (.-status response)))))))
-      (.then generated-f64-kernel-test)
-      (.then
-       (fn [result]
-         (let [results (conj previous-results result)]
-           (render-results! summary results-list results)
-           (-> (audio-worklet-test :f64)
-               (.then
-                (fn [worklet-result]
-                  (let [results (conj results worklet-result)]
-                    (render-results! summary results-list results)
-                    (run-wasm-test! summary results-list results))))))))))
+(defn- run-promise-sequence
+  [summary results-list previous-results steps]
+  (reduce (fn [promise step]
+            (.then promise
+                   (fn [results]
+                     (-> (step)
+                         (.then (fn [new-results]
+                                  (let [results (into results new-results)]
+                                    (render-results! summary results-list results)
+                                    results)))))))
+          (js/Promise.resolve previous-results)
+          steps))
 
-(defn- run-generated-test!
-  [summary results-list previous-results]
-  (-> (js/fetch "/omkamra/dsp/testbed/source")
-      (.then (fn [response]
-               (if (.-ok response)
-                 (.text response)
-                 (js/Promise.reject
-                  (js/Error. (str "kernel endpoint returned " (.-status response)))))))
-      (.then generated-kernel-test)
-      (.then
-       (fn [generated-result]
-         (let [results (conj previous-results generated-result)]
-           (render-results! summary results-list results)
-           (-> (audio-worklet-test)
-               (.then (fn [worklet-result]
-                        (let [results (conj results worklet-result)]
-                          (render-results! summary results-list results)
-                          (run-generated-f64-test! summary results-list results))))))))
-      (.catch (fn [error]
-                (render-results!
-                 summary
-                 results-list
-                 (conj previous-results
-                       {:name "generated JavaScript / AudioWorklet"
-                        :passed? false
-                        :detail (or (.-message error) (str error))}))))))
+(defn- wasm-worklet-step
+  [results]
+  (-> (js/fetch "/omkamra/dsp/testbed/wasm-metadata")
+      (.then (fn [response] (.json response)))
+      (.then (fn [metadata]
+               (-> (js/fetch "/omkamra/dsp/testbed/wasm-source")
+                   (.then (fn [response] (.text response)))
+                   (.then (fn [wat]
+                            (-> (compile-wasm wat)
+                                (.then (fn [bytes]
+                                         (wasm-audio-worklet-test
+                                          bytes
+                                          (js->clj metadata :keywordize-keys true))))))))))
+      (.then (fn [worklet] (conj results worklet)))))
 
 (defn- run-suite!
   [summary results-list]
-  (let [results (run-suite)]
-    (render-results! summary results-list results)
-    (-> (run-shared-target-suite-test! summary results-list results)
-        (.then #(run-function-suite-test! summary results-list %))
-        (.then #(run-bounded-loop-wasm-suite-test! summary results-list %))
-        (.then #(run-generated-test! summary results-list %)))))
+  (render-results! summary results-list [])
+  (-> (js/Promise.resolve [])
+      (.then (fn [_] (run-process-matrix!)))
+      (.then (fn [process-results]
+               (-> (run-function-matrix!)
+                   (.then (fn [function-results]
+                            (into process-results function-results))))))
+      (.then (fn [matrix-results]
+               (render-results! summary results-list matrix-results)
+               matrix-results))
+      (.then (fn [matrix-results]
+               (run-promise-sequence
+                summary results-list matrix-results
+                [(fn [] (-> (bounded-loop-wasm-test) (.then (fn [r] [r]))))
+                 (fn [] (-> (audio-worklet-test :f32)
+                            (.then (fn [a]
+                                     (-> (audio-worklet-test :f64)
+                                         (.then (fn [b] [a b])))))))])))
+      (.then #(wasm-worklet-step %))
+      (.then (fn [results]
+               (render-results! summary results-list results)
+               results))
+      (.catch (fn [error]
+                (let [failure {:name "browser suite"
+                               :passed? false
+                               :detail (or (.-message error) (str error))}
+                      results (conj (or @last-results []) failure)]
+                  (render-results! summary results-list results)
+                  results)))))
 
 (defn run-conformance!
   "Run the complete browser conformance suite and resolve a structured result.
 
-  Unlike `init`, this does not render into the document and is safe to call
-  from `cljs-eval` or from a Playwright driver such as `omkamra.dsp.browser`.
-  The result is a plain map: `{:passed? :passed :total :results}`.  Each entry
-  in `:results` carries `:name`, `:passed?`, `:detail`, and, for the shared
-  matrices, `:targets` and a per-case `:cases` breakdown."  []
+  Safe to call from `cljs-eval` or from a Playwright driver such as
+  `omkamra.dsp.browser`.  The result is `{:passed? :passed :total :results}`;
+  each entry carries `:name`, `:passed?`, `:detail`, and, for the shared
+  matrices, `:targets` and a per-case `:cases` breakdown."
+  []
   (reset! last-results nil)
   (let [summary (make-element "strong")
         results-list (make-element "ul")]
     (-> (run-suite! summary results-list)
         (.then
-         (fn [_]
-           (let [results (or @last-results [])]
-             (clj->js
-              {:passed? (every? :passed? results)
-               :passed (count (filter :passed? results))
-               :total (count results)
-               :results (mapv #(clj->js (select-keys
-                                         % [:name :passed? :detail :targets :cases]))
-                              results)})))))))
+         (fn [results]
+           (clj->js
+            {:passed? (every? :passed? results)
+             :passed (count (filter :passed? results))
+             :total (count results)
+             :results (mapv #(clj->js (select-keys
+                                       % [:name :passed? :detail :targets :cases]))
+                            results)}))))))
+
+(defn run-function-case-matrix!
+  []
+  (-> (run-function-matrix!)
+      (.then (fn [results]
+               (clj->js {:passed? (every? :passed? results)
+                         :results (mapv clj->js results)})))))
 
 (defn init
   []
@@ -1086,13 +712,10 @@
   (let [main (make-element "main")
         heading (text! (make-element "h1") "omkamra.dsp browser testbed")
         intro (text! (make-element "p")
-                     "A browser-side block ABI testbed. One run covers the shared f32/f64 JavaScript/Wasm acceptance matrix, bounded-loop WAT traps, handwritten CLJS checks, generated JavaScript modules, both Squint AudioWorklet adapters, and WABT-compiled Wasm modules.")
+                     "Differential browser testbed: every shared case is compared against the portable reference interpreter compiled into this page, on JavaScript and Wasm.")
         button (text! (make-element "button") "Run checks")
         summary (make-element "strong")
-        results-list (make-element "ul")
-        notes (text! (make-element "h2") "What this exercises")
-        description (text! (make-element "p")
-                           "Float32Array and Float64Array input/output buffers, partial blocks, zero-length blocks, state carried across blocks, reset behavior, shared catalog vectors, bounded-loop exhaustion traps, emitted JavaScript modules, JavaScript and Wasm AudioWorklet block processing, WAT emission, and browser-side Wasm instantiation.")]
+        results-list (make-element "ul")]
     (style! button "padding" "8px 12px")
     (style! button "cursor" "pointer")
     (style! summary "display" "block")
@@ -1104,8 +727,6 @@
     (append! main button)
     (append! main summary)
     (append! main results-list)
-    (append! main notes)
-    (append! main description)
     (append! (.-body js/document) main)
     (.addEventListener button "click" #(run-suite! summary results-list))
     (set! (.-omkamraDspTestbed js/window)
@@ -1113,6 +734,5 @@
                :runFunctionCaseMatrix run-function-case-matrix!
                :caseIds (clj->js (mapv :id acceptance/all-cases))})
     (reset! app-state {:summary summary :results-list results-list})
-    (when-not (str/includes? (or (.-search (.-location js/window)) "")
-                             "autorun=0")
+    (when-not (str/includes? (or (.-search (.-location js/window)) "") "autorun=0")
       (run-suite! summary results-list))))

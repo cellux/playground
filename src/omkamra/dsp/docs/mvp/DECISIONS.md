@@ -165,3 +165,146 @@ runnable from the REPL and from scripts, rather than only by clicking.
 installed `chromium_headless_shell` under `PLAYWRIGHT_BROWSERS_PATH` because
 spel's bundled Playwright may pin a different revision. `?autorun=0` keeps the
 programmatic run from racing the page's automatic run.
+
+---
+
+## D9 — `min`/`max` are NaN-propagating and signed-zero-aware
+
+**Status.** In force (decided before P2).
+
+**Decision.** `min` and `max` (and therefore `clamp`, defined as
+`min(max(x, lo), hi)`) return NaN if any operand is NaN, and order `-0 < +0`.
+So `min(-0, +0)` is `-0`, `max(-0, +0)` is `+0`, and `clamp(NaN, lo, hi)` is
+NaN. This is the native behavior of JVM `Math.min`/`Math.max`, JavaScript
+`Math.min`/`Math.max`, and Wasm `f32.min`/`f64.min` (verified during P2
+planning), so all three lower directly.
+
+**Rationale.** It is the lowest-glue contract and the one every target already
+implements. It is also the modern IEEE 754-2019 direction: the old NaN-ignoring
+`minNum`/`maxNum` were deprecated in favor of NaN-propagating `minimum`/`maximum`
+with separate `minimumNumber`/`maximumNumber` variants. Finally, `PLAN.md`'s
+non-finite policy detects and contains NaN at the voice level, which requires
+NaN to remain visible rather than being swallowed by `min`/`max`.
+
+**Consequences.** Conformance comparison for these operations must be
+signed-zero-aware (`-0` and `+0` are distinct results) while treating any NaN
+as equal to any NaN. If NaN-ignoring semantics are ever wanted, they are added
+as separate `min-number`/`max-number` operations rather than by changing
+`min`/`max`.
+
+---
+
+## D10 — `round` rounds half away from zero, and is derived
+
+**Status.** In force (decided before P2).
+
+**Decision.** `round` rounds ties away from zero: `round(0.5) = 1`,
+`round(-0.5) = -1`, `round(2.5) = 3`, `round(-2.5) = -3`. It is not a
+per-backend primitive; it expands to `copysign(floor(abs(x) + 0.5), x)`.
+Signed zero is preserved (`round(-0.0) = -0.0`) and NaN propagates.
+
+**Rationale.** No target's native `round` agrees with another's: JVM/JS are
+half-up-toward-`+inf` (and JVM `Math.round` returns an integer type),
+while Wasm `nearest` and JVM `Math.rint` are half-to-even; JS and JVM even
+disagree on the sign of `round(-0.5)`. Half-away-from-zero (the C `round` and
+Rust `f32::round` convention) is the only tie rule with a single portable
+definition and no target quirks, and it is symmetric, which is what DSP
+quantization and pitch code expects.
+
+**Consequences.** `round` adds no backend surface. Its correctness follows
+from `copysign`, `floor`, and `abs`, so conformance can compare it exactly
+(subject to D9's signed-zero-aware comparison).
+
+---
+
+## D11 — P2 has a small primitive set; most named operations are derived
+
+**Status.** In force (decided before P2).
+
+**Decision.** P2 primitives are `abs`, `min`, `max`, `floor`, `ceil`,
+`trunc`, `sqrt`, `copysign`, and integer `rem`/`mod`. Derived operations are
+`clamp` = `min(max(x, lo), hi)`, `fract` = `x - floor(x)`, `sign`, and
+`round` (D10). A primitive is added only where a target instruction is the
+natural lowering or the semantics genuinely cannot be expressed in the
+language. `trunc` is a primitive even though only JS and Wasm have it
+natively; JVM derives it as `copysign(floor(abs(x)), x)`.
+
+**Rationale.** `PLAN.md` says to prefer the DSP language and to keep target
+intrinsics a constrained escape hatch. Deriving the composable operations keeps
+the portable-IR and backend surface small, makes their semantics follow from
+the primitives, and matches the fact that `copysign` (JS) and `trunc` (JVM)
+already need derivation on some targets.
+
+**Consequences.** The builtin registry distinguishes primitives from derived
+operations. Derived operations may be expanded during IR lowering and are not
+required to appear as capability-bearing intrinsics.
+
+---
+
+## D12 — Integer division and remainder are total and wrapping
+
+**Status.** In force (decided before P2).
+
+**Decision.** Integer `/`, `rem`, and `mod` never throw or trap:
+
+- `x / 0 = 0`, `x rem 0 = 0`, `x mod 0 = 0`;
+- `INT_MIN / -1` wraps to `INT_MIN`;
+- `INT_MIN rem -1 = 0` and `INT_MIN mod -1 = 0`;
+- `rem` is truncated (sign of the dividend); `mod` is floored (sign of the
+  divisor).
+
+This applies to the existing integer `/` as well, normalizing a pre-existing
+four-way divergence (interpreter threw, JVM threw, JavaScript returned `0`,
+Wasm trapped; and the interpreter threw on `INT_MIN / -1` while the JVM
+wrapped).
+
+**Rationale.** `PLAN.md` requires bounded, predeclared runtime behavior that
+never throws, traps, blocks, or allocates through the audio callback, and fixes
+`:int` as signed two's-complement with explicit wrapping arithmetic. Returning
+`0` is the smallest bounded total extension; wrapping `INT_MIN / -1` follows
+two's-complement arithmetic and matches the existing JVM and JavaScript
+behavior. The remainder path needs no special case (`INT_MIN rem -1 = 0` is
+native on all targets).
+
+**Consequences.** The interpreter must use unchecked integer division with
+guards; the JVM and Wasm lowerings add a zero-divisor/normalization guard
+around `idiv`/`div_s`; JavaScript is unchanged. A fixed diagnostic counter for
+integer division by zero is deferred to the runtime-diagnostics work (P9).
+
+---
+
+## D13 — A capability-aware builtin registry and a generic `:builtin` IR node
+
+**Status.** In force (decided before P2).
+
+**Decision.** P2 introduces a single builtin registry (namespace
+`omkamra.dsp.builtins`) as the source of truth for every non-arithmetic
+operation. Each entry declares name, operator keyword, arity, parameter types,
+return type, effects, and whether it is a primitive or a derived operation
+(plus its expansion when derived). The registry feeds linker `language-forms`,
+descriptor type inference, and IR lowering so those never drift.
+
+Primitives lower to one generic portable-IR node,
+`{:op :builtin :builtin :sqrt :args [...]}`. Each backend owns a
+builtin → lowering map whose value may emit a sequence of instructions and may
+return a structured unsupported-target diagnostic. Derived operations (D11)
+are expanded during IR lowering and never reach a backend.
+
+Derived expansions must not duplicate effectful arguments. Each argument is
+bound to a fresh IR local before the expansion is lowered, so an argument that
+is a `:call` or `:buffer-load` is evaluated exactly once.
+
+**Rationale.** `PLAN.md` requires every intrinsic to have a typed signature,
+an explicit effect and capability contract, and a clear unsupported-target
+diagnostic. Centralizing that in one registry removes the seven-file edit
+surface per operation and gives P3 a single place to express the mixed
+outcomes it will face — JVM and JavaScript can lower transcendentals to
+`Math`, but Wasm has no `sin`/`cos`/`exp`/`log`/`pow` and must either emit a
+portable sequence or report the operation unsupported. Existing arithmetic,
+comparison, and logical nodes keep their current representation; bitwise may
+migrate to the registry later.
+
+**Consequences.** Adding an operation becomes a registry entry plus one
+lowering per backend. The registry is expected to become `.cljc` when the
+browser compiler (P13) is ported. Capability gaps are data, not backend
+exception strings.

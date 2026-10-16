@@ -51,6 +51,8 @@
               :args (mapv #(lower-expression % channels) (:args expression))}
     :bitwise {:op :bitwise :operator (:operator expression) :type :int
               :args (mapv #(lower-expression % channels) (:args expression))}
+    :builtin {:op :builtin :builtin (:builtin expression) :type (:type expression)
+              :args (mapv #(lower-expression % channels) (:args expression))}
     :convert {:op :convert :operator (:operator expression) :type (:type expression)
               :value (lower-expression (:value expression) channels)}
     (throw (ex-info "unsupported expression in JS lowering"
@@ -152,7 +154,7 @@
     :bit-shift-right ">>"
     :unsigned-bit-shift-right ">>>"))
 
-(declare emit-expression emit-statement-lines)
+(declare emit-expression emit-statement-lines emit-builtin)
 
 (defn- buffer-source
   [operation]
@@ -202,10 +204,52 @@
                               (str "(" (emit-expression (first (:args expression))) " "
                                    (bitwise-operator (:operator expression)) " "
                                    (emit-expression (second (:args expression))) ")")))
+    :builtin (coerce-source (:type expression) (emit-builtin expression))
     :convert (case (:operator expression)
                :int->float (coerce-source :float (emit-expression (:value expression)))
                :float->int (coerce-source :int
                                           (str "Math.trunc(" (emit-expression (:value expression)) ")")))))
+
+(defmulti emit-builtin
+  "JavaScript emission for a primitive builtin, dispatched on `[operator type]`."
+  (fn [expression] [(:builtin expression) (:type expression)]))
+
+(defmethod emit-builtin :default
+  [expression]
+  (throw (ex-info "JavaScript backend does not implement this DSP builtin"
+                  {:builtin (:builtin expression) :type (:type expression)})))
+
+(defn- unary-builtin
+  [method expression]
+  (str method "(" (emit-expression (first (:args expression))) ")"))
+
+(defn- binary-builtin
+  [method expression]
+  (str method "(" (emit-expression (first (:args expression))) ", "
+       (emit-expression (second (:args expression))) ")"))
+
+(defmethod emit-builtin [:abs :float] [e] (unary-builtin "Math.abs" e))
+(defmethod emit-builtin [:abs :int] [e] (unary-builtin "Math.abs" e))
+(defmethod emit-builtin [:min :float] [e] (binary-builtin "Math.min" e))
+(defmethod emit-builtin [:max :float] [e] (binary-builtin "Math.max" e))
+(defmethod emit-builtin [:min :int] [e] (binary-builtin "Math.min" e))
+(defmethod emit-builtin [:max :int] [e] (binary-builtin "Math.max" e))
+(defmethod emit-builtin [:floor :float] [e] (unary-builtin "Math.floor" e))
+(defmethod emit-builtin [:ceil :float] [e] (unary-builtin "Math.ceil" e))
+(defmethod emit-builtin [:trunc :float] [e] (unary-builtin "Math.trunc" e))
+(defmethod emit-builtin [:sqrt :float] [e] (unary-builtin "Math.sqrt" e))
+
+(defmethod emit-builtin [:copysign :float]
+  [expression]
+  (let [x (emit-expression (first (:args expression)))
+        y (emit-expression (second (:args expression)))]
+    (str "(((" y " < 0) || ((" y " === 0) && ((1 / " y ") < 0))) ? -Math.abs(" x
+         ") : Math.abs(" x "))")))
+
+(defmethod emit-builtin [:rem :int]
+  [expression]
+  (str "(" (emit-expression (first (:args expression))) " % "
+       (emit-expression (second (:args expression))) ")"))
 
 (defn- indent
   [level text]

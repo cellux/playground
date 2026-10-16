@@ -1,10 +1,12 @@
-(ns omkamra.dsp.interpreter)
+(ns omkamra.dsp.interpreter
+  "Portable reference interpreter for portable DSP IR.
 
-(def ^:private float-array-class (Class/forName "[F"))
-(def ^:private double-array-class (Class/forName "[D"))
-(def ^:private float-2d-array-class (Class/forName "[[F"))
-(def ^:private double-2d-array-class (Class/forName "[[D"))
-(def ^:private object-array-class (Class/forName "[Ljava.lang.Object;"))
+  This is the executable semantic specification for the DSP language.  It is
+  a `.cljc` namespace with a small platform abstraction so the same code runs on
+  the JVM (over primitive `float`/`double` arrays) and in ClojureScript (over
+  `Float32Array`/`Float64Array`), which lets the browser compute expected
+  outputs from compiled IR instead of trusting vectors shipped from the JVM.")
+
 (def ^:dynamic *precision* nil)
 
 (defn- precision!
@@ -23,12 +25,82 @@
     (throw (ex-info "interpreter precision is not bound"
                     {:precision *precision*}))))
 
-(defn- real-array-class [] (if (f64?) double-array-class float-array-class))
-(defn- real-2d-array-class [] (if (f64?) double-2d-array-class float-2d-array-class))
-(defn- logical-real [value] (if (f64?) (double value) (float value)))
+;; ---------------------------------------------------------------------------
+;; Platform abstraction: buffers and numeric narrowing
+;; ---------------------------------------------------------------------------
 
-(defn logical-float [value] (float value))
-(defn logical-int [value] (int value))
+#?(:clj (def ^:private float-array-class (Class/forName "[F")))
+#?(:clj (def ^:private double-array-class (Class/forName "[D")))
+#?(:clj (def ^:private float-2d-array-class (Class/forName "[[F")))
+#?(:clj (def ^:private double-2d-array-class (Class/forName "[[D")))
+#?(:clj (def ^:private object-array-class (Class/forName "[Ljava.lang.Object;")))
+
+(defn- real-buffer?
+  [value]
+  #?(:clj (or (instance? float-array-class value)
+              (instance? double-array-class value))
+     :cljs (or (instance? js/Float32Array value)
+               (instance? js/Float64Array value))))
+
+(defn- buffer-array?
+  [value]
+  #?(:clj (or (instance? float-2d-array-class value)
+              (instance? double-2d-array-class value))
+     :cljs (and (js/Array.isArray value)
+                (every? real-buffer? (array-seq value)))))
+
+(defn- object-buffer?
+  [value]
+  #?(:clj (instance? object-array-class value)
+     :cljs (js/Array.isArray value)))
+
+(defn- make-real-array
+  [values]
+  #?(:clj (if (f64?) (double-array values) (float-array values))
+     :cljs (if (f64?)
+             (js/Float64Array. (to-array values))
+             (js/Float32Array. (to-array values)))))
+
+(defn- make-object-array
+  [values]
+  #?(:clj (object-array values)
+     :cljs (to-array values)))
+
+(defn- set-real!
+  [buffer index value]
+  #?(:clj (if (instance? double-array-class buffer)
+            (aset-double ^doubles buffer index (double value))
+            (aset-float ^floats buffer index (float value)))
+     :cljs (aset buffer index value)))
+
+(defn- set-object!
+  [buffer index value]
+  #?(:clj (aset ^objects buffer index value)
+     :cljs (aset buffer index value)))
+
+;; `(float x)` range-checks and throws on infinity, while the f32 contract is
+;; IEEE-754, so narrowing uses `unchecked-float` on the JVM.
+(defn- logical-real
+  [value]
+  #?(:clj (if (f64?) (double value) (unchecked-float value))
+     :cljs (if (f64?) value (js/Math.fround value))))
+
+(defn logical-float
+  [value]
+  #?(:clj (unchecked-float value)
+     :cljs (js/Math.fround value)))
+
+(defn logical-int
+  [value]
+  #?(:clj (int value)
+     :cljs (bit-or value 0)))
+
+(defn- int32
+  "Narrow to a signed two's-complement 32-bit integer."
+  [value]
+  #?(:clj (unchecked-int value)
+     :cljs (bit-or value 0)))
+
 (defn logical-boolean
   [value]
   (if (boolean? value)
@@ -42,6 +114,64 @@
     :int (logical-int value)
     :boolean (logical-boolean value)
     (throw (ex-info "unknown DSP logical type" {:type type :value value}))))
+
+;; ---------------------------------------------------------------------------
+;; Builtin reference semantics
+;; ---------------------------------------------------------------------------
+
+(defn- math-abs [x] #?(:clj (Math/abs (double x)) :cljs (js/Math.abs x)))
+(defn- math-abs-int [x] #?(:clj (Math/abs (int x)) :cljs (js/Math.abs x)))
+(defn- math-min [a b] #?(:clj (Math/min (double a) (double b)) :cljs (js/Math.min a b)))
+(defn- math-max [a b] #?(:clj (Math/max (double a) (double b)) :cljs (js/Math.max a b)))
+(defn- math-min-int [a b] #?(:clj (Math/min (int a) (int b)) :cljs (js/Math.min a b)))
+(defn- math-max-int [a b] #?(:clj (Math/max (int a) (int b)) :cljs (js/Math.max a b)))
+(defn- math-floor [x] #?(:clj (Math/floor (double x)) :cljs (js/Math.floor x)))
+(defn- math-ceil [x] #?(:clj (Math/ceil (double x)) :cljs (js/Math.ceil x)))
+(defn- math-sqrt [x] #?(:clj (Math/sqrt (double x)) :cljs (js/Math.sqrt x)))
+
+(defn- math-copy-sign
+  [x y]
+  #?(:clj (Math/copySign (double x) (double y))
+     :cljs (if (or (neg? y) (and (zero? y) (neg? (/ 1 y))))
+             (- (js/Math.abs x))
+             (js/Math.abs x))))
+
+(defn- truncate
+  [x]
+  (if (neg? x) (math-ceil x) (math-floor x)))
+
+(defmulti ^:private evaluate-builtin
+  "Reference semantics for primitive builtins, dispatched on [operator type]."
+  (fn [operator type _args] [operator type]))
+
+(defmethod evaluate-builtin :default
+  [operator type _args]
+  (throw (ex-info "DSP builtin has no interpreter implementation"
+                  {:operator operator :type type})))
+
+(defmethod evaluate-builtin [:abs :float] [_ _ [x]] (math-abs x))
+(defmethod evaluate-builtin [:abs :int] [_ _ [x]] (math-abs-int x))
+(defmethod evaluate-builtin [:min :float] [_ _ [x y]] (math-min x y))
+(defmethod evaluate-builtin [:min :int] [_ _ [x y]] (math-min-int x y))
+(defmethod evaluate-builtin [:max :float] [_ _ [x y]] (math-max x y))
+(defmethod evaluate-builtin [:max :int] [_ _ [x y]] (math-max-int x y))
+(defmethod evaluate-builtin [:floor :float] [_ _ [x]] (math-floor x))
+(defmethod evaluate-builtin [:ceil :float] [_ _ [x]] (math-ceil x))
+(defmethod evaluate-builtin [:trunc :float] [_ _ [x]] (truncate x))
+(defmethod evaluate-builtin [:sqrt :float] [_ _ [x]] (math-sqrt x))
+(defmethod evaluate-builtin [:copysign :float] [_ _ [x y]] (math-copy-sign x y))
+;; `rem` is the truncated remainder on every target.  ClojureScript's
+;; `unchecked-remainder-int` is floored (it uses `mod`), so the reference uses
+;; `rem` and narrows explicitly.
+(defmethod evaluate-builtin [:rem :int]
+  [_ _ [x y]]
+  (if (zero? (logical-int y))
+    0
+    (int32 (rem (logical-int x) (logical-int y)))))
+
+;; ---------------------------------------------------------------------------
+;; Validation
+;; ---------------------------------------------------------------------------
 
 (defn- check-arity!
   [ir args]
@@ -59,9 +189,9 @@
                      :actual (count controls)
                      :name (:name ir)}))))
 
-(defn- check-float-array!
+(defn- check-real-buffer!
   [value name]
-  (when-not (instance? (real-array-class) value)
+  (when-not (real-buffer? value)
     (throw (ex-info (if (f64?) "DSP process expects primitive double arrays"
                         "DSP process expects primitive float arrays")
                     {:argument name :value value}))))
@@ -71,13 +201,13 @@
   (let [required-length (+ frames (get-in ir [:memory name :max-frame-offset] 0))]
     (if (= 1 (:channels ir))
       (do
-        (check-float-array! value name)
+        (check-real-buffer! value name)
         (when (< (alength value) required-length)
           (throw (ex-info "DSP buffer is shorter than the frame-access requirement"
                           {:argument name :frames frames :required-length required-length
                            :length (alength value)}))))
       (do
-        (when-not (instance? (real-2d-array-class) value)
+        (when-not (buffer-array? value)
           (throw (ex-info (if (f64?) "DSP multi-channel process expects double[][] buffers"
                               "DSP multi-channel process expects float[][] buffers")
                           {:argument name :value value})))
@@ -87,7 +217,7 @@
                            :actual (alength value)})))
         (dotimes [channel (:channels ir)]
           (let [buffer (aget value channel)]
-            (check-float-array! buffer [name channel])
+            (check-real-buffer! buffer [name channel])
             (when (< (alength buffer) required-length)
               (throw (ex-info "DSP buffer channel is shorter than the frame-access requirement"
                               {:argument [name channel]
@@ -110,40 +240,48 @@
   [ir]
   (every? #(= :float (:type %)) (:state ir)))
 
+(defn- state-length
+  [ir]
+  (reduce + 0 (map state-size (:state ir))))
+
 (defn- check-state!
   [ir state]
-  (let [expected-class (if (float-state? ir) (real-array-class) object-array-class)]
-    (when-not (instance? expected-class state)
-      (throw (ex-info "DSP process state has the wrong representation"
-                      {:expected (if (float-state? ir) :float-array :object-array)
-                       :value state :name (:name ir)})))
-    (let [expected (reduce + 0 (map state-size (:state ir)))]
-      (when-not (= expected (alength state))
+  (if (float-state? ir)
+    (do
+      (when-not (real-buffer? state)
+        (throw (ex-info "DSP process state has the wrong representation"
+                        {:expected :float-array :value state :name (:name ir)})))
+      (when-not (= (state-length ir) (alength state))
         (throw (ex-info "DSP process state has the wrong size"
-                        {:expected expected
+                        {:expected (state-length ir)
                          :actual (alength state)
                          :name (:name ir)}))))
-    state))
+    (do
+      (when-not (object-buffer? state)
+        (throw (ex-info "DSP process state has the wrong representation"
+                        {:expected :object-array :value state :name (:name ir)})))
+      (when-not (= (state-length ir) (alength state))
+        (throw (ex-info "DSP process state has the wrong size"
+                        {:expected (state-length ir)
+                         :actual (alength state)
+                         :name (:name ir)})))))
+  state)
 
 (defn- state-value
   [state index]
-  (if (instance? (real-array-class) state)
-    (aget state index)
-    (aget ^objects state index)))
+  (aget state index))
 
 (defn- set-state-value!
   [state index type value]
   (let [value (coerce-value type value)]
-    (if (instance? (real-array-class) state)
-      (if (f64?)
-        (aset-double ^doubles state index value)
-        (aset-float ^floats state index value))
-      (aset ^objects state index value))
+    (if (real-buffer? state)
+      (set-real! state index value)
+      (set-object! state index value))
     nil))
 
 (defn- check-block!
   [ir input output frames state]
-  (let [frames (int frames)]
+  (let [frames (logical-int frames)]
     (when (neg? frames)
       (throw (ex-info "DSP process frame count must not be negative"
                       {:frames frames :name (:name ir)})))
@@ -152,18 +290,22 @@
     (check-state! ir state)
     frames))
 
+;; ---------------------------------------------------------------------------
+;; State lifecycle
+;; ---------------------------------------------------------------------------
+
 (defn create-state
   [ir]
   (binding [*precision* (precision! ir)]
     (if (float-state? ir)
-      (if (f64?)
-        (double-array (state-elements (:state ir)))
-        (float-array (state-elements (:state ir))))
-      (object-array (mapcat (fn [{:keys [type] :as state}]
-                              (map #(coerce-value type %) (if (= 1 (state-size state))
-                                                            [(:init state)]
-                                                            (:init state))))
-                            (:state ir))))))
+      (make-real-array (state-elements (:state ir)))
+      (make-object-array
+       (mapcat (fn [{:keys [type] :as state}]
+                 (map #(coerce-value type %)
+                      (if (= 1 (state-size state))
+                        [(:init state)]
+                        (:init state))))
+               (:state ir))))))
 
 (defn reset-state!
   [ir state]
@@ -176,6 +318,10 @@
                                                  init))]
       (set-state-value! state (+ index element-index) type value))
     nil))
+
+;; ---------------------------------------------------------------------------
+;; Evaluation
+;; ---------------------------------------------------------------------------
 
 (defn- evaluate-binary
   [type operator left right]
@@ -192,9 +338,13 @@
       :+ (unchecked-add-int left right)
       :- (unchecked-subtract-int left right)
       :* (unchecked-multiply-int left right)
+      ;; Total and wrapping (D12): division by zero yields zero, and
+      ;; INT_MIN / -1 wraps to INT_MIN rather than overflowing.
       :/ (if (zero? right)
-           (throw (ex-info "DSP integer division by zero" {:left left :right right}))
-           (logical-int (quot left right))))))
+           0
+           ;; Wrapped explicitly: ClojureScript's `unchecked-divide-int` does
+           ;; not narrow `INT_MIN / -1` to 32 bits.
+           (int32 (unchecked-divide-int left right))))))
 
 (defn- evaluate-comparison
   [operator left right]
@@ -212,8 +362,8 @@
 ;; target.  Clojure's `bit-shift-*` operate on 64-bit boxed longs and do not
 ;; mask the shift distance the way JVM/JS/Wasm i32 shifts do, so the reference
 ;; implementation masks the distance to five bits and narrows results with
-;; `unchecked-int`.  Logical right shift first reinterprets the operand as an
-;; unsigned 32-bit value to avoid 64-bit sign extension.
+;; `int32`.  Logical right shift first reinterprets the operand as an unsigned
+;; 32-bit value to avoid 64-bit sign extension.
 (defn- shift-distance
   [value]
   (bit-and (logical-int value) 0x1f))
@@ -222,7 +372,7 @@
   [expression locals context]
   (let [args (mapv #(logical-int (evaluate-expression % locals context))
                    (:args expression))]
-    (unchecked-int
+    (int32
      (case (:operator expression)
        :bit-and (bit-and (nth args 0) (nth args 1))
        :bit-or (bit-or (nth args 0) (nth args 1))
@@ -336,11 +486,31 @@
                :or (or (evaluate-expression (first (:args expression)) locals context)
                        (evaluate-expression (second (:args expression)) locals context)))
     :bitwise (evaluate-bitwise expression locals context)
+    :builtin (coerce-value
+              (:type expression)
+              (evaluate-builtin
+               (:builtin expression)
+               (:type expression)
+               (mapv #(evaluate-expression % locals context) (:args expression))))
     (throw (ex-info "unknown DSP IR expression" {:expression expression}))))
 
 (defn- control
   [kind & [value]]
   {:control kind :value value})
+
+(defn- set-local!
+  "Associate `value` with `name` in the `locals` volatile.
+
+  ClojureScript's persistent maps short-circuit `assoc` when the new value is
+  `identical?` (JavaScript `===`) to the stored one.  Because JavaScript says
+  `0 === -0`, overwriting a `+0.0` local with `-0.0` (or the reverse) would
+  silently keep the old sign.  Dropping the key first forces a genuine
+  insertion; the JVM has no such fast path, so it keeps the direct `assoc`."
+  [locals name value]
+  (vreset! locals
+           #?(:clj (assoc @locals name value)
+              :cljs (assoc (dissoc @locals name) name value)))
+  nil)
 
 (defn- execute-block
   [statements locals context]
@@ -355,22 +525,18 @@
   [statement locals context]
   (case (:op statement)
     :block (execute-block (:statements statement) locals context)
-    :declare (do
-               (vswap! locals assoc (:name statement)
-                       (if-let [init (:init statement)]
-                         (coerce-value (:type statement)
-                                       (evaluate-expression init locals context))
-                         (case (:type statement)
-                           :float (logical-real 0.0)
-                           :int (int 0)
-                           :boolean false)))
-               nil)
-    :assign (do
-              (vswap! locals assoc (:name statement)
-                      (coerce-value (:type statement)
-                                    (evaluate-expression (:value statement)
-                                                         locals context)))
-              nil)
+    :declare (set-local! locals (:name statement)
+                         (if-let [init (:init statement)]
+                           (coerce-value (:type statement)
+                                         (evaluate-expression init locals context))
+                           (case (:type statement)
+                             :float (logical-real 0.0)
+                             :int (logical-int 0)
+                             :boolean false)))
+    :assign (set-local! locals (:name statement)
+                        (coerce-value (:type statement)
+                                      (evaluate-expression (:value statement)
+                                                           locals context)))
     :expression (do (evaluate-expression (:value statement) locals context) nil)
     :if (execute-statement
          (if (evaluate-expression (:condition statement) locals context)
@@ -397,9 +563,7 @@
                         value (logical-real
                                (evaluate-expression (:value statement)
                                                     locals context))]
-                    (if (f64?)
-                      (aset-double ^doubles buffer index value)
-                      (aset-float ^floats buffer index value))
+                    (set-real! buffer index value)
                     nil)
     :state-store (do
                    (set-state-value! (:state context)
@@ -409,6 +573,10 @@
                                                           locals context))
                    nil)
     (throw (ex-info "unknown DSP IR statement" {:statement statement}))))
+
+;; ---------------------------------------------------------------------------
+;; Public entry points
+;; ---------------------------------------------------------------------------
 
 (defn invoke
   [ir args]
@@ -432,7 +600,7 @@
   `:sample-rate` is part of the portable ABI even though the legacy array
   callable does not pass it. `:controls` is a vector in process-signature
   order. This function is the reference implementation used by richer host
-  adapters."
+  adapters and by the browser conformance runner."
   [ir {:keys [input output frames controls state sample-rate]
        :or {controls [] sample-rate 0.0}}]
   (binding [*precision* (precision! ir)]
@@ -467,3 +635,4 @@
                        :frames frames
                        :controls controls
                        :state state}))
+

@@ -5,6 +5,7 @@
             [cheshire.core :as json]
             [omkamra.dsp :as dsp]
             [omkamra.dsp.acceptance :as acceptance]
+            [omkamra.dsp.conformance :as conformance]
             [squint.compiler :as squint]))
 
 (def one-pole (:definition (acceptance/case-by-id :one-pole)))
@@ -69,6 +70,21 @@
 (defn source-f64
   [request]
   (js-source (requested-case request) :f64))
+
+(defn plan
+  "Serve the target-neutral conformance plan for a case and precision.
+
+  The plan embeds the compiled portable IR; the browser runs the `.cljc`
+  reference interpreter on it to compute expected outputs."
+  [request]
+  (let [case (requested-case request)
+        precision (requested-precision request)
+        body (json/generate-string
+              (conformance/serialize-plan (conformance/plan case precision)))]
+    {:status 200
+     :headers {"content-type" "application/json; charset=utf-8"
+               "cache-control" "no-store"}
+     :body body}))
 
 (defn- wasm-artifact
   [case precision]
