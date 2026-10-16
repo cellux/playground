@@ -128,6 +128,19 @@
 (defn- math-floor [x] #?(:clj (Math/floor (double x)) :cljs (js/Math.floor x)))
 (defn- math-ceil [x] #?(:clj (Math/ceil (double x)) :cljs (js/Math.ceil x)))
 (defn- math-sqrt [x] #?(:clj (Math/sqrt (double x)) :cljs (js/Math.sqrt x)))
+(defn- math-exp [x] #?(:clj (Math/exp (double x)) :cljs (js/Math.exp x)))
+(defn- math-sin [x] #?(:clj (Math/sin (double x)) :cljs (js/Math.sin x)))
+(defn- math-cos [x] #?(:clj (Math/cos (double x)) :cljs (js/Math.cos x)))
+(defn- math-tan [x] #?(:clj (Math/tan (double x)) :cljs (js/Math.tan x)))
+(defn- math-asin [x] #?(:clj (Math/asin (double x)) :cljs (js/Math.asin x)))
+(defn- math-acos [x] #?(:clj (Math/acos (double x)) :cljs (js/Math.acos x)))
+(defn- math-atan [x] #?(:clj (Math/atan (double x)) :cljs (js/Math.atan x)))
+(defn- math-atan2 [y x] #?(:clj (Math/atan2 (double y) (double x)) :cljs (js/Math.atan2 y x)))
+(defn- math-log [x] #?(:clj (Math/log (double x)) :cljs (js/Math.log x)))
+(defn- math-pow [x y] #?(:clj (Math/pow (double x) (double y)) :cljs (js/Math.pow x y)))
+(defn- math-sinh [x] #?(:clj (Math/sinh (double x)) :cljs (js/Math.sinh x)))
+(defn- math-cosh [x] #?(:clj (Math/cosh (double x)) :cljs (js/Math.cosh x)))
+(defn- math-tanh [x] #?(:clj (Math/tanh (double x)) :cljs (js/Math.tanh x)))
 
 (defn- math-copy-sign
   [x y]
@@ -159,6 +172,19 @@
 (defmethod evaluate-builtin [:ceil :float] [_ _ [x]] (math-ceil x))
 (defmethod evaluate-builtin [:trunc :float] [_ _ [x]] (truncate x))
 (defmethod evaluate-builtin [:sqrt :float] [_ _ [x]] (math-sqrt x))
+(defmethod evaluate-builtin [:exp :float] [_ _ [x]] (math-exp x))
+(defmethod evaluate-builtin [:sin :float] [_ _ [x]] (math-sin x))
+(defmethod evaluate-builtin [:cos :float] [_ _ [x]] (math-cos x))
+(defmethod evaluate-builtin [:tan :float] [_ _ [x]] (math-tan x))
+(defmethod evaluate-builtin [:asin :float] [_ _ [x]] (math-asin x))
+(defmethod evaluate-builtin [:acos :float] [_ _ [x]] (math-acos x))
+(defmethod evaluate-builtin [:atan :float] [_ _ [x]] (math-atan x))
+(defmethod evaluate-builtin [:atan2 :float] [_ _ [y x]] (math-atan2 y x))
+(defmethod evaluate-builtin [:log :float] [_ _ [x]] (math-log x))
+(defmethod evaluate-builtin [:pow :float] [_ _ [x y]] (math-pow x y))
+(defmethod evaluate-builtin [:sinh :float] [_ _ [x]] (math-sinh x))
+(defmethod evaluate-builtin [:cosh :float] [_ _ [x]] (math-cosh x))
+(defmethod evaluate-builtin [:tanh :float] [_ _ [x]] (math-tanh x))
 (defmethod evaluate-builtin [:copysign :float] [_ _ [x y]] (math-copy-sign x y))
 ;; `rem` is the truncated remainder on every target.  ClojureScript's
 ;; `unchecked-remainder-int` is floored (it uses `mod`), so the reference uses
@@ -456,7 +482,11 @@
 (defn- evaluate-expression
   [expression locals context]
   (case (:op expression)
-    :const (:value expression)
+    ;; Narrow float constants to the kernel precision, matching what the
+    ;; backends emit as a constant (`f32.const`, `(float ...)`, `Math.fround`).
+    :const (if (= :float (:type expression))
+             (logical-real (:value expression))
+             (:value expression))
     :local (get @locals (:name expression))
     :state-load (coerce-value (:type expression)
                               (state-value (:state context)

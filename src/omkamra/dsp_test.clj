@@ -136,7 +136,8 @@
             :channels 1
             :checks :development
             :optimize false
-            :loop-bound nil}
+            :loop-bound nil
+            :wasm-math :polynomial}
            (:options artifact))))
   (testing "unknown options"
     (let [error (try
@@ -472,7 +473,7 @@
             actual (conformance/run-plan
                     (conformance/target-artifact case precision :jvm)
                     plan)]
-        (is (conformance/results-match? expected actual))))))
+        (is (conformance/results-match? :jvm precision expected actual))))))
 
 (deftest bitwise-operators-reject-invalid-forms
   (is (thrown-with-msg?

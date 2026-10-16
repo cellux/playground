@@ -158,15 +158,17 @@ filters, and modulation, with a documented cross-target tolerance policy.
 
 **Deliverables.**
 
-1. Intrinsic definitions under the P2 contract, with per-target lowering to
-   `java.lang.Math`/`java.lang.StrictMath`, JS `Math`, and Wasm math
-   instructions.
-2. Documented reference semantics: the interpreter's IEEE-754 `double` result,
-   narrowed per precision, is the oracle.
-3. Tolerance policy distinguishing bit-exact builtins from transcendentals, and
-   tests that apply a narrow documented tolerance only to the latter.
-4. Capability checks for targets lacking an intrinsic (e.g. Wasm opcodes not
-   available in the pinned engine).
+1. Intrinsic definitions under the P2 contract. Each target lowers to what it
+   has: the JVM to `java.lang.Math` and JavaScript to `Math` (native); Wasm,
+   whose core has **no** transcendental instructions, to a portable emulation
+   emitted as WAT and computed internally in f64 (see `DECISIONS.md` D14).
+2. Documented reference semantics: the interpreter's host-`Math` IEEE-754
+   `double` result, narrowed per precision, is the oracle, and the interpreter
+   counts as a native target for this purpose.
+3. A target-dispatched comparison: exact for the native targets and tolerant
+   only on `:wasm`, where the emulation cannot reproduce the host `Math`
+   bit-for-bit. The tolerance is the emulation's accuracy gate.
+4. A structured diagnostic for an operation a target cannot serve at all.
 
 **Done when.** A sine oscillator and an exponential ADSR envelope defined only
 in DSP source render within tolerance on interpreter/JVM/JS/Wasm for f32 and

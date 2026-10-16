@@ -19,7 +19,8 @@
    :channels 1
    :checks :development
    :optimize false
-   :loop-bound nil})
+   :loop-bound nil
+   :wasm-math :polynomial})
 
 (def ^:private source-keys #{:namespace :file :line :column})
 
@@ -150,7 +151,10 @@
    [:channels {:optional true} int?]
    [:checks {:optional true} [:enum :development :none]]
    [:optimize {:optional true} boolean?]
-   [:loop-bound {:optional true} [:or nil? int?]]])
+   [:loop-bound {:optional true} [:or nil? int?]]
+   ;; Selects the Wasm transcendental emulation. Only `:polynomial` is
+   ;; implemented; `:table` is reserved for the lookup-table lowering.
+   [:wasm-math {:optional true} [:enum :polynomial :table]]])
 
 (def ^:private SourceMetadata
   [:map {:closed true}

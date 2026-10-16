@@ -308,3 +308,49 @@ migrate to the registry later.
 lowering per backend. The registry is expected to become `.cljc` when the
 browser compiler (P13) is ported. Capability gaps are data, not backend
 exception strings.
+
+---
+
+## D14 — Transcendentals: native intrinsic per target, portable emulation as fallback, target-dispatched comparison
+
+**Status.** In force (decided before P3).
+
+**Decision.** P3 compiles each transcendental to whatever the target has:
+
+- a target with a native intrinsic lowers the operation to it — the JVM to
+  `java.lang.Math`, JavaScript to `Math`, and the reference interpreter to the
+  host `Math`, so the interpreter also counts as native;
+- a target without one lowers to a portable **emulation**.
+
+The only target without one today is Wasm, whose core has no transcendental
+instructions at all. Its emulation computes in f64 and narrows to the kernel
+precision, following the existing `sqrt` precedent.
+
+This is decided per backend, using the multimethods that already exist
+(`evaluate-builtin`, `builtin-instructions`, `emit-builtin`); the registry does
+not need a capability field for it.
+
+**The reference interpreter remains the single oracle** (D2/D7). What is
+specialized per target is the **matcher** that compares a target kernel against
+the interpreter's expected value:
+
+- the default matcher is exact, with NaN-equal-as-NaN and signed-zero
+  awareness (D9);
+- the `:wasm` matcher additionally allows a small relative/absolute deviation,
+  because an emulation cannot reproduce the host `Math` bit-for-bit.
+
+So JVM and JavaScript comparisons stay exact — both call the same native op the
+interpreter calls — and tolerance is confined to the one target whose result is
+an approximation. That tolerance doubles as the emulation's accuracy gate.
+
+**Rationale.** Speed: prefer the native intrinsic wherever one exists and
+emulate only where the target has nothing. `PLAN.md` permits a target intrinsic
+once the language-level operation exists; Wasm needs the emulation regardless,
+so it is written once in the Wasm backend. Keeping the deviation in the matcher
+leaves the catalog, the plan format, and the oracle model unchanged.
+
+**Consequences.** New registry entries are ordinary primitives. The interpreter
+implements the ops with the host `Math` (`.cljc`); JVM and JavaScript gain
+native lowerings; Wasm gains f64-internal emulations. `omkamra.dsp.conformance`
+and `omkamra.dsp.testbed` gain a target-dispatched matcher whose only tolerant
+specialization is `:wasm`.

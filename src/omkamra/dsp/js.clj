@@ -238,6 +238,19 @@
 (defmethod emit-builtin [:ceil :float] [e] (unary-builtin "Math.ceil" e))
 (defmethod emit-builtin [:trunc :float] [e] (unary-builtin "Math.trunc" e))
 (defmethod emit-builtin [:sqrt :float] [e] (unary-builtin "Math.sqrt" e))
+(defmethod emit-builtin [:exp :float] [e] (unary-builtin "Math.exp" e))
+(defmethod emit-builtin [:sin :float] [e] (unary-builtin "Math.sin" e))
+(defmethod emit-builtin [:cos :float] [e] (unary-builtin "Math.cos" e))
+(defmethod emit-builtin [:tan :float] [e] (unary-builtin "Math.tan" e))
+(defmethod emit-builtin [:asin :float] [e] (unary-builtin "Math.asin" e))
+(defmethod emit-builtin [:acos :float] [e] (unary-builtin "Math.acos" e))
+(defmethod emit-builtin [:atan :float] [e] (unary-builtin "Math.atan" e))
+(defmethod emit-builtin [:atan2 :float] [e] (binary-builtin "Math.atan2" e))
+(defmethod emit-builtin [:log :float] [e] (unary-builtin "Math.log" e))
+(defmethod emit-builtin [:pow :float] [e] (binary-builtin "Math.pow" e))
+(defmethod emit-builtin [:sinh :float] [e] (unary-builtin "Math.sinh" e))
+(defmethod emit-builtin [:cosh :float] [e] (unary-builtin "Math.cosh" e))
+(defmethod emit-builtin [:tanh :float] [e] (unary-builtin "Math.tanh" e))
 
 (defmethod emit-builtin [:copysign :float]
   [expression]

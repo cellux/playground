@@ -43,6 +43,14 @@
    #?(:clj Double/POSITIVE_INFINITY :cljs js/Infinity)
    #?(:clj Double/NEGATIVE_INFINITY :cljs (- js/Infinity))])
 
+(defn adr-gate-samples
+  "Gate trace for the ADSR: on for the first half of a block, off for the
+  second, so attack/decay/sustain and release are all exercised."
+  [precision _block frames]
+  (mapv (fn [frame]
+          (real precision (if (< frame (quot frames 2)) 1.0 -1.0)))
+        (range frames)))
+
 (defn builtin-input-samples
   "A deterministic trace that includes signed zero, NaN, and infinities."
   [precision block frames]
@@ -94,6 +102,17 @@
                  :params [{:name 'sample :type :float}]
                  :controls [{:name 'lo :type :float :default lo}
                             {:name 'hi :type :float :default hi}]}))
+
+(defn- library-case
+  "A process case whose definition is a user-facing library Var, named by
+  `:definition-var`; the JVM side resolves it when compiling the plan."
+  [{:keys [id definition-var controls precisions input-samples]}]
+  {:id id
+   :entry :process
+   :definition-var definition-var
+   :precisions (or precisions [:f32 :f64])
+   :controls (or controls [])
+   :input-samples (or input-samples builtin-input-samples)})
 
 (defn- int-case
   [id body a b]
@@ -176,6 +195,19 @@
     (unary-float-case :trunc '(trunc sample))
     (unary-float-case :fract '(fract sample))
     (unary-float-case :sqrt '(sqrt sample))
+    (unary-float-case :exp '(exp sample))
+    (unary-float-case :sin '(sin sample))
+    (unary-float-case :cos '(cos sample))
+    (unary-float-case :tan '(tan sample))
+    (unary-float-case :sinh '(sinh sample))
+    (unary-float-case :cosh '(cosh sample))
+    (unary-float-case :tanh '(tanh sample))
+    (unary-float-case :log '(log sample))
+    (unary-float-case :atan '(atan sample))
+    (unary-float-case :asin '(asin sample))
+    (unary-float-case :acos '(acos sample))
+    (binary-float-case :atan2 '(atan2 sample c) -0.5)
+    (binary-float-case :pow '(pow sample c) 2.0)
     (unary-float-case :sign '(sign sample))
     (unary-float-case :round '(round sample))
     (binary-float-case :min '(min sample c) 0.5)
@@ -199,7 +231,17 @@
     (int-case :rem-zero '(rem a b) 5 0)
     (int-case :mod-neg '(mod a b) -7 3)
     (int-case :mod-flip '(mod a b) 7 -3)
-    (int-case :mod-zero '(mod a b) 5 0)]))
+    (int-case :mod-zero '(mod a b) 5 0)
+    ;; P3 done-when: a sine oscillator and an exponential ADSR envelope,
+    ;; defined in `omkamra.dsp.library` and only in DSP source.
+    (library-case {:id :sine-oscillator
+                   :definition-var 'omkamra.dsp.library/sine-oscillator
+                   :controls [440.0]
+                   :input-samples sine-input-samples})
+    (library-case {:id :exponential-adsr
+                   :definition-var 'omkamra.dsp.library/exponential-adsr
+                   :controls [0.0002 0.0001 0.4 0.0002]
+                   :input-samples adr-gate-samples})]))
 
 (def function-cases
   [{:id :float-arithmetic

@@ -22,9 +22,20 @@
   [plan]
   (= :function (:entry plan)))
 
+(defn case-definition
+  "Resolve a case's DSP definition: an inline descriptor map, or a library Var
+  named by `:definition-var` (so the catalog can test user-facing library code
+  without inlining it)."
+  [case]
+  (if-let [var-symbol (:definition-var case)]
+    (or (requiring-resolve var-symbol)
+        (throw (ex-info "conformance case refers to an unknown DSP library Var"
+                        {:case (:id case) :definition-var var-symbol})))
+    (:definition case)))
+
 (defn target-artifact
   [case precision target]
-  (dsp/compile (:definition case)
+  (dsp/compile (case-definition case)
                (cond-> {:target target :precision precision}
                  (not (acceptance/function-case? case))
                  (assoc :entry :process))))
@@ -130,6 +141,7 @@
 ;; ---------------------------------------------------------------------------
 
 (defn matches?
+  "Exact scalar comparison: NaN-equal-as-NaN and signed-zero aware (D9)."
   [actual expected]
   (if (and (number? actual) (number? expected))
     (let [a (double actual)
@@ -142,14 +154,46 @@
         :else (= a e)))
     (= actual expected)))
 
+(defn within-tolerance?
+  "Documented transcendental tolerance for a target whose op is an emulation."
+  [precision actual expected]
+  (let [a (double actual)
+        e (double expected)
+        relative (if (= :f64 precision) 1.0e-9 1.0e-6)
+        absolute (if (= :f64 precision) 1.0e-12 1.0e-7)]
+    (and (Double/isFinite a)
+         (Double/isFinite e)
+         (<= (Math/abs (- a e)) (+ absolute (* relative (Math/abs e)))))))
+
+(defmulti scalar-match?
+  "Compare one target value against the interpreter's expected value.
+
+  The default is exact; `:wasm` additionally allows the documented tolerance
+  because its transcendental emulations cannot reproduce the host `Math`
+  bit-for-bit (`DECISIONS.md` D14). The interpreter stays the single oracle."
+  (fn [target _precision _actual _expected] target))
+
+(defmethod scalar-match? :default
+  [_target _precision actual expected]
+  (matches? actual expected))
+
+(defmethod scalar-match? :wasm
+  [_target precision actual expected]
+  (or (matches? actual expected)
+      (and (number? actual)
+           (number? expected)
+           (within-tolerance? precision actual expected))))
+
 (defn results-match?
-  [expected actual]
+  "Recursively compare a target's outputs against the interpreter's expected."
+  [target precision expected actual]
   (and (= (count expected) (count actual))
        (every? true?
                (map (fn [e a]
                       (cond
-                        (and (sequential? e) (sequential? a)) (results-match? e a)
-                        :else (matches? a e)))
+                        (and (sequential? e) (sequential? a))
+                        (results-match? target precision e a)
+                        :else (scalar-match? target precision a e)))
                     expected actual))))
 
 ;; ---------------------------------------------------------------------------

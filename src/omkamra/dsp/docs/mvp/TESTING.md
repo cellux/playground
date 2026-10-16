@@ -157,15 +157,16 @@ runs; raise `:timeout` on a cold cache.
 checks**; the results render in the page. Append `?autorun=0` to prevent the
 automatic run.
 
-### What the 8 checks cover
+### What the 9 checks cover
 
 1. the shared **process** matrix — every `acceptance/cases` entry, f32 and f64,
    on JavaScript and Wasm;
 2. the shared **function-case** matrix — every `acceptance/function-cases`
    entry, f32 and f64, on JavaScript;
 3. a WAT bounded-loop trap check;
-4. the Squint JavaScript AudioWorklet adapters (f32 and f64);
-5. the Wasm AudioWorklet adapter (f32).
+4. a WAT check of the f32 sine **lookup-table** strategy (`:wasm-math :table`);
+5. the Squint JavaScript AudioWorklet adapters (f32 and f64);
+6. the Wasm AudioWorklet adapter (f32).
 
 Wasm is process-only, so function-entry cases run on the interpreter, JVM, and
 JavaScript; Wasm coverage for the same operators comes from process cases such

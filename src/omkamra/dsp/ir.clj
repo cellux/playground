@@ -91,7 +91,12 @@
   [form]
   (cond
     (integer? form) {:op :const :type :int :value (int form)}
-    (number? form) {:op :const :type :float :value (float form)}
+    ;; Keep the full double. Narrowing happens per precision at use: the
+    ;; interpreter's `:const` and each backend's constant emission. Narrowing
+    ;; here would lose f64 precision and, because a Clojure `Float` prints a
+    ;; short decimal, would not round-trip through the EDN served to the
+    ;; browser.
+    (number? form) {:op :const :type :float :value (double form)}
     (boolean? form) {:op :const :type :boolean :value form}
     :else nil))
 

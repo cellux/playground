@@ -44,6 +44,10 @@
   [request]
   (keyword (or (request-parameter request "precision") "f32")))
 
+(defn- requested-wasm-math
+  [request]
+  (keyword (or (request-parameter request "wasm-math") "polynomial")))
+
 (defn- javascript-response
   [body]
   {:status 200
@@ -57,7 +61,7 @@
 
 (defn- js-source
   [case precision]
-  (let [{:keys [source]} (dsp/compile (:definition case)
+  (let [{:keys [source]} (dsp/compile (conformance/case-definition case)
                                       {:target :js
                                        :entry (js-entry case)
                                        :precision precision})]
@@ -87,33 +91,38 @@
      :body body}))
 
 (defn- wasm-artifact
-  [case precision]
-  (dsp/compile (:definition case)
-               {:target :wasm
-                :entry :process
-                :precision precision}))
+  ([case precision] (wasm-artifact case precision :polynomial))
+  ([case precision wasm-math]
+   (dsp/compile (conformance/case-definition case)
+                {:target :wasm
+                 :entry :process
+                 :precision precision
+                 :wasm-math wasm-math})))
 
 (defn wasm-source
   [request]
   (let [{:keys [wat]} (wasm-artifact (requested-case request)
-                                     (requested-precision request))]
+                                     (requested-precision request)
+                                     (requested-wasm-math request))]
     {:status 200
      :headers {"content-type" "application/wat; charset=utf-8"
                "cache-control" "no-store"}
      :body wat}))
 
 (defn- wasm-metadata-response
-  [case precision]
-  (let [{:keys [metadata]} (wasm-artifact case precision)]
-    {:status 200
-     :headers {"content-type" "application/json; charset=utf-8"
-               "cache-control" "no-store"}
-     :body (json/generate-string metadata)}))
+  ([case precision] (wasm-metadata-response case precision :polynomial))
+  ([case precision wasm-math]
+   (let [{:keys [metadata]} (wasm-artifact case precision wasm-math)]
+     {:status 200
+      :headers {"content-type" "application/json; charset=utf-8"
+                "cache-control" "no-store"}
+      :body (json/generate-string metadata)})))
 
 (defn wasm-metadata
   [request]
   (wasm-metadata-response (requested-case request)
-                          (requested-precision request)))
+                          (requested-precision request)
+                          (requested-wasm-math request)))
 
 (defn wasm-source-f64
   [request]

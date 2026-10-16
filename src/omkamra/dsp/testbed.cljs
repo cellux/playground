@@ -18,6 +18,9 @@
 (defonce app-state (atom nil))
 (defonce ^:private last-results (atom nil))
 
+;; Bound around a run to request a non-default Wasm math strategy.
+(def ^:dynamic *wasm-math* nil)
+
 (def block-lengths acceptance/block-lengths)
 
 ;; ---------------------------------------------------------------------------
@@ -60,14 +63,37 @@
       :else (= actual expected))
     (= actual expected)))
 
+(defn- within-tolerance?
+  [precision actual expected]
+  (and (number? actual)
+       (number? expected)
+       (js/Number.isFinite actual)
+       (js/Number.isFinite expected)
+       (let [relative (if (= :f64 precision) 1.0e-9 1.0e-6)
+             absolute (if (= :f64 precision) 1.0e-12 1.0e-7)]
+         (<= (js/Math.abs (- actual expected))
+             (+ absolute (* relative (js/Math.abs expected)))))))
+
+(defn- scalar-match?
+  "Compare one target value against the interpreter's expected value.
+
+  Exact by default; `:wasm` additionally allows the documented tolerance
+  because its transcendental emulations cannot reproduce the host `Math`
+  bit-for-bit (DECISIONS.md D14)."
+  [target precision actual expected]
+  (if (= :wasm target)
+    (or (matches-value? actual expected)
+        (within-tolerance? precision actual expected))
+    (matches-value? actual expected)))
+
 (defn- results-match?
-  [actual expected]
+  [target precision actual expected]
   (and (= (count actual) (count expected))
        (every? true?
                (map (fn [a e]
                       (if (and (sequential? e) (sequential? a))
-                        (results-match? a e)
-                        (matches-value? a e)))
+                        (results-match? target precision a e)
+                        (scalar-match? target precision a e)))
                     actual expected))))
 
 (defn- show-number
@@ -77,13 +103,13 @@
     (str x)))
 
 (defn- describe-mismatch
-  [actual expected]
+  [target precision actual expected]
   (or (first
        (for [i (range (min (count actual) (count expected)))
              :let [a (nth actual i) e (nth expected i)]
-             :when (not (results-match? a e))
+             :when (not (results-match? target precision a e))
              j (range (min (count a) (count e)))
-             :when (not (matches-value? (nth a j) (nth e j)))]
+             :when (not (scalar-match? target precision (nth a j) (nth e j)))]
          (str "block " i " sample " j " actual " (show-number (nth a j))
               " expected " (show-number (nth e j)))))
       (str "block count actual " (count actual) " expected " (count expected))))
@@ -179,7 +205,8 @@
 
 (defn- acceptance-query
   [c precision]
-  (str "?case=" (name (:id c)) "&precision=" (name precision)))
+  (str "?case=" (name (:id c)) "&precision=" (name precision)
+       (when *wasm-math* (str "&wasm-math=" (name *wasm-math*)))))
 
 (defn- run-process-case-on-js
   [c precision]
@@ -199,10 +226,10 @@
                                     (:sample-rate plan) (:invocations plan))
                           actual (replay-process plan
                                                  (js-process-runner module precision))]
-                      (require! (results-match? actual expected)
+                      (require! (results-match? :js precision actual expected)
                                 (str (:id c) " " (name precision)
                                      " JavaScript mismatch: "
-                                     (describe-mismatch actual expected)))
+                                     (describe-mismatch :js precision actual expected)))
                       {:target :js :passed? true})))
                  (.finally #(js/URL.revokeObjectURL url)))))))))
 
@@ -259,10 +286,10 @@
                                                        []
                                                        (vec (output-view frames)))))))
                                          [] (:invocations plan)))]
-                           (require! (results-match? actual expected)
+                           (require! (results-match? :wasm precision actual expected)
                                      (str (:id c) " " (name precision)
                                           " Wasm mismatch: "
-                                          (describe-mismatch actual expected)))
+                                          (describe-mismatch :wasm precision actual expected)))
                            {:target :wasm :passed? true}))))))))))))
 
 (defn- run-process-case!
@@ -304,7 +331,7 @@
                           expected (interpreter-function-values ir (:vectors plan))
                           actual (mapv (fn [args] (apply invoke (decode-values args)))
                                        (:vectors plan))]
-                      (require! (results-match? actual expected)
+                      (require! (results-match? :js precision actual expected)
                                 (str (:id c) " " (name precision)
                                      " function mismatch"))
                       {:target :js :passed? true})))
@@ -610,6 +637,22 @@
           :passed? false
           :detail (or (.-message error) (str error))}))))
 
+(defn- wasm-table-test
+  "Run the f32 sine case on Wasm with the lookup-table math strategy."
+  []
+  (let [c (acceptance/case-by-id :sin)
+        name "Wasm sin lookup table f32"]
+    (-> (binding [*wasm-math* :table]
+          (run-process-case-on-wasm c :f32))
+        (.then (fn [_]
+                 {:name name
+                  :passed? true
+                  :detail "table strategy matched the interpreter within tolerance"}))
+        (.catch (fn [error]
+                  {:name name
+                   :passed? false
+                   :detail (str (:id c) " | " (or (.-message error) (str error)))})))))
+
 ;; ---------------------------------------------------------------------------
 ;; Suite
 ;; ---------------------------------------------------------------------------
@@ -658,6 +701,7 @@
                (run-promise-sequence
                 summary results-list matrix-results
                 [(fn [] (-> (bounded-loop-wasm-test) (.then (fn [r] [r]))))
+                 (fn [] (-> (wasm-table-test) (.then (fn [r] [r]))))
                  (fn [] (-> (audio-worklet-test :f32)
                             (.then (fn [a]
                                      (-> (audio-worklet-test :f64)

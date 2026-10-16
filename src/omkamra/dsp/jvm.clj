@@ -254,6 +254,17 @@
             [[:invokestatic java.lang.Math method [Double/TYPE Double/TYPE]]]
             (when-not (f64?) [[:d2f]]))))
 
+(defn- double-binary-transcendental-instructions
+  "Emit `Math/<method>(double, double)` for a f32 or f64 binary operation."
+  [method expression slots labels]
+  (let [[x y] (:args expression)]
+    (concat (expression-instructions x slots labels)
+            (when-not (f64?) [[:f2d]])
+            (expression-instructions y slots labels)
+            (when-not (f64?) [[:f2d]])
+            [[:invokestatic java.lang.Math method [Double/TYPE Double/TYPE Double/TYPE]]]
+            (when-not (f64?) [[:d2f]]))))
+
 (defmulti builtin-instructions
   "JVM lowering for a primitive builtin, dispatched on `[operator type]`."
   (fn [expression _slots _labels] [(:builtin expression) (:type expression)]))
@@ -296,6 +307,32 @@
   (double-transcendental-instructions "ceil" e slots labels))
 (defmethod builtin-instructions [:sqrt :float] [e slots labels]
   (double-transcendental-instructions "sqrt" e slots labels))
+(defmethod builtin-instructions [:exp :float] [e slots labels]
+  (double-transcendental-instructions "exp" e slots labels))
+(defmethod builtin-instructions [:sin :float] [e slots labels]
+  (double-transcendental-instructions "sin" e slots labels))
+(defmethod builtin-instructions [:cos :float] [e slots labels]
+  (double-transcendental-instructions "cos" e slots labels))
+(defmethod builtin-instructions [:tan :float] [e slots labels]
+  (double-transcendental-instructions "tan" e slots labels))
+(defmethod builtin-instructions [:asin :float] [e slots labels]
+  (double-transcendental-instructions "asin" e slots labels))
+(defmethod builtin-instructions [:acos :float] [e slots labels]
+  (double-transcendental-instructions "acos" e slots labels))
+(defmethod builtin-instructions [:atan :float] [e slots labels]
+  (double-transcendental-instructions "atan" e slots labels))
+(defmethod builtin-instructions [:atan2 :float] [e slots labels]
+  (double-binary-transcendental-instructions "atan2" e slots labels))
+(defmethod builtin-instructions [:log :float] [e slots labels]
+  (double-transcendental-instructions "log" e slots labels))
+(defmethod builtin-instructions [:pow :float] [e slots labels]
+  (double-binary-transcendental-instructions "pow" e slots labels))
+(defmethod builtin-instructions [:sinh :float] [e slots labels]
+  (double-transcendental-instructions "sinh" e slots labels))
+(defmethod builtin-instructions [:cosh :float] [e slots labels]
+  (double-transcendental-instructions "cosh" e slots labels))
+(defmethod builtin-instructions [:tanh :float] [e slots labels]
+  (double-transcendental-instructions "tanh" e slots labels))
 
 (defmethod builtin-instructions [:copysign :float]
   [expression slots labels]

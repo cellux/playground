@@ -53,6 +53,58 @@
              :kind :primitive
              :effects #{}
              :signatures [{:params [:float] :return :float}]}
+   'exp     {:operator :exp
+             :kind :primitive
+             :effects #{}
+             :signatures [{:params [:float] :return :float}]}
+   'sin     {:operator :sin
+             :kind :primitive
+             :effects #{}
+             :signatures [{:params [:float] :return :float}]}
+   'cos     {:operator :cos
+             :kind :primitive
+             :effects #{}
+             :signatures [{:params [:float] :return :float}]}
+   'tan     {:operator :tan
+             :kind :primitive
+             :effects #{}
+             :signatures [{:params [:float] :return :float}]}
+   'asin    {:operator :asin
+             :kind :primitive
+             :effects #{}
+             :signatures [{:params [:float] :return :float}]}
+   'acos    {:operator :acos
+             :kind :primitive
+             :effects #{}
+             :signatures [{:params [:float] :return :float}]}
+   'atan    {:operator :atan
+             :kind :primitive
+             :effects #{}
+             :signatures [{:params [:float] :return :float}]}
+   'atan2   {:operator :atan2
+             :kind :primitive
+             :effects #{}
+             :signatures [{:params [:float :float] :return :float}]}
+   'log     {:operator :log
+             :kind :primitive
+             :effects #{}
+             :signatures [{:params [:float] :return :float}]}
+   'pow     {:operator :pow
+             :kind :primitive
+             :effects #{}
+             :signatures [{:params [:float :float] :return :float}]}
+   'sinh    {:operator :sinh
+             :kind :primitive
+             :effects #{}
+             :signatures [{:params [:float] :return :float}]}
+   'cosh    {:operator :cosh
+             :kind :primitive
+             :effects #{}
+             :signatures [{:params [:float] :return :float}]}
+   'tanh    {:operator :tanh
+             :kind :primitive
+             :effects #{}
+             :signatures [{:params [:float] :return :float}]}
    'copysign {:operator :copysign
               :kind :primitive
               :effects #{}

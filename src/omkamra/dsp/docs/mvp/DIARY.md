@@ -134,7 +134,95 @@ JavaScript-only. See the handoff entry below for detail and next steps.
 
 ---
 
-## Handoff — current state after P2 (rolling entry)
+## P3 — Transcendental math intrinsics (completed)
+
+**Decision.** `DECISIONS.md` D14: compile to a native intrinsic wherever one
+exists, emulate where it does not, and put the resulting deviation in a
+**target-dispatched matcher** rather than in the oracle. The interpreter stays
+the single oracle and uses the host `Math`, so it counts as a native target;
+Wasm, whose core has no transcendental instructions, gets an f64-internal
+emulation emitted as WAT. The matcher is exact by default and tolerant only on
+`:wasm`.
+
+**Landed (first slice: `exp`, `sin`, `cos`).**
+
+- `exp`, `sin`, `cos` are primitive builtins (`omkamra.dsp.builtins`).
+- Native lowerings: the interpreter uses `Math`/`js/Math`, the JVM `Math`
+  through the existing `double-transcendental-instructions` helper (f32
+  promotes to f64 and narrows), JavaScript `Math`.
+- Wasm emulations (f64, fixed size): `exp` reduces by `k = nearest(x*log2e)`
+  and builds `2^k` from the f64 exponent field by bit construction; `sin`/`cos`
+  share one quadrant reduction (`n = nearest(x*2/pi)`, `|r| <= pi/4`, Taylor
+  polynomials, quadrant `n mod 4` selects and negations). `\u00b1inf` and NaN
+  cannot reach the i64 conversion, so they are replaced and their results
+  forced to NaN with `select`.
+- Emulated builtins are emitted once as shared f64→f64 Wasm functions
+  (`$dsp_sin`, `$dsp_cos`, `$dsp_exp`) and `call`ed from each use site, so
+  module size no longer multiplies with call sites: `sin`/`cos` went from
+  ~78 KB to ~19.5 KB and `exp` from ~14.6 KB to ~5.2 KB, and each extra `sin`
+  call site now costs ~93 bytes instead of re-emitting the whole expression.
+- Compiler option `:wasm-math` selects the Wasm emulation strategy:
+  `:polynomial` (default) or `:table`.
+- Wasm lookup table (`:table`, f32 only): one shared 4097-entry f32 sine table
+  in a `(data ...)` segment, read with linear interpolation, used by
+  `$dsp_sin` and `$dsp_cos` (`cos` via a π/2 phase shift). f64 keeps the
+  polynomial because a table accurate enough for f64 would be far larger than
+  the code it replaces. The table WAT text is ~53 KB (16 KB of payload) but a
+  lookup is a handful of ops against a degree-13 polynomial.
+- Matcher: `conformance/scalar-match?` and the browser `scalar-match?` dispatch
+  on target; `:wasm` allows `1e-6` (f32) / `1e-9` (f64) relative tolerance,
+  and every other target stays exact.
+- Catalog cases `:exp`, `:sin`, `:cos`, so the shared process matrix is now 30
+  cases.
+- A browser check, **Wasm sin lookup table f32**, renders the `:table` kernel
+  and compares it to the interpreter within tolerance.
+
+**P3 done-when met.** `omkamra.dsp.library` now defines a `sine-oscillator`
+(phase accumulator wrapping at 1.0) and an `exponential-adsr` (per-sample
+one-pole segments over attack/decay/sustain/release, with threshold-based
+stage changes because an exponential approach only reaches its target in the
+limit), written only in DSP source. The catalog has `:sine-oscillator` and
+`:exponential-adsr` cases; a case may name a user-facing library Var with
+`:definition-var` instead of inlining a descriptor, and the JVM side resolves
+it when building the plan. Both render within tolerance on
+interpreter/JVM/JS/Wasm for f32 and f64.
+
+**Cross-cutting fix: constant precision.** Float literals were narrowed to a
+Clojure `Float` during IR lowering regardless of the artifact's precision.
+That lost f64 precision, and because a `Float` prints a short decimal it did
+not round-trip through the EDN served to the browser: Java widens `Float`
+`6.2831855` to `6.283185482025146` while JavaScript reading the EDN number
+`6.2831855` gets `6.2831855`. The oscillator's `2*pi` constant exposed it as a
+browser-only f32/f64 mismatch. Literals now stay `double` in the IR and are
+narrowed per precision at use: the interpreter's `:const`, the JVM
+`(float ...)`, the JS `Math.fround`, and the Wasm `<f32/f64>.const`.
+
+**Full operation set.** The other ten landed: `tan`/`sinh`/`cosh`/`tanh`
+derive from the shared `sin`/`cos`/`exp` functions; `log` (mantissa/exponent
+split by bit reinterpretation, then `log(m) = 2*atanh((m-1)/(m+1))`) and
+`atan` (four argument halvings then a Taylor series) are the two new accurate
+building blocks; `asin`/`acos`/`atan2`/`pow` derive from those. Emulation
+bodies may now carry WAT locals and statements, which is also what keeps them
+bounded: before that, `atan`'s halving loop duplicated its argument three
+ways per step and produced 430 KB of WAT; a scratch local brought it to 3 KB.
+
+**Verified.** JVM 59 tests / 475 assertions; browser 9/9, with all thirteen
+P3 operations, plus `:sine-oscillator` and `:exponential-adsr`, passing on
+JavaScript and Wasm at f32 and f64, and the table strategy exercised.
+
+**Trap avoided.** The first emulation computed `exp(x/2^20)` and then squared
+it twenty times by nesting `(f64.mul p p)`. Nesting duplicates the expression
+tree, so the WAT grew as 2^20 copies of the polynomial and killed the dev
+server with an out-of-memory. `exp` now uses exponent bit construction and
+stays fixed-size; every future emulation must do the same.
+
+**Deferred.** The `:wasm-math :table` lookup-table lowering is still an
+optimization with a pending benchmark (see the TODO below); it does not block
+the phase.
+
+---
+
+## Handoff — current state after P3 (rolling entry)
 
 This is the one living entry, as opposed to the completed-phase entries above:
 what exists, how it fits together, what is open, and what to do next. It may be
@@ -147,6 +235,12 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
 - **P2 (portable scalar math builtins) is complete**, including the
   capability-aware registry, the D9–D12 semantics, and the first standard
   library entries (`omkamra.dsp.library`).
+- **P3 (transcendentals) is complete** under D14 (native intrinsic per
+  target, emulation fallback, target-dispatched matcher). All thirteen
+  operations are done end to end on interpreter/JVM/JS/Wasm; the `:wasm-math`
+  option selects the Wasm emulation strategy (`:polynomial` or the f32
+  `:table`); and the library's `sine-oscillator` and `exponential-adsr`
+  render on all four targets.
 - **The conformance harness is interpreter-oracle-driven** (D7/D13): the shared
   catalog is pure data, and the reference interpreter is the single oracle on
   the JVM *and* in the browser.
@@ -154,9 +248,9 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   (CodeMirror) and compile them there, which means the compiler itself becomes
   portable and runs in SCI (P13). The library and every new language form are
   therefore authored as portable `.cljc` source forms.
-- Verified through `clojure_eval` on the running nREPL: JVM 59 tests / 445
-  assertions, browser 8/8, `clj-kondo`/`cljfmt` clean. The git working tree
-  holds this uncommitted.
+- Verified through `clojure_eval` on the running nREPL: JVM 59 tests / 455
+  assertions, browser 9/9 (the extra check is the f32 sine lookup table),
+  `clj-kondo`/`cljfmt` clean. The git working tree holds this uncommitted.
 
 ### Architecture
 
@@ -251,15 +345,29 @@ omkamra.dsp.testbed           (.cljs)  browser differential suite
 
 ### Next steps
 
-1. Begin **P3 (transcendental math intrinsics)**. Important design input:
-   **Wasm has no `sin`/`cos`/`exp`/`log`/`pow`**, so those must either be
-   emitted as portable sequences on Wasm or reported unsupported; the D13
-   registry already models both outcomes. `sqrt` is implemented and conformance
-   uses a guard for f32 double-rounding (Wasm computes
-   `f32.demote_f64(f64.sqrt(f64.promote_f32(x)))` to match Java/JS).
-2. When P3 lands, decide where the capability model lives (registry metadata
-   vs backend `:default`) and record it in `DECISIONS.md`.
+1. Begin **P4 — local arrays, constant tables, and aggregate state records**,
+   which the remaining phases (delay lines, filters, the DSP library) build
+   on. The transcendental machinery from P3 is done and awaits only the
+   deferred lookup-table benchmark.
+2. Keep a structured diagnostic for any operation a target cannot serve at all.
 3. Optionally restore the dropped Wasm f64 worklet and generated-kernel checks.
+
+### Wasm lookup table — done, with follow-ups
+
+Steps 1 and 2 are done (shared emulation functions; f32 sine table via
+`:wasm-math :table`). Remaining:
+
+- **Benchmark** the table against the polynomial before changing the default;
+  `:polynomial` is still the default.
+- **f64**: a raw table would be too large; consider a piecewise minimax
+  coefficient table if f64 Wasm speed ever matters.
+- **`exp`** has no table (polynomial only); fine while it is not hot.
+- **Table size**: 4097 f32 entries (16 KB payload, ~53 KB WAT text). Could
+  shrink to 2049 entries if the interpolation error stays acceptable, or grow
+  for margin.
+- **Cos** currently reuses `$dsp_sin` with a π/2 phase shift; acceptable for
+  the tested ranges but a direct quarter-period offset would be more accurate
+  for large arguments.
 
 ### How to run everything
 
