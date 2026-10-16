@@ -77,6 +77,11 @@
 (def ^:private Reference
   [:or symbol? keyword? [:fn quoted-symbol?]])
 
+;; A return type is either a logical scalar or a reference to a `defstruct`
+;; shape, resolved by the linker into a record return (multi-output).
+(def ^:private ReturnType
+  [:or LogicalType Reference])
+
 (def ^:private ParameterSource
   [:or
    symbol?
@@ -181,7 +186,9 @@
    [:dsp/kind [:= :function]]
    [:name Name]
    [:params [:vector ParameterSource]]
-   [:return-type {:optional true} LogicalType]
+   [:return-type {:optional true} ReturnType]
+   ;; Attached by the linker when a struct-typed `:return-type` is resolved.
+   [:return-record {:optional true} [:or nil? [:map]]]
    [:state {:optional true} [:or nil? [:vector StateSource]]]
    [:body [:vector any?]]
    [:source {:optional true} [:or nil? SourceMetadata]]
@@ -786,6 +793,7 @@
                         :name (:name definition)
                         :params params
                         :return-type return-type
+                        :return-record (:return-record definition)
                         :state states
                         :process process
                         :body (vec body)

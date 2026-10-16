@@ -556,3 +556,119 @@ follows places through `let` aliases. This is a strict subset of first-class
 arrays: places are static, so they cannot be passed to or returned from
 functions and cannot have a runtime base (e.g. selecting a record in an array of
 records). Those remain P6's "buffer-accessing callees".
+
+---
+
+## D19 — Stateful module composition by ownership-partitioned calls
+
+**Status.** In force (adopted at P6).
+
+**Decision.** A **module** is any DSP definition with state, arrays, or records;
+there is no separate module kind. Used as the entry it has I/O ports and its
+`:next` runs once per frame; **called** it takes params and its `:next` runs once
+per call. Composition is defined by four rules:
+
+1. **Ownership is per call site.** Each syntactic call site owns one private
+   copy of the callee's persistent state, local-array scratch, and records. Two
+   sites never share; one site reused in a loop reuses one copy.
+2. **A module's transition is immediate.** The callee applies its `:next` at the
+   end of its body, so consecutive calls in a frame observe each other. This is
+   ordinary mutable-module semantics and is identical in the interpreter.
+3. **Restrictions preserved.** No recursion; modules are not first-class values;
+   no runtime state base (selecting a module in an array of modules is P10
+   voices). A called module never accesses the **caller's** I/O buffers.
+4. **Ports.** More inputs are more params. More outputs are a **record return**:
+   `:return-type` names a `defstruct`, the body produces a map mirroring the
+   struct's field tree (a `let`/`do` around it is an ordinary form), and each
+   call site binds the result in a `let`. It is erased at lowering — one local
+   per leaf — so `(:field r)` is a local read and no backend changed. A record
+   value cannot be produced by an `if` and cannot be written.
+
+**Mechanism.** Lowering allocates a state partition per call site. A definition's
+partition size is its own expanded state plus the partition of each *static* call
+site in its body, so it is a compile-time constant (recursion is forbidden). The
+callee IR keeps 0-based state indices; each `:call` node carries its partition
+base relative to the enclosing module. The **interpreter executes `:call` nodes
+against that partition** — a genuinely independent oracle, preserving D2 — while
+the three source backends share one **statement-level inliner** that renames
+locals and rebases state ids. The interleaving is deliberate: an inlining bug
+cannot hide behind the reference semantics.
+
+---
+
+## D20 — One arena of named partitions; reuse is dead-on-entry
+
+**Status.** In force (adopted at P6); the coloring pass that acts on it is
+follow-up work rather than a P6 deliverable — all five P6 deliverables are met
+without it. It is most valuable once P10 gives many sibling modules.
+
+**Decision.** Every instance has one preallocated arena of **named partitions
+with explicit offsets** (persistent state and per-frame scratch), and the same
+`:arena` offsets are handed to every backend. A partition may be reused by
+another only when it is **dead on frame entry**: on every path from frame start
+it is written before it is read, so its value at a frame boundary can never
+matter. Persistent state that is live across the frame boundary is **never**
+reused across nodes — a semantic constraint, not an implementation limit.
+
+**Rationale.** A per-sample inlining compiler has no intermediate audio buffers
+between nodes, so the only reusable storage is per-frame transient state. The
+reuse question is therefore exactly "dead on frame entry", which ordinary
+liveness analysis over the frame body plus a write-before-read check at frame
+boundaries can decide. Keeping partitions explicit and offset-based means
+coloring is a pure offset rewrite: no backend change, no semantic change.
+Explicit aliasing is available as the predictable alternative for a shared
+workspace.
+
+**Consequences.** P6a lays the arena out as partitions and records the
+criterion so the coloring pass drops in later; it also colors the P4 local-array
+scratch, so one pass pays off in both places.
+
+---
+
+## D21 — Composition is inlined under a statement budget
+
+**Status.** In force (adopted at P6c).
+
+**Decision.** A call to a stateful module is **inlined**, not emitted as a call.
+The inliner carries a fixed statement budget (`inlining-statement-limit`, 20 000
+statements added per artifact); exceeding it is a compile error naming the
+expansion, not a silently larger artifact. There is deliberately **no run-time
+call fallback**: a call frame would allocate, and allocation through the audio
+callback is forbidden.
+
+**Rationale.** Inlining is what makes composition target-free — one portable
+pass serves the JVM, JavaScript, and Wasm. Growth is bounded because recursion
+is rejected at link time and every call site is static, so an expansion is a
+finite tree; the budget only guards against a pathological fan-out.
+
+**Consequences.** More call sites to one module means more code, not a shared
+function. When that becomes a real cost (many voices), the answer is the one the
+rest of the system already uses: explicit compile-time configuration, not a
+run-time mechanism.
+
+---
+
+## D22 — State updates follow source order
+
+**Status.** In force (adopted at P6c).
+
+**Decision.** Three rules, by state kind:
+
+1. **Entry scalar state.** All `:next` expressions are evaluated against the
+   frame-start values and then stored at the end of the frame, so updates within
+   a frame are simultaneous. `:next` cannot see body locals (D17).
+2. **Called module state.** A module applies its own transitions at the end of
+   its body, i.e. *at the call*, so a later call in the same frame sees the
+   update (D19).
+3. **Aggregate state (records, arrays).** Updates are explicit, ordered
+   `set!`/`set-field!`/`aset` statements, so feedback and delay boundaries are
+   visible in the source and in the IR. A module that wants a one-frame delay
+   writes before it reads (the delay-line convention, D17).
+
+**Rationale.** Ordering the source does not state cannot be relied on. These
+rules make every transition's position determinate and identical in the
+interpreter and every backend.
+
+**Consequences.** A zero-delay feedback loop is not expressible without an
+explicit state slot — the intended discipline, since such a loop has no
+well-defined sample-serial evaluation order.

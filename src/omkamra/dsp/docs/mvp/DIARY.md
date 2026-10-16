@@ -384,7 +384,180 @@ P6's territory rather than an ad-hoc mechanism here.
 
 ---
 
-## Handoff — current state after P5 (rolling entry)
+## P6a — Stateful module composition (D19/D20) (completed)
+
+Calls are no longer limited to pure functions. A **module** is any DSP
+definition with state: used as an entry it has ports and a per-frame transition;
+used as a callee it takes params and applies its transition per call. The
+semantics (D19):
+
+- **Ownership is per call site.** Lowering allocates one private state partition
+  per call site, so `one-pole-voice`'s two `one-pole`s are independent, and a
+  module called twice in a loop reuses one copy — no runtime allocation and no
+  shared state.
+- **The transition is immediate.** A module emits its own `:next` and stores at
+  the end of its body, so consecutive calls in a frame observe each other.
+- The entry arena is now its own state, then one partition per call site, then
+  local-array scratch. Partition sizes are static (`module-state-sizes`), so
+  scratch starts after the whole state region.
+- Nested composition works: a state-free module that calls a stateful one
+  (`one-pole-pair`) still owns the partitions of its callees.
+
+Mechanism: a `:call` node carries a partition base relative to the enclosing
+module, while the callee IR keeps zero-based state indices. The **interpreter
+executes `:call` against that partition** (`:state-base`), so it stays an
+independent oracle. The three source backends share one **statement-level
+inliner** that rebases state, shifts nested call bases, renames locals,
+substitutes params, and rebuilds the local layout from the expanded body — under
+a statement budget that turns a pathological graph into a diagnostic. The linker
+still rejects a module that reaches into the caller's process buffers, and still
+rejects cycles.
+
+The bug the nested case caught: a state-free module with an expression-only body
+took the pure substitution path, which did not rebase *nested* call bases, so a
+second instantiation reused the first's partitions. The pure path now rebases
+too.
+
+**Verified.** JVM 66 tests / 556 assertions; browser 9/9 with 60 process cases
+matched on JavaScript and Wasm (`:one-pole-voice`, `:one-pole-pair-voice`).
+`clj-kondo`/`cljfmt` clean.
+
+**Remaining for P6.** Record returns for multi-output; then P6c (the done-when
+voice, the inlining-policy write-up, and the feedback/ordering notes) and P6d
+(the coloring pass over partitions, D20). P6b's record-owning half is the entry
+immediately below.
+
+---
+
+## P6b — Modules that own records and arrays (completed)
+
+A module may own a record with an array field, end to end:
+
+- The entry IR, ABI, and arena now carry **callee record metadata**, rebased per
+  partition: `:records` lists every record from every call site with its leaf
+  offsets shifted into the partition (`line` at 0/8 and 9/17 for a pair voice).
+  `lower` seeds `:records-more` like `:state-more`, and `lower-call` rebases
+  both.
+- `omkamra.dsp.library/delay-line` and `allpass-delay-line` are now **modules**,
+  not processes — the P5 workaround is gone. `delay-line-voice` and
+  `delay-line-pair-voice` compose them, and the pair voice (two lines, delays
+  `d` and `2d`) proves each call site gets its own 64-sample buffer.
+
+Two bugs the new cases caught:
+
+1. The statement inliner rebased a callee's `:state-load`/`:state-store`
+   `:index` but **not their `:element-index`**, so a record's array accesses kept
+   their unrenamed locals and unshifted indices. Fixed for `:state-*` and
+   `:array-*` on both the expression and statement paths.
+2. The interpreter decided whether to add the partition base from `:state-id`
+   presence, but place-based (`aget`/`aset`) state ops carried no `:state-id`, so
+   the interpreter silently ignored the base while the backends applied it. It
+   now keys off the op (`:state-load`/`:state-store` vs `:array-*`), and place
+   ops carry `:state-id`, which also restores the P4 `:dynamic-state-index`
+   diagnostic for record fields. The oracle caught this; the earlier
+   `one-pole-voice` vector could not, because both poles saw the same input.
+
+**Verified.** JVM 67 tests / 563 assertions; browser 9/9 with 61 process cases
+matched on JavaScript and Wasm. `clj-kondo`/`cljfmt` clean.
+
+**Record returns (multi-output) are not built yet.** They are a larger language
+feature — a struct-typed return, record-value bindings, projection, and a
+record-value path in both the interpreter and the inliner — and the P6 gate (a
+biquad + ADSR voice) does not need them: a biquad has one output, and stereo is
+already a process `:channels` concern. Recommend finishing P6c first and
+returning to record returns after the gate.
+
+---
+
+## P6c — The composed filter voice (completed)
+
+**The P6 gate is met:** `omkamra.dsp.library/filter-voice` composes a stateful
+RBJ biquad with the stateful exponential ADSR and runs identically on the
+interpreter, JVM, JavaScript, and Wasm (`:filter-voice`; 62 process cases matched
+in the browser).
+
+- `exponential-adsr` kept its `:process` metadata and is *called as a module* —
+  one definition, two usage modes (D19). The linker admits it because its body
+  touches no process buffers.
+- `biquad` is Direct Form I with its history in a `biquad-state` record, so the
+  update order is explicit; coefficients are recomputed per sample because
+  controls are per-sample in this architecture.
+- The bug this surfaced: **a module lowered as a callee could not reference
+  `sample-rate` or `frames`** — `lower` bound only params and state, while
+  `lower-process` bound the context, and no earlier module used them as a
+  callee. `context-bindings` now supplies both names to every definition, entry
+  or module.
+
+Policy recorded as **D21** (composition is inlined under a statement budget,
+with a diagnostic and deliberately no run-time call fallback) and **D22**
+(source-ordered state updates: simultaneous entry scalars, per-call module
+transitions, explicit ordered aggregate stores).
+
+**Verified.** JVM 68 tests / 571 assertions; browser 9/9 with 62 process cases
+matched on JavaScript and Wasm. `clj-kondo`/`cljfmt` clean.
+
+**Still open in P6.** Record returns for multi-output (additive per the D19
+design) and the partition-coloring pass (P6d/D20).
+
+---
+
+## P6b-ii — Record returns (multi-output) (completed)
+
+The other half of deliverable 1. A module may now return **several typed outputs**:
+
+```clojure
+(dsp/defstruct svf-output [low band high])
+
+(dsp/defn state-variable-filter
+  [sample cutoff q]
+  {:state [{:name s :struct svf-state}]
+   :return-type svf-output}
+  (let [f (* 2.0 (sin (* 3.141592653589793 (/ cutoff sample-rate))))
+        q1 (/ 1.0 q)
+        low (+ (:low s) (* f (:band s)))
+        high (- (- sample low) (* q1 (:band s)))
+        band (+ (* f high) (:band s))]
+    (do (set! (:low s) low)
+        (set! (:band s) band)
+        {:low low :band band :high high})))
+```
+
+- `:return-type` names a `defstruct`; the linker resolves it (like `:struct`)
+  to `:record` plus the field list, and `descriptor/LogicalType` gained a sibling
+  that admits a reference. `descriptor/expression-type` already returns nil for a
+  map, so the descriptor check defers to lowering — and `SourceForm` already
+  allowed map literals.
+- The body is a map mirroring the struct's field tree; a `let`/`do` around it is
+  an ordinary form, because the expected shape travels in the lowering
+  environment.
+- The value is **erased**: an `:declare` bound to a record becomes one local per
+  leaf. The interpreter holds a Clojure map and evaluates `:project` as a lookup;
+  the statement inliner splits the declaration and rewrites `:project` to the
+  leaf's local. No backend changed, and the arena is untouched — exactly the
+  property D19's deferral rested on.
+- Constraints: a record value cannot cross an `if`, and is immutable.
+
+`omkamra.dsp.library` gained `state-variable-filter` (one filter, three
+simultaneous outputs) and `svf-voice`; catalog case `:svf-voice` covers it on all
+four targets.
+
+Two bugs, both caught by the new cases: the inliner bound a local called `name`,
+shadowing `clojure.core/name` so every per-leaf local was named `out__`; and the
+record body needed a `let`/`do` around it, which the env-threaded shape now
+allows.
+
+**P6 is complete.** All five deliverables are met and the done-when voice
+(`filter-voice`) runs identically on the interpreter, JVM, JavaScript, and Wasm.
+
+**Note on P6d.** The partition-coloring pass proposed under D20 is an *arena
+optimization*, not one of P6's deliverables, and all five are met without it. It
+is deferred: persistent module state is almost always live across the frame
+boundary (which is why the criterion is "dead on frame entry"), so it fires
+rarely today and matters most once P10 gives many sibling modules.
+
+---
+
+## Handoff — current state after P6 (rolling entry)
 
 This is the one living entry, as opposed to the completed-phase entries above:
 what exists, how it fits together, what is open, and what to do next. It may be
@@ -414,11 +587,22 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   initialization. The ABI exposes `:records` and `:arena`.
 - **P5 (delay lines, circular buffers, interpolation) is complete** under D17
   and D18. The library provides `linear-interpolate`, `allpass-coefficient`, and
-  the `delay-line` / `allpass-delay-line` processes; the convention is a
+  the `delay-line` / `allpass-delay-line` modules (with `-voice` process
+  wrappers); the convention is a
   persistent buffer plus an `:int` cursor with write-then-read ordering and
   floored `mod` wrap. Array storage is a static *place* (D18), so a record owns
   its buffer and `(aget (:buf rec) k)` / `let` aliases index it. Catalog vectors
   cover zero, unit, fractional, wrap, allpass, and the place form.
+- **P6 (stateful module composition) is complete** under D19/D21/D22, and the
+  phase gate is met: `filter-voice` composes a stateful RBJ biquad with a
+  stateful exponential ADSR and runs identically on all four targets. A call to
+  a stateful module owns one private state partition per call site; the
+  transition applies at the call; nested composition works; a module may own a
+  record/array end to end; and a module may return a **named record** for
+  multi-output (`state-variable-filter` yields low/band/high). The interpreter
+  executes `:call` against the partition (the oracle); JVM/JS/Wasm share one
+  statement-level inliner. The coloring pass under D20 (partition coloring)
+  is deferred: it is an arena optimization, not a P6 deliverable.
 - **The conformance harness is interpreter-oracle-driven** (D7/D13): the shared
   catalog is pure data, and the reference interpreter is the single oracle on
   the JVM *and* in the browser.
@@ -426,10 +610,11 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   (CodeMirror) and compile them there, which means the compiler itself becomes
   portable and runs in SCI (P13). The library and every new language form are
   therefore authored as portable `.cljc` source forms.
-- Verified through `clojure_eval` on the running nREPL: JVM 65 tests / 545
-  assertions, browser 9/9 (the process matrix covers the P4 array/record/table
-  cases and the P5 delay-line and place cases on JavaScript and Wasm),
-  `clj-kondo`/`cljfmt` clean.
+- Verified through `clojure_eval` on the running nREPL: JVM 69 tests / 578
+  assertions, browser 9/9 (the process matrix matches 63 cases on JavaScript
+  and Wasm, covering the P4 array/record/table cases, the P5 delay-line and
+  place cases, and the P6 composition cases including `filter-voice` and
+  `svf-voice`), `clj-kondo`/`cljfmt` clean.
 
 ### Architecture
 
@@ -477,6 +662,11 @@ omkamra.dsp.testbed           (.cljs)  browser differential suite
 
 - `omkamra.dsp.library` is the `.cljc` seed of the P7 library. `clip` and
   `triangular-window` are written with `dsp/defn` and compose builtins only.
+- P6a added the first *callable modules*: `one-pole` (scalar state) and
+  `one-pole-pair` / `one-pole-voice` / `one-pole-pair-voice` that compose it
+  through calls. P6b turned `delay-line` / `allpass-delay-line` into modules
+  (with `-voice` wrappers and a `delay-line-pair-voice`). P6c added `biquad`
+  (record-owned history) and `filter-voice`, the done-when ADSR + biquad voice.
 - The library is `:clj`-required by `acceptance.cljc` so the JVM linker can
   resolve the calls; the browser only receives compiled IR and never loads it.
 - Fully-qualified symbols (`omkamra.dsp.library/clip`) are used in catalog
@@ -533,13 +723,15 @@ omkamra.dsp.testbed           (.cljs)  browser differential suite
 
 ### Next steps
 
-1. Begin **P6 — stateful module composition**: typed multi-input/multi-output
-   module definitions with explicit state, buffers, and update ordering, and a
-   defined policy for calling stateful and buffer-accessing callees (which P5
-   worked around by using library *processes*).
+1. Begin **P7 — the DSP standard library**. The composition machinery is in
+   place, so library entries can be reused modules rather than processes (the
+   P5/P6 workarounds are gone: `delay-line`, `one-pole`, `biquad`,
+   `state-variable-filter` are all callable modules).
 2. Keep a structured diagnostic for any operation a target cannot serve at all.
 3. Optionally add generated-target (JS/Wasm) development guards and restore the
    dropped Wasm f64 worklet checks.
+4. Deferred, optional: the D20 partition-coloring pass (dead-on-frame-entry
+   state and P4 scratch), most valuable once P10 gives many sibling modules.
 
 ### Wasm lookup table — done, with follow-ups
 

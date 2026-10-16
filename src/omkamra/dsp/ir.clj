@@ -50,16 +50,27 @@
   ([bindings functions options]
    (environment bindings functions options {}))
   ([bindings functions options buffers]
+   (environment bindings functions options buffers {}))
+  ([bindings functions options buffers modules]
    {:bindings bindings
     :functions functions
     :options options
     :buffers buffers
+    ;; Linked callees available for composition: id -> lowered function IR.
+    :modules modules
     :loop-depth 0
     :locals (atom [])
     ;; Fixed-size local arrays ("scratch"): a distinct, preallocated instance
     ;; region whose logical offsets continue after persistent state, so every
     ;; backend can realize state and scratch in one arena.
     :scratch (atom {:next 0 :entries []})
+    ;; Per-call-site state partitions (D19). `:call-offset` is the running
+    ;; offset, seeded after this module's own state; `:state-more` and
+    ;; `:records-more` collect the rebased callee slots and record metadata that
+    ;; extend this module's arena.
+    :call-offset (atom 0)
+    :state-more (atom [])
+    :records-more (atom [])
     :counter (atom 0)}))
 
 (defn- fresh-local!
@@ -85,6 +96,9 @@
   (when (= :array (:type expression))
     (fail "DSP array places must be indexed (aget/aset) or bound in a let"
           {:form form :type :array}))
+  (when (= :record (:type expression))
+    (fail "DSP record values must be projected with a field access"
+          {:form form :type :record}))
   (when-not (= expected (:type expression))
     (fail "DSP expression has the wrong type"
           {:form form :expected expected :actual (:type expression)}))
@@ -108,7 +122,8 @@
     :else nil))
 
 (declare lower-value lower-form lower-forms array-form? array-declaration
-         lower-place-store!)
+         lower-place-store! rebase-slots rebase-records record-leaves
+         lower-record-value)
 
 (defn- frame-index
   "Lower a source buffer offset to an absolute per-frame index.
@@ -170,6 +185,7 @@
     (when (= 1 (count buffers))
       (let [leaf (first buffers)]
         {:op :array-ref :type :array :region :state
+         :state-id (:name binding)
          :base (:offset leaf) :element (:type leaf) :size (:size leaf)
          :constant (boolean (:constant binding))}))))
 
@@ -179,6 +195,7 @@
     :state (if (> (or (:size binding) 1) 1)
              ;; A state array is an addressable place, like a record's buffer.
              {:op :array-ref :type :array :region :state
+              :state-id (:name binding)
               :base (:index binding) :element (:type binding) :size (:size binding)
               :constant (boolean (:constant binding))}
              {:op :state-load
@@ -191,8 +208,10 @@
             :base (:index binding) :element (:type binding) :size (:size binding)
             :constant false}
     :place {:op :array-ref :type :array :region (:region binding)
+            :state-id (:state-id binding)
             :base (:base binding) :element (:element binding) :size (:size binding)
             :constant (:constant binding)}
+    :record-value {:op :local :name (:name binding) :type :record}
     :record (or (record-array-ref binding)
                 (fail "DSP state record does not expose a single array place"
                       {:record (:name binding) :size (:size binding)
@@ -384,6 +403,10 @@
       (case type
         :never {:statements (vec statements) :value nil :type :never}
         :void (void-fragment statements)
+        ;; A record value is a set of locals, so it must come straight from a
+        ;; module call bound in a let, not be selected between by an `if`.
+        :record (fail "DSP record values cannot be produced by an if"
+                      {:form form})
         (fragment statements
                   {:op :local :name (:name result-local) :type type})))))
 
@@ -413,7 +436,8 @@
                      (assoc-in env [:bindings name] binding)
                      statements))
             (let [init (lower-value init-form env)]
-              (if (= :array-ref (:op (:value init)))
+              (cond
+                (= :array-ref (:op (:value init)))
                 ;; A place alias: a compile-time name for an existing array.
                 (let [ref (:value init)
                       local {:name name :kind :place
@@ -423,6 +447,23 @@
                   (recur remaining
                          (assoc-in env [:bindings name] local)
                          (into statements (:statements init))))
+
+                (= :record (:type (:value init)))
+                ;; A record value (multi-output) is one local per leaf: the
+                ;; interpreter holds a map, the backends split it when inlining.
+                (let [value (:value init)
+                      local {:name name :type :record :kind :record-value
+                             :record-leaves (:record-leaves value)}
+                      declaration {:op :declare
+                                   :name name
+                                   :type :record
+                                   :init value}]
+                  (swap! (:locals env) conj (select-keys local [:name :type]))
+                  (recur remaining
+                         (assoc-in env [:bindings name] local)
+                         (into statements (concat (:statements init) [declaration]))))
+
+                :else
                 (let [local {:name name :type (:type init) :kind :local}
                       declaration {:op :declare
                                    :name name
@@ -708,6 +749,7 @@
                    :type (:element ref)
                    :effects #{:read-memory}}
                   {:op :state-load
+                   :state-id (:state-id ref)
                    :index (:base ref)
                    :element-index (:value index)
                    :size (:size ref)
@@ -737,6 +779,7 @@
                    :value (:value value)
                    :effects #{:write-memory}}]
                  [{:op :state-store
+                   :state-id (:state-id ref)
                    :index (:base ref)
                    :element-index (:value index)
                    :size (:size ref)
@@ -751,6 +794,25 @@
       (fail "DSP field access requires a declared state record"
             {:form form :state name}))
     binding))
+
+(defn- value-record-binding
+  "The `:record-value` binding named `name`, if any (a multi-output result)."
+  [env name]
+  (let [binding (get-in env [:bindings name])]
+    (when (= :record-value (:kind binding)) binding)))
+
+(defn- project-record-value
+  [form binding path]
+  (let [leaf (some #(when (= (vec (:path %)) (vec path)) %) (:record-leaves binding))]
+    (when-not leaf
+      (fail "DSP record value has no such field"
+            {:form form :record (:name binding) :field (vec path)
+             :fields (mapv :path (:record-leaves binding))}))
+    (fragment []
+              {:op :project
+               :value {:op :local :name (:name binding) :type :record}
+               :path (:path leaf)
+               :type (:type leaf)})))
 
 (defn- field-selectors
   "Split field selectors into an optional record index, a field path, and an
@@ -807,6 +869,7 @@
   "An `:array-ref` place for a record's array field."
   [binding leaf]
   {:op :array-ref :type :array :region :state
+   :state-id (:name binding)
    :base (:offset leaf) :element (:type leaf) :size (:size leaf)
    :constant (boolean (:constant binding))})
 
@@ -815,19 +878,24 @@
   (let [[_ name & selectors] form]
     (when-not (symbol? name)
       (fail "field requires a state record name" {:form form}))
-    (let [binding (record-binding! form env name)
-          {:keys [leaf index]} (field-leaf! form env binding
-                                            (field-selectors form selectors))]
-      (if (and (> (:size leaf) 1) (nil? index))
-        (fragment [] (leaf-array-ref binding leaf))
-        (fragment (:statements index)
-                  {:op :state-load
-                   :state-id (:name binding)
-                   :index (:offset leaf)
-                   :element-index (:value index)
-                   :size (:size leaf)
-                   :type (:type leaf)
-                   :effects #{:read-state}})))))
+    (if-let [binding (value-record-binding env name)]
+      (let [parsed (field-selectors form selectors)]
+        (when (or (:record-index parsed) (:element-index parsed))
+          (fail "DSP record values have no record or element index" {:form form}))
+        (project-record-value form binding (:path parsed)))
+      (let [binding (record-binding! form env name)
+            {:keys [leaf index]} (field-leaf! form env binding
+                                              (field-selectors form selectors))]
+        (if (and (> (:size leaf) 1) (nil? index))
+          (fragment [] (leaf-array-ref binding leaf))
+          (fragment (:statements index)
+                    {:op :state-load
+                     :state-id (:name binding)
+                     :index (:offset leaf)
+                     :element-index (:value index)
+                     :size (:size leaf)
+                     :type (:type leaf)
+                     :effects #{:read-state}}))))))
 
 (defn- lower-set-field!
   [form env]
@@ -837,6 +905,8 @@
     (when-not (and (symbol? name) (seq selectors) value-form)
       (fail "set-field! requires a state record name, field path, and value"
             {:form form}))
+    (when (value-record-binding env name)
+      (fail "DSP record values are immutable" {:form form :record name}))
     (let [binding (record-binding! form env name)
           parsed (field-selectors form selectors)
           {:keys [leaf index]} (field-leaf! form env binding parsed)
@@ -860,22 +930,27 @@
 (defn- lower-field-read
   "Clojure-style field read for `(:field record)` and `(record :field)`."
   [form env record-name path]
-  (let [binding (record-binding! form env record-name)
-        {:keys [leaf index]} (field-leaf! form env binding {:path path})]
-    (if (and (> (:size leaf) 1) (nil? index))
-      (fragment [] (leaf-array-ref binding leaf))
-      (fragment (:statements index)
-                {:op :state-load
-                 :state-id (:name binding)
-                 :index (:offset leaf)
-                 :element-index (:value index)
-                 :size (:size leaf)
-                 :type (:type leaf)
-                 :effects #{:read-state}}))))
+  (if-let [binding (value-record-binding env record-name)]
+    (project-record-value form binding path)
+    (let [binding (record-binding! form env record-name)
+          {:keys [leaf index]} (field-leaf! form env binding {:path path})]
+      (if (and (> (:size leaf) 1) (nil? index))
+        (fragment [] (leaf-array-ref binding leaf))
+        (fragment (:statements index)
+                  {:op :state-load
+                   :state-id (:name binding)
+                   :index (:offset leaf)
+                   :element-index (:value index)
+                   :size (:size leaf)
+                   :type (:type leaf)
+                   :effects #{:read-state}})))))
 
 (defn- lower-place-store!
   "Field write for a `set!` place: `(set! (:field record) value)`."
   [form record-name path value-form env]
+  (when (value-record-binding env record-name)
+    (fail "DSP record values are immutable"
+          {:form form :record record-name}))
   (let [binding (record-binding! form env record-name)
         {:keys [leaf index]} (field-leaf! form env binding {:path path})]
     (when (> (:size leaf) 1)
@@ -911,13 +986,32 @@
     (let [args (mapv #(lower-value %1 env) arg-forms)]
       (doseq [[arg parameter] (map vector args (:params signature))]
         (expect-type! (:type parameter) (:value arg) form))
-      (combine-fragments
-       args
-       {:op :call
-        :function-id function-id
-        :args (mapv :value args)
-        :type (:return-type signature)
-        :effects #{:call}}))))
+      ;; A callee with state gets a private partition at this call site (D19).
+      ;; The callee IR keeps zero-based state indices; the partition base is
+      ;; resolved relative to the enclosing module, and the rebased slots extend
+      ;; the enclosing arena.
+      (let [callee (get (:modules env) function-id)
+            partition-size (or (:state-size callee) 0)
+            partition-base (when (pos? partition-size)
+                             (let [base @(:call-offset env)]
+                               (swap! (:call-offset env) + partition-size)
+                               (swap! (:state-more env) into
+                                      (rebase-slots base (:state callee)))
+                               (swap! (:records-more env) into
+                                      (rebase-records base (:records callee)))
+                               base))]
+        (combine-fragments
+         args
+         {:op :call
+          :function-id function-id
+          :args (mapv :value args)
+          :type (:return-type signature)
+          :record-leaves (when (= :record (:return-type signature))
+                           (:return-fields signature))
+          :state-base partition-base
+          :effects (if partition-base
+                     #{:call :read-state :write-state}
+                     #{:call})})))))
 
 (defn- lower-conversion
   [form env operator from-type to-type]
@@ -980,6 +1074,14 @@
         (lower-builtin form env op)
         :else (fail "unsupported DSP expression" {:form form :operator op})))
 
+    ;; A record value: a map matching the struct carried by the environment. It
+    ;; is erased at lowering, so `let`/`do` around it work as ordinary forms.
+    (map? form)
+    (if-let [record (:return-record env)]
+      (lower-record-value form (:fields record) env)
+      (fail "DSP record values may only be returned from a module"
+            {:form form}))
+
     :else (fail "unsupported DSP expression value" {:form form})))
 
 (defn- lower-form
@@ -1026,7 +1128,11 @@
   (into {}
         (map (fn [[id definition]]
                [id {:params (:params definition)
-                    :return-type (:return-type definition)}])
+                    :return-type (:return-type definition)
+                    ;; A record return carries its flat field list, so a call site
+                    ;; can bind one local per output (multi-output).
+                    :return-fields (when-let [record (:return-record definition)]
+                                     (vec (record-leaves (:fields record) [])))}])
              definitions)))
 
 (defn- record-leaves
@@ -1122,48 +1228,230 @@
   [states]
   (reduce + 0 (map #(or (:size %) 1) states)))
 
+(defn- rebase-slots
+  "Shift a module's relative state slots to a partition base (D19)."
+  [base slots]
+  (mapv #(update % :index + base) slots))
+
+(defn- rebase-records
+  "Shift a module's relative record leaf offsets to a partition base."
+  [base records]
+  (mapv (fn [record]
+          (update record :leaves
+                  #(mapv (fn [leaf] (update leaf :offset + base)) %)))
+        records))
+
+(defn- definition-calls
+  "Every resolved `dsp/call` form in a descriptor's body and state transitions."
+  [definition]
+  (letfn [(walk [form]
+            (cond
+              (seq? form) (if (= 'dsp/call (first form))
+                            (cons form (mapcat walk (nnext form)))
+                            (mapcat walk form))
+              (vector? form) (mapcat walk form)
+              (map? form) (mapcat walk (vals form))
+              :else nil))]
+    (concat (mapcat walk (:body definition))
+            (mapcat (fn [state] (when-let [next-form (:next state)]
+                                  (walk next-form)))
+                    (:state definition)))))
+
+(defn- module-state-sizes
+  "Partition size of every definition: its own expanded state plus one
+  partition per static call site, recursively (D19). Definitions are dependency
+  ordered, so a callee's size is known before its caller's."
+  [definitions]
+  (reduce (fn [sizes [id definition]]
+            (assoc sizes id
+                   (+ (state-total (:slots (expand-state (:state definition))))
+                      (reduce + 0 (map (fn [call] (get sizes (second call) 0))
+                                       (definition-calls definition))))))
+          {}
+          definitions))
+
+(defn- lower-record-fields
+  "Flatten a record value's map form into leaf entries.
+
+  The form mirrors the struct's field tree, so a nested field takes a nested map.
+  Returns a flat sequence of `{:path ... :type ... :fragment ...}` in field order."
+  [form fields env path]
+  (when-not (map? form)
+    (fail "DSP record value must be a map matching the declared struct"
+          {:form form :path (vec path)}))
+  (let [expected (set (map :name fields))
+        actual (set (keys form))]
+    (when-not (= expected actual)
+      (fail "DSP record value fields do not match the declared struct"
+            {:form form :path (vec path)
+             :expected (vec (sort expected)) :actual (vec (sort actual))})))
+  (mapcat (fn [field]
+            (let [value (get form (:name field))
+                  field-path (conj path (:name field))]
+              (if (contains? field :fields)
+                (lower-record-fields value (:fields field) env field-path)
+                (let [lowered (lower-value value env)]
+                  (expect-type! (:type field) (:value lowered) value)
+                  [{:path field-path :type (:type field) :fragment lowered}]))))
+          fields))
+
+(defn- lower-record-value
+  "Lower a record value's map form: one flat leaf per scalar field.
+
+  The form mirrors the struct's field tree, so a nested field takes a nested map."
+  [form fields env]
+  (let [entries (vec (lower-record-fields form fields env []))]
+    (fragment (mapcat (comp :statements :fragment) entries)
+              {:op :record
+               :type :record
+               :record-leaves (mapv #(select-keys % [:path :type]) entries)
+               :values (mapv (comp :value :fragment) entries)})))
+
+(defn- context-bindings
+  "The per-instance context values every definition may reference, whether it is
+  lowered as an entry or as a module: the frame count and the sample rate."
+  [definition]
+  (let [process (:process definition)
+        frames (or (get-in process [:frames]) {:name 'frames :type :int})
+        sample-rate (or (get-in process [:sample-rate])
+                        {:name 'sample-rate :type :float})]
+    (into {}
+          [[(:name frames) (assoc frames :kind :frames)]
+           [(:name sample-rate) (assoc sample-rate :kind :sample-rate)]])))
+
 (defn- base-bindings
   [definition state-bindings]
-  (into {}
-        (concat
-         (map (fn [parameter]
-                [(:name parameter) (assoc parameter :kind :param)])
-              (:params definition))
-         state-bindings)))
+  (merge (into {}
+               (concat
+                (map (fn [parameter]
+                       [(:name parameter) (assoc parameter :kind :param)])
+                     (:params definition))
+                state-bindings))
+         (context-bindings definition)))
 
 (defn lower
   "Lower one normalized descriptor to explicit function IR."
   ([definition] (lower definition {}))
-  ([definition {:keys [functions definition-id options]}]
+  ([definition {:keys [functions definition-id options modules]}]
    (normalized-definition! definition)
    (let [return-type (:return-type definition)
+         record-return (:return-record definition)
          expanded (expand-state (:state definition))
          states (:slots expanded)
-         env (environment (base-bindings definition (:bindings expanded))
-                          (or functions {}) (or options {}))
-         body (lower-forms (:body definition) env)]
-     (when-not (:value body)
-       (fail "DSP function body does not produce a value" {:body (:body definition)}))
-     (expect-type! return-type (:value body) (:body definition))
-     (when (seq (:state definition))
-       ;; State transitions are lowered directly by `lower-process`; scalar
-       ;; function entries remain invalid for stateful descriptors.
-       nil)
-     (let [body (block (conj (:statements body)
-                             {:op :return :value (:value body)}))
-           ir {:op :function
-               :name (:name definition)
-               :id (or definition-id (:name definition))
-               :params (:params definition)
-               :return-type return-type
-               :locals @(:locals env)
-               :state states
-               :records (:records expanded)
-               :scratch (vec (:entries @(:scratch env)))
-               :precision (:precision options)
-               :options (or options {})
-               :body body}]
-       (assoc ir :effects (collect-effects body))))))
+         stateful? (boolean (seq (:state definition)))
+         env (assoc (environment (base-bindings definition (:bindings expanded))
+                                 (or functions {}) (or options {}) {} (or modules {}))
+                    :return-record record-return)
+         ;; Call-site partitions are allocated after this module's own state.
+         _ (reset! (:call-offset env) (state-total states))
+         _ (reset! (:records-more env) (vec (:records expanded)))
+         ;; The return is a scalar expression, or a map producing a record value;
+         ;; `let`/`do` around it lower as ordinary forms.
+         returned (lower-forms (:body definition) env)
+         _ (when-not (:value returned)
+             (fail "DSP function body does not produce a value"
+                   {:body (:body definition)}))
+         _ (if record-return
+             (when-not (= :record (:type (:value returned)))
+               (fail "DSP record-returning body must produce a record value"
+                     {:body (:body definition) :type (:type (:value returned))}))
+             (expect-type! return-type (:value returned) (:body definition)))
+         ;; Snapshot the return before this module's transitions can clobber a
+         ;; state slot the returning expression already read.
+         [result-declarations return-value]
+         (if-not stateful?
+           [[] (:value returned)]
+           (if record-return
+             (let [leaves (:record-leaves (:value returned))
+                   pairs (mapv (fn [leaf expr]
+                                 {:local (fresh-local!
+                                          env
+                                          (symbol (str "out_"
+                                                       (str/join "_" (map name (:path leaf)))))
+                                          (:type leaf))
+                                  :expr expr})
+                               leaves (:values (:value returned)))]
+               [(mapv (fn [{:keys [local expr]}]
+                        {:op :declare :name (:name local)
+                         :type (:type local) :init expr})
+                      pairs)
+                {:op :record :type :record :record-leaves leaves
+                 :values (mapv (fn [{:keys [local]}]
+                                 {:op :local :name (:name local) :type (:type local)})
+                               pairs)}])
+             (let [local (fresh-local! env "result" return-type)]
+               [[{:op :declare :name (:name local)
+                  :type return-type :init (:value returned)}]
+                {:op :local :name (:name local) :type return-type}])))
+         ;; A module applies its own scalar state transition at the end of its
+         ;; body, so consecutive calls in a frame observe each other (D19).
+         state-results
+         (mapv (fn [state]
+                 (when-let [next-form (:next state)]
+                   (let [next (lower-value next-form env)
+                         _ (expect-type! (:type state) (:value next) next-form)
+                         local (fresh-local! env
+                                             (str (name (:name state)) "_next")
+                                             (:type state))]
+                     {:state state
+                      :statements (conj (:statements next)
+                                        {:op :declare
+                                         :name (:name local)
+                                         :type (:type local)
+                                         :init (:value next)})
+                      :local local})))
+               states)
+         transitions (vec (concat (mapcat :statements (remove nil? state-results))
+                                  (map (fn [{:keys [state local]}]
+                                         {:op :state-store
+                                          :state-id (:name state)
+                                          :index (:index state)
+                                          :type (:type state)
+                                          :value {:op :local
+                                                  :name (:name local)
+                                                  :type (:type local)}
+                                          :effects #{:write-state}})
+                                       (remove nil? state-results))))
+         body (block
+               (vec
+                (concat
+                 (:statements returned)
+                 result-declarations
+                 transitions
+                 [{:op :return :value return-value}])))
+         ir {:op :function
+             :name (:name definition)
+             :id (or definition-id (:name definition))
+             :params (:params definition)
+             :return-type return-type
+             :return-record record-return
+             :locals @(:locals env)
+             ;; The arena is this module's own slots followed by one partition
+             ;; per call site, all relative to this module's base.
+             :state (into (mapv #(select-keys % [:name :type :size :init
+                                                 :index :constant])
+                                states)
+                          @(:state-more env))
+             :state-size @(:call-offset env)
+             :records (vec @(:records-more env))
+             :scratch (vec (:entries @(:scratch env)))
+             :precision (:precision options)
+             :options (or options {})
+             :body body}]
+     (assoc ir :effects (collect-effects body)))))
+
+(defn- lower-definitions
+  "Lower every definition in dependency order, exposing each lowered callee to
+  the ones that follow so call sites can allocate their state partitions."
+  [definitions options]
+  (reduce (fn [lowered [id definition]]
+            (assoc lowered id
+                   (lower definition {:functions (signatures definitions)
+                                      :definition-id id
+                                      :options options
+                                      :modules lowered})))
+          (array-map)
+          definitions))
 
 (defn lower-unit
   "Lower every descriptor in a linked compilation unit."
@@ -1172,13 +1460,7 @@
    (when-not (= :compilation-unit (:dsp/kind unit))
      (fail "DSP IR lowering expects a linked compilation unit" {:unit unit}))
    (let [definitions (:definitions unit)
-         signatures (signatures definitions)
-         lowered (into (array-map)
-                       (map (fn [[id definition]]
-                              [id (lower definition {:functions signatures
-                                                     :definition-id id
-                                                     :options options})])
-                            definitions))
+         lowered (lower-definitions definitions options)
          entry (:entry unit)]
      (assoc (get lowered entry)
             :definitions lowered
@@ -1279,12 +1561,9 @@
                 {sample-name {:name sample-name
                               :type :float
                               :kind :buffer
-                              :expression sample-expression}
-                 (:name frames) {:name (:name frames) :type :int :kind :frames}
-                 (:name sample-rate) {:name (:name sample-rate)
-                                      :type :float
-                                      :kind :sample-rate}}
+                              :expression sample-expression}}
                 (concat
+                 (context-bindings definition)
                  (map (fn [control]
                         [(:name control) (assoc control :kind :control)])
                       controls)
@@ -1353,18 +1632,26 @@
          entry-id (:entry unit)
          definition (get definitions entry-id)
          _ (normalized-definition! definition)
-         _ (when (and (> channels 1) (seq (:state definition)))
-             (fail "stateful multi-channel DSP processes are not supported yet"
-                   {:name (:name definition) :channels channels}))
          expanded (expand-state (:state definition))
          states (:slots expanded)
          buffers (process-buffers definition channels)
          {:keys [bindings channel controls frames sample-rate]} (process-bindings definition (:bindings expanded) channels)
+         ;; Callees are lowered first, in dependency order, so every call site
+         ;; can allocate its state partition (D19).
+         modules (lower-definitions (dissoc definitions entry-id) options)
+         ;; The entry arena is its own state, then one partition per call site,
+         ;; then local-array scratch. Partition sizes are static, so scratch
+         ;; starts after the whole state region.
+         total-state (get (module-state-sizes definitions) entry-id)
+         _ (when (and (> channels 1) (pos? total-state))
+             (fail "stateful multi-channel DSP processes are not supported yet"
+                   {:name (:name definition) :channels channels}))
          env (environment bindings (signatures definitions) (or options {})
-                          (into {} (map (juxt :id identity) buffers)))
-         ;; Scratch offsets continue after persistent state so state and scratch
-         ;; form one arena; a stateful body never allocates at run time.
-         _ (reset! (:scratch env) {:next (state-total states) :entries []})
+                          (into {} (map (juxt :id identity) buffers))
+                          modules)
+         _ (reset! (:call-offset env) (state-total states))
+         _ (reset! (:records-more env) (vec (:records expanded)))
+         _ (reset! (:scratch env) {:next total-state :entries []})
          output (lower-forms (:body definition) env)
          _ (when-not (:value output)
              (fail "DSP process body does not produce an output value"
@@ -1411,14 +1698,6 @@
                    :value {:op :local :name (:name local) :type (:type local)}
                    :effects #{:write-state}})
                 (remove nil? state-results))))
-         dependencies (dissoc definitions entry-id)
-         lowered-definitions
-         (into (array-map)
-               (map (fn [[id descriptor]]
-                      [id (lower descriptor {:functions (signatures definitions)
-                                             :definition-id id
-                                             :options options})])
-                    dependencies))
          frame-body (block frame-statements)
          memory (memory-requirements buffers frame-body (:precision options))
          diagnostics (process-diagnostics frame-body memory)
@@ -1433,100 +1712,292 @@
              :sample-rate sample-rate
              :controls controls
              :locals @(:locals env)
-             :state (mapv #(select-keys % [:name :type :size :init :index :constant]) states)
-             :records (:records expanded)
+             :state (into (mapv #(select-keys % [:name :type :size :init :index :constant])
+                                states)
+                          @(:state-more env))
+             :state-size @(:call-offset env)
+             :records (vec @(:records-more env))
              :scratch (vec (:entries @(:scratch env)))
              :precision (:precision options)
              :lifecycle (merge {:init true :reset true}
                                (get-in definition [:process :lifecycle]))
              :options (or options {})
-             :definitions lowered-definitions
+             :definitions modules
              :entry-id entry-id
              :graph (:graph unit)
              :frame-body frame-body}]
      (assoc ir :effects (collect-effects frame-body)))))
 
-(defn- substitute-expression
-  [expr substitutions]
+(def ^:private inlining-statement-limit
+  "Conservative bound on the statements an expansion may add. Composition is
+  inlined, not called, and recursion is rejected at link time, so growth is
+  finite; this budget turns a pathological graph into a clear diagnostic rather
+  than a runaway artifact."
+  20000)
+
+(declare inline-call inline-statement)
+
+(defn- expression-body?
+  [statements]
+  (and (= 1 (count statements))
+       (= :return (:op (first statements)))))
+
+(defn- rename-local
+  [renames name]
+  (get renames name name))
+
+(defn- rebase-expression
+  "Rename a module's locals, substitute its params, and rebase its state.
+
+  Parameter references become the call site's already-hoisted argument values,
+  which are pure, so duplicating them is safe. State indices move into the call
+  site's partition, and a nested call's base is shifted with them."
+  [expr renames substitutions base]
   (case (:op expr)
-    :local (get substitutions (:name expr) expr)
+    :local (or (get substitutions (:name expr))
+               (assoc expr :name (rename-local renames (:name expr))))
+    :state-load (cond-> (update expr :index + base)
+                  (:element-index expr)
+                  (update :element-index
+                          rebase-expression renames substitutions base))
     :binary (assoc expr
-                   :left (substitute-expression (:left expr) substitutions)
-                   :right (substitute-expression (:right expr) substitutions))
+                   :left (rebase-expression (:left expr) renames substitutions base)
+                   :right (rebase-expression (:right expr) renames substitutions base))
     :compare (assoc expr
-                    :left (substitute-expression (:left expr) substitutions)
-                    :right (substitute-expression (:right expr) substitutions))
-    :logical (update expr :args #(mapv (fn [arg]
-                                         (substitute-expression arg substitutions)) %))
-    :bitwise (update expr :args #(mapv (fn [arg]
-                                         (substitute-expression arg substitutions)) %))
-    :builtin (update expr :args #(mapv (fn [arg]
-                                         (substitute-expression arg substitutions)) %))
-    :convert (update expr :value substitute-expression substitutions)
-    :buffer-load expr
-    :state-load expr
-    :const expr
+                    :left (rebase-expression (:left expr) renames substitutions base)
+                    :right (rebase-expression (:right expr) renames substitutions base))
+    :logical (update expr :args
+                     #(mapv (fn [a] (rebase-expression a renames substitutions base)) %))
+    :bitwise (update expr :args
+                     #(mapv (fn [a] (rebase-expression a renames substitutions base)) %))
+    :builtin (update expr :args
+                     #(mapv (fn [a] (rebase-expression a renames substitutions base)) %))
+    :convert (update expr :value rebase-expression renames substitutions base)
+    :frame-plus (update expr :offset rebase-expression renames substitutions base)
+    :project (update expr :value rebase-expression renames substitutions base)
+    :record (update expr :values
+                    #(mapv (fn [v] (rebase-expression v renames substitutions base)) %))
+    ;; A scratch (`:array-*`) offset is arena-absolute, so only its element
+    ;; index can hold locals; a state offset moves into the partition.
+    :array-load (cond-> expr
+                  (:element-index expr)
+                  (update :element-index
+                          rebase-expression renames substitutions base))
+    :buffer-load (update expr :index rebase-expression renames substitutions base)
+    :call (cond-> (update expr :args
+                          #(mapv (fn [a] (rebase-expression a renames substitutions base)) %))
+            (some? (:state-base expr)) (update :state-base + base))
     expr))
 
-(defn- inline-expression
-  [expr definitions]
-  (letfn [(inline* [expr]
-            (case (:op expr)
-              :call
-              (let [callee (get definitions (:function-id expr))
-                    statements (get-in callee [:body :statements])]
-                (when-not (and (= 1 (count statements))
-                               (= :return (:op (first statements))))
-                  (fail "backend inlining currently requires expression-only callees"
-                        {:function-id (:function-id expr)}))
-                (let [args (mapv inline* (:args expr))
-                      substitutions (into {}
-                                          (map (fn [parameter argument]
-                                                 [(:name parameter) argument])
-                                               (:params callee) args))]
-                  (-> (get-in statements [0 :value])
-                      (substitute-expression substitutions)
-                      inline*)))
-              :binary (assoc expr :left (inline* (:left expr))
-                             :right (inline* (:right expr)))
-              :compare (assoc expr :left (inline* (:left expr))
-                              :right (inline* (:right expr)))
-              :logical (update expr :args #(mapv inline* %))
-              :bitwise (update expr :args #(mapv inline* %))
-              :builtin (update expr :args #(mapv inline* %))
-              :convert (update expr :value inline*)
-              expr))]
-    (inline* expr)))
+(defn- rebase-statement
+  [statement renames substitutions base]
+  (let [expr #(rebase-expression % renames substitutions base)
+        stmt #(rebase-statement % renames substitutions base)]
+    (case (:op statement)
+      :block (update statement :statements #(mapv stmt %))
+      :declare (cond-> (assoc statement :name (rename-local renames (:name statement)))
+                 (:init statement) (update :init expr))
+      :assign (-> statement
+                  (assoc :name (rename-local renames (:name statement)))
+                  (update :value expr))
+      :expression (update statement :value expr)
+      :return (update statement :value expr)
+      :buffer-store (update statement :value expr)
+      :state-store (-> statement
+                       (update :index + base)
+                       (cond-> (:element-index statement)
+                         (update :element-index expr))
+                       (update :value expr))
+      :array-store (-> statement
+                       (cond-> (:element-index statement)
+                         (update :element-index expr))
+                       (update :value expr))
+      :if (-> statement
+              (update :condition expr)
+              (update :then stmt)
+              (update :else stmt))
+      :while (-> statement
+                 (update :condition expr)
+                 (update :body stmt))
+      statement)))
 
-(defn- map-statement-expressions
-  [statement f]
+(defn- inline-value
+  "Inline every call in an expression, hoisting the side effects it introduces."
+  [expr definitions state]
+  (case (:op expr)
+    :call (inline-call expr definitions state)
+    :binary (let [left (inline-value (:left expr) definitions state)
+                  right (inline-value (:right expr) definitions state)]
+              {:statements (into (:statements left) (:statements right))
+               :value (assoc expr :left (:value left) :right (:value right))})
+    :compare (let [left (inline-value (:left expr) definitions state)
+                   right (inline-value (:right expr) definitions state)]
+               {:statements (into (:statements left) (:statements right))
+                :value (assoc expr :left (:value left) :right (:value right))})
+    :logical (let [args (mapv #(inline-value % definitions state) (:args expr))]
+               {:statements (vec (mapcat :statements args))
+                :value (assoc expr :args (mapv :value args))})
+    :bitwise (let [args (mapv #(inline-value % definitions state) (:args expr))]
+               {:statements (vec (mapcat :statements args))
+                :value (assoc expr :args (mapv :value args))})
+    :builtin (let [args (mapv #(inline-value % definitions state) (:args expr))]
+               {:statements (vec (mapcat :statements args))
+                :value (assoc expr :args (mapv :value args))})
+    :convert (let [value (inline-value (:value expr) definitions state)]
+               {:statements (:statements value)
+                :value (assoc expr :value (:value value))})
+    :project (if (and (= :local (:op (:value expr)))
+                      (get-in @state [:records (:name (:value expr))]))
+               (if-let [local (get-in @state [:records (:name (:value expr)) (:path expr)])]
+                 {:statements []
+                  :value {:op :local :name local :type (:type expr)}}
+                 (fail "DSP record value has no such field" {:path (:path expr)}))
+               (let [value (inline-value (:value expr) definitions state)]
+                 {:statements (:statements value)
+                  :value (assoc expr :value (:value value))}))
+    :record (let [values (mapv #(inline-value % definitions state) (:values expr))]
+              {:statements (vec (mapcat :statements values))
+               :value (assoc expr :values (mapv :value values))})
+    :frame-plus (let [offset (inline-value (:offset expr) definitions state)]
+                  {:statements (:statements offset)
+                   :value (assoc expr :offset (:value offset))})
+    {:statements [] :value expr}))
+
+(defn- inline-call
+  [expr definitions state]
+  (let [callee (get definitions (:function-id expr))]
+    (when-not callee
+      (fail "DSP call refers to an unlinked function"
+            {:function-id (:function-id expr)}))
+    (let [args (mapv #(inline-value % definitions state) (:args expr))
+          arg-statements (vec (mapcat :statements args))
+          arg-values (mapv :value args)
+          substitutions (into {}
+                              (map (fn [parameter argument]
+                                     [(:name parameter) argument])
+                                   (:params callee) arg-values))
+          statements (get-in callee [:body :statements])]
+      (if (expression-body? statements)
+        ;; State-free callee: substitute its return expression. The partition
+        ;; base is still applied, because the expression may call stateful
+        ;; modules whose own partitions are relative to this module's base.
+        (let [base (or (:state-base expr) 0)
+              value (rebase-expression (get-in statements [0 :value]) {}
+                                       substitutions base)
+              result (inline-value value definitions state)]
+          {:statements (into arg-statements (:statements result))
+           :value (:value result)})
+        ;; A stateful module: rename its locals, rebase its state into this call
+        ;; site's partition, and splice its statements in place (D19).
+        (let [base (or (:state-base expr) 0)
+              renames (into {}
+                            (map (fn [local]
+                                   [(:name local)
+                                    (symbol (str "inl__"
+                                                 (:names (swap! state update :names inc))
+                                                 "__" (name (:name local))))]))
+                            (:locals callee))
+              body-nodes (pop statements)
+              return-node (peek statements)
+              rewritten (vec (mapcat (fn [node]
+                                       (inline-statement
+                                        (rebase-statement node renames substitutions base)
+                                        definitions state))
+                                     body-nodes))
+              return-value (rebase-expression (:value return-node)
+                                              renames substitutions base)
+              result (inline-value return-value definitions state)
+              _ (swap! state update :statements + (count rewritten))
+              _ (when (> (:statements @state) inlining-statement-limit)
+                  (fail "DSP inlining exceeded the code-size budget"
+                        {:limit inlining-statement-limit
+                         :function-id (:function-id expr)}))]
+          {:statements (into arg-statements (into rewritten (:statements result)))
+           :value (:value result)})))))
+
+(defn- inline-statement
+  "Inline a statement, returning the hoisted statement vector that replaces it."
+  [statement definitions state]
+  (let [expr #(inline-value % definitions state)]
+    (case (:op statement)
+      :block [(assoc statement
+                     :statements (vec (mapcat #(inline-statement % definitions state)
+                                              (:statements statement))))]
+      :declare (if-let [init (:init statement)]
+                 (let [value (expr init)]
+                   (if (= :record (:op (:value value)))
+                     ;; A multi-output result: one local per leaf, plus a mapping
+                     ;; from the bound name to those locals for projections.
+                     (let [record (:value value)
+                           base-name (:name statement)
+                           locals (mapv (fn [leaf]
+                                          {:path (:path leaf)
+                                           :name (symbol (str base-name "__"
+                                                              (str/join "_"
+                                                                        (map name (:path leaf)))))
+                                           :type (:type leaf)})
+                                        (:record-leaves record))]
+                       (swap! state assoc-in [:records base-name]
+                              (into {} (map (fn [l] [(:path l) (:name l)])) locals))
+                       (into (vec (:statements value))
+                             (mapv (fn [local leaf-value]
+                                     {:op :declare :name (:name local)
+                                      :type (:type local) :init leaf-value})
+                                   locals (:values record))))
+                     (conj (:statements value) (assoc statement :init (:value value)))))
+                 [statement])
+      :assign (let [value (expr (:value statement))]
+                (conj (:statements value) (assoc statement :value (:value value))))
+      :expression (let [value (expr (:value statement))]
+                    (conj (:statements value) (assoc statement :value (:value value))))
+      :return (let [value (expr (:value statement))]
+                (conj (:statements value) (assoc statement :value (:value value))))
+      :buffer-store (let [value (expr (:value statement))]
+                      (conj (:statements value) (assoc statement :value (:value value))))
+      :state-store (let [value (expr (:value statement))]
+                     (conj (:statements value) (assoc statement :value (:value value))))
+      :if (let [condition (expr (:condition statement))]
+            (conj (:statements condition)
+                  (assoc statement
+                         :condition (:value condition)
+                         :then (first (inline-statement (:then statement)
+                                                        definitions state))
+                         :else (when-let [else (:else statement)]
+                                 (first (inline-statement else definitions state))))))
+      :while (let [condition (expr (:condition statement))]
+               (conj (:statements condition)
+                     (assoc statement
+                            :condition (:value condition)
+                            :body (first (inline-statement (:body statement)
+                                                           definitions state)))))
+      [statement])))
+
+(defn- declared-locals
+  "Every local a statement tree declares, in walk order. Inlining introduces
+  locals the enclosing descriptor never saw, so the arena's local layout is
+  rebuilt from the expanded body."
+  [statement]
   (case (:op statement)
-    :block (update statement :statements
-                   #(mapv (fn [child] (map-statement-expressions child f)) %))
-    :declare (cond-> statement (:init statement) (update :init f))
-    :assign (update statement :value f)
-    :expression (update statement :value f)
-    :return (update statement :value f)
-    :buffer-store (update statement :value f)
-    :state-store (update statement :value f)
-    :if (-> statement
-            (update :condition f)
-            (update :then map-statement-expressions f)
-            (update :else map-statement-expressions f))
-    :while (-> statement
-               (update :condition f)
-               (update :body map-statement-expressions f))
-    statement))
+    :block (mapcat declared-locals (:statements statement))
+    :declare [{:name (:name statement) :type (:type statement)}]
+    :if (concat (declared-locals (:then statement))
+                (when (:else statement) (declared-locals (:else statement))))
+    :while (declared-locals (:body statement))
+    nil))
 
 (defn inline-calls
-  "Inline expression-only linked callees for the current source-emitting backends."
+  "Inline linked callees for the source-emitting backends.
+
+  Pure callees are substituted. A stateful module is expanded with its locals
+  renamed and its state rebased into the call site's partition (D19), so the
+  JVM, JavaScript, and Wasm backends share one composition implementation."
   [ir]
   (let [definitions (:definitions ir)
         body-key (if (= :process (:op ir)) :frame-body :body)
-        body (map-statement-expressions
-              (get ir body-key)
-              #(inline-expression % definitions))
-        ir (assoc ir body-key body :definitions {})]
+        state (atom {:names 0 :statements 0 :records {}})
+        body (first (inline-statement (get ir body-key) definitions state))
+        ir (assoc ir body-key body :definitions {}
+                  :locals (vec (distinct (declared-locals body))))]
     (assoc ir :effects (collect-effects body))))
 
 (defn validate-runtime-policy!

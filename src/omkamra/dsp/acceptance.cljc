@@ -363,24 +363,52 @@
     ;; fractional delay, a delay that wraps the 64-sample buffer over the run,
     ;; and an allpass-interpolated fractional tap.
     (library-case {:id :delay-line-zero
-                   :definition-var 'omkamra.dsp.library/delay-line
+                   :definition-var 'omkamra.dsp.library/delay-line-voice
                    :controls [0.0]
                    :input-samples sine-input-samples})
     (library-case {:id :delay-line-unit
-                   :definition-var 'omkamra.dsp.library/delay-line
+                   :definition-var 'omkamra.dsp.library/delay-line-voice
                    :controls [1.0]
                    :input-samples sine-input-samples})
     (library-case {:id :delay-line-fractional
-                   :definition-var 'omkamra.dsp.library/delay-line
+                   :definition-var 'omkamra.dsp.library/delay-line-voice
                    :controls [4.5]
                    :input-samples sine-input-samples})
     (library-case {:id :delay-line-wrap
-                   :definition-var 'omkamra.dsp.library/delay-line
+                   :definition-var 'omkamra.dsp.library/delay-line-voice
                    :controls [30.25]
                    :input-samples sine-input-samples})
     (library-case {:id :allpass-delay-line
-                   :definition-var 'omkamra.dsp.library/allpass-delay-line
+                   :definition-var 'omkamra.dsp.library/allpass-delay-line-voice
                    :controls [4.5]
+                   :input-samples sine-input-samples})
+    ;; P6b: the delay line as a *module*, called twice with different delays, so
+    ;; the two buffers must be independent.
+    (library-case {:id :delay-line-pair-voice
+                   :definition-var 'omkamra.dsp.library/delay-line-pair-voice
+                   :controls [4.5]
+                   :input-samples sine-input-samples})
+    ;; P6 done-when: a stateful biquad and a stateful ADSR envelope composed into
+    ;; one voice module, exercised on all four targets.
+    (library-case {:id :filter-voice
+                   :definition-var 'omkamra.dsp.library/filter-voice
+                   :controls [2000.0 0.7 0.0002 0.0001 0.4 0.0002]
+                   :input-samples adr-gate-samples})
+    ;; P6 multi-output: a module returning a named record of three signals.
+    (library-case {:id :svf-voice
+                   :definition-var 'omkamra.dsp.library/svf-voice
+                   :controls [500.0 0.7]
+                   :input-samples sine-input-samples})
+    ;; P6: a stateful module composed through calls. Each call site owns its own
+    ;; state, so the voice's two one-poles are independent.
+    (library-case {:id :one-pole-voice
+                   :definition-var 'omkamra.dsp.library/one-pole-voice
+                   :controls [0.5]
+                   :input-samples sine-input-samples})
+    ;; Nested ownership: a state-free module that itself owns two one-poles.
+    (library-case {:id :one-pole-pair-voice
+                   :definition-var 'omkamra.dsp.library/one-pole-pair-voice
+                   :controls [0.5]
                    :input-samples sine-input-samples})]))
 
 (def function-cases

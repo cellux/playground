@@ -94,6 +94,41 @@
     (do (set! (:previous history) (+ sample (* coefficient previous)))
         previous)))
 
+;; --- P6: composed stateful modules ------------------------------------------
+
+;; A reusable one-pole *module*. Because it is stateful, each call site owns its
+;; own `previous` (D19), so a voice can hold several independent one-poles.
+(dsp/defn one-pole
+  [sample coefficient]
+  {:state [{:name previous
+            :init 0.0
+            :next (+ sample (* coefficient previous))}]}
+  (+ sample (* coefficient previous)))
+
+;; Two independent one-poles in parallel, composed only through the call
+;; mechanism. The second uses half the coefficient, so any sharing of state
+;; between the two call sites would show up as a wrong response.
+(dsp/defn one-pole-voice
+  [sample coefficient]
+  {:process {:controls [{:name coefficient}]}}
+  (* 0.5 (+ (one-pole sample coefficient)
+            (one-pole sample (* 0.5 coefficient)))))
+
+;; A state-free module that calls a stateful one twice. Its own body is a single
+;; expression, so it exercises nested partitions: the pair has no state of its
+;; own, yet owns two one-poles.
+(dsp/defn one-pole-pair
+  [sample coefficient]
+  (* 0.5 (+ (one-pole sample coefficient)
+            (one-pole sample (* 0.5 coefficient)))))
+
+;; Two pairs, so four independent one-poles: two levels of call-site ownership.
+(dsp/defn one-pole-pair-voice
+  [sample coefficient]
+  {:process {:controls [{:name coefficient}]}}
+  (+ (one-pole-pair sample coefficient)
+     (* 0.5 (one-pole-pair sample (* 2.0 coefficient)))))
+
 ;; --- P5: delay lines, circular buffers, and interpolation -------------------
 
 ;; Linear interpolation between two samples at fractional position `frac` in
@@ -110,8 +145,9 @@
   (/ (- 1.0 frac) (+ 1.0 frac)))
 
 ;; Circular delay line of 64 samples with a linearly interpolated fractional
-;; tap. The whole state is one record that owns its buffer, so the line reads
-;; and writes through `aget`/`aset` on the record.
+;; tap. It is a *module*: it owns its record, so several lines can be composed
+;; independently. Every call site gets its own buffer (D19); before P6 it had to
+;; be a process, because calls rejected stateful callees.
 ;;
 ;; The cursor is this frame's write position and advances by one every frame.
 ;; Ordering: the new sample is written *first*, then the taps are read, then the
@@ -123,8 +159,7 @@
   [sample delay]
   {:state [{:name line
             :fields [{:name buffer :type :float :size 64}
-                     {:name cursor :type :int :init 0}]}]
-   :process {:controls [{:name delay}]}}
+                     {:name cursor :type :int :init 0}]}]}
   (let [cursor (:cursor line)]
     (do
       (aset line cursor sample)
@@ -135,6 +170,20 @@
         (do (set! (:cursor line) (mod (+ cursor 1) 64))
             (linear-interpolate x0 x1 frac))))))
 
+;; The module used as a process: the control is the port.
+(dsp/defn delay-line-voice
+  [sample delay]
+  {:process {:controls [{:name delay}]}}
+  (delay-line sample delay))
+
+;; Two independent lines with different delays, proving the call sites do not
+;; share the buffer.
+(dsp/defn delay-line-pair-voice
+  [sample delay]
+  {:process {:controls [{:name delay}]}}
+  (* 0.5 (+ (delay-line sample delay)
+            (delay-line sample (* 2.0 delay)))))
+
 ;; The same line with a first-order allpass fractional tap; the recursion is the
 ;; standard `y = a * (x - previous) + x-below`. The record owns the buffer, the
 ;; cursor, and the previous allpass output.
@@ -143,8 +192,7 @@
   {:state [{:name line
             :fields [{:name buffer :type :float :size 64}
                      {:name cursor :type :int :init 0}
-                     {:name previous :type :float :init 0.0}]}]
-   :process {:controls [{:name delay}]}}
+                     {:name previous :type :float :init 0.0}]}]}
   (let [cursor (:cursor line)]
     (do
       (aset line cursor sample)
@@ -157,3 +205,83 @@
         (do (set! (:cursor line) (mod (+ cursor 1) 64))
             (set! (:previous line) y)
             y)))))
+
+(dsp/defn allpass-delay-line-voice
+  [sample delay]
+  {:process {:controls [{:name delay}]}}
+  (allpass-delay-line sample delay))
+
+;; --- P6c: a composed filter voice -------------------------------------------
+
+;; RBJ biquad lowpass as a module. Its history lives in a named record so the
+;; update order is explicit and visible: the output is computed from the current
+;; history, then the history shifts. Direct Form I; the coefficients are
+;; recomputed each sample, because controls are per-sample in this architecture.
+(dsp/defstruct biquad-state
+  [x1 x2 y1 y2])
+
+(dsp/defn biquad
+  [sample cutoff q]
+  {:state [{:name s :struct biquad-state}]}
+  (let [w0 (* 6.283185307179586 (/ cutoff sample-rate))
+        cosw (cos w0)
+        alpha (/ (sin w0) (* 2.0 q))
+        a0 (+ 1.0 alpha)
+        b0n (/ (- 1.0 cosw) (* 2.0 a0))
+        b1n (/ (- 1.0 cosw) a0)
+        ;; a1 = -2*cos(w0) and a2 = 1-alpha; the subtraction is folded into these
+        ;; signs so the recursion is a plain sum.
+        a1n (/ (* 2.0 cosw) a0)
+        a2n (/ (- alpha 1.0) a0)
+        y (+ (+ (+ (+ (* b0n sample)
+                      (* b1n (:x1 s)))
+                   (* b0n (:x2 s)))
+                (* a1n (:y1 s)))
+             (* a2n (:y2 s)))]
+    (do
+      (set! (:x2 s) (:x1 s))
+      (set! (:x1 s) sample)
+      (set! (:y2 s) (:y1 s))
+      (set! (:y1 s) y)
+      y)))
+
+;; The P6 done-when voice: a stateful biquad and a stateful exponential ADSR,
+;; composed only through calls. `exponential-adsr` keeps its `:process` metadata
+;; but is called here as a module — one definition, two usage modes (D19). The
+;; envelope output is the filter input, so the gate opens the filter.
+(dsp/defn filter-voice
+  [gate cutoff q attack decay sustain release]
+  {:process {:controls [{:name cutoff} {:name q}
+                        {:name attack} {:name decay}
+                        {:name sustain} {:name release}]}}
+  (biquad (exponential-adsr gate attack decay sustain release) cutoff q))
+
+;; A module with several *outputs*. The Chamberlin state-variable filter yields
+;; lowpass, bandpass, and highpass at once; the return is a named record, erased
+;; at lowering, so each call site simply gets one local per output.
+(dsp/defstruct svf-state
+  [low band])
+
+(dsp/defstruct svf-output
+  [low band high])
+
+(dsp/defn state-variable-filter
+  [sample cutoff q]
+  {:state [{:name s :struct svf-state}]
+   :return-type svf-output}
+  (let [f (* 2.0 (sin (* 3.141592653589793 (/ cutoff sample-rate))))
+        q1 (/ 1.0 q)
+        low (+ (:low s) (* f (:band s)))
+        high (- (- sample low) (* q1 (:band s)))
+        band (+ (* f high) (:band s))]
+    (do
+      (set! (:low s) low)
+      (set! (:band s) band)
+      {:low low :band band :high high})))
+
+;; A voice using two of the three outputs: lowpass plus a scaled highpass.
+(dsp/defn svf-voice
+  [sample cutoff q]
+  {:process {:controls [{:name cutoff} {:name q}]}}
+  (let [out (state-variable-filter sample cutoff q)]
+    (+ (:low out) (* 0.5 (:high out)))))

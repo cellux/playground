@@ -113,6 +113,8 @@
     :float (logical-real value)
     :int (logical-int value)
     :boolean (logical-boolean value)
+    ;; A record value is a Clojure map of leaf path -> value; nothing to narrow.
+    :record value
     (throw (ex-info "unknown DSP logical type" {:type type :value value}))))
 
 ;; ---------------------------------------------------------------------------
@@ -435,7 +437,13 @@
       (throw (ex-info "DSP indexed element is out of bounds"
                       {:id (or (:state-id expression) (:array-id expression))
                        :index element-index :size size})))
-    (+ (:index expression) element-index)))
+    ;; State offsets are relative to the current module's partition; scratch
+    ;; offsets are already absolute in the one arena.
+    (+ (if (#{:state-load :state-store} (:op expression))
+         (or (:state-base context) 0)
+         0)
+       (or (:index expression) 0)
+       element-index)))
 
 (defn- buffer-index
   [expr locals context]
@@ -491,7 +499,12 @@
                                (map (fn [{:keys [name type]} value]
                                       [name (coerce-value type value)])
                                     (:params callee) arguments)))
-          result (execute-statement (:body callee) callee-locals context)]
+          ;; A stateful callee runs against its own partition: its zero-based
+          ;; state indices are resolved relative to the call-site base (D19).
+          result (execute-statement
+                  (:body callee) callee-locals
+                  (update context :state-base (fnil + 0)
+                          (or (:state-base expression) 0)))]
       (coerce-value (:return-type callee) (:value result)))))
 
 (defn- evaluate-expression
@@ -518,6 +531,16 @@
     :buffer-load (let [[buffer index] (checked-buffer-index expression locals context)]
                    (aget buffer index))
     :call (evaluate-call expression locals context)
+    ;; A record value (multi-output) is a map from leaf path to value, held in an
+    ;; ordinary local; a projection reads one leaf.
+    :record (into {}
+                  (map (fn [leaf value]
+                         [(:path leaf) value])
+                       (:record-leaves expression)
+                       (mapv #(evaluate-expression % locals context)
+                             (:values expression))))
+    :project (get (evaluate-expression (:value expression) locals context)
+                  (:path expression))
     :binary (evaluate-binary (:type expression) (:operator expression)
                              (evaluate-expression (:left expression) locals context)
                              (evaluate-expression (:right expression) locals context))

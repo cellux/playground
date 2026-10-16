@@ -292,10 +292,14 @@ compilation unit. It:
 There is no source-level `:dependencies` list. Inferred calls are the dependency
 source of truth.
 
-Calls are currently limited to non-recursive, stateless, buffer-free functions.
-The interpreter executes explicit `:call` nodes. JVM, JavaScript, and Wasm
-artifacts use a target-neutral inlining pass, currently restricted to
-expression-only callees.
+Calls are non-recursive and may target stateful modules. Each call site owns a
+private partition of the callee's persistent state (D19), so two calls never
+share state and one call site reused in a loop reuses one copy; a module still
+may not reach into the caller's process buffers. The interpreter executes
+explicit `:call` nodes against the call site's partition, keeping it an
+independent semantic oracle (D2). JVM, JavaScript, and Wasm share one
+statement-level inlining pass that renames the callee's locals and rebases its
+state into the call site's partition, bounded by a documented statement budget.
 
 ### Portable IR
 
@@ -309,7 +313,10 @@ statement IR. The implemented language includes:
 - explicit `int->float` and `float->int` conversions;
 - `if`, `let`, `do`, and returns;
 - `while`, optional iteration bounds, `break`, and `continue`;
-- resolved function calls;
+- resolved function calls, including calls to stateful modules whose state is
+  partitioned per call site (D19);
+- record values returned from a module and projected by field (`(:field r)`),
+  erased to one local per output at lowering (D19);
 - persistent typed scalar state, fixed-size typed state arrays, named records
   (`:struct`), and read-only constant tables (`:constant`);
 - explicit buffer loads/stores and indexed `state-load`/`state-store`
@@ -319,10 +326,13 @@ statement IR. The implemented language includes:
 
 Process IR is lowered directly from process metadata. It contains canonical
 buffer descriptors, controls, state slots, a per-frame body, lifecycle flags,
-memory requirements, effects, and diagnostics. Scalar state transitions are
-computed before stores so updates within a frame are simultaneous. Fixed-size
-aggregate state uses explicit ordered loads and stores, making feedback and
-delay update order visible in source and IR.
+memory requirements, effects, and diagnostics. The instance arena is the
+entry's own state, then one partition per call site, then local-array scratch.
+A process's own scalar state transitions are computed before its stores so
+updates within a frame are simultaneous; a *called* module applies its
+transition at the call, so successive calls in a frame observe each other.
+Fixed-size aggregate state uses explicit ordered loads and stores, making
+feedback and delay update order visible in source and IR.
 
 IR nodes identify state and memory effects explicitly. Function and process
 roots contain aggregate effect sets. The runtime-policy validator rejects

@@ -247,6 +247,14 @@ expression-only call restriction.
 **Done when.** A biquad filter and an ADSR envelope compose into a voice module
 that runs identically on all four targets.
 
+**Slices.** P6a (done) — per-call-site state ownership, the interpreter oracle,
+and the shared statement inliner for JVM/JS/Wasm. P6b (done) — a module that owns
+a record/array end to end, and record returns for multi-output. P6c (done) — the
+done-when voice (`filter-voice`), plus the inlining policy (D21) and the
+state-ordering rules (D22). All five deliverables are met. The partition-coloring
+pass proposed under D20 is an arena optimization and is deferred, not part of
+P6.
+
 ---
 
 ## P7 — DSP standard library

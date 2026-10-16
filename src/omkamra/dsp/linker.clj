@@ -161,6 +161,27 @@
       (when-let [v (ns-resolve target-ns (symbol (name id)))]
         (descriptor/normalize-struct @v)))))
 
+(def ^:private logical-return-types #{:float :int :boolean :void})
+
+(defn- resolve-return-struct
+  "Resolve a struct-typed `:return-type` into `:record` plus the struct's fields,
+  so a module can return several typed values (multi-output)."
+  [definition]
+  (let [return-type (:return-type definition)]
+    (if (or (nil? return-type) (contains? logical-return-types return-type))
+      definition
+      (let [reference (if (and (seq? return-type) (= 'quote (first return-type)))
+                        (second return-type)
+                        return-type)
+            id (resolve-symbol-id definition reference)
+            resolved (or (resolve-struct-var id)
+                         (fail "DSP :return-type refers to a missing struct"
+                               (merge (source-data definition [:return-type] return-type)
+                                      {:reference reference :resolved-id id})))]
+        (assoc definition
+               :return-type :record
+               :return-record {:struct-name id :fields (:fields resolved)})))))
+
 (defn- resolve-structs
   "Inline `:struct <symbol>` state references with the struct's fields.
 
@@ -168,29 +189,32 @@
   used for calls, so an aliased struct from another namespace resolves
   identically. The struct's fully-qualified id is retained as `:struct-name`."
   [definition]
-  (if (seq (:state definition))
-    (update definition :state
-            (fn [states]
-              (mapv (fn [state]
-                      (if-let [reference (:struct state)]
-                        (let [reference (if (and (seq? reference)
-                                                 (= 'quote (first reference)))
-                                          (second reference)
-                                          reference)
-                              id (resolve-symbol-id definition reference)
-                              resolved (or (resolve-struct-var id)
-                                           (fail "DSP :struct refers to a missing struct"
-                                                 (merge (source-data definition [:state] state)
-                                                        {:reference reference
-                                                         :resolved-id id})))]
-                          ;; Struct options are defaults for the state slot.
-                          (-> (merge (select-keys resolved [:constant]) state)
-                              (dissoc :struct)
-                              (assoc :struct-name id
-                                     :fields (:fields resolved))))
-                        state))
-                    states)))
-    definition))
+  (let [definition (resolve-return-struct definition)]
+    (if (seq (:state definition))
+      (update
+       definition
+       :state
+       (fn [states]
+         (mapv (fn [state]
+                 (if-let [reference (:struct state)]
+                   (let [reference (if (and (seq? reference)
+                                            (= 'quote (first reference)))
+                                     (second reference)
+                                     reference)
+                         id (resolve-symbol-id definition reference)
+                         resolved (or (resolve-struct-var id)
+                                      (fail "DSP :struct refers to a missing struct"
+                                            (merge (source-data definition [:state] state)
+                                                   {:reference reference
+                                                    :resolved-id id})))]
+                     ;; Struct options are defaults for the state slot.
+                     (-> (merge (select-keys resolved [:constant]) state)
+                         (dissoc :struct)
+                         (assoc :struct-name id
+                                :fields (:fields resolved))))
+                   state))
+               states)))
+      definition)))
 
 (defn- resolve-var-definition
   [id]
@@ -209,10 +233,10 @@
     (set? form) (some buffer-access? form)
     :else false))
 
-(defn- pure-definition?
+(defn- definition-buffer-access?
   [definition]
-  (and (empty? (:state definition))
-       (not-any? buffer-access? (:body definition))))
+  (or (some buffer-access? (:body definition))
+      (some #(some buffer-access? [(:next %)]) (:state definition))))
 
 (defn- resolve-definition
   [definitions definition call]
@@ -223,8 +247,10 @@
                            (merge (source-data definition (:path call) (:form call))
                                   {:reference (:symbol call)
                                    :resolved-id id})))]
-    (when-not (pure-definition? (second resolved))
-      (fail "DSP calls currently require stateless, buffer-free functions"
+    ;; A module owns its own state and buffers, but it may not reach into the
+    ;; caller's I/O ports: `buffer-load`/`buffer-store` name process buffers.
+    (when (definition-buffer-access? (second resolved))
+      (fail "DSP modules cannot access the caller's process buffers"
             (merge (source-data definition (:path call) (:form call))
                    {:reference (:symbol call)
                     :resolved-id (first resolved)})))
