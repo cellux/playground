@@ -1,7 +1,7 @@
 ---
 description: Capture interesting parts of C64 demos and intros
 ---
-Read the `vice`, `c64-capture` and `c64-analysis` skills.
+Read the `omkamra.vice` namespace for an overview of relevant tooling.
 
 Ensure the `/home/rb/Downloads/c64` directory is mounted from the
 host - this folder contains the user's demo/intro collection.
@@ -13,12 +13,7 @@ Once the desired demo/intro is identified, start a VICE instance,
 autostarting the demo/intro in question.
 
 When the user says `on` or `on <title>`, start a live capture of the
-ongoing VICE instance **through `omkamra.vice.capture/capture!`**. For an
-already-running instance, pass its descriptor as `:instance`; do not attach
-to it manually or use `omkamra.vice.driver`,
-`omkamra.vice.binary-monitor`, `bm/autostart!`, or direct VICE process/
-monitor manipulation for the capture workflow. The capture API must own the
-monitor connection and tracing lifecycle.
+ongoing VICE instance.
 
 Save each capture to `captures/GROUP/DEMO/DEMOPART`:
 
@@ -39,12 +34,11 @@ can be used for later analysis. A capture created from an existing instance
 should leave that VICE instance running unless the user separately asks to
 stop it.
 
-As soon as a capture is finalized, immediately build the full analysis of
-that part by default: call `omkamra.vice.pipeline/build!` on the dataset root
-with target `:all` (every stage, including the report) unless the user
-explicitly instructs otherwise. This analysis is part of the default `off`
-behavior and may proceed while VICE keeps running and the user gets ready for
-the next part.
+As soon as a capture is finalized, immediately build the full analysis
+of that part with stage `:all` unless the user explicitly instructs
+otherwise. This analysis is part of the default `off` behavior and may
+proceed while VICE keeps running and the user gets ready for the next
+part.
 
 Do not overwrite previous captures without explicit authorization by
 the user.
