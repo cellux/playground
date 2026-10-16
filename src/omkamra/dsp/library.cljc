@@ -93,3 +93,67 @@
   (let [previous (:previous history)]
     (do (set! (:previous history) (+ sample (* coefficient previous)))
         previous)))
+
+;; --- P5: delay lines, circular buffers, and interpolation -------------------
+
+;; Linear interpolation between two samples at fractional position `frac` in
+;; [0, 1).
+(dsp/defn linear-interpolate
+  [x0 x1 frac]
+  (+ (* (- 1.0 frac) x0) (* frac x1)))
+
+;; First-order allpass coefficient for the fractional position `frac` in
+;; [0, 1). The allpass recursion `y = a * (x - previous) + x-below` has a
+;; flatter magnitude response than linear interpolation.
+(dsp/defn allpass-coefficient
+  [frac]
+  (/ (- 1.0 frac) (+ 1.0 frac)))
+
+;; Circular delay line of 64 samples with a linearly interpolated fractional
+;; tap. The whole state is one record that owns its buffer, so the line reads
+;; and writes through `aget`/`aset` on the record.
+;;
+;; The cursor is this frame's write position and advances by one every frame.
+;; Ordering: the new sample is written *first*, then the taps are read, then the
+;; cursor advances, so a zero delay returns the current input and every tap is
+;; consistent within a frame. A delay of `d` samples reads the value written `d`
+;; frames ago; delays of 64 or more alias around the buffer, and a negative
+;; delay is undefined.
+(dsp/defn delay-line
+  [sample delay]
+  {:state [{:name line
+            :fields [{:name buffer :type :float :size 64}
+                     {:name cursor :type :int :init 0}]}]
+   :process {:controls [{:name delay}]}}
+  (let [cursor (:cursor line)]
+    (do
+      (aset line cursor sample)
+      (let [whole (float->int delay)
+            frac (- delay (int->float whole))
+            x0 (aget line (mod (- cursor whole) 64))
+            x1 (aget line (mod (- cursor (+ whole 1)) 64))]
+        (do (set! (:cursor line) (mod (+ cursor 1) 64))
+            (linear-interpolate x0 x1 frac))))))
+
+;; The same line with a first-order allpass fractional tap; the recursion is the
+;; standard `y = a * (x - previous) + x-below`. The record owns the buffer, the
+;; cursor, and the previous allpass output.
+(dsp/defn allpass-delay-line
+  [sample delay]
+  {:state [{:name line
+            :fields [{:name buffer :type :float :size 64}
+                     {:name cursor :type :int :init 0}
+                     {:name previous :type :float :init 0.0}]}]
+   :process {:controls [{:name delay}]}}
+  (let [cursor (:cursor line)]
+    (do
+      (aset line cursor sample)
+      (let [whole (float->int delay)
+            frac (- delay (int->float whole))
+            a (allpass-coefficient frac)
+            x0 (aget line (mod (- cursor whole) 64))
+            x1 (aget line (mod (- cursor (+ whole 1)) 64))
+            y (+ (* a (- x0 (:previous line))) x1)]
+        (do (set! (:cursor line) (mod (+ cursor 1) 64))
+            (set! (:previous line) y)
+            y)))))

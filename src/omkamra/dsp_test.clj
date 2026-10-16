@@ -1495,8 +1495,8 @@
             {:name 'voices.gain :type :float :size 4
              :init [1.0 1.0 1.0 1.0] :index 4}]
            (:state (:ir artifact))))
-    (is (= [{:path [:phase] :type :float :offset 0}
-            {:path [:gain] :type :float :offset 4}]
+    (is (= [{:path [:phase] :type :float :offset 0 :size 4}
+            {:path [:gain] :type :float :offset 4 :size 4}]
            (get-in artifact [:abi :records 0 :fields])))
     (dsp/invoke artifact input output 2 1)
     (dsp/invoke jvm input jvm-output 2 1)
@@ -1559,6 +1559,108 @@
          clojure.lang.ExceptionInfo
          #"declared state record"
          (dsp/compile (assoc-in definition [:body 0] '(:missing nope))
+                      {:entry :process})))))
+
+(deftest circular-delay-lines-and-interpolation
+  (let [render (fn [definition controls frames]
+                 (let [artifact (dsp/compile definition {:target :jvm :entry :process
+                                                         :precision :f32})
+                       input (float-array (assoc (vec (repeat frames 0.0)) 0 1.0))
+                       output (float-array frames)]
+                   (apply dsp/invoke artifact input output frames controls)
+                   (vec output)))
+        nonzero (fn [xs] (vec (keep-indexed (fn [index x]
+                                              (when (not= 0.0 x) index))
+                                            xs)))
+        delay-line (resolve 'omkamra.dsp.library/delay-line)
+        allpass (resolve 'omkamra.dsp.library/allpass-delay-line)]
+    ;; Ordering: the sample is written before the taps are read, so a zero
+    ;; delay returns the current input.
+    (is (= [1.0 0.0 0.0 0.0] (render delay-line [0.0] 4)))
+    ;; An integer delay moves the impulse by exactly that many samples.
+    (is (= [3] (nonzero (render delay-line [3.0] 6))))
+    ;; A half-sample delay splits the impulse across the two neighbouring taps.
+    (let [out (render delay-line [3.5] 6)]
+      (is (= [0.5 0.5] [(nth out 3) (nth out 4)])))
+    ;; The first-order allpass tap is stable and centred on the same delay.
+    (let [out (render allpass [3.5] 8)]
+      (is (= 3 (first (nonzero out))))
+      (is (every? #(Float/isFinite %) out)))
+    (is (= [1.0 0.0 0.0 0.0] (render allpass [0.0] 4)))))
+
+(deftest record-buffers-and-element-indices
+  (let [definition {:dsp/kind :function
+                    :name 'record-buffer
+                    :params [{:name 'sample :type :float} {:name 'index :type :int}]
+                    :state [{:name 'store
+                             :fields [{:name :line :type :float :size 4}
+                                      {:name :cursor :type :int :init 0}]}]
+                    :process {:input :sample :controls [{:name 'index :type :int}]}
+                    :return-type :float
+                    :body ['(let [previous (aget store index)]
+                              (do (aset store index sample)
+                                  (set-field! store :cursor (+ (:cursor store) 1))
+                                  previous))]}
+        artifact (dsp/compile definition {:entry :process})
+        jvm (dsp/compile definition {:target :jvm :entry :process})
+        input (float-array [1.0 2.0 3.0]) output (float-array 3) jvm-output (float-array 3)]
+    ;; A record owns a contiguous 4-slot buffer followed by its scalar cursor.
+    (is (= [{:name 'store.line :type :float :size 4
+             :init [0.0 0.0 0.0 0.0] :index 0}
+            {:name 'store.cursor :type :int :init 0 :index 4}]
+           (:state (:ir artifact))))
+    (is (= [{:path [:line] :type :float :offset 0 :size 4}
+            {:path [:cursor] :type :int :offset 4 :size 1}]
+           (get-in artifact [:abi :records 0 :fields])))
+    (apply dsp/invoke artifact input output 3 [1])
+    (apply dsp/invoke jvm input jvm-output 3 [1])
+    (is (= (vec output) (vec jvm-output)))
+    ;; `(field rec :line k)` is the explicit spelling of the element index.
+    (is (= (:state (:ir artifact))
+           (:state (:ir (dsp/compile
+                         (assoc-in definition [:body 0]
+                                   '(let [previous (field store :line index)]
+                                      (do (set-field! store :line index sample)
+                                          (set-field! store :cursor (+ (field store :cursor) 1))
+                                          previous)))
+                         {:entry :process})))))
+    ;; An array field without an index is a place, so it cannot be a scalar
+    ;; result; a scalar field rejects an element index.
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"array places must be indexed"
+         (dsp/compile (assoc-in definition [:body 0] '(field store :line))
+                      {:entry :process})))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"does not take an element index"
+         (dsp/compile (assoc-in definition [:body 0] '(field store :cursor 0))
+                      {:entry :process})))
+    ;; `aget`/`aset` need exactly one array field to drop the field name.
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"does not expose a single array place"
+         (dsp/compile (assoc-in definition [:state 0 :fields]
+                                [{:name :cursor :type :int :init 0}])
+                      {:entry :process})))
+    ;; `(aget (:line store) k)` is the same place as `(aget store k)`, and a
+    ;; `let` may alias it.
+    (is (= (:state (:ir artifact))
+           (:state (:ir (dsp/compile
+                         (assoc-in definition [:body 0]
+                                   '(let [buf (:line store)]
+                                      (let [previous (aget buf index)]
+                                        (do (aset buf index sample)
+                                            (set-field! store :cursor (+ (:cursor store) 1))
+                                            previous))))
+                         {:entry :process})))))
+    ;; An array of records cannot yet contain an array field.
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"cannot contain array fields"
+         (dsp/compile (assoc-in definition [:state 0]
+                                {:name 'store :size 2
+                                 :fields [{:name :line :type :float :size 4}]})
                       {:entry :process})))))
 
 (deftest dynamic-memory-access-and-checks

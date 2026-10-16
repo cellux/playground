@@ -267,6 +267,31 @@
       :params [{:name 'sample :type :float}]
       :input-samples sine-input-samples})
     (process-case
+     {:id :record-buffer
+      :state [{:name 'store
+               :fields [{:name :line :type :float :size 4}
+                        {:name :cursor :type :int :init 0}]}]
+      :body '(let [previous (field store :line index)]
+               (do (set-field! store :line index sample)
+                   (set-field! store :cursor (+ (field store :cursor) 1))
+                   previous))
+      :params [{:name 'sample :type :float}]
+      :controls [{:name 'index :type :int :default 2}]
+      :input-samples sine-input-samples})
+    (process-case
+     {:id :array-place
+      :state [{:name 'store
+               :fields [{:name :line :type :float :size 4}
+                        {:name :cursor :type :int :init 0}]}]
+      :body '(let [buf (:line store)
+                   previous (aget buf index)]
+               (do (aset buf index sample)
+                   (set-field! store :cursor (+ (:cursor store) 1))
+                   (+ previous (aget (:line store) index))))
+      :params [{:name 'sample :type :float}]
+      :controls [{:name 'index :type :int :default 2}]
+      :input-samples sine-input-samples})
+    (process-case
      {:id :constant-table
       :state [{:name 'wavetable
                :type :float
@@ -333,6 +358,29 @@
     (library-case {:id :one-pole-record
                    :definition-var 'omkamra.dsp.library/one-pole-record
                    :controls [0.5]
+                   :input-samples sine-input-samples})
+    ;; P5: circular-buffer delay lines. The vectors cover zero delay, a small
+    ;; fractional delay, a delay that wraps the 64-sample buffer over the run,
+    ;; and an allpass-interpolated fractional tap.
+    (library-case {:id :delay-line-zero
+                   :definition-var 'omkamra.dsp.library/delay-line
+                   :controls [0.0]
+                   :input-samples sine-input-samples})
+    (library-case {:id :delay-line-unit
+                   :definition-var 'omkamra.dsp.library/delay-line
+                   :controls [1.0]
+                   :input-samples sine-input-samples})
+    (library-case {:id :delay-line-fractional
+                   :definition-var 'omkamra.dsp.library/delay-line
+                   :controls [4.5]
+                   :input-samples sine-input-samples})
+    (library-case {:id :delay-line-wrap
+                   :definition-var 'omkamra.dsp.library/delay-line
+                   :controls [30.25]
+                   :input-samples sine-input-samples})
+    (library-case {:id :allpass-delay-line
+                   :definition-var 'omkamra.dsp.library/allpass-delay-line
+                   :controls [4.5]
                    :input-samples sine-input-samples})]))
 
 (def function-cases

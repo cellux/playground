@@ -279,35 +279,59 @@
     (when-not (and (map? field) (:name field))
       (fail "DSP record fields require a name" source path {:field field}))
     (let [field-name (keyword (name (:name field)))]
+      (when (contains? field :next)
+        (fail "DSP record fields do not take :next" source (conj path :next)))
       (if (contains? field :fields)
-        {:name field-name
-         :fields (mapv (fn [child index]
-                         (normalize-field child source (conj path :fields index)))
-                       (:fields field) (range))}
-        (let [type (or (:type field) :float)]
-          (when (contains? field :next)
-            (fail "DSP record fields do not take :next" source (conj path :next)))
+        (do
           (when (contains? field :size)
-            (fail "DSP record fields do not support :size" source (conj path :size)))
+            (fail "DSP nested record fields cannot declare :size"
+                  source (conj path :size) {:field field-name}))
           {:name field-name
-           :type type
-           :init (normalize-initializer
-                  (if (contains? field :init) (:init field) (default-value type))
-                  type source (conj path :init))})))))
+           :fields (mapv (fn [child index]
+                           (normalize-field child source (conj path :fields index)))
+                         (:fields field) (range))})
+        (let [type (or (:type field) :float)
+              size (or (:size field) 1)]
+          (when-not (and (integer? size) (pos? size))
+            (fail "DSP record field :size must be a positive integer"
+                  source (conj path :size) {:field field-name :size size}))
+          (if (= 1 size)
+            {:name field-name
+             :type type
+             :init (normalize-initializer
+                    (if (contains? field :init) (:init field) (default-value type))
+                    type source (conj path :init))}
+            (let [init (if (contains? field :init)
+                         (:init field)
+                         (vec (repeat size (default-value type))))]
+              (when-not (and (vector? init) (= size (count init)))
+                (fail "DSP array field initializers must be vectors of the declared size"
+                      source (conj path :init)
+                      {:field field-name :size size :init init}))
+              {:name field-name
+               :type type
+               :size size
+               :init (mapv (fn [value index]
+                             (normalize-initializer value type source
+                                                    (conj path :init index)))
+                           init (range))})))))))
 
 (defn- normalize-record
   [state source path]
-  (let [size (or (:size state) 1)]
+  (let [size (or (:size state) 1)
+        fields (mapv (fn [field index]
+                       (normalize-field field source (conj path :fields index)))
+                     (:fields state) (range))]
     (when (contains? state :next)
       (fail "DSP record state uses explicit field access, not :next"
             source (conj path :next) {:state (:name state)}))
     (when (contains? state :init)
       (fail "DSP record state does not take a top-level :init"
             source (conj path :init) {:state (:name state)}))
-    (cond-> {:name (:name state)
-             :fields (mapv (fn [field index]
-                             (normalize-field field source (conj path :fields index)))
-                           (:fields state) (range))}
+    (when (and (> size 1) (some #(> (or (:size %) 1) 1) fields))
+      (fail "DSP arrays of records cannot contain array fields yet"
+            source (conj path :fields) {:state (:name state)}))
+    (cond-> {:name (:name state) :fields fields}
       (> size 1) (assoc :size size)
       (:constant state) (assoc :constant true)
       (:struct-name state) (assoc :struct-name (:struct-name state)))))

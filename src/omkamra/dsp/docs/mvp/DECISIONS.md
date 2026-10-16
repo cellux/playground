@@ -416,7 +416,10 @@ referenced from state declarations:
   possibly nested, plus an optional options map;
 - a state slot references the shape with `{:name slot :struct name}`,
   optionally with `:size N` for an array of records. Inline `:fields [...]` is
-  also accepted for one-off records.
+  also accepted for one-off records;
+- a field inside a **scalar** record may declare `:size M`, making it an array
+  field, so a record can own its buffer. An array of records cannot yet contain
+  an array field (rejected).
 
 The linker resolves `:struct` through the declaring namespace's captured
 resolution (the same mechanism as calls) and inlines the struct's fields,
@@ -424,20 +427,26 @@ retaining the fully-qualified struct id as `:struct-name`. Field access comes in
 two equivalent spellings: the explicit `(field slot :a :b)` and
 `(set-field! slot :a :b value)`, and the Clojure-style `(:field slot)` (keyword
 in head position, like `(:key map)`), `(slot :field)` (the record name in call
-position), and `(set! (:field slot) value)`. An optional leading record index
-handles arrays of records in the explicit form: `(field voices i :phase)`.
-The linker treats a form headed by a record name as field access rather than a
-call, so `(slot :field)` is never mistaken for a function call.
+position), and `(set! (:field slot) value)`. Selectors are
+`[record-index?] field-name+ [element-index?]`: the leading index selects a
+record in an array of records (`(field voices i :phase)`) and the trailing one
+selects an element of an array field (`(field slot :buf k)`). A record that owns
+exactly one array field is indexable directly — `(aget slot k)` / `(aset slot k v)`
+— since `aget`/`aset` are the array accessors; this is the terse spelling of
+`(field slot :buf k)`. The linker treats a form headed by a record name as field
+access rather than a call, so `(slot :field)` is never mistaken for a function
+call.
 
 **Layout — struct of arrays.** A record's field tree is flattened into scalar
 leaves; for a slot of `:size N`, each leaf becomes one flat state entry of
 `:size N`, and leaves are laid out in declaration order. Field `j`'s record `i`
 lives at logical slot `leafOffset(j) + i`, where `leafOffset(j)` is the sum of
 the sizes of the preceding leaves. Nested records contribute their leaves under
-path-qualified names. Record slots continue the same arena as scalar state and
-scratch (D15), and each leaf is an ordinary `:state-load`/`:state-store` with a
-constant base offset and the record index as the element index — so every
-backend reuses the existing state paths unchanged.
+path-qualified names. In a scalar record an array field occupies its own
+contiguous block of `M` slots. Record slots continue the same arena as scalar
+state and scratch (D15), and each leaf is an ordinary
+`:state-load`/`:state-store` with a constant base offset and a single element
+index — so every backend reuses the existing state paths unchanged.
 
 **Constant tables.** A state slot (or record) may be `:constant true`. It is
 materialized into instance state at initialization and is **read-only**; any
@@ -459,3 +468,91 @@ Float `:init` values stay double in the IR and are narrowed per precision at
 use, so an f64 table survives the EDN round trip to the browser. Structured
 `:dynamic-state-index` diagnostics join `:dynamic-array-index`; the reference
 interpreter is the development-time bounds checker.
+
+---
+
+## D17 — Circular-buffer delay lines use write-then-read ordering
+
+**Status.** In force (adopted at P5).
+
+**Decision.** A delay line is written in the DSP language on top of the P4
+arena, with one documented convention:
+
+- **State.** A persistent `:float` array of length `N` holds the samples, and an
+  `:int` cursor names this frame's write position. The library holds both in a
+  **record that owns its buffer** — `{:name line :fields [{:name buffer :type
+  :float :size 64} {:name cursor :type :int :init 0}]}` — read and written with
+  `(aget line k)`/`(aset line k v)` and `(:cursor line)`. A top-level state
+  array with `state-load`/`state-store` is equally valid; either way this is
+  persistent state, not local scratch (`array`).
+
+- **Ordering — write, then read.** Within a frame the new sample is stored at
+  `cursor` *first*, every tap is then read relative to `cursor`, and the cursor
+  advances last. Consequences:
+
+  - a delay of `0` returns the current input (the sample just written);
+  - a delay of `d` samples returns the value written `d` frames ago;
+  - all taps read in one frame see a consistent buffer, and a tap feeding back
+    into the line is deterministic;
+  - a delay at or beyond `N` aliases around the buffer; a negative delay is
+    undefined.
+
+  The wrap uses the floored `mod` builtin, so `(mod (- cursor d) N)` is always a
+  valid index for `d >= 0`. The cursor advance is either a state `:next`
+  transition or a body write to a record field (`(set! (:cursor line) ...)`).
+
+- **Interpolation.** Reads use `linear-interpolate` between the two neighbouring
+  taps, or a first-order allpass recursion `y = a*(x0 - previous) + x1` with
+  `a = (1-frac)/(1+frac)`. The allpass `previous` output is feedback state: it
+  lives in the same record as the buffer, because a record field can be written
+  from the body whereas scalar state is `:next`-only and `:next` cannot see body
+  locals.
+
+**Rationale.** Every synth effect needs the same memory-access pattern, so one
+convention keeps multi-tap delays and feedback readable and deterministic, and
+makes the update order visible in source and IR (a stated P5 goal). Write-then-
+read is chosen so zero delay is the identity and taps are frame-consistent.
+
+**Consequences.** `omkamra.dsp.library` gains `linear-interpolate`,
+`allpass-coefficient`, `delay-line`, and `allpass-delay-line`; the acceptance
+catalog gains zero-, unit-, fractional-, and wrap-delay vectors exercised on the
+interpreter, JVM, JavaScript, and Wasm. A delay-line-like module that *owns* its
+state is a library **process**, since the call mechanism still rejects stateful
+callees; encapsulating such state behind reusable functions is P6's work.
+
+---
+
+## D18 — Named array storage has static places
+
+**Status.** In force (adopted at P5).
+
+**Decision.** Array storage may be named as a **place** and indexed with
+`aget`/`aset`. A place is a *compile-time* reference — region (`:state` or
+scratch), base offset, element type, and length — **not a runtime value**. A
+place arises from:
+
+- a local array name (`(array :float N)`);
+- a top-level state array name;
+- a record's single array field, named by the record itself (`(aget rec k)`);
+- an array-field accessor with no element index: `(:field rec)` or
+  `(field rec :field)` — the place;
+- a `let` alias of any of the above (`(let [buf (:line rec)] (aget buf k))`).
+
+`(aget place k)` / `(aset place k v)` index a place; `(field rec :field k)` /
+`(set-field! rec :field k v)` is the explicit spelling. A place used where a
+scalar is expected is a diagnostic ("array places must be indexed (aget/aset) or
+bound in a let"), so a bare array name can no longer be silently misused.
+
+**Rationale.** It makes buffer access read like the storage it is and keeps a
+buffer-owning record cohesive — `(aget (:line rec) k)` rather than a form that
+must name both the field and the index. It costs nothing at runtime: a place
+lowers to `:state-load`/`:state-store` (or `:array-load`/`:array-store` for local
+scratch) with a constant base offset, so **no backend changed**. Local arrays,
+state arrays, and record fields all become the same indexed-storage concept.
+
+**Consequences.** Array indices are checked while lowering when constant and at
+run time by the interpreter otherwise, and the constant-table read-only check
+follows places through `let` aliases. This is a strict subset of first-class
+arrays: places are static, so they cannot be passed to or returned from
+functions and cannot have a runtime base (e.g. selecting a record in an array of
+records). Those remain P6's "buffer-accessing callees".

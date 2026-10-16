@@ -82,6 +82,9 @@
 
 (defn- expect-type!
   [expected expression form]
+  (when (= :array (:type expression))
+    (fail "DSP array places must be indexed (aget/aset) or bound in a let"
+          {:form form :type :array}))
   (when-not (= expected (:type expression))
     (fail "DSP expression has the wrong type"
           {:form form :expected expected :actual (:type expression)}))
@@ -160,23 +163,41 @@
       {:statements (:statements channel)
        :value (if (= :const (:op value)) (:value value) value)})))
 
+(defn- record-array-ref
+  "The `:array-ref` for a record's single array field, or nil."
+  [binding]
+  (let [buffers (filterv #(> (:size %) 1) (:leaves binding))]
+    (when (= 1 (count buffers))
+      (let [leaf (first buffers)]
+        {:op :array-ref :type :array :region :state
+         :base (:offset leaf) :element (:type leaf) :size (:size leaf)
+         :constant (boolean (:constant binding))}))))
+
 (defn- binding-expression
   [binding]
   (case (:kind binding)
-    :state (do
-             (when (> (or (:size binding) 1) 1)
-               (fail "aggregate DSP state must be accessed with state-load"
-                     {:state (:name binding) :size (:size binding)}))
+    :state (if (> (or (:size binding) 1) 1)
+             ;; A state array is an addressable place, like a record's buffer.
+             {:op :array-ref :type :array :region :state
+              :base (:index binding) :element (:type binding) :size (:size binding)
+              :constant (boolean (:constant binding))}
              {:op :state-load
               :state-id (:name binding)
               :index (:index binding)
               :type (:type binding)
               :effects #{:read-state}})
     :buffer (:expression binding)
-    :array (fail "DSP local arrays must be accessed with aget/aset (array-load/array-store)"
-                 {:array (:name binding) :size (:size binding)})
-    :record (fail "DSP state records must be accessed with field/set-field!"
-                  {:record (:name binding) :size (:size binding)})
+    :array {:op :array-ref :type :array :region :scratch
+            :base (:index binding) :element (:type binding) :size (:size binding)
+            :constant false}
+    :place {:op :array-ref :type :array :region (:region binding)
+            :base (:base binding) :element (:element binding) :size (:size binding)
+            :constant (:constant binding)}
+    :record (or (record-array-ref binding)
+                (fail "DSP state record does not expose a single array place"
+                      {:record (:name binding) :size (:size binding)
+                       :array-fields (mapv :path
+                                           (filterv #(> (:size %) 1) (:leaves binding)))}))
     :frames {:op :frames :type :int}
     :sample-rate {:op :sample-rate :type :float}
     {:op :local :name (:name binding) :type (:type binding)}))
@@ -391,16 +412,26 @@
               (recur remaining
                      (assoc-in env [:bindings name] binding)
                      statements))
-            (let [init (lower-value init-form env)
-                  local {:name name :type (:type init) :kind :local}
-                  declaration {:op :declare
-                               :name name
-                               :type (:type init)
-                               :init (:value init)}]
-              (swap! (:locals env) conj (select-keys local [:name :type]))
-              (recur remaining
-                     (assoc-in env [:bindings name] local)
-                     (into statements (concat (:statements init) [declaration]))))))
+            (let [init (lower-value init-form env)]
+              (if (= :array-ref (:op (:value init)))
+                ;; A place alias: a compile-time name for an existing array.
+                (let [ref (:value init)
+                      local {:name name :kind :place
+                             :region (:region ref) :base (:base ref)
+                             :element (:element ref) :size (:size ref)
+                             :type :array}]
+                  (recur remaining
+                         (assoc-in env [:bindings name] local)
+                         (into statements (:statements init))))
+                (let [local {:name name :type (:type init) :kind :local}
+                      declaration {:op :declare
+                                   :name name
+                                   :type (:type init)
+                                   :init (:value init)}]
+                  (swap! (:locals env) conj (select-keys local [:name :type]))
+                  (recur remaining
+                         (assoc-in env [:bindings name] local)
+                         (into statements (concat (:statements init) [declaration]))))))))
         (let [body-fragment (lower-forms body env)]
           (assoc body-fragment
                  :statements (into (vec statements)
@@ -632,64 +663,86 @@
                    (update :entries conj entry))))
       (assoc entry :kind :array))))
 
-(defn- array-binding!
-  [form env array-id]
-  (let [binding (get-in env [:bindings array-id])]
-    (when-not (= :array (:kind binding))
-      (fail "DSP array access requires a declared local array"
-            {:form form :array array-id}))
-    binding))
+(defn- reject-constant-place!
+  [form ref]
+  (when (:constant ref)
+    (fail "DSP constant tables and records are read-only" {:form form})))
 
-(defn- array-index
-  [form env binding index-form]
+(defn- place-index
+  "Lower an array index and check a constant one against the place's length."
+  [form ref index-form env]
   (let [index (lower-value index-form env)]
     (expect-type! :int (:value index) form)
     (when (and (= :const (get-in index [:value :op]))
                (or (neg? (get-in index [:value :value]))
-                   (>= (get-in index [:value :value]) (:size binding))))
+                   (>= (get-in index [:value :value]) (:size ref))))
       (fail "DSP array index is outside the declared range"
-            {:form form :array (:name binding) :size (:size binding)
+            {:form form :size (:size ref)
              :index (get-in index [:value :value])}))
     index))
 
+(defn- array-place
+  "Lower an `aget`/`aset` target to its `:array-ref` fragment."
+  [form env target]
+  (let [value (lower-value target env)]
+    (when-not (= :array-ref (:op (:value value)))
+      (fail "DSP array access requires an array place"
+            {:form form :target target}))
+    value))
+
 (defn- lower-array-load
   [form env]
-  (let [[_ array-id index-form & extra] form]
-    (when (or (not (symbol? array-id)) (nil? index-form) extra)
-      (fail (str (first form) " requires a local array name and one integer index")
+  (let [[_ target index-form & extra] form]
+    (when (or (nil? target) (nil? index-form) extra)
+      (fail (str (first form) " requires an array place and one integer index")
             {:form form}))
-    (let [binding (array-binding! form env array-id)
-          index (array-index form env binding index-form)]
-      (fragment (:statements index)
-                {:op :array-load
-                 :array-id (:name binding)
-                 :index (:index binding)
-                 :element-index (:value index)
-                 :size (:size binding)
-                 :type (:type binding)
-                 :effects #{:read-memory}}))))
+    (let [place (array-place form env target)
+          ref (:value place)
+          index (place-index form ref index-form env)]
+      (fragment (concat (:statements place) (:statements index))
+                (if (= :scratch (:region ref))
+                  {:op :array-load
+                   :index (:base ref)
+                   :element-index (:value index)
+                   :size (:size ref)
+                   :type (:element ref)
+                   :effects #{:read-memory}}
+                  {:op :state-load
+                   :index (:base ref)
+                   :element-index (:value index)
+                   :size (:size ref)
+                   :type (:element ref)
+                   :effects #{:read-state}})))))
 
 (defn- lower-array-store
   [form env]
-  (let [[_ array-id index-form value-form & extra] form]
-    (when (or (not (symbol? array-id)) (nil? index-form) (nil? value-form) extra)
-      (fail (str (first form) " requires a local array name, integer index, and value")
+  (let [[_ target index-form value-form & extra] form]
+    (when (or (nil? target) (nil? index-form) (nil? value-form) extra)
+      (fail (str (first form) " requires an array place, integer index, and value")
             {:form form}))
-    (let [binding (array-binding! form env array-id)
-          index (array-index form env binding index-form)
+    (let [place (array-place form env target)
+          ref (:value place)
+          index (place-index form ref index-form env)
           value (lower-value value-form env)]
-      (reject-constant-store! form binding)
-      (expect-type! (:type binding) (:value value) form)
+      (reject-constant-place! form ref)
+      (expect-type! (:element ref) (:value value) form)
       (void-fragment
-       (concat (:statements index) (:statements value)
-               [{:op :array-store
-                 :array-id (:name binding)
-                 :index (:index binding)
-                 :element-index (:value index)
-                 :size (:size binding)
-                 :type (:type binding)
-                 :value (:value value)
-                 :effects #{:write-memory}}])))))
+       (concat (:statements place) (:statements index) (:statements value)
+               (if (= :scratch (:region ref))
+                 [{:op :array-store
+                   :index (:base ref)
+                   :element-index (:value index)
+                   :size (:size ref)
+                   :type (:element ref)
+                   :value (:value value)
+                   :effects #{:write-memory}}]
+                 [{:op :state-store
+                   :index (:base ref)
+                   :element-index (:value index)
+                   :size (:size ref)
+                   :type (:element ref)
+                   :value (:value value)
+                   :effects #{:write-state}}]))))))
 
 (defn- record-binding!
   [form env name]
@@ -700,29 +753,62 @@
     binding))
 
 (defn- field-selectors
-  "Split field selectors into an optional record-index form and a field path.
+  "Split field selectors into an optional record index, a field path, and an
+  optional element index.
 
-  A leading non-keyword selector is the record index; the remaining selectors
-  are the field-name path."
+  Selectors are `[record-index?] field-name+ [element-index?]`; a leading or
+  trailing non-keyword selector is the record index or the element index."
   [form selectors]
-  (let [[index selectors] (if (keyword? (first selectors))
-                            [nil selectors]
-                            [(first selectors) (rest selectors)])]
+  (let [selectors (vec selectors)
+        [record-index selectors] (if (and (seq selectors)
+                                          (not (keyword? (first selectors))))
+                                   [(first selectors) (subvec selectors 1)]
+                                   [nil selectors])
+        [element-index selectors] (if (and (seq selectors)
+                                           (not (keyword? (peek selectors))))
+                                    [(peek selectors) (pop selectors)]
+                                    [nil selectors])]
     (when (or (empty? selectors) (not (every? keyword? selectors)))
-      (fail "DSP field access requires an optional record index and field names"
-            {:form form :selectors (vec selectors)}))
-    [index (vec selectors)]))
+      (fail "DSP field access requires field names and optional indices"
+            {:form form :selectors selectors}))
+    {:record-index record-index :path selectors :element-index element-index}))
 
 (defn- field-leaf!
-  [form env binding index-form path]
-  (let [leaf (get (:leaf-index binding) path)]
+  "Resolve a parsed field access to `{:leaf ... :index ...}`.
+
+  For an array of records the index is the record index; for a scalar record
+  owning an array field it is the field's element index. An array field with no
+  element index is an array place; see `leaf-array-ref`."
+  [form env binding parsed]
+  (let [path (:path parsed)
+        leaf (get (:leaf-index binding) path)]
     (when-not leaf
       (fail "DSP field path does not exist in the record"
             {:form form :state (:name binding) :path path}))
-    (let [index (when index-form (lower-value index-form env))]
-      (when index
-        (expect-type! :int (:value index) form))
-      [leaf index])))
+    (let [record-array? (> (:size binding) 1)
+          array-field? (> (:size leaf) 1)
+          record-index (:record-index parsed)
+          element-index (:element-index parsed)]
+      (when (and (not record-array?) record-index)
+        (fail "a scalar record has no record index"
+              {:form form :state (:name binding) :path path}))
+      (when (and record-array? element-index)
+        (fail "an array of records has no per-field element index"
+              {:form form :state (:name binding) :path path}))
+      (when (and (not array-field?) element-index)
+        (fail "scalar field access does not take an element index"
+              {:form form :state (:name binding) :path path}))
+      (let [index-form (if record-array? record-index element-index)
+            index (when index-form (lower-value index-form env))]
+        (when index (expect-type! :int (:value index) form))
+        {:leaf leaf :index index}))))
+
+(defn- leaf-array-ref
+  "An `:array-ref` place for a record's array field."
+  [binding leaf]
+  {:op :array-ref :type :array :region :state
+   :base (:offset leaf) :element (:type leaf) :size (:size leaf)
+   :constant (boolean (:constant binding))})
 
 (defn- lower-field
   [form env]
@@ -730,16 +816,18 @@
     (when-not (symbol? name)
       (fail "field requires a state record name" {:form form}))
     (let [binding (record-binding! form env name)
-          [index-form path] (field-selectors form selectors)
-          [leaf index] (field-leaf! form env binding index-form path)]
-      (fragment (:statements index)
-                {:op :state-load
-                 :state-id (:name binding)
-                 :index (:index leaf)
-                 :element-index (:value index)
-                 :size (:size leaf)
-                 :type (:type leaf)
-                 :effects #{:read-state}}))))
+          {:keys [leaf index]} (field-leaf! form env binding
+                                            (field-selectors form selectors))]
+      (if (and (> (:size leaf) 1) (nil? index))
+        (fragment [] (leaf-array-ref binding leaf))
+        (fragment (:statements index)
+                  {:op :state-load
+                   :state-id (:name binding)
+                   :index (:offset leaf)
+                   :element-index (:value index)
+                   :size (:size leaf)
+                   :type (:type leaf)
+                   :effects #{:read-state}})))))
 
 (defn- lower-set-field!
   [form env]
@@ -750,16 +838,19 @@
       (fail "set-field! requires a state record name, field path, and value"
             {:form form}))
     (let [binding (record-binding! form env name)
-          [index-form path] (field-selectors form selectors)
-          [leaf index] (field-leaf! form env binding index-form path)
+          parsed (field-selectors form selectors)
+          {:keys [leaf index]} (field-leaf! form env binding parsed)
           value (lower-value value-form env)]
+      (when (and (> (:size leaf) 1) (nil? index))
+        (fail "use aset to write an array field element"
+              {:form form :state (:name binding) :path (:path parsed)}))
       (reject-constant-store! form binding)
       (expect-type! (:type leaf) (:value value) form)
       (void-fragment
        (concat (:statements index) (:statements value)
                [{:op :state-store
                  :state-id (:name binding)
-                 :index (:index leaf)
+                 :index (:offset leaf)
                  :element-index (:value index)
                  :size (:size leaf)
                  :type (:type leaf)
@@ -770,34 +861,39 @@
   "Clojure-style field read for `(:field record)` and `(record :field)`."
   [form env record-name path]
   (let [binding (record-binding! form env record-name)
-        [leaf index] (field-leaf! form env binding nil path)]
-    (fragment (:statements index)
-              {:op :state-load
-               :state-id (:name binding)
-               :index (:index leaf)
-               :element-index (:value index)
-               :size (:size leaf)
-               :type (:type leaf)
-               :effects #{:read-state}})))
+        {:keys [leaf index]} (field-leaf! form env binding {:path path})]
+    (if (and (> (:size leaf) 1) (nil? index))
+      (fragment [] (leaf-array-ref binding leaf))
+      (fragment (:statements index)
+                {:op :state-load
+                 :state-id (:name binding)
+                 :index (:offset leaf)
+                 :element-index (:value index)
+                 :size (:size leaf)
+                 :type (:type leaf)
+                 :effects #{:read-state}}))))
 
 (defn- lower-place-store!
   "Field write for a `set!` place: `(set! (:field record) value)`."
   [form record-name path value-form env]
   (let [binding (record-binding! form env record-name)
-        [leaf index] (field-leaf! form env binding nil path)
-        value (lower-value value-form env)]
-    (reject-constant-store! form binding)
-    (expect-type! (:type leaf) (:value value) form)
-    (void-fragment
-     (concat (:statements index) (:statements value)
-             [{:op :state-store
-               :state-id (:name binding)
-               :index (:index leaf)
-               :element-index (:value index)
-               :size (:size leaf)
-               :type (:type leaf)
-               :value (:value value)
-               :effects #{:write-state}}]))))
+        {:keys [leaf index]} (field-leaf! form env binding {:path path})]
+    (when (> (:size leaf) 1)
+      (fail "use aset to write an array field element"
+            {:form form :state (:name binding) :path path}))
+    (let [value (lower-value value-form env)]
+      (reject-constant-store! form binding)
+      (expect-type! (:type leaf) (:value value) form)
+      (void-fragment
+       (concat (:statements index) (:statements value)
+               [{:op :state-store
+                 :state-id (:name binding)
+                 :index (:offset leaf)
+                 :element-index (:value index)
+                 :size (:size leaf)
+                 :type (:type leaf)
+                 :value (:value value)
+                 :effects #{:write-state}}])))))
 
 (defn- lower-call
   [form env]
@@ -934,13 +1030,17 @@
              definitions)))
 
 (defn- record-leaves
-  "Flatten a record's field tree into scalar leaves carrying their path."
+  "Flatten a record's field tree into leaves carrying their path, element type,
+  and (for an array field) its slot count."
   [fields prefix]
   (mapcat (fn [field]
             (let [path (conj prefix (:name field))]
               (if (contains? field :fields)
                 (record-leaves (:fields field) path)
-                [{:path path :type (:type field) :init (:init field)}])))
+                [{:path path
+                  :type (:type field)
+                  :size (or (:size field) 1)
+                  :init (:init field)}])))
           fields))
 
 (defn- record-leaf-name
@@ -948,35 +1048,37 @@
   (symbol (str (name record-name) "." (str/join "." (map name path)))))
 
 (defn- expand-record
-  "Expand one record entry into struct-of-arrays leaf slots from `offset`.
+  "Expand one record entry into flat leaf slots from `offset`.
 
-  Each leaf `j` occupies the contiguous block `[offset + j*n, offset + (j+1)*n)`
-  for an array of `n` records, so element `i` of leaf `j` is stored at
-  `offset + j*n + i`. Returns `[slots offset' binding]`."
+  An array of records (`n > 1`) is laid out struct-of-arrays: each leaf is one
+  flat state entry of `:size n`. A scalar record (`n = 1`) may instead own array
+  fields, in which case each field occupies its own contiguous block. Either way
+  a leaf is an ordinary state slot with a constant base offset, so the backends
+  are unchanged. Returns `[slots offset' binding]`."
   [state offset]
   (let [n (or (:size state) 1)
+        scalar? (= n 1)
         leaves (vec (record-leaves (:fields state) []))
-        [slots offset']
-        (reduce (fn [[slots offset] leaf]
-                  (let [entry (cond-> {:name (record-leaf-name (:name state) (:path leaf))
+        [slots offset' leaf-list]
+        (reduce (fn [[slots offset result] leaf]
+                  (let [size (if scalar? (:size leaf) n)
+                        entry (cond-> {:name (record-leaf-name (:name state) (:path leaf))
                                        :type (:type leaf)
                                        :index offset}
-                                (> n 1) (assoc :size n
-                                               :init (vec (repeat n (:init leaf))))
-                                (= n 1) (assoc :init (:init leaf)))]
-                    [(conj slots entry) (+ offset n)]))
-                [[] offset]
+                                (> size 1) (assoc :size size
+                                                  :init (if scalar?
+                                                          (:init leaf)
+                                                          (vec (repeat n (:init leaf)))))
+                                (= size 1) (assoc :init (:init leaf)))]
+                    [(conj slots entry)
+                     (+ offset size)
+                     (conj result {:path (:path leaf)
+                                   :type (:type leaf)
+                                   :offset offset
+                                   :size size})]))
+                [[] offset []]
                 leaves)
-        leaf-list (vec (map-indexed (fn [index leaf]
-                                      {:path (:path leaf)
-                                       :type (:type leaf)
-                                       :offset (+ offset (* index n))})
-                                    leaves))
-        leaf-index (into {}
-                         (map (fn [leaf]
-                                [(:path leaf)
-                                 {:index (:offset leaf) :type (:type leaf) :size n}]))
-                         leaf-list)
+        leaf-index (into {} (map (fn [leaf] [(:path leaf) leaf])) leaf-list)
         binding (cond-> {:name (:name state)
                          :kind :record
                          :size n
@@ -1138,8 +1240,14 @@
                         (get-in definition [:params 0 :name]))
         sample-param (some #(when (= sample-name (:name %)) %) (:params definition))
         controls (if process
-                   (mapv (fn [{:keys [name]}]
-                           (some #(when (= name (:name %)) %) (:params definition)))
+                   (mapv (fn [{:keys [name type]}]
+                           (let [param (some #(when (= name (:name %)) %)
+                                             (:params definition))]
+                             ;; A control port that declares a non-default type
+                             ;; (e.g. :int) types the local, since the shorthand
+                             ;; parameter list can only express :float.
+                             (cond-> param
+                               (and type (not= :float type)) (assoc :type type))))
                          (:controls process))
                    (vec (rest (:params definition))))
         frames (or (get-in process [:frames]) {:name 'frames :type :int})

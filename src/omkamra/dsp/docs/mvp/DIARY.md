@@ -320,7 +320,71 @@ Wasm at f32 and f64. `clj-kondo`/`cljfmt` clean.
 
 ---
 
-## Handoff — current state after P4 (rolling entry)
+## P5 — Delay lines, circular buffers, and interpolation (completed)
+
+Circular-buffer delay lines are written in the DSP language on top of the P4
+arena and exercised by the catalog. The convention is D17: a persistent `:float`
+buffer plus an `:int` cursor, **write then read** each frame, and wrapped indices
+via the floored `mod`.
+
+**Library.** `omkamra.dsp.library` gains the stateless helpers
+`linear-interpolate` and `allpass-coefficient`, and two reusable **processes**
+that own their state: `delay-line` (64-sample line, linearly interpolated
+fractional tap) and `allpass-delay-line` (same line, first-order allpass tap).
+Each holds its whole state in one **record that owns its buffer**
+(`{:name line :fields [{:name buffer :type :float :size 64} {:name cursor ...}]}`),
+accessed with `(aget line k)`/`(aset line k v)` and `(:cursor line)`. Processes
+rather than functions because the call mechanism still rejects stateful
+callees — that is P6.
+
+**Catalog vectors.** `:delay-line-zero` (zero delay is the identity),
+`:delay-line-unit`, `:delay-line-fractional` (4.5), `:delay-line-wrap` (30.25,
+which wraps the 64-sample buffer over the run), and `:allpass-delay-line`. All
+run through the shared matrix on the interpreter, JVM, JavaScript, and Wasm. A
+readable JVM test pins the convention with an impulse: delay 3.0 moves the
+impulse to sample 3, delay 3.5 splits it 0.5/0.5 across samples 3 and 4, and
+zero delay is the identity.
+
+### P4 follow-up — records can own their buffers
+
+P5 needed a record to own a buffer, so the P4b omission was closed:
+
+- a field in a **scalar** record may declare `:size M` (an array field), so a
+  record is `{buffer, cursor, ...}` rather than the buffer being a separate
+  top-level state array. An array of records cannot yet contain an array field
+  (rejected with a diagnostic); that nested case stays for P6/P10 voices.
+- the accessors gained the missing element index: `(aget rec k)`/`(aset rec k v)`
+  index a record's single array field, and `(field rec :buf k)` /
+  `(set-field! rec :buf k v)` is the explicit spelling. Selectors are
+  `[record-index?] field-name+ [element-index?]`, so the leading index selects a
+  record and the trailing one an array element.
+- as a side fix, a control port that declares a non-default type (e.g. `:int`)
+  now types its local, so `[sample index]` with `{:controls [{:name index :type
+  :int}]}` works instead of silently making `index` a float.
+
+### P5 follow-up — static array places (D18)
+
+`(:line rec)` / `(field rec :line)` with no element index is now a **place** — a
+compile-time reference to storage — and `(aget (:line rec) k)` /
+`(aset (:line rec) k v)` index it. Places also arise from a local array, a
+top-level state array, a record name with a single array field, and a `let` alias
+of any of these (`(let [buf (:line rec)] (aget buf k))`). A place used where a
+scalar is expected is a diagnostic. No backend changed: a place lowers to
+`state-load`/`state-store` with a constant base offset. This is a strict subset
+of first-class arrays — places are static, so passing/returning them and runtime
+bases (into an array of records) remain P6. The `:array-place` catalog case
+exercises the place form and a `let` alias on all four targets.
+
+**Verified.** JVM 65 tests / 545 assertions; browser 9/9. `clj-kondo`/`cljfmt`
+clean.
+
+**Deferred.** The library line length is fixed at 64; a delay of `N` aliases by
+design. Length *parameterization* needs compile-time capacities/modules, which is
+P6's territory rather than an ad-hoc mechanism here.
+
+---
+
+## Handoff — current state after P5 (rolling entry)
 
 This is the one living entry, as opposed to the completed-phase entries above:
 what exists, how it fits together, what is open, and what to do next. It may be
@@ -344,9 +408,17 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   `array-load`/`array-store`) index it. `dsp/defstruct` names a record shape,
   referenced with `{:name slot :struct shape}` (plus `:size` for arrays of
   records) and accessed with `field`/`set-field!`; the linker inlines the
-  fields, laid out struct-of-arrays in the same arena as state and scratch.
-  `:constant` tables are read-only and materialized at initialization. The ABI
-  exposes `:records` and `:arena`.
+  fields, laid out struct-of-arrays in the same arena as state and scratch. A
+  scalar record may own an array field (`:size M`), indexed with `(aget rec k)`
+  or `(field rec :buf k)`. `:constant` tables are read-only and materialized at
+  initialization. The ABI exposes `:records` and `:arena`.
+- **P5 (delay lines, circular buffers, interpolation) is complete** under D17
+  and D18. The library provides `linear-interpolate`, `allpass-coefficient`, and
+  the `delay-line` / `allpass-delay-line` processes; the convention is a
+  persistent buffer plus an `:int` cursor with write-then-read ordering and
+  floored `mod` wrap. Array storage is a static *place* (D18), so a record owns
+  its buffer and `(aget (:buf rec) k)` / `let` aliases index it. Catalog vectors
+  cover zero, unit, fractional, wrap, allpass, and the place form.
 - **The conformance harness is interpreter-oracle-driven** (D7/D13): the shared
   catalog is pure data, and the reference interpreter is the single oracle on
   the JVM *and* in the browser.
@@ -354,10 +426,10 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   (CodeMirror) and compile them there, which means the compiler itself becomes
   portable and runs in SCI (P13). The library and every new language form are
   therefore authored as portable `.cljc` source forms.
-- Verified through `clojure_eval` on the running nREPL: JVM 61 tests / 495
-  assertions, browser 9/9 (the process matrix covers the P4a array cases on
-  JavaScript and Wasm too), `clj-kondo`/`cljfmt` clean. The P4a changes are
-  uncommitted.
+- Verified through `clojure_eval` on the running nREPL: JVM 65 tests / 545
+  assertions, browser 9/9 (the process matrix covers the P4 array/record/table
+  cases and the P5 delay-line and place cases on JavaScript and Wasm),
+  `clj-kondo`/`cljfmt` clean.
 
 ### Architecture
 
@@ -448,6 +520,10 @@ omkamra.dsp.testbed           (.cljs)  browser differential suite
   breaks the running Shadow server). To refresh `omkamra.dsp-test`, use
   `(remove-ns 'omkamra.dsp-test)` then `(require 'omkamra.dsp-test :reload)`,
   because `:reload` alone leaves removed `deftest` vars behind.
+- A `:reload` flag placed mid-list — `(require 'a :reload 'b :reload)` — does
+  not reliably reload every namespace, and a stale served catalog shows up as a
+  browser 500 for a case the server does not know. Reload explicitly:
+  `(doseq [n [...]] (require n :reload))`.
 - `spel`'s bundled Playwright wants a different Chromium revision than the
   installed one; `omkamra.dsp.browser/installed-headless-shell` finds the
   installed headless shell and passes it as `:executable-path`.
@@ -457,9 +533,10 @@ omkamra.dsp.testbed           (.cljs)  browser differential suite
 
 ### Next steps
 
-1. Begin **P5 — delay lines, circular buffers, and interpolation**, built in the
-   DSP language on top of the P4 arena (circular-buffer state with a wrap
-   cursor, fractional-delay reads, documented update ordering).
+1. Begin **P6 — stateful module composition**: typed multi-input/multi-output
+   module definitions with explicit state, buffers, and update ordering, and a
+   defined policy for calling stateful and buffer-accessing callees (which P5
+   worked around by using library *processes*).
 2. Keep a structured diagnostic for any operation a target cannot serve at all.
 3. Optionally add generated-target (JS/Wasm) development guards and restore the
    dropped Wasm f64 worklet checks.

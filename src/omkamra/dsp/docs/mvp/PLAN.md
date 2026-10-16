@@ -519,10 +519,13 @@ typed initializer vector accessed with `(state-load name index)` and
 `(state-store name index value)`; `(array :float N)` declares preallocated
 scratch indexed with `(aget a i)`/`(aset a i v)`; and `dsp/defstruct` names a
 record shape referenced with `{:name slot :struct shape}` and accessed with
-`field`/`set-field!` (or `(:field slot)`). Records are laid out struct-of-arrays
-across the same arena. All of this lowers and executes on the interpreter, JVM,
-JavaScript, and Wasm backends. Circular-buffer helpers (P5), stateful module
-composition (P6), complex/interleaved layouts, and generated
+`field`/`set-field!` (or `(:field slot)`). A scalar record may own an array
+field (`:size M`); array storage is a static *place*, so `(aget rec k)`,
+`(aget (:buf rec) k)`, and a `let` alias all index the same buffers. Records are
+laid out struct-of-arrays across the same arena. All of this lowers and executes
+on the interpreter, JVM, JavaScript, and Wasm backends. P5 adds circular-buffer delay lines with linear
+and allpass fractional interpolation as library processes (D17). Stateful
+module composition (P6), complex/interleaved layouts, and generated
 initialization-time tables remain to be designed before backend-specific FFT or
 filter implementations.
 
@@ -674,9 +677,10 @@ automated CI browser job. There is no separate Node conformance runner.
 - Process input/output buffers are currently float buffers with a fixed overall
   channel count.
 - Fixed-size state arrays/tables, local arrays, named state records/`defstruct`,
-  and read-only constant tables are part of the language. Complex/interleaved
-  layouts, circular-buffer helpers, and generated initialization-time tables
-  are not yet.
+  read-only constant tables, and circular-buffer delay lines with interpolation
+  are part of the language (the latter as `omkamra.dsp.library` processes, since
+  stateful callees are not yet callable — P6). Complex/interleaved layouts and
+  generated initialization-time tables are not yet.
 - Dynamic buffer indices are not statically proven safe.
 - Sample-accurate automation, timestamped musical events, and voice management
   are not yet part of the process ABI.
@@ -718,14 +722,14 @@ automated CI browser job. There is no separate Node conformance runner.
 
 ### 1. Extend the language for synth DSP
 
-P1–P4 are complete across the interpreter, JVM, JavaScript, and Wasm: bitwise
+P1–P5 are complete across the interpreter, JVM, JavaScript, and Wasm: bitwise
 operations, the portable scalar math builtins and transcendentals, fixed-size
-state arrays/tables, preallocated local arrays, named state records, and
-read-only constant tables. Next add circular-buffer/delay helpers (P5), stateful
-module composition (P6), mixed numeric representations, complex/interleaved
-data, and the math/DSP library needed for oscillators, envelopes, filters,
-modulation, resampling, and FFT/IFFT. Keep this work in the portable language
-and IR before introducing backend-specific kernels.
+state arrays/tables, preallocated local arrays, named state records, read-only
+constant tables, and circular-buffer delay lines with interpolation. Next add
+stateful module composition (P6), mixed numeric representations,
+complex/interleaved data, and the math/DSP library needed for oscillators,
+envelopes, filters, modulation, resampling, and FFT/IFFT. Keep this work in the
+portable language and IR before introducing backend-specific kernels.
 
 Add stateful module composition with explicit ownership, feedback boundaries,
 multiple ports, and update ordering. Keep native intrinsics limited to measured
