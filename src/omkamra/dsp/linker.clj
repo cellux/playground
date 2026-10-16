@@ -10,7 +10,10 @@
 (def ^:private language-forms
   '#{if let do set! while break continue buffer-load buffer-store
      state-load state-store int->float float->int
-     + - * / = not= < <= > >= and or not dsp/call})
+     + - * / = not= < <= > >= and or not
+     bit-and bit-or bit-xor bit-not
+     bit-shift-left bit-shift-right unsigned-bit-shift-right
+     dsp/call})
 
 (defn- fail
   [message data]

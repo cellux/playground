@@ -208,6 +208,32 @@
 
 (declare evaluate-expression execute-statement)
 
+;; Bitwise operations use signed two's-complement 32-bit semantics on every
+;; target.  Clojure's `bit-shift-*` operate on 64-bit boxed longs and do not
+;; mask the shift distance the way JVM/JS/Wasm i32 shifts do, so the reference
+;; implementation masks the distance to five bits and narrows results with
+;; `unchecked-int`.  Logical right shift first reinterprets the operand as an
+;; unsigned 32-bit value to avoid 64-bit sign extension.
+(defn- shift-distance
+  [value]
+  (bit-and (logical-int value) 0x1f))
+
+(defn- evaluate-bitwise
+  [expression locals context]
+  (let [args (mapv #(logical-int (evaluate-expression % locals context))
+                   (:args expression))]
+    (unchecked-int
+     (case (:operator expression)
+       :bit-and (bit-and (nth args 0) (nth args 1))
+       :bit-or (bit-or (nth args 0) (nth args 1))
+       :bit-xor (bit-xor (nth args 0) (nth args 1))
+       :bit-not (bit-not (nth args 0))
+       :bit-shift-left (bit-shift-left (nth args 0) (shift-distance (nth args 1)))
+       :bit-shift-right (bit-shift-right (nth args 0) (shift-distance (nth args 1)))
+       :unsigned-bit-shift-right (unsigned-bit-shift-right
+                                  (bit-and (nth args 0) 0xffffffff)
+                                  (shift-distance (nth args 1)))))))
+
 (defn- state-element-index
   [expression locals context]
   (let [element-index (if-let [index (:element-index expression)]
@@ -309,6 +335,7 @@
                          (evaluate-expression (second (:args expression)) locals context))
                :or (or (evaluate-expression (first (:args expression)) locals context)
                        (evaluate-expression (second (:args expression)) locals context)))
+    :bitwise (evaluate-bitwise expression locals context)
     (throw (ex-info "unknown DSP IR expression" {:expression expression}))))
 
 (defn- control

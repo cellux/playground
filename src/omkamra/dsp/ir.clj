@@ -16,6 +16,21 @@
 (def ^:private logical-operators
   {'and :and 'or :or 'not :not})
 
+;; Integer bitwise operations mirror `clojure.core` names and 32-bit
+;; two's-complement semantics. `:bit-shift-right` is arithmetic and
+;; `:unsigned-bit-shift-right` is logical; shift distances are masked modulo
+;; 32 by every target.
+(def ^:private bitwise-operators
+  {'bit-and :bit-and
+   'bit-or :bit-or
+   'bit-xor :bit-xor
+   'bit-not :bit-not
+   'bit-shift-left :bit-shift-left
+   'bit-shift-right :bit-shift-right
+   'unsigned-bit-shift-right :unsigned-bit-shift-right})
+
+(def ^:private unary-bitwise-operators #{:bit-not})
+
 (def ^:private value-types #{:float :int :boolean})
 (def ^:private numeric-types #{:float :int})
 
@@ -195,6 +210,23 @@
                           :operator operator
                           :args (mapv :value args)
                           :type :boolean}))))
+
+(defn- lower-bitwise
+  [form env operator]
+  (let [forms (vec (rest form))
+        expected (if (contains? unary-bitwise-operators operator) 1 2)]
+    (when-not (= expected (count forms))
+      (fail "DSP bitwise operators have the wrong arity"
+            {:form form :operator (first form)
+             :expected expected :actual (count forms)}))
+    (let [args (mapv #(lower-value % env) forms)]
+      (doseq [arg args]
+        (expect-type! :int (:value arg) form))
+      (combine-fragments args
+                         {:op :bitwise
+                          :operator operator
+                          :args (mapv :value args)
+                          :type :int}))))
 
 (defn- branch-type
   [form then-fragment else-fragment]
@@ -522,6 +554,8 @@
         (= 'float->int op) (lower-conversion form env :float->int :float :int)
         (contains? logical-operators op)
         (lower-logical form env (get logical-operators op))
+        (contains? bitwise-operators op)
+        (lower-bitwise form env (get bitwise-operators op))
         (contains? arithmetic-operators op)
         (lower-binary form env (get arithmetic-operators op) false)
         (contains? comparison-operators op)
@@ -900,6 +934,8 @@
                     :right (substitute-expression (:right expr) substitutions))
     :logical (update expr :args #(mapv (fn [arg]
                                          (substitute-expression arg substitutions)) %))
+    :bitwise (update expr :args #(mapv (fn [arg]
+                                         (substitute-expression arg substitutions)) %))
     :convert (update expr :value substitute-expression substitutions)
     :buffer-load expr
     :state-load expr
@@ -930,6 +966,7 @@
               :compare (assoc expr :left (inline* (:left expr))
                               :right (inline* (:right expr)))
               :logical (update expr :args #(mapv inline* %))
+              :bitwise (update expr :args #(mapv inline* %))
               :convert (update expr :value inline*)
               expr))]
     (inline* expr)))
@@ -985,6 +1022,7 @@
   (into (set (keys arithmetic-operators))
         (concat (keys comparison-operators)
                 (keys logical-operators)
+                (keys bitwise-operators)
                 ['if 'let 'do 'set! 'while 'break 'continue
                  'buffer-load 'buffer-store 'state-load 'state-store
                  'int->float 'float->int])))

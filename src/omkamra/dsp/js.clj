@@ -49,6 +49,8 @@
               :right (lower-expression (:right expression) channels)}
     :logical {:op :logical :operator (:operator expression) :type :boolean
               :args (mapv #(lower-expression % channels) (:args expression))}
+    :bitwise {:op :bitwise :operator (:operator expression) :type :int
+              :args (mapv #(lower-expression % channels) (:args expression))}
     :convert {:op :convert :operator (:operator expression) :type (:type expression)
               :value (lower-expression (:value expression) channels)}
     (throw (ex-info "unsupported expression in JS lowering"
@@ -140,6 +142,16 @@
   [operator]
   (case operator := "===" :not= "!==" (name operator)))
 
+(defn- bitwise-operator
+  [operator]
+  (case operator
+    :bit-and "&"
+    :bit-or "|"
+    :bit-xor "^"
+    :bit-shift-left "<<"
+    :bit-shift-right ">>"
+    :unsigned-bit-shift-right ">>>"))
+
 (declare emit-expression emit-statement-lines)
 
 (defn- buffer-source
@@ -184,6 +196,12 @@
                          (emit-expression (second (:args expression))) ")")
                :or (str "(" (emit-expression (first (:args expression))) " || "
                         (emit-expression (second (:args expression))) ")"))
+    :bitwise (coerce-source :int
+                            (if (= :bit-not (:operator expression))
+                              (str "(~" (emit-expression (first (:args expression))) ")")
+                              (str "(" (emit-expression (first (:args expression))) " "
+                                   (bitwise-operator (:operator expression)) " "
+                                   (emit-expression (second (:args expression))) ")")))
     :convert (case (:operator expression)
                :int->float (coerce-source :float (emit-expression (:value expression)))
                :float->int (coerce-source :int

@@ -18,6 +18,135 @@ This document records the design, current implementation, known limitations,
 and remaining work. It is a living roadmap rather than a history of
 implementation phases.
 
+## Planning baseline
+
+This plan covers the whole v1 system rather than a narrow compiler MVP. The
+non-negotiable gates are semantic correctness and real-time safety. Browser
+usability, performance, and the complete synthesizer capability are also v1
+goals, delivered in dependency order rather than traded away.
+
+JVM, JavaScript, and WebAssembly are equivalent first-class targets for the DSP
+kernel, with both `:f32` and `:f64` modes. The sequencing/runtime layer is
+portable in behavior but is hosted on the JVM for JVM applications and in
+ClojureScript for browser applications; it is not required to run on
+WebAssembly. A single synth description should produce both the DSP kernel
+artifacts and the host-target sequencing/runtime configuration.
+
+The system has two explicit layers:
+
+1. The **DSP kernel layer** owns typed sample processing, state, memory,
+   controls, lifecycle, and the canonical timestamped message ABI.
+2. The **sequencing layer** owns timeline scheduling, preallocated event and
+   voice storage, voice allocation/stealing, modulation routing, and delivery
+   of timestamped messages to the kernel.
+
+All capacities are explicit compile-time configuration: voice count, event
+queue capacity, modulation routes, workspaces, effect storage, and timeline
+lookahead. Runtime allocation is not an overflow strategy. The default event
+queue overflow policy is deterministic drop-oldest, and all other overflow and
+failure policies must be explicit in the compiled configuration and diagnostics.
+The sequencing layer must support note-on/off with velocities, pitch bend,
+controller and parameter changes, pressure/per-note expression, transport
+tempo/beat data, and sample-rate changes. Events are applied at exact sample
+or frame offsets with deterministic ordering for equal timestamps and arbitrary
+host block sizes.
+
+The v1 acceptance instrument is the reference definition of a general-purpose
+synth: polyphonic band-limited oscillators and noise; sync, pulse-width
+modulation, envelopes, LFOs, and modulation routing; a resonant filter; unison;
+deterministic voice stealing; stereo output; and delay/chorus/distortion
+effects. It must render deterministically across block sizes and supported
+backends, remain stable under modulation, handle event boundaries correctly,
+contain non-finite state according to a documented policy, and allocate
+nothing after initialization.
+
+V1 excludes plugin APIs and formats, GUI design, project/preset file formats,
+network collaboration, distribution/packaging, and native or AOT toolchains.
+The DSP language remains deliberately limited to the constructs necessary for
+the reference synthesizer; arbitrary host-language execution is forbidden in
+DSP code.
+
+## Runtime topology and compilation products
+
+The DSP compiler and sequencing runtime are separate layers with a shared,
+serializable synth schema. Compiling a synth description produces:
+
+- reusable DSP kernel artifacts for the interpreter, JVM, JavaScript, and Wasm;
+- a target-neutral ABI and metadata manifest;
+- host-target sequencing configuration for JVM or ClojureScript; and
+- any precomputed memory layout, voice, event, modulation, and workspace
+  requirements.
+
+The sequencing layer is not compiled into the Wasm module. On the JVM it runs
+on the JVM; in the browser it runs as ClojureScript in the AudioWorklet. It may
+also be driven from a GUI, CLJ REPL, or CLJS REPL through a non-real-time
+control API. The shared synth schema defines the compatibility boundary, but
+kernel instances and sequencing services have independent lifecycles.
+
+A real-time instance has this topology:
+
+```text
+non-real-time GUI/REPL/timeline producer
+  -> control/event transport
+  -> preallocated real-time scheduler and voice manager
+  -> timestamped kernel-message ABI
+  -> DSP kernel instance
+```
+
+The scheduler owns event and voice-allocation metadata; the kernel owns typed
+signal-processing state. Both use a preallocated per-instance memory arena.
+The scheduler runs once per audio block, dispatches messages at exact frame
+offsets, and supports deterministic ordering for equal timestamps and arbitrary
+host block sizes. The browser AudioWorklet owns the real-time scheduler and
+kernel. `MessagePort` is the required browser control transport; the worklet
+copies incoming data into its fixed queue before processing. `process()` never
+allocates and never depends on message delivery timing. Each instance exposes a
+single-producer, single-consumer queue: a non-real-time ingress component
+serializes GUI, REPL, and timeline inputs, while the audio thread is the sole
+consumer. Multi-producer support, if added later, must be host-side and must
+not introduce audio-thread locks.
+
+All capacities are explicit compile-time configuration: maximum voices, event
+queue length, modulation routes, workspaces, effect storage, and timeline
+lookahead. The event queue's default overflow policy is to drop the oldest
+future event, never an event already due or being dispatched, and increment a
+fixed diagnostic/status counter outside the audio path. Other overflow and
+failure policies must be explicit in compiled metadata. Runtime allocation is
+never an overflow strategy.
+
+The sequencing ABI includes note-on/off with velocity and release velocity,
+pitch bend, controller and parameter changes, pressure and per-note
+expression, transport tempo/beat data, and sample-rate changes. It delivers
+canonical timestamped messages to the kernel; it does not require the kernel
+to know about GUI or host-language objects. A timestamp is an absolute integer
+sample/frame position on a monotonic synth timeline. A monotonically increasing
+ingress sequence number orders events with equal timestamps, making behavior
+independent of host block boundaries and comparable across JVM and browser
+runtimes.
+
+The numeric contract uses IEEE-754 `f32` or `f64` according to compilation
+mode. `:int` is a signed two's-complement 32-bit value with explicit wrapping
+arithmetic. Conversions, NaN, infinity, signed zero, overflow, and rounding
+are specified and tested. Reference semantics preserve subnormals. Flush to
+zero is an explicit opt-in compilation/runtime policy with separate
+conformance expectations; it is not the default. The default non-finite-state
+policy detects NaN or infinity, silences and resets the affected voice, and
+increments a fixed diagnostic counter; propagation is an explicit diagnostic
+mode rather than the default audio behavior.
+
+Every DSP and sequencing operation in the audio path must have statically
+bounded work. Unbounded loops, recursion, dynamic allocation, and unconstrained
+event dispatch are rejected before audio starts. Runtime failures use bounded,
+predeclared policies such as dropping events, silencing a voice, or incrementing
+a fixed diagnostic counter; they never log, allocate, block, or throw through
+the audio callback.
+
+Recompilation occurs off the audio thread. A replacement is initialized as a
+new instance and switched at a block boundary without automatic state
+migration. An optional host-level crossfade renders both instances for a
+configured bounded duration using preallocated resources; if resources are
+insufficient, the host performs a hard block-boundary switch.
+
 ## Design rules
 
 The portable typed IR is the semantic boundary:
@@ -362,6 +491,13 @@ host UI and plugin integration outside this project.
 
 ### Language and memory
 
+The sequencing/runtime layer must separately provide preallocated event and
+voice storage, deterministic voice allocation and stealing, modulation routing,
+and exact timestamp-to-frame dispatch. Its event ABI must include note-on/off,
+velocity and release velocity, pitch bend, controller and parameter changes,
+pressure and per-note expression, transport tempo/beat data, and sample-rate
+changes. These concerns must not be hidden inside target-specific DSP kernels.
+
 The language must provide:
 
 - fixed-size arrays and initialization-time lookup tables;
@@ -535,10 +671,12 @@ automated CI browser job. There is no separate Node conformance runner.
 - Dynamic buffer indices are not statically proven safe.
 - Sample-accurate automation, timestamped musical events, and voice management
   are not yet part of the process ABI.
-- Unbounded loops remain legal and produce diagnostics rather than compilation
-  failure.
-- The special-value and conversion contract is not yet fully specified across
-  targets.
+- Constructs whose worst-case work cannot be statically bounded are rejected
+  before audio starts; diagnostics identify the offending construct and its
+  bound requirement.
+- The special-value and conversion contract still needs to be completed and
+  enforced uniformly across targets; reference semantics preserve subnormals,
+  while flush-to-zero is an explicit non-default policy.
 
 ### Runtime and ABI
 
@@ -552,7 +690,9 @@ automated CI browser job. There is no separate Node conformance runner.
 - The JavaScript worklet status protocol is less complete than the Wasm
   adapter's init/reset protocol.
 - The compiler currently runs on the JVM; browser tests receive generated
-  artifacts rather than compiling user DSP source in the browser.
+  artifacts rather than compiling user DSP source in the browser. Browser-side
+  compilation remains required for v1, while the sequencing runtime remains
+  ClojureScript rather than Wasm.
 
 ### Safety and tooling
 
@@ -722,6 +862,28 @@ Optimization follows conformance and safety work. Initial safe candidates are:
 Run differential tests before and after optimization. Do not reassociate
 floating-point expressions unless a separately selected policy permits it.
 
+## Validation and release gates
+
+Correctness is the release gate. Every supported kernel operation and runtime
+operation must be differentially tested against the interpreter/reference model
+for each target, precision, lifecycle state, event boundary, and arbitrary
+partitioning of a block. Tests must cover NaN, infinity, signed zero,
+conversions, overflow, subnormals, the explicit flush-to-zero policy, queue
+overflow, voice stealing, sample-rate changes, and malformed configurations.
+
+Where target math can be identical, comparisons must be bitwise exact. Only
+operations whose target math libraries cannot be identical (notably
+transcendentals) may use narrowly documented tolerances. Rendering must be
+deterministic across block sizes and event partitioning. Browser tests must
+exercise both JavaScript and Wasm kernels in an AudioWorklet. JVM and browser
+audio paths must demonstrate zero allocation after initialization, including
+scheduler dispatch and crossfade when enabled, and bounded-work tests must
+verify all configured limits.
+
+Performance budgets are recorded as regression thresholds rather than replacing
+semantic tests. Allocation, latency, throughput, and worst-case work must be
+measured separately for interpreter/reference, JVM, JavaScript, and Wasm paths.
+
 ## Completion criteria
 
 The compiler is complete when:
@@ -753,6 +915,15 @@ The compiler is complete when:
 14. Browser users can edit DSP source, compile it dynamically, install the
     generated AudioWorklet kernel, and test it without an AOT or server-side
     compiler.
+15. A serializable synth description produces compatible kernel artifacts and
+    host-target sequencing configuration without coupling sequencing to Wasm.
+16. The sequencing layer supports all v1 event categories, exact frame-offset
+    dispatch, deterministic voice allocation/stealing, fixed capacities, and
+    the specified drop-oldest overflow policy.
+17. Recompilation can replace an instance at a block boundary, optionally with
+    a bounded preallocated crossfade and no automatic state migration.
+18. A complete conformance and performance suite enforces semantic equivalence,
+    real-time allocation/work bounds, and the documented numeric policies.
 
 ## Source organization
 

@@ -215,6 +215,18 @@
                              (wat-form "then" (wat-form "i32.const" 1))
                              (wat-form "else"
                                        (emit-expression (second (:args expression))))))
+    :bitwise (if (= :bit-not (:operator expression))
+               (wat-form "i32.xor" (emit-expression (first (:args expression)))
+                         (wat-form "i32.const" -1))
+               (wat-form (case (:operator expression)
+                           :bit-and "i32.and"
+                           :bit-or "i32.or"
+                           :bit-xor "i32.xor"
+                           :bit-shift-left "i32.shl"
+                           :bit-shift-right "i32.shr_s"
+                           :unsigned-bit-shift-right "i32.shr_u")
+                         (emit-expression (first (:args expression)))
+                         (emit-expression (second (:args expression)))))
     :convert (case (:operator expression)
                :int->float (wat-form (str (float-type) ".convert_i32_s")
                                      (emit-expression (:value expression)))

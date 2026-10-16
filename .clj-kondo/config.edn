@@ -6,4 +6,13 @@
                          squint.defclass/defclass hooks.squint/defclass
                          omkamra.vice/with-conn hooks.vice/with-binding-vector
                          omkamra.vice.driver/with-conn hooks.vice/with-binding-vector
-                         omkamra.vice.examples.common/with-run hooks.vice/with-binding-vector}}}
+                         omkamra.vice.examples.common/with-run hooks.vice/with-binding-vector}}
+
+ :lint-as
+ {;; spel ships these as clj-kondo config exports; mirror them here so the
+  ;; standalone linter resolves the `with-*` bindings used by
+  ;; `omkamra.dsp.browser` without copying dependency configs.
+  com.blockether.spel.core/with-playwright clojure.core/with-open
+  com.blockether.spel.core/with-browser clojure.core/with-open
+  com.blockether.spel.core/with-context clojure.core/with-open
+  com.blockether.spel.core/with-page clojure.core/with-open}}

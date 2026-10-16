@@ -258,6 +258,22 @@
                    :/ [(if (f64?) :ddiv :fdiv)]))]))
     :compare (boolean-value-instructions expression slots labels)
     :logical (boolean-value-instructions expression slots labels)
+    :bitwise (vec
+              (case (:operator expression)
+                :bit-not (concat (expression-instructions (first (:args expression))
+                                                          slots labels)
+                                 [[:iconst-m1] [:ixor]])
+                (concat (expression-instructions (first (:args expression))
+                                                 slots labels)
+                        (expression-instructions (second (:args expression))
+                                                 slots labels)
+                        [(case (:operator expression)
+                           :bit-and [:iand]
+                           :bit-or [:ior]
+                           :bit-xor [:ixor]
+                           :bit-shift-left [:ishl]
+                           :bit-shift-right [:ishr]
+                           :unsigned-bit-shift-right [:iushr])])))
     :convert (case (:operator expression)
                :int->float (conj (vec (expression-instructions (:value expression)
                                                                slots labels))
@@ -406,7 +422,7 @@
                              (if (= :float type)
                                (if (f64?) (double value) (float value))
                                (if (= :boolean type)
-                                 (if value 1 0)
+                                 (if value (int 1) (int 0))
                                  (int value))))
                            (:params ir) args)
             result (.invoke method nil (object-array arguments))]

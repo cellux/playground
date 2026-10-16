@@ -50,11 +50,15 @@
              "cache-control" "no-store"}
    :body body})
 
+(defn- js-entry
+  [case]
+  (if (acceptance/function-case? case) :function :process))
+
 (defn- js-source
   [case precision]
   (let [{:keys [source]} (dsp/compile (:definition case)
                                       {:target :js
-                                       :entry :process
+                                       :entry (js-entry case)
                                        :precision precision})]
     (javascript-response source)))
 

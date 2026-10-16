@@ -345,6 +345,13 @@
             (when (every? #{:boolean} (map #(expression-type % env source path) args))
               :boolean)))
 
+        (contains? '#{bit-and bit-or bit-xor bit-not
+                      bit-shift-left bit-shift-right unsigned-bit-shift-right} op)
+        (let [expected (if (= op 'bit-not) 1 2)]
+          (when (= expected (count args))
+            (when (every? #{:int} (map #(expression-type % env source path) args))
+              :int)))
+
         (= op 'if)
         (let [[condition then else] args]
           (when (and (= 3 (count args))

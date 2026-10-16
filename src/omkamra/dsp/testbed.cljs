@@ -1,9 +1,13 @@
 (ns omkamra.dsp.testbed
-  (:require [goog.object :as gobj]
+  (:require [clojure.string :as str]
+            [goog.object :as gobj]
             [omkamra.dsp.acceptance :as acceptance]
             ["wabt" :default wabt]))
 
 (defonce app-state (atom nil))
+
+(defonce ^:private last-results
+  (atom nil))
 
 (def block-lengths acceptance/block-lengths)
 
@@ -44,6 +48,14 @@
   (and (= (.-length actual) (count expected))
        (every? true?
                (map close? (values actual) expected))))
+
+(defn- value-match?
+  "Compare a JavaScript return value with a shared reference value."
+  [actual expected]
+  (cond
+    (boolean? expected) (= (boolean actual) expected)
+    (number? expected) (close? actual expected)
+    :else (= actual expected)))
 
 (defn- require!
   [condition message]
@@ -160,6 +172,7 @@
 
 (defn- render-results!
   [summary results-list results]
+  (reset! last-results results)
   (let [passed (count (filter :passed? results))
         total (count results)]
     (text! summary (str passed "/" total " checks passed"))
@@ -805,12 +818,25 @@
                   (swap! app-state assoc :shared-target-vectors result)
                   result))))))))
 
+(defn- case-target-breakdown
+  "Flatten per-precision case results into `{:case :precision :javascript :wasm}`."
+  [result]
+  (mapv (fn [entry]
+          {:case (:case entry)
+           :precision (:precision entry)
+           :javascript (boolean (:passed? (:javascript entry)))
+           :wasm (boolean (:passed? (:wasm entry)))})
+        (concat (get-in result [:f32 :cases])
+                (get-in result [:f64 :cases]))))
+
 (defn- shared-target-suite-result
   [result]
   {:name "shared JS/Wasm acceptance matrix"
    :passed? (:passed? result)
+   :targets [:js :wasm]
    :detail (str "matched " (count acceptance/cases)
-                " cases across f32/f64 JavaScript and Wasm")})
+                " cases across f32/f64 JavaScript and Wasm")
+   :cases (case-target-breakdown result)})
 
 (defn- run-shared-target-suite-test!
   [summary results-list previous-results]
@@ -825,6 +851,100 @@
        (fn [error]
          (let [results (conj previous-results
                              {:name "shared JS/Wasm acceptance matrix"
+                              :passed? false
+                              :detail (or (.-message error) (str error))})]
+           (render-results! summary results-list results)
+           results)))))
+
+;; Function-entry cases run in the browser on the JavaScript backend.  The Wasm
+;; backend is process-only, so the same operators are covered there by process
+;; cases such as `:bitwise-lfsr`.
+(defn- generated-function-case-test
+  [case precision source]
+  (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
+        url (js/URL.createObjectURL blob)]
+    (-> (dynamic-import url)
+        (.then
+         (fn [module]
+           (let [invoke (gobj/get module "invoke")]
+             (doseq [args (:vectors case)]
+               (let [expected (apply (:reference case) precision args)
+                     actual (apply invoke args)]
+                 (require! (value-match? actual expected)
+                           (str (:id case) " " (pr-str args)
+                                " expected " (pr-str expected)
+                                " got " (pr-str actual)))))
+             {:target :js
+              :case (:id case)
+              :precision precision
+              :passed? true})))
+        (.finally #(js/URL.revokeObjectURL url)))))
+
+(defn- run-function-case!
+  [case precision]
+  (let [url (str "/omkamra/dsp/testbed/source" (acceptance-query case precision))]
+    (-> (response-text url)
+        (.then #(generated-function-case-test case precision %))
+        (.catch
+         (fn [error]
+           {:target :js
+            :case (:id case)
+            :precision precision
+            :passed? false
+            :detail (or (.-message error) (str error))})))))
+
+(defn- run-function-cases-precision!
+  [precision]
+  (letfn [(run [remaining results]
+            (if-let [case (first remaining)]
+              (-> (run-function-case! case precision)
+                  (.then #(run (next remaining) (conj results %))))
+              (js/Promise.resolve results)))]
+    (run (filter #(some #{precision} (:precisions %)) acceptance/function-cases)
+         [])))
+
+(defn run-function-case-matrix!
+  "Run every shared function-entry case against generated JavaScript."
+  []
+  (-> (run-function-cases-precision! :f32)
+      (.then
+       (fn [f32]
+         (-> (run-function-cases-precision! :f64)
+             (.then (fn [f64]
+                      {:f32 f32 :f64 f64
+                       :passed? (and (every? :passed? f32)
+                                     (every? :passed? f64))})))))))
+
+(defn- function-case-suite-result
+  [precision results]
+  {:name (str "shared JS function-case matrix " (name precision))
+   :passed? (every? :passed? results)
+   :targets [:js]
+   :detail (str "matched " (count results) " function cases"
+                "; Wasm is process-only"
+                (when-let [failure (first (remove :passed? results))]
+                  (str "; first failure: " (:case failure)
+                       " — " (:detail failure))))
+   :cases (mapv (fn [entry]
+                  {:case (:case entry)
+                   :precision precision
+                   :javascript (boolean (:passed? entry))})
+                results)})
+
+(defn- run-function-suite-test!
+  [summary results-list previous-results]
+  (-> (run-function-case-matrix!)
+      (.then
+       (fn [{:keys [f32 f64]}]
+         (let [results (conj previous-results
+                             (function-case-suite-result :f32 f32)
+                             (function-case-suite-result :f64 f64))]
+           (render-results! summary results-list results)
+           results)))
+      (.catch
+       (fn [error]
+         (let [results (conj previous-results
+                             {:name "shared JS function-case matrix"
                               :passed? false
                               :detail (or (.-message error) (str error))})]
            (render-results! summary results-list results)
@@ -930,8 +1050,32 @@
   (let [results (run-suite)]
     (render-results! summary results-list results)
     (-> (run-shared-target-suite-test! summary results-list results)
+        (.then #(run-function-suite-test! summary results-list %))
         (.then #(run-bounded-loop-wasm-suite-test! summary results-list %))
         (.then #(run-generated-test! summary results-list %)))))
+
+(defn run-conformance!
+  "Run the complete browser conformance suite and resolve a structured result.
+
+  Unlike `init`, this does not render into the document and is safe to call
+  from `cljs-eval` or from a Playwright driver such as `omkamra.dsp.browser`.
+  The result is a plain map: `{:passed? :passed :total :results}`.  Each entry
+  in `:results` carries `:name`, `:passed?`, `:detail`, and, for the shared
+  matrices, `:targets` and a per-case `:cases` breakdown."  []
+  (reset! last-results nil)
+  (let [summary (make-element "strong")
+        results-list (make-element "ul")]
+    (-> (run-suite! summary results-list)
+        (.then
+         (fn [_]
+           (let [results (or @last-results [])]
+             (clj->js
+              {:passed? (every? :passed? results)
+               :passed (count (filter :passed? results))
+               :total (count results)
+               :results (mapv #(clj->js (select-keys
+                                         % [:name :passed? :detail :targets :cases]))
+                              results)})))))))
 
 (defn init
   []
@@ -964,5 +1108,11 @@
     (append! main description)
     (append! (.-body js/document) main)
     (.addEventListener button "click" #(run-suite! summary results-list))
+    (set! (.-omkamraDspTestbed js/window)
+          #js {:runConformance run-conformance!
+               :runFunctionCaseMatrix run-function-case-matrix!
+               :caseIds (clj->js (mapv :id acceptance/all-cases))})
     (reset! app-state {:summary summary :results-list results-list})
-    (run-suite! summary results-list)))
+    (when-not (str/includes? (or (.-search (.-location js/window)) "")
+                             "autorun=0")
+      (run-suite! summary results-list))))

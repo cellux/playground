@@ -457,6 +457,61 @@
     (is (= 6 (dsp/invoke artifact 4)))
     (is (= 45 (dsp/invoke artifact 10)))))
 
+(deftest shared-function-cases-match-interpreter-and-jvm
+  (doseq [case acceptance/function-cases
+          precision (:precisions case)
+          target [:interpreter :jvm]
+          args (:vectors case)]
+    (testing (str (:id case) " " (name precision) " " (name target) " " args)
+      (let [artifact (dsp/compile (:definition case)
+                                  {:target target :precision precision})
+            expected (apply (:reference case) precision args)]
+        (is (= expected (apply dsp/invoke artifact args)))))))
+
+(deftest bitwise-operators-reject-invalid-forms
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"wrong type"
+       (dsp/compile {:dsp/kind :function
+                     :name 'bad-bitwise-type
+                     :params ['x]
+                     :return-type :int
+                     :body ['(bit-and x 1.0)]})))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"wrong arity"
+       (dsp/compile {:dsp/kind :function
+                     :name 'bad-bitwise-arity
+                     :params ['a 'b]
+                     :return-type :int
+                     :body ['(bit-not a b)]})))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"wrong arity"
+       (dsp/compile {:dsp/kind :function
+                     :name 'bad-bitwise-unary
+                     :params ['a]
+                     :return-type :int
+                     :body ['(bit-shift-left a)]}))))
+
+(deftest bitwise-operators-are-emitted-by-js-and-wasm
+  (let [definition (:definition (acceptance/case-by-id :bitwise-lfsr))
+        js (dsp/compile definition {:target :js :entry :process})
+        wasm (dsp/compile definition {:target :wasm :entry :process})]
+    (is (str/includes? (:source js) "&"))
+    (is (str/includes? (:source js) "|"))
+    (is (str/includes? (:source js) "^"))
+    (is (str/includes? (:source js) "~"))
+    (is (str/includes? (:source js) "<<"))
+    (is (str/includes? (:source js) ">>"))
+    (is (str/includes? (:source js) ">>>"))
+    (is (str/includes? (:wat wasm) "i32.and"))
+    (is (str/includes? (:wat wasm) "i32.or"))
+    (is (str/includes? (:wat wasm) "i32.xor"))
+    (is (str/includes? (:wat wasm) "i32.shl"))
+    (is (str/includes? (:wat wasm) "i32.shr_s"))
+    (is (str/includes? (:wat wasm) "i32.shr_u"))))
+
 (deftest bounded-loops-and-loop-control
   (let [definition {:dsp/kind :function
                     :name 'bounded-sum
