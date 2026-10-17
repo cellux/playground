@@ -175,8 +175,9 @@
    [:checks {:optional true} [:enum :development :none]]
    [:optimize {:optional true} boolean?]
    [:loop-bound {:optional true} [:or nil? int?]]
-   ;; Selects the Wasm transcendental emulation. Only `:polynomial` is
-   ;; implemented; `:table` is reserved for the lookup-table lowering.
+   ;; Selects the Wasm transcendental emulation. `:table` uses the f32 sine
+   ;; lookup table when one exists; f64 always uses `:polynomial`, because a
+   ;; table region is addressed by a byte stride and has no f64 form.
    [:wasm-math {:optional true} [:enum :polynomial :table]]])
 
 (def ^:private SourceMetadata

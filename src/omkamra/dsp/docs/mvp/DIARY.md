@@ -1428,20 +1428,21 @@ omkamra.dsp.testbed           (.cljs)  browser differential suite
 
 ### Next steps
 
-1. Finish **P7 — the DSP standard library**: smoothing/slew, multimode biquad,
-   effects (chorus, distortion), and cubic interpolation, plus converting the
-   older `;;` comments to docstrings. Composition is in place, so library entries
-   are reused modules rather than processes.
-2. **P8 must include optional input ports (D23).** A process with `:input false`
-   has no sample parameter and no `:input` buffer in the ABI, so generators stop
-   carrying an ignored `sample` and a dead buffer load that falsely reports
-   `:read-memory`. It belongs in P8 because that phase already moves the ABI's
-   argument indices (instance handle), so the index/descriptor/adapter rework is
-   paid once instead of twice.
-3. Keep a structured diagnostic for any operation a target cannot serve at all.
-4. Optionally add generated-target (JS/Wasm) development guards and restore the
-   dropped Wasm f64 worklet checks.
-5. Deferred, optional: the D20 partition-coloring pass (dead-on-frame-entry
+P1–P9 are complete except for the residuals listed under "Open issues" and the
+two partial P9 deliverables (`PHASES.md`, P9 "Not done"): linear/critical ramps,
+which a host can supply as a lane instead, and non-finite containment, which
+belongs with P10's voice pool.
+
+1. **P10 — voice pool and synth runtime.** Where D23's per-note mapping lives,
+   where non-finite containment belongs, and where the ABI's per-voice region
+   layout pays off.
+2. **A structured capability diagnostic.** There is still no registry-level,
+   pre-flight check: an unimplemented `[operator type]` fails in a backend's
+   `:default` method at emission time. Worth doing before P12 adds more surface.
+3. **Generated-target (JS/Wasm) development guards**, and restoring the dropped
+   Wasm f64 AudioWorklet check. Lanes are a live example of the gap: the Wasm
+   *worklet* adapter does not carry a lane region, because no case drives it.
+4. **Deferred, optional: the D20 partition-coloring pass** (dead-on-frame-entry
    state and P4 scratch), most valuable once P10 gives many sibling modules.
 
 ### Wasm lookup table — done, with follow-ups
@@ -1460,6 +1461,9 @@ Steps 1 and 2 are done (shared emulation functions; f32 sine table via
 - **Cos** currently reuses `$dsp_sin` with a π/2 phase shift; acceptable for
   the tested ranges but a direct quarter-period offset would be more accurate
   for large arguments.
+- **`:wasm-math :table` is f32-only and silently ignored for f64** (the table is
+  a byte-stride region, so it has no f64 form). A caller asking for `:table` at
+  f64 gets the polynomial emulation without being told.
 
 ### How to run everything
 

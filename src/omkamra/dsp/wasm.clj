@@ -391,8 +391,9 @@
 (defn- f64-exp
   "Portable f64 exp by range reduction and exponent bit construction.
 
-  TODO: a lookup table with a selectable `:wasm-math` strategy is a possible
-  faster emulation; see the lookup-table TODO in `DIARY.md`. Keep any
+  The `:wasm-math` strategy selects this or the polynomial emulation; the f32
+  sine table is implemented, f64 stays polynomial. See the lookup-table
+  follow-ups in `DIARY.md`. Keep any
   emulation fixed-size: nesting a self-referential term duplicates the tree.
 
   `x = k*ln2 + r` with `k = nearest(x*log2e)` and `|r| <= ln2/2`; `exp(r)` is a
