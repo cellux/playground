@@ -14,13 +14,16 @@ below evaluates in it.
 
 | File | Role |
 |---|---|
-| `src/omkamra/dsp/acceptance.cljc` | Shared semantic catalog (pure data). Both testbeds read it. |
-| `src/omkamra/dsp/conformance.clj` | Builds target-neutral plans; JVM differential driver; plan serialization. |
-| `src/omkamra/dsp/interpreter.cljc` | Portable reference interpreter (the oracle), runs on JVM and in the browser. |
+| `src/omkamra/dsp/harness/catalog.cljc` | Shared semantic catalog (pure data). Both testbeds read it. |
+| `src/omkamra/dsp/harness/conformance.clj` | Builds target-neutral plans; JVM differential driver; plan serialization. |
+| `src/omkamra/dsp/targets/interpreter.cljc` | Portable reference interpreter (the oracle), runs on JVM and in the browser. |
 | `src/omkamra/dsp_test.clj` | Interpreter/JVM suite plus compiler-internal checks (descriptor, linker, ABI, allocation). |
-| `src/omkamra/dsp/testbed.cljs` | Browser differential suite; runs the in-page interpreter against JavaScript/Wasm kernels. |
-| `src/omkamra/dsp/testbed.clj` | On-demand HTTP endpoints: `source`, `wasm-source`, `wasm-metadata`, and `plan`. |
-| `src/omkamra/dsp/browser.clj` | Clojure-side browser driver (spel + `:on-demand-http`). |
+| `src/omkamra/dsp/harness/testbed.cljs` | Browser differential suite; runs the in-page interpreter against JavaScript/Wasm kernels. |
+| `src/omkamra/dsp/harness/testbed.clj` | On-demand HTTP endpoints: `source`, `wasm-source`, `wasm-metadata`, and `plan`. |
+| `src/omkamra/dsp/harness/browser.clj` | Clojure-side browser driver (spel + `:on-demand-http`). |
+| `src/omkamra/dsp/harness/fixtures.clj` | Shared `dsp/defn` fixtures and measuring helpers the tests use. |
+| `src/omkamra/dsp/tests/suite.clj` | Requires every test namespace; `run-all` runs the whole language suite. |
+| `src/omkamra/dsp/targets/*.{clj,cljc}` | The four backends; `targets/capability.cljc` declares what each serves. |
 
 The split follows `DECISIONS.md` D7/D13: **runtime semantics live once in
 `acceptance.cljc`**, and the **interpreter is the single oracle** for every
@@ -45,15 +48,16 @@ with the `:executable-path` option if needed.
 
 ## JVM / interpreter tests
 
-The suite namespace is `omkamra.dsp-test`. It exercises the interpreter and the
+The suite is split by subject under `omkamra.dsp.tests.*`; `omkamra.dsp.tests.suite` requires them all and is the
+namespace to require when you want the whole language suite. It exercises the interpreter and the
 JVM backend against the shared catalog and checks descriptor validation, linking,
 IR lowering, the process ABI, precision variants, and JVM allocation behavior.
 
 Evaluate in the dev nREPL:
 
 ```clojure
-(require '[clojure.test :as t] 'omkamra.dsp-test)
-(t/run-tests 'omkamra.dsp-test)
+(require 'omkamra.dsp.tests.suite)
+(omkamra.dsp.tests.suite/run-all)
 ;; => {:test 60, :pass 612, :fail 0, :error 0}
 ```
 
@@ -65,21 +69,21 @@ namespaces explicitly — **avoid `:reload-all`**, which can reload
 
 ```clojure
 (require 'omkamra.dsp.ir 'omkamra.dsp.interpreter 'omkamra.dsp.jvm :reload)
-(t/run-tests 'omkamra.dsp-test)
+(omkamra.dsp.tests.suite/run-all)
 ```
 
 ### A single test
 
 ```clojure
 (clojure.test/test-vars
- [(resolve 'omkamra.dsp-test/shared-function-cases-match-interpreter-and-jvm)])
+ [#'omkamra.dsp.tests.conformance/interpreter-oracle-conformance])
 ```
 
 Notable groups:
 
-- `shared-function-cases-match-interpreter-and-jvm` — runs every
+- `interpreter-oracle-conformance` — runs every
   `acceptance/function-cases` entry against interpreter **and** JVM.
-- `acceptance-cases-match-interpreter-and-jvm` — runs every
+- `interpreter-oracle-conformance` — runs every
   `acceptance/cases` process case against interpreter and JVM.
 - `bitwise-operators-are-emitted-by-js-and-wasm` — checks emitted operator text.
 - `jvm-unchecked-process-adapter-does-not-allocate-after-warmup` — allocation
@@ -99,20 +103,20 @@ resolves a structured result.
 Evaluate in the dev nREPL:
 
 ```clojure
-(require '[omkamra.dsp.browser :as browser])
+(require '[omkamra.dsp.harness.browser :as browser])
 (browser/run!)
 ;; => {:passed? true, :passed 8, :total 8, :results [...]}
 ```
 
 The browser suite is a **differential** test: it runs the portable
 `.cljc` reference interpreter (compiled into the page) on the IR served by
-`/omkamra/dsp/testbed/plan`, then runs the generated JavaScript/Wasm kernel on
+`/omkamra/dsp/harness/testbed/plan`, then runs the generated JavaScript/Wasm kernel on
 the same inputs and compares the two. No expected vectors are shipped from the
 JVM.
 
 `run!` starts `:on-demand-http` if needed (which starts the Shadow watcher on
 the first page request), opens
-`http://127.0.0.1:8080/omkamra/dsp/testbed?autorun=0` in headless Chromium via
+`http://127.0.0.1:8080/omkamra/dsp/harness/testbed?autorun=0` in headless Chromium via
 spel, waits for the hook, and evaluates `runConformance()`. The `?autorun=0`
 query suppresses the page's own automatic run so the programmatic call is the
 only run. `run!` starts and stops its own browser; no connected runtime or
@@ -153,7 +157,7 @@ runs; raise `:timeout` on a cold cache.
 ### The interactive page
 
 `browser/run!` uses a fresh headless browser. To watch a run, open
-`http://127.0.0.1:8080/omkamra/dsp/testbed` in a normal browser and click **Run
+`http://127.0.0.1:8080/omkamra/dsp/harness/testbed` in a normal browser and click **Run
 checks**; the results render in the page. Append `?autorun=0` to prevent the
 automatic run.
 
@@ -233,7 +237,7 @@ only; for local work use the nREPL commands above.
 # JVM / interpreter suite
 clojure -M:dev -e "
   (require 'omkamra.dsp-test '[clojure.test :as t])
-  (let [r (t/run-tests 'omkamra.dsp-test)]
+  (let [r (omkamra.dsp.tests.suite/run-all)]
     (shutdown-agents)
     (System/exit (if (zero? (+ (long (:fail r)) (long (:error r)))) 0 1)))"
 
@@ -265,4 +269,4 @@ clojure -M:dev:linux -e "
   namespaces you changed (`:reload`), and restart the dev process if it happens.
 - **First browser run times out:** it also compiles the Shadow build; raise
   `:timeout` or warm the build by loading
-  `http://127.0.0.1:8080/omkamra/dsp/testbed` once.
+  `http://127.0.0.1:8080/omkamra/dsp/harness/testbed` once.

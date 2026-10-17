@@ -1,4 +1,4 @@
-(ns omkamra.dsp.acceptance
+(ns omkamra.dsp.harness.catalog
   "Declarative DSP conformance cases shared by every target runner.
 
   Cases are pure data: a definition, an entry kind, precisions, and inputs.

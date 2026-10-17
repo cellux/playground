@@ -1,8 +1,8 @@
-(ns omkamra.dsp.conformance
+(ns omkamra.dsp.harness.conformance
   "Interpreter-oracle conformance driving (DECISIONS.md D2/D7/D13).
 
   A conformance *plan* is target-neutral data built from an
-  `omkamra.dsp.acceptance` case: the compiled portable IR, the process controls
+  `omkamra.dsp.harness.catalog` case: the compiled portable IR, the process controls
   or function vectors, and the invocation sequence (including reset and special
   values).  There are no hand-written expected values: the reference
   interpreter computes them, on the JVM here and in the browser via the
@@ -12,11 +12,11 @@
   serves the serialized plan and compares the JS/Wasm kernel with the
   interpreter it runs locally."
   (:require [omkamra.dsp :as dsp]
-            [omkamra.dsp.acceptance :as acceptance]))
+            [omkamra.dsp.harness.catalog :as catalog]))
 
 (def process-blocks
   "Block lengths exercised per process case, in order."
-  acceptance/block-lengths)
+  catalog/block-lengths)
 
 (defn function-plan?
   [plan]
@@ -37,7 +37,7 @@
   [case precision target]
   (dsp/compile (case-definition case)
                (cond-> {:target target :precision precision}
-                 (not (acceptance/function-case? case))
+                 (not (catalog/function-case? case))
                  (assoc :entry :process))))
 
 (defn- special-value
@@ -60,14 +60,14 @@
         ;; its region.
         lane-item (fn [block frames]
                     (when (:lane-samples case)
-                      {:lanes (acceptance/lane-samples precision case block frames)}))
+                      {:lanes (catalog/lane-samples precision case block frames)}))
         block-invocations
         (mapv (fn [block]
                 (let [frames (nth blocks block)]
                   (cond-> (merge {:op :process :frames frames} (lane-item block frames))
                     input?
-                    (assoc :input (acceptance/input-samples precision case block
-                                                            frames)))))
+                    (assoc :input (catalog/input-samples precision case block
+                                                         frames)))))
               (range (count blocks)))
         ;; NaN/infinity propagation is injected through the input sample, so it
         ;; is meaningless for a generator, which has no input port.
@@ -94,7 +94,7 @@
   [case precision]
   (let [artifact (target-artifact case precision :interpreter)
         ir (:ir artifact)]
-    (if (acceptance/function-case? case)
+    (if (catalog/function-case? case)
       {:case (:id case)
        :entry :function
        :precision precision
@@ -115,9 +115,9 @@
        ;; would carry its leading colon and would never match a lane lookup.
        :lane-layout (mapv (fn [lane] {:name (name (:name lane)) :offset (:offset lane)})
                           (get-in artifact [:abi :lanes]))
-       :sample-rate acceptance/sample-rate
+       :sample-rate catalog/sample-rate
        :invocations (process-invocations case precision
-                                         (acceptance/case-blocks case)
+                                         (catalog/case-blocks case)
                                          (boolean (seq (get-in artifact [:abi :inputs]))))})))
 
 (defn- real-array

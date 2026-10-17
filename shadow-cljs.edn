@@ -25,10 +25,10 @@
    {:main
     {:init-fn rb.explores.threejs.earth/init}}}
 
-  :omkamra.dsp.testbed
+  :omkamra.dsp.harness.testbed
   {:target :browser
-   :output-dir ".dev/cljs/omkamra/dsp/testbed"
-   :asset-path "/omkamra/dsp/testbed"
+   :output-dir ".dev/cljs/omkamra/dsp/harness/testbed"
+   :asset-path "/omkamra/dsp/harness/testbed"
    :js-options
    {:resolve
     {"fs" {:target :file
@@ -37,4 +37,4 @@
                  :file "src/omkamra/dsp/wabt-fs-stub.js"}}}
    :modules
    {:main
-    {:init-fn omkamra.dsp.testbed/init}}}}}
+    {:init-fn omkamra.dsp.harness.testbed/init}}}}}

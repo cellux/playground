@@ -1,15 +1,15 @@
-(ns omkamra.dsp.browser
+(ns omkamra.dsp.harness.browser
   "Run the shared DSP conformance catalog in a real browser.
 
-  The catalog lives in `omkamra.dsp.acceptance` (`.cljc`), so the same cases
+  The catalog lives in `omkamra.dsp.harness.catalog` (`.cljc`), so the same cases
   drive the interpreter/JVM suite in `omkamra.dsp-test` and the browser
-  JavaScript/Wasm suite in `omkamra.dsp.testbed`.
+  JavaScript/Wasm suite in `omkamra.dsp.harness.testbed`.
 
   This namespace is the Clojure-side driver.  It starts the `:on-demand-http`
   system when needed (which also serves the Shadow page and starts its watcher),
-  opens the `omkamra.dsp.testbed` page in a headless browser through spel, and
+  opens the `omkamra.dsp.harness.testbed` page in a headless browser through spel, and
   calls the page's programmatic `runConformance` hook.  The hook is installed
-  by `omkamra.dsp.testbed/init`; navigating with `?autorun=0` suppresses the
+  by `omkamra.dsp.harness.testbed/init`; navigating with `?autorun=0` suppresses the
   page's own automatic run so the programmatic call is the only run.
 
   The result is a plain map: `{:passed? :passed :total :results}`.  Each entry
@@ -28,7 +28,7 @@
 
 (def testbed-path
   "Browser testbed page served by `:on-demand-http`."
-  "/omkamra/dsp/testbed")
+  "/omkamra/dsp/harness/testbed")
 
 (defn server-url
   "Return the base URL of the configured on-demand HTTP server."

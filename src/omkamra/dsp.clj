@@ -9,14 +9,14 @@
   expressions."
   (:refer-clojure :exclude [compile defn defstruct reset!])
   (:require [clojure.string :as str]
-            [omkamra.dsp.capability :as capability]
+            [omkamra.dsp.targets.capability :as capability]
             [omkamra.dsp.descriptor :as descriptor]
-            [omkamra.dsp.interpreter :as interpreter]
+            [omkamra.dsp.targets.interpreter :as interpreter]
             [omkamra.dsp.linker :as linker]
             [omkamra.dsp.ir :as ir]
-            [omkamra.dsp.js :as js-backend]
-            [omkamra.dsp.jvm :as jvm]
-            [omkamra.dsp.wasm :as wasm-backend]))
+            [omkamra.dsp.targets.js :as js-backend]
+            [omkamra.dsp.targets.jvm :as jvm]
+            [omkamra.dsp.targets.wasm :as wasm-backend]))
 
 (clojure.core/defn- valid-definition-name?
   [name]

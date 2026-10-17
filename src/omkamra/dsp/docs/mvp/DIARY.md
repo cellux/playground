@@ -1299,6 +1299,51 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   checks, four instance-independence checks, four sample-accurate-scheduling
   checks, and the three AudioWorklet adapters), and `clj-kondo`/`cljfmt` clean.
 
+### Layout after the reorganisation (before P10)
+
+The suite and its scaffolding were reorganised so a change can be checked against
+the part it concerns, and so it is obvious which namespaces are the compiler and
+which are the machinery around it. The suite is unchanged in substance: **85
+tests, 995 assertions**, and browser **19/19** either side of it.
+
+| before | after |
+|---|---|
+| `omkamra.dsp-test` — one 2864-line file | `omkamra.dsp.tests.{descriptor,linker,ir,interpreter,jvm,js,wasm,process,memory,composition,library,conformance,automation}`, plus `tests.suite/run-all` |
+| *(new)* | `omkamra.dsp.harness.fixtures` — the shared `dsp/defn` fixtures and measuring helpers |
+| `omkamra.dsp.acceptance` | `omkamra.dsp.harness.catalog` |
+| `omkamra.dsp.conformance` | `omkamra.dsp.harness.conformance` |
+| `omkamra.dsp.testbed` (`.clj`/`.cljs`) | `omkamra.dsp.harness.testbed` |
+| `omkamra.dsp.browser` | `omkamra.dsp.harness.browser` |
+| `omkamra.dsp.call-fixture` | `omkamra.dsp.harness.call-fixture` |
+| `omkamra.dsp.{interpreter,jvm,js,wasm}` | `omkamra.dsp.targets.*` |
+| `omkamra.dsp.capability` | `omkamra.dsp.targets.capability` |
+
+Entries above this one use the old names, and should: they record what was true
+when they were written.
+
+**Three couplings that the file tree does not show.**
+
+1. **HTTP routes follow the namespace.** `omkamra.dev.on-demand-http` derives the
+   handler namespace from the URI, so moving the testbed moved every endpoint to
+   `/omkamra/dsp/harness/testbed/...`. The *page* is a separate mechanism: it is
+   served for whichever URI matches a Shadow build's `:asset-path`, and the page
+   HTML's script tag is generated from that same path. So `shadow-cljs.edn`'s
+   build id, `:output-dir`, `:asset-path` and `:init-fn` had to move together, or
+   the page would 404 its own bundle. The Shadow content cache also had to be
+   cleared, as ever.
+2. **A `dsp/call` inside quoted data resolves against the aliases of the
+   namespace that *initiates the link*, not the one that defines the body**: the
+   linker uses `find-ns`, which only sees namespaces already loaded. Splitting
+   the fixtures away from the tests broke two calls, so the fixtures now call
+   their dependencies by full namespace, and `harness.fixtures` requires
+   `harness.call-fixture` purely so the linker can find it — a require that
+   appears nowhere in code, and that a lint-driven tidy-up will try to remove.
+   It is load-bearing; the reason is recorded at the require.
+3. **`dsp/defn` bakes its descriptor at compile time**, so a moved definition is
+   not in effect until it is reloaded — and clj-reload captures its baseline on
+   first use, so files edited *before* that must be touched to be seen at all.
+   Those two together made a correct edit look like a live bug for two runs.
+
 ### Architecture
 
 ```text
@@ -1319,7 +1364,7 @@ omkamra.dsp.testbed           (.cljs)  browser differential suite
   special values). It contains **no expected outputs**.
 - **JVM:** the interpreter computes expected outputs; the JVM backend is
   compared against it (`interpreter-oracle-conformance` in `dsp_test.clj`).
-- **Browser:** `/omkamra/dsp/testbed/plan` serves the plan; the page reads the
+- **Browser:** `/omkamra/dsp/harness/testbed/plan` serves the plan; the page reads the
   EDN IR with `cljs.reader`, runs the bundled `.cljc` interpreter to compute
   expected, runs the generated JavaScript/Wasm kernel, and compares.
 - Adding a test is now **data-only**: append to `acceptance/process-cases` or

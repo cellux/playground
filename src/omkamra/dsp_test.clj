@@ -3,7 +3,7 @@
             [clojure.test :refer [deftest is testing]]
             [omkamra.dsp :as dsp]
             #_{:clj-kondo/ignore [:unused-namespace]}
-            [omkamra.dsp.call-fixture :as calls]
+            [omkamra.dsp.harness.call-fixture :as calls]
             [omkamra.dsp.descriptor :as descriptor]
             [omkamra.dsp.library.control :as control]
             [omkamra.dsp.library.delay :as delay]
@@ -14,8 +14,8 @@
             [omkamra.dsp.library.math :as math]
             [omkamra.dsp.library.noise :as noise]
             [omkamra.dsp.library.oscillator :as oscillator]
-            [omkamra.dsp.acceptance :as acceptance]
-            [omkamra.dsp.conformance :as conformance]
+            [omkamra.dsp.harness.catalog :as catalog]
+            [omkamra.dsp.harness.conformance :as conformance]
             [omkamra.dsp.event :as event]
             [omkamra.dsp.schedule :as schedule])
   (:import [com.sun.management ThreadMXBean]
@@ -29,7 +29,7 @@
   [sample]
   (+ sample 0.25))
 
-(def one-pole (:definition (acceptance/case-by-id :one-pole)))
+(def one-pole (:definition (catalog/case-by-id :one-pole)))
 
 ;; A named state-record shape and a definition that uses it, so the linker's
 ;; `:struct` resolution is exercised from real source.
@@ -82,7 +82,7 @@
       upper
       sample)))
 
-(def gated-one-pole (:definition (acceptance/case-by-id :gated-one-pole)))
+(def gated-one-pole (:definition (catalog/case-by-id :gated-one-pole)))
 
 (dsp/defn sum-count
   [count]
@@ -430,15 +430,15 @@
         wasm (dsp/compile unit {:target :wasm :entry :process})
         entry (get-in unit [:definitions 'omkamra.dsp-test/call-fixture-chain])]
     (is (= 'omkamra.dsp-test/call-fixture-chain (:entry unit)))
-    (is (= ['omkamra.dsp.call-fixture/add-one
-            'omkamra.dsp.call-fixture/double-sample
+    (is (= ['omkamra.dsp.harness.call-fixture/add-one
+            'omkamra.dsp.harness.call-fixture/double-sample
             'omkamra.dsp-test/call-fixture-twice
             'omkamra.dsp-test/call-fixture-chain]
            (:order unit)))
-    (is (= ['omkamra.dsp.call-fixture/add-one
+    (is (= ['omkamra.dsp.harness.call-fixture/add-one
             'omkamra.dsp-test/call-fixture-twice]
            (get-in unit [:graph 'omkamra.dsp-test/call-fixture-chain])))
-    (is (= '(dsp/call omkamra.dsp.call-fixture/add-one
+    (is (= '(dsp/call omkamra.dsp.harness.call-fixture/add-one
                       (dsp/call omkamra.dsp-test/call-fixture-twice sample))
            (first (:body entry))))
     (is (= (float 9.0) (dsp/invoke lowered 2.0)))
@@ -575,10 +575,10 @@
 (deftest interpreter-oracle-conformance
   ;; The interpreter computes expected outputs from the case data; the JVM
   ;; backend is compared against it. No hand-written reference is involved.
-  (doseq [case acceptance/all-cases
+  (doseq [case catalog/all-cases
           precision (:precisions case)]
     (testing (str (:id case) " " (name precision)
-                  (when (acceptance/function-case? case) " function"))
+                  (when (catalog/function-case? case) " function"))
       (let [plan (conformance/plan case precision)
             expected (conformance/run-plan
                       (conformance/target-artifact case precision :interpreter)
@@ -615,7 +615,7 @@
                      :body ['(bit-shift-left a)]}))))
 
 (deftest bitwise-operators-are-emitted-by-js-and-wasm
-  (let [definition (:definition (acceptance/case-by-id :bitwise-lfsr))
+  (let [definition (:definition (catalog/case-by-id :bitwise-lfsr))
         js (dsp/compile definition {:target :js :entry :process})
         wasm (dsp/compile definition {:target :wasm :entry :process})]
     (is (str/includes? (:source js) "&"))
@@ -842,8 +842,8 @@
           (aset-double ^doubles float-controls 0 2.0)
           (aset-float ^floats float-controls 0 (float 2.0)))
         (is (if f64?
-              (instance? omkamra.dsp.jvm.DspProcessD64 (:unchecked artifact))
-              (instance? omkamra.dsp.jvm.DspProcess (:unchecked artifact))))
+              (instance? omkamra.dsp.targets.jvm.DspProcessD64 (:unchecked artifact))
+              (instance? omkamra.dsp.targets.jvm.DspProcess (:unchecked artifact))))
         (is (nil? (dsp/process-checked! artifact input output 2 48000.0
                                         float-controls int-controls)))
         (is (= [2.0 -4.0] (vec output)))
@@ -881,8 +881,8 @@
           (aset-double ^doubles float-controls 0 2.0)
           (aset-float ^floats float-controls 0 (float 2.0)))
         (is (if f64?
-              (instance? omkamra.dsp.jvm.DspMultiProcessD64 (:unchecked artifact))
-              (instance? omkamra.dsp.jvm.DspMultiProcess (:unchecked artifact))))
+              (instance? omkamra.dsp.targets.jvm.DspMultiProcessD64 (:unchecked artifact))
+              (instance? omkamra.dsp.targets.jvm.DspMultiProcess (:unchecked artifact))))
         (dsp/process-checked! artifact input output 2 48000.0
                               float-controls int-controls)
         (is (= [[2.0 4.0] [6.0 8.0]] (mapv vec output)))
@@ -1293,7 +1293,7 @@
           jvm-output (float-array 2)]
       (is (= {:float-count 0 :int-count 2}
              (select-keys (:state-layout jvm-artifact) [:float-count :int-count])))
-      (is (some #(= "omkamra.dsp.jvm.DspKernel" (.getName ^Class %))
+      (is (some #(= "omkamra.dsp.targets.jvm.DspKernel" (.getName ^Class %))
                 (.getInterfaces ^Class (:class jvm-artifact))))
       (is (some? (:kernel jvm-artifact)))
       (is (= {:float "[F" :int "[I"}

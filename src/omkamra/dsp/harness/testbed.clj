@@ -1,14 +1,14 @@
-(ns omkamra.dsp.testbed
+(ns omkamra.dsp.harness.testbed
   "Development endpoints serving generated JavaScript, WAT, and browser adapters."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [cheshire.core :as json]
             [omkamra.dsp :as dsp]
-            [omkamra.dsp.acceptance :as acceptance]
-            [omkamra.dsp.conformance :as conformance]
+            [omkamra.dsp.harness.catalog :as catalog]
+            [omkamra.dsp.harness.conformance :as conformance]
             [squint.compiler :as squint]))
 
-(def one-pole (:definition (acceptance/case-by-id :one-pole)))
+(def one-pole (:definition (catalog/case-by-id :one-pole)))
 
 (def bounded-loop-definition
   {:dsp/kind :function
@@ -37,7 +37,7 @@
 
 (defn- requested-case
   [request]
-  (acceptance/case-by-id
+  (catalog/case-by-id
    (keyword (or (request-parameter request "case") "one-pole"))))
 
 (defn- requested-precision
@@ -57,7 +57,7 @@
 
 (defn- js-entry
   [case]
-  (if (acceptance/function-case? case) :function :process))
+  (if (catalog/function-case? case) :function :process))
 
 (defn- js-source
   [case precision]
@@ -159,8 +159,8 @@
         physical-type (:physical-type artifact)]
     {:processor-name "omkamra-dsp-kernel"
      :kernel-url (if (= :f64 precision)
-                   "/omkamra/dsp/testbed/source-f64"
-                   "/omkamra/dsp/testbed/source")
+                   "/omkamra/dsp/harness/testbed/source-f64"
+                   "/omkamra/dsp/harness/testbed/source")
      :channels 2
      :frame-capacity 256
      :element-bytes (:element-bytes physical-type)
@@ -197,7 +197,7 @@
   [precision]
   (let [metadata (worklet-metadata precision)]
     (javascript-response
-     (str "import * as squint_core from '/omkamra/dsp/testbed/squint-core';\n"
+     (str "import * as squint_core from '/omkamra/dsp/harness/testbed/squint-core';\n"
           "import { createKernel } from '" (:kernel-url metadata) "';\n"
           (worklet-source "src/omkamra/dsp/worklet_adapter.cljs" metadata)))))
 
@@ -212,6 +212,6 @@
 (defn squint-wasm-worklet
   [_request]
   (javascript-response
-   (str "import * as squint_core from '/omkamra/dsp/testbed/squint-core';\n"
+   (str "import * as squint_core from '/omkamra/dsp/harness/testbed/squint-core';\n"
         (worklet-source "src/omkamra/dsp/wasm_worklet_adapter.cljs"
                         (worklet-metadata :f32)))))

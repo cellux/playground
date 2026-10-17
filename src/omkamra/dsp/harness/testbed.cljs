@@ -1,9 +1,9 @@
-(ns omkamra.dsp.testbed
+(ns omkamra.dsp.harness.testbed
   "Browser conformance testbed.
 
   Every shared case is run as a differential test against the portable
   reference interpreter, which is compiled into this bundle from
-  `omkamra.dsp.interpreter` (`.cljc`).  The JVM serves a target-neutral plan
+  `omkamra.dsp.targets.interpreter` (`.cljc`).  The JVM serves a target-neutral plan
   (compiled IR, controls, and the invocation sequence); this page runs the
   interpreter on that IR to compute expected outputs, runs the generated
   JavaScript or Wasm kernel, and compares the two.  No expected vectors are
@@ -11,9 +11,9 @@
   (:require [clojure.string :as str]
             [cljs.reader :as reader]
             [goog.object :as gobj]
-            [omkamra.dsp.acceptance :as acceptance]
+            [omkamra.dsp.harness.catalog :as catalog]
             [omkamra.dsp.event :as event]
-            [omkamra.dsp.interpreter :as interpreter]
+            [omkamra.dsp.targets.interpreter :as interpreter]
             [omkamra.dsp.schedule :as schedule]
             ["wabt" :default wabt]))
 
@@ -23,7 +23,7 @@
 ;; Bound around a run to request a non-default Wasm math strategy.
 (def ^:dynamic *wasm-math* nil)
 
-(def block-lengths acceptance/block-lengths)
+(def block-lengths catalog/block-lengths)
 
 ;; ---------------------------------------------------------------------------
 ;; Small utilities
@@ -142,7 +142,7 @@
 
 (defn- process-case?
   [case]
-  (not (acceptance/function-case? case)))
+  (not (catalog/function-case? case)))
 
 (defn- plan-ir
   [plan]
@@ -233,7 +233,7 @@
                   (.apply process kernel
                           (to-array (concat (when samples
                                               [(real-array precision samples)])
-                                            [out frames acceptance/sample-rate]
+                                            [out frames catalog/sample-rate]
                                             controls
                                             (when region [region]))))
                   (vec out)))}))
@@ -261,8 +261,8 @@
 (defn- run-process-case-on-js
   [c precision]
   (let [query (acceptance-query c precision)
-        source-url (str "/omkamra/dsp/testbed/source" query)
-        plan-url (str "/omkamra/dsp/testbed/plan" query)]
+        source-url (str "/omkamra/dsp/harness/testbed/source" query)
+        plan-url (str "/omkamra/dsp/harness/testbed/plan" query)]
     (-> (js/Promise.all #js [(response-text source-url) (fetch-json plan-url)])
         (.then
          (fn [[source plan]]
@@ -286,11 +286,11 @@
 (defn- run-process-case-on-wasm
   [c precision]
   (let [query (acceptance-query c precision)
-        plan-url (str "/omkamra/dsp/testbed/plan" query)
-        wat-url (str "/omkamra/dsp/testbed/wasm-source" query)
+        plan-url (str "/omkamra/dsp/harness/testbed/plan" query)
+        wat-url (str "/omkamra/dsp/harness/testbed/wasm-source" query)
         ;; The linear-memory layout is the module's, so read it from the module
         ;; rather than repeating its offsets here.
-        metadata-url (str "/omkamra/dsp/testbed/wasm-metadata" query)]
+        metadata-url (str "/omkamra/dsp/harness/testbed/wasm-metadata" query)]
     (-> (js/Promise.all #js [(fetch-json plan-url) (response-text wat-url)
                              (fetch-json metadata-url)])
         (.then
@@ -346,7 +346,7 @@
                                                (.apply process nil
                                                        (to-array (concat (when samples [input-offset])
                                                                          [output-offset frames
-                                                                          acceptance/sample-rate]
+                                                                          catalog/sample-rate]
                                                                          controls
                                                                          (when (seq (:lane-layout plan))
                                                                            [lanes-offset]))))
@@ -385,8 +385,8 @@
 (defn- run-function-case!
   [c precision]
   (let [query (acceptance-query c precision)
-        source-url (str "/omkamra/dsp/testbed/source" query)
-        plan-url (str "/omkamra/dsp/testbed/plan" query)]
+        source-url (str "/omkamra/dsp/harness/testbed/source" query)
+        plan-url (str "/omkamra/dsp/harness/testbed/plan" query)]
     (-> (js/Promise.all #js [(response-text source-url) (fetch-json plan-url)])
         (.then
          (fn [[source plan]]
@@ -417,7 +417,7 @@
               (-> (run-process-case! c precision)
                   (.then #(run (next remaining) (conj results %))))
               (js/Promise.resolve results)))]
-    (run (filter process-case? acceptance/cases) [])))
+    (run (filter process-case? catalog/cases) [])))
 
 (defn- run-function-matrix-precision!
   [precision]
@@ -430,9 +430,9 @@
                                                      :javascript
                                                      (not (false? (:passed? result)))))))))
               (js/Promise.resolve results)))]
-    (run (filter #(and (acceptance/function-case? %)
+    (run (filter #(and (catalog/function-case? %)
                        (some #{precision} (:precisions %)))
-                 acceptance/all-cases)
+                 catalog/all-cases)
          [])))
 
 (defn- matrix-result
@@ -565,8 +565,8 @@
    (let [context (js/OfflineAudioContext. 2 256 44100)
          f64? (= :f64 precision)
          worklet-url (if f64?
-                       "/omkamra/dsp/testbed/squint-worklet-f64"
-                       "/omkamra/dsp/testbed/squint-worklet")
+                       "/omkamra/dsp/harness/testbed/squint-worklet-f64"
+                       "/omkamra/dsp/harness/testbed/squint-worklet")
          label (if f64?
                  "Squint AudioWorklet f64 adapter"
                  "Squint AudioWorklet adapter")]
@@ -582,8 +582,8 @@
                              :channelCountMode "explicit"
                              :outputChannelCount #js [2]
                              :processorOptions #js {:kernelUrl (if f64?
-                                                                 "/omkamra/dsp/testbed/source-f64"
-                                                                 "/omkamra/dsp/testbed/source")
+                                                                 "/omkamra/dsp/harness/testbed/source-f64"
+                                                                 "/omkamra/dsp/harness/testbed/source")
                                                     :channels 2
                                                     :frameCapacity 256
                                                     :elementBytes (if f64? 8 4)
@@ -628,7 +628,7 @@
                 "Wasm AudioWorklet f64 adapter"
                 "Wasm AudioWorklet adapter")]
     (-> (.addModule (.-audioWorklet context)
-                    (str "/omkamra/dsp/testbed/squint-wasm-worklet?v="
+                    (str "/omkamra/dsp/harness/testbed/squint-wasm-worklet?v="
                          (js/Date.now)))
         (.then
          (fn [_]
@@ -672,7 +672,7 @@
 
 (defn- bounded-loop-wasm-test
   []
-  (-> (response-text "/omkamra/dsp/testbed/wasm-bounded-loop-source")
+  (-> (response-text "/omkamra/dsp/harness/testbed/wasm-bounded-loop-source")
       (.then compile-wasm)
       (.then
        (fn [bytes]
@@ -709,7 +709,7 @@
 (defn- wasm-table-test
   "Run the f32 sine case on Wasm with the lookup-table math strategy."
   []
-  (let [c (acceptance/case-by-id :sin)
+  (let [c (catalog/case-by-id :sin)
         name "Wasm sin lookup table f32"]
     (-> (binding [*wasm-math* :table]
           (run-process-case-on-wasm c :f32))
@@ -829,14 +829,14 @@
                 (let [out (real-array precision (repeat frames 0.0))
                       in (real-array precision samples)]
                   (.apply process kernel
-                          (to-array (concat [in out frames acceptance/sample-rate]
+                          (to-array (concat [in out frames catalog/sample-rate]
                                             controls)))
                   (vec out)))
      ;; Context-style entry so `schedule/render-block!` can drive it directly.
      :process! (fn [{:keys [input output frames controls]}]
                  (.apply process kernel
                          (to-array (concat (when input [input])
-                                           [output frames acceptance/sample-rate]
+                                           [output frames catalog/sample-rate]
                                            controls))))}))
 
 (defn- wasm-process-instance
@@ -857,7 +857,7 @@
                 (.set (view input-offset frames) (real-array precision samples))
                 (.apply process nil
                         (to-array (concat [input-offset output-offset frames
-                                           acceptance/sample-rate] controls)))
+                                           catalog/sample-rate] controls)))
                 (if (zero? frames) [] (vec (view output-offset frames))))
      ;; The kernel writes into linear memory, so the rendered frames are copied
      ;; into the caller's array to match the JavaScript driver's shape.
@@ -868,7 +868,7 @@
                    (.set (view input-offset frames) (.subarray input 0 frames)))
                  (.apply process nil
                          (to-array (concat (when input [input-offset])
-                                           [output-offset frames acceptance/sample-rate]
+                                           [output-offset frames catalog/sample-rate]
                                            controls)))
                  (.set output (view output-offset frames)))}))
 
@@ -878,7 +878,7 @@
   Returns its `process`, so a test can drive it with its own inputs rather than
   the catalog's block plan."
   [c]
-  (-> (response-text (str "/omkamra/dsp/testbed/wasm-source"
+  (-> (response-text (str "/omkamra/dsp/harness/testbed/wasm-source"
                           (binding [*wasm-math* :table]
                             (acceptance-query c :f32))))
       (.then compile-wasm)
@@ -932,8 +932,8 @@
                               (process xs frames)
                               (map reference xs)))))]
     (-> (js/Promise.all
-         #js [(wasm-table-probe (acceptance/case-by-id :cos))
-              (wasm-table-probe (acceptance/case-by-id :sin))])
+         #js [(wasm-table-probe (catalog/case-by-id :cos))
+              (wasm-table-probe (catalog/case-by-id :sin))])
         (.then
          (fn [[cos-process sin-process]]
            (let [measured (mapv (fn [[magnitude bound]]
@@ -968,8 +968,8 @@
 (defn- js-independence-test
   [precision]
   (let [query (str "?case=" (name independence-case) "&precision=" (name precision))
-        source-url (str "/omkamra/dsp/testbed/source" query)
-        plan-url (str "/omkamra/dsp/testbed/plan" query)]
+        source-url (str "/omkamra/dsp/harness/testbed/source" query)
+        plan-url (str "/omkamra/dsp/harness/testbed/plan" query)]
     (-> (js/Promise.all #js [(response-text source-url) (fetch-json plan-url)])
         (.then
          (fn [[source plan]]
@@ -989,8 +989,8 @@
 (defn- wasm-independence-test
   [precision]
   (let [query (str "?case=" (name independence-case) "&precision=" (name precision))
-        plan-url (str "/omkamra/dsp/testbed/plan" query)
-        wat-url (str "/omkamra/dsp/testbed/wasm-source" query)]
+        plan-url (str "/omkamra/dsp/harness/testbed/plan" query)
+        wat-url (str "/omkamra/dsp/harness/testbed/wasm-source" query)]
     (-> (js/Promise.all #js [(fetch-json plan-url) (response-text wat-url)])
         (.then
          (fn [[plan wat]]
@@ -1061,7 +1061,7 @@
                          :output block-out
                          :input-scratch input-scratch
                          :output-scratch output-scratch
-                         :sample-rate acceptance/sample-rate
+                         :sample-rate catalog/sample-rate
                          :controls controls
                          :control-index {control-name 0}
                          :process! process!})]
@@ -1114,8 +1114,8 @@
 (defn- js-invariance-test
   [precision]
   (let [query (str "?case=" (name schedule-case) "&precision=" (name precision))
-        source-url (str "/omkamra/dsp/testbed/source" query)
-        plan-url (str "/omkamra/dsp/testbed/plan" query)]
+        source-url (str "/omkamra/dsp/harness/testbed/source" query)
+        plan-url (str "/omkamra/dsp/harness/testbed/plan" query)]
     (-> (js/Promise.all #js [(response-text source-url) (fetch-json plan-url)])
         (.then
          (fn [[source plan]]
@@ -1142,8 +1142,8 @@
 (defn- wasm-invariance-test
   [precision]
   (let [query (str "?case=" (name schedule-case) "&precision=" (name precision))
-        plan-url (str "/omkamra/dsp/testbed/plan" query)
-        wat-url (str "/omkamra/dsp/testbed/wasm-source" query)]
+        plan-url (str "/omkamra/dsp/harness/testbed/plan" query)
+        wat-url (str "/omkamra/dsp/harness/testbed/wasm-source" query)]
     (-> (js/Promise.all #js [(fetch-json plan-url) (response-text wat-url)])
         (.then
          (fn [[plan wat]]
@@ -1207,11 +1207,11 @@
   changes. Checking f32 alone would leave that untested."
   [precision results]
   (let [suffix (if (= :f64 precision) "-f64" "")]
-    (-> (js/fetch (str "/omkamra/dsp/testbed/wasm-metadata" suffix))
+    (-> (js/fetch (str "/omkamra/dsp/harness/testbed/wasm-metadata" suffix))
         (.then (fn [response] (.json response)))
         (.then
          (fn [metadata]
-           (-> (js/fetch (str "/omkamra/dsp/testbed/wasm-source" suffix))
+           (-> (js/fetch (str "/omkamra/dsp/harness/testbed/wasm-source" suffix))
                (.then (fn [response] (.text response)))
                (.then
                 (fn [wat]
@@ -1263,7 +1263,7 @@
   "Run the complete browser conformance suite and resolve a structured result.
 
   Safe to call from `cljs-eval` or from a Playwright driver such as
-  `omkamra.dsp.browser`.  The result is `{:passed? :passed :total :results}`;
+  `omkamra.dsp.harness.browser`.  The result is `{:passed? :passed :total :results}`;
   each entry carries `:name`, `:passed?`, `:detail`, and, for the shared
   matrices, `:targets` and a per-case `:cases` breakdown."
   []
@@ -1317,7 +1317,7 @@
     (set! (.-omkamraDspTestbed js/window)
           #js {:runConformance run-conformance!
                :runFunctionCaseMatrix run-function-case-matrix!
-               :caseIds (clj->js (mapv :id acceptance/all-cases))})
+               :caseIds (clj->js (mapv :id catalog/all-cases))})
     (reset! app-state {:summary summary :results-list results-list})
     (when-not (str/includes? (or (.-search (.-location js/window)) "") "autorun=0")
       (run-suite! summary results-list))))

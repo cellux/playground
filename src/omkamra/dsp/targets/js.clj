@@ -1,4 +1,4 @@
-(ns omkamra.dsp.js
+(ns omkamra.dsp.targets.js
   "Structured JavaScript lowering and ES-module emission for DSP IR."
   (:require [clojure.string :as str]))
 

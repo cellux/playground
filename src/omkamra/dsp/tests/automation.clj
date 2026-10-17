@@ -1,0 +1,309 @@
+(ns omkamra.dsp.tests.automation
+  (:require [clojure.test :refer [deftest is testing]]
+            [omkamra.dsp :as dsp]
+            [omkamra.dsp.descriptor :as descriptor]
+            [omkamra.dsp.library.control :as control]
+            [omkamra.dsp.event :as event]
+            [omkamra.dsp.schedule :as schedule]
+            #_{:clj-kondo/ignore [:unused-referred-var]}
+            [omkamra.dsp.harness.fixtures :refer [abi-controls allocated-bytes first-difference lane-gain lane-smoothed-gain one-pole one-pole-samples render-automation render-gain render-lane render-manual-split render-on render-single-parameter-event render-timeline smoothed-targets thread-allocation-meter two-lane-mix]]))
+
+(deftest event-vocabulary-and-ingress-queue
+  (testing "the v1 event set accepts valid payloads"
+    (is (= :note-on (:type (event/validate-event {:frame 0 :sequence 0 :type :note-on
+                                                  :channel 0 :note 60 :velocity 0.5}))))
+    (is (= :transport (:type (event/validate-event {:frame 3 :sequence 4 :type :transport
+                                                    :tempo 128.0 :beat 1.5}))))
+    (is (= event/event-types
+           [:control-change :note-off :note-on :parameter :pitch-bend :pressure
+            :sample-rate :transport])))
+  (testing "malformed events are rejected on the producer side"
+    (doseq [[label message message-event]
+            [["unknown type" #"not in the v1" {:frame 0 :sequence 0 :type :nope}]
+             ["out of range" #"out of range" {:frame 0 :sequence 0 :type :note-on
+                                              :channel 0 :note 60 :velocity 2.0}]
+             ["missing key" #"out of range" {:frame 0 :sequence 0 :type :note-on
+                                             :channel 0 :note 60}]
+             ["negative frame" #"non-negative" {:frame -1 :sequence 0 :type :pressure
+                                                :channel 0 :note 60 :value 0.5}]
+             ["unknown key" #"outside the v1" {:frame 0 :sequence 0 :type :pressure
+                                               :channel 0 :note 60 :value 0.5
+                                               :bogus 1}]]]
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo message
+                            (event/validate-event message-event))
+          label)))
+  (testing "equal frames are ordered by ingress sequence"
+    (is (= [{:frame 4 :sequence 9} {:frame 5 :sequence 0} {:frame 5 :sequence 1}]
+           (sort event/compare-events [{:frame 5 :sequence 1} {:frame 5 :sequence 0}
+                                       {:frame 4 :sequence 9}]))))
+  (testing "overflow drops the oldest future event"
+    (let [queue (event/event-queue 3)]
+      (doseq [frame [10 20 30]]
+        (is (= :accepted (event/push-event! queue {:frame frame :sequence frame}
+                                            5))))
+      (is (= :dropped-oldest (event/push-event! queue {:frame 40 :sequence 40} 5)))
+      (is (= [20 30 40] (mapv :frame (map #(event/event-at queue %) (range 3)))))
+      (is (= {:accepted 3 :dropped 1 :rejected 0 :dispatched 0 :high-water 3 :depth 3}
+             (event/queue-stats queue)))))
+  (testing "a due event is never dropped: the incoming one is rejected instead"
+    (let [queue (event/event-queue 2)]
+      (event/push-event! queue {:frame 10 :sequence 0} 5)
+      (event/push-event! queue {:frame 20 :sequence 1} 5)
+      (is (= :rejected (event/push-event! queue {:frame 99 :sequence 2} 100)))
+      (is (= [10 20] (mapv :frame (map #(event/event-at queue %) (range 2)))))
+      (is (= 1 (:rejected (event/queue-stats queue))))
+      (is (= 0 (:dropped (event/queue-stats queue))))))
+  (testing "the queue reuses its storage and zeroes its counters"
+    (let [queue (event/event-queue 2)]
+      (event/push-event! queue {:frame 5 :sequence 0} 0)
+      (event/push-event! queue {:frame 6 :sequence 1} 0)
+      (is (= 2 (event/reset-queue! queue)))
+      (is (event/queue-empty? queue))
+      (is (= {:accepted 0 :dropped 0 :rejected 0 :dispatched 0 :high-water 0 :depth 0}
+             (event/queue-stats queue)))
+      (is (= :accepted (event/push-event! queue {:frame 1 :sequence 0} 0))))))
+
+(deftest sample-accurate-events-render-identically-across-partitionings
+  (testing "an event changes the signal, so these comparisons are not vacuous"
+    (is (not= (render-single-parameter-event 17) (render-single-parameter-event nil))))
+  (doseq [[target precision] [[:interpreter :f32] [:interpreter :f64]
+                              [:jvm :f32] [:jvm :f64]]
+          :let [reference (render-timeline 200 target precision)]]
+    (is (not (every? zero? reference))
+        (str target " " precision " rendered silence"))
+    (testing (str target " " precision " is partition-independent")
+      (doseq [block-size [100 64 32 16 7 3 1 5 199]]
+        (is (= reference (render-timeline block-size target precision))
+            (str target " " precision " differs at block size " block-size))))))
+
+(deftest event-dispatch-is-sample-accurate
+  (testing "a dispatch at frame 17 is identical to splitting the block by hand"
+    (is (= (render-manual-split 17 0.1) (render-single-parameter-event 17))))
+  (testing "moving the event by one frame moves the output by one frame"
+    (is (= 17 (first-difference (render-single-parameter-event 17)
+                                (render-single-parameter-event 18))))
+    (is (= 16 (first-difference (render-single-parameter-event 17)
+                                (render-single-parameter-event 16))))
+    (is (= 17 (first-difference (render-single-parameter-event 17)
+                                (render-single-parameter-event nil))))))
+
+(deftest segmentation-allocates-nothing-per-event-boundary
+  (if-let [meter (thread-allocation-meter)]
+    (let [queue (event/event-queue 16)
+          scheduler (schedule/scheduler queue)
+          calls 2000
+          ;; Built once: a producer builds an event off the audio thread, so the
+          ;; test must not charge its own message construction to the scheduler.
+          messages (mapv (fn [frame]
+                           {:frame frame :sequence frame :type :parameter
+                            :name :coefficient :value 0.5})
+                         (range 1 17))
+          ;; Refill, then segment the whole block. A handful of boxed longs per
+          ;; *block* is expected; what must not happen is allocation that grows
+          ;; with the number of event boundaries.
+          segment (fn [boundaries]
+                    (event/reset-queue! queue)
+                    (dotimes [index boundaries]
+                      (event/push-event! queue (nth messages index) 0))
+                    (schedule/begin-block! scheduler 0 256)
+                    (loop [segments 0]
+                      (if (schedule/next-segment! scheduler)
+                        (recur (inc segments))
+                        segments)))]
+      (dotimes [_ 200] (segment 1) (segment 16))
+      (is (= 2 (segment 1)) "one event must yield two segments")
+      (is (= 17 (segment 16)) "16 events must yield 17 segments")
+      (let [one (allocated-bytes meter #(dotimes [_ calls] (segment 1)))
+            many (allocated-bytes meter #(dotimes [_ calls] (segment 16)))]
+        ;; The residue is a couple of boxed indices per call in this reference
+        ;; host; the claim is that 15 extra boundaries cost *bytes*, not
+        ;; kilobytes, and that nothing scales with the event payloads or the
+        ;; segment count in any structural way.
+        (is (< (- many one) (* 1024 calls))
+            (str "15 extra event boundaries cost " (- many one) " bytes over "
+                 calls " blocks; the scheduler itself must not allocate per "
+                 "segment"))))
+    (is true "thread allocation counters are unavailable on this JVM")))
+
+(deftest declared-control-modes-are-carried-by-the-kernel
+  (testing "a `:smooth` control is a one-pole filter, one step per frame"
+    (is (= (one-pole-samples 1.0 0.01 8)
+           (render-gain #'control/smoothed-gain 1.0 8)))
+    ;; A coefficient of 1 would reach the target immediately, so the smoothing
+    ;; is genuinely rate-limited rather than a pass-through.
+    (is (not= (render-gain #'control/smoothed-gain 1.0 8)
+              (vec (repeat 8 1.0)))))
+  (testing "a `:slew` control moves a bounded step per frame and lands on target"
+    (let [output (render-gain #'control/slewed-gain 1.0 200)
+          steps (map - (rest output) output)]
+      (is (every? #(<= 0.0 % 0.0100001) steps))
+      (is (apply <= output))
+      (is (= 1.0 (last output)))))
+  (testing "the ABI describes the mode, so a host knows setting it is a target"
+    (is (= [{:name 'amount :type :float :smooth 0.01}]
+           (abi-controls #'control/smoothed-gain)))
+    (is (= [{:name 'amount :type :float :slew 0.01}]
+           (abi-controls #'control/slewed-gain))))
+  (testing "invalid declared modes are rejected"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"must have type :float"
+         (descriptor/normalize {:dsp/kind :function
+                                :name 'bad-smooth
+                                :params ['sample 'count]
+                                :process {:controls [{:name 'count :type :int
+                                                      :smooth 0.5}]}
+                                :body [1.0]})))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"alternatives"
+         (descriptor/normalize {:dsp/kind :function
+                                :name 'bad-both
+                                :params ['sample 'amount]
+                                :process {:controls [{:name 'amount :smooth 0.5
+                                                      :slew 0.5}]}
+                                :body [1.0]})))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"invalid shape"
+         (descriptor/normalize {:dsp/kind :function
+                                :name 'bad-amount
+                                :params ['sample 'amount]
+                                :process {:controls [{:name 'amount :smooth :fast}]}
+                                :body [1.0]})))))
+
+(deftest smoothed-and-slewed-controls-are-partition-independent
+  (doseq [[label definition-var control-name]
+          [["smoothed" #'control/smoothed-gain :amount]
+           ["slewed" #'control/slewed-gain :amount]]
+          [target precision] [[:interpreter :f32] [:jvm :f32] [:jvm :f64]]
+          :let [reference (render-automation definition-var control-name smoothed-targets
+                                             200 target precision)]]
+    (testing (str label " " target " " precision)
+      ;; The target changes inside the block, so the smoothing must be doing
+      ;; something for these comparisons to mean anything.
+      (is (not (every? zero? reference)))
+      (is (not= reference
+                (render-automation definition-var control-name [] 200 target precision)))
+      (doseq [block-size [100 64 37 16 7 3 1 5 199]]
+        (is (= reference
+               (render-automation definition-var control-name smoothed-targets
+                                  block-size target precision))
+            (str label " " target " " precision " differs at block size " block-size))))))
+
+(deftest per-frame-lanes-carry-host-automation
+  (testing "a lane is described by name, with its own slice of the region"
+    (let [abi (:abi (dsp/compile #'lane-gain {:target :interpreter :entry :process}))]
+      ;; A lane is not a block-rate scalar, so it leaves `:controls` entirely.
+      (is (= [] (:controls abi)))
+      (is (= [{:name 'amount :type :float :role :lane :index 0 :buffer :lanes :offset 0}]
+             (:lanes abi)))
+      (is (= 1024 (:lane-stride abi)))
+      (is (some #{:lanes} (mapv :id (:buffers abi))))))
+  (testing "the lane supplies one float per frame"
+    (is (= [0.25 0.5 0.75 1.0]
+           (render-lane #'lane-gain {:amount (float-array [0.25 0.5 0.75 1.0])} 4))))
+  (testing "the ABI names a lane with a symbol, and the keyword spelling works too"
+    (is (= (render-lane #'lane-gain {:amount (float-array [1.0 0.5])} 2)
+           (render-lane #'lane-gain {'amount (float-array [1.0 0.5])} 2))))
+  (testing "lanes are independent slices of one region"
+    (let [abi (:abi (dsp/compile #'two-lane-mix {:target :interpreter :entry :process}))]
+      (is (= [{:name 'a :offset 0} {:name 'b :offset 1024}]
+             (mapv #(select-keys % [:name :offset]) (:lanes abi)))))
+    (is (= [1.5 1.25 1.0 0.5]
+           (render-lane #'two-lane-mix
+                        {:a (float-array [1.0 1.0 1.0 1.0])
+                         :b (float-array [0.5 0.25 0.0 -0.5])}
+                        4))))
+  (testing "a lane composes with kernel smoothing"
+    (let [plain (render-lane #'lane-gain {:amount (float-array [1.0 1.0 1.0 1.0])} 4)
+          smoothed (render-lane #'lane-smoothed-gain
+                                {:amount (float-array [1.0 1.0 1.0 1.0])} 4)]
+      (is (= [1.0 1.0 1.0 1.0] plain))
+      ;; A one-pole from zero: 0, 0.5, 0.75, 0.875.
+      (is (= [0.0 0.5 0.75 0.875] smoothed))))
+  (testing "a lane with no values fails loudly rather than publishing zeros"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"no values"
+         (render-lane #'lane-gain {} 2))))
+  (testing "invalid lanes are rejected"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"must have type :float"
+         (descriptor/normalize {:dsp/kind :function
+                                :name 'bad-lane
+                                :params ['sample 'count]
+                                :process {:controls [{:name 'count :type :int :lane true}]}
+                                :body [1.0]}))))
+  (testing "every target describes the same lane region"
+    (doseq [target [:interpreter :jvm :js :wasm]]
+      (let [abi (:abi (dsp/compile #'lane-gain {:target target :entry :process}))]
+        (is (= [{:name 'amount :type :float :role :lane :index 0 :buffer :lanes :offset 0}]
+               (:lanes abi))
+            (name target))
+        (is (some #{:lanes} (mapv :id (:buffers abi))) (name target)))))
+  (testing "the interpreter and the JVM render lanes identically"
+    (doseq [precision [:f32 :f64]]
+      (is (= (render-lane #'two-lane-mix
+                          {:a (float-array [1.0 1.0 1.0 1.0])
+                           :b (float-array [0.5 0.25 0.0 -0.5])}
+                          4)
+             (render-on #'two-lane-mix :jvm precision
+                        {'a [1.0 1.0 1.0 1.0] 'b [0.5 0.25 0.0 -0.5]} 4))
+          (name precision))))
+  (testing "a lane's stride is a byte count, so f64 fits fewer frames per lane"
+    ;; This is the assertion that caught a real f64 bug: the region is sized in
+    ;; bytes, but a lane offset is a compile-time *element* index.
+    (is (= 1024 (:lane-stride (:abi (dsp/compile #'two-lane-mix {:target :interpreter
+                                                                 :entry :process
+                                                                 :precision :f32})))))
+    (is (= 512 (:lane-stride (:abi (dsp/compile #'two-lane-mix {:target :interpreter
+                                                                :entry :process
+                                                                :precision :f64})))))
+    (is (= [0 1024] (mapv :offset
+                          (:lanes (:abi (dsp/compile #'two-lane-mix {:target :interpreter
+                                                                     :entry :process
+                                                                     :precision :f32}))))))
+    (is (= [0 512] (mapv :offset
+                         (:lanes (:abi (dsp/compile #'two-lane-mix {:target :interpreter
+                                                                    :entry :process
+                                                                    :precision :f64})))))))
+  (testing "the generated targets take one region and read it per frame"
+    (let [js (:source (dsp/compile #'lane-gain {:target :js :entry :process}))
+          wasm (dsp/compile #'lane-gain {:target :wasm :entry :process})]
+      (is (re-find #"function process\(input, output, frames, sampleRate, lanes\)" js))
+      (is (re-find #"Math\.fround\(input\[frame\]\)" js))
+      (is (re-find #"lanes\[\(frame \+ 0\)\]" js)
+          "a lane is read per frame from the region")
+      (is (re-find #"\$lanes" (:wat wasm)))
+      (is (= 4096 (get-in wasm [:memory :regions :lanes :bytes]))
+          "one lane is one channel stride")
+      (is (= 8192 (get-in wasm [:memory :lanes-offset]))
+          "the lane region follows the input and output ports")))
+  (testing "the raw JVM ABI takes the lane region and validates it"
+    (let [artifact (dsp/compile #'lane-gain {:target :jvm :entry :process})
+          region (float-array 1024)
+          out (float-array 2)]
+      (aset region 0 (float 0.5))
+      (aset region 1 (float 0.25))
+      (dsp/process-checked! artifact (float-array [1.0 1.0]) out 2 48000.0
+                            (float-array 0) (int-array 0) region)
+      (is (= [0.5 0.25] (vec out)))
+      (dsp/process-unchecked! artifact (float-array [1.0 1.0]) out 2 48000.0
+                              (float-array 0) (int-array 0) region)
+      (is (= [0.5 0.25] (vec out)))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shorter than the lane layout"
+                            (dsp/process-checked! artifact (float-array 2) (float-array 2) 2
+                                                  48000.0 (float-array 0) (int-array 0)
+                                                  (float-array 10))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"wrong primitive type"
+                            (dsp/process-checked! artifact (float-array 2) (float-array 2) 2
+                                                  48000.0 (float-array 0) (int-array 0)
+                                                  (double-array 1024))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"declares per-frame lanes"
+                            (dsp/process-checked! artifact (float-array 2) (float-array 2) 2
+                                                  48000.0 (float-array 0) (int-array 0))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"declares per-frame lanes"
+                            (dsp/process-unchecked! artifact (float-array 2) (float-array 2) 2
+                                                    48000.0 (float-array 0) (int-array 0)))))))

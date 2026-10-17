@@ -1,4 +1,4 @@
-(ns omkamra.dsp.call-fixture
+(ns omkamra.dsp.harness.call-fixture
   (:require [omkamra.dsp :as dsp]))
 
 (dsp/defn double-sample

@@ -1,4 +1,4 @@
-(ns omkamra.dsp.jvm
+(ns omkamra.dsp.targets.jvm
   "Lower explicit typed f32-audio DSP IR to JVM bytecode using insn."
   (:refer-clojure :exclude [compile])
   (:require [clojure.string :as str]

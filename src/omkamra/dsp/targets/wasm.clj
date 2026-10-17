@@ -1,4 +1,4 @@
-(ns omkamra.dsp.wasm
+(ns omkamra.dsp.targets.wasm
   "Emit WebAssembly text from explicit process IR."
   (:require [clojure.string :as str]))
 

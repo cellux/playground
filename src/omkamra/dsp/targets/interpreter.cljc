@@ -1,4 +1,4 @@
-(ns omkamra.dsp.interpreter
+(ns omkamra.dsp.targets.interpreter
   "Portable reference interpreter for portable DSP IR.
 
   This is the executable semantic specification for the DSP language.  It is

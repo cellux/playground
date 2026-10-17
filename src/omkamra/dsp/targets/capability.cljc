@@ -1,4 +1,4 @@
-(ns omkamra.dsp.capability
+(ns omkamra.dsp.targets.capability
   "What each compilation target can actually serve (D29).
 
   A target that cannot honour a requested option must say so at compile time

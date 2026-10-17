@@ -959,14 +959,14 @@ src/omkamra/dsp/descriptor.clj            normalization and validation
 src/omkamra/dsp/linker.clj                dependency graph and linking
 src/omkamra/dsp/ir.clj                    typed portable IR
 src/omkamra/dsp/interpreter.clj           reference semantics
-src/omkamra/dsp/jvm.clj                   JVM bytecode backend
-src/omkamra/dsp/js.clj                    JS-like lowering and emitter
-src/omkamra/dsp/wasm.clj                  Wasm lowering and WAT emission
-src/omkamra/dsp/acceptance.cljc           shared semantic cases
+src/omkamra/dsp/targets/jvm.clj                   JVM bytecode backend
+src/omkamra/dsp/targets/js.clj                    JS-like lowering and emitter
+src/omkamra/dsp/targets/wasm.clj                  Wasm lowering and WAT emission
+src/omkamra/dsp/harness/catalog.cljc           shared semantic cases
 src/omkamra/dsp/worklet_adapter.cljs      JavaScript worklet adapter
 src/omkamra/dsp/wasm_worklet_adapter.cljs Wasm worklet adapter
-src/omkamra/dsp/testbed.clj                browser development endpoints
-src/omkamra/dsp/testbed.cljs               browser conformance harness
+src/omkamra/dsp/harness/testbed.clj                browser development endpoints
+src/omkamra/dsp/harness/testbed.cljs               browser conformance harness
 src/omkamra/dsp_test.clj                   Clojure/JVM test suite
 ```
 
