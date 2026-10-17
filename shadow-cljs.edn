@@ -29,6 +29,11 @@
   {:target :browser
    :output-dir ".dev/cljs/omkamra/dsp/harness/testbed"
    :asset-path "/omkamra/dsp/harness/testbed"
+   ;; WABT's Emscripten bundle reaches for two Node-only things inside its
+   ;; `ENVIRONMENT_IS_NODE` branch, and Shadow resolves both at *build* time
+   ;; whether or not that branch ever runs in a browser: the module
+   ;; `require("fs")`, and the bare `process` global, which the CommonJS pass
+   ;; resolves the way it resolves a module. One stub answers both.
    :js-options
    {:resolve
     {"fs" {:target :file

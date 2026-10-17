@@ -1,3 +1,6 @@
-// WABT's Node-only fs branch is unreachable in browser builds. Shadow CLJS
-// still needs a module for the conditional CommonJS require to resolve.
+// WABT's Emscripten bundle reaches for two Node-only things inside its
+// ENVIRONMENT_IS_NODE branch, which a browser never takes — it requires "fs" and
+// it reads the `process` global — and Shadow resolves both at build time whether
+// or not that branch ever runs. An empty object is the smallest honest answer,
+// and one stub answers for both.
 module.exports = {};
