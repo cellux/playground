@@ -91,7 +91,14 @@
         input-bytes (* channels channel-stride-bytes)
         output-offset input-bytes
         output-bytes input-bytes
-        state-start (+ output-offset output-bytes)
+        ;; Host-supplied per-frame automation: one flat region, a fixed
+        ;; `channel-stride-bytes` slice per lane, so any number of lanes costs
+        ;; one pointer rather than one parameter per lane (D28). A process with
+        ;; no lanes contributes no bytes at all.
+        lane-count (count (:lanes ir))
+        lanes-offset (+ output-offset output-bytes)
+        lanes-bytes (* lane-count channel-stride-bytes)
+        state-start (+ lanes-offset lanes-bytes)
         state-layout (state-memory-layout (:state ir) state-start)
         scratch-start (:next state-layout)
         scratch-layout (state-memory-layout (:scratch ir) scratch-start)
@@ -120,6 +127,11 @@
                         :frame-capacity frame-capacity
                         :bytes output-bytes
                         :storage :linear-memory}
+               :lanes {:offset lanes-offset
+                       :channels 1
+                       :frame-capacity frame-capacity
+                       :bytes lanes-bytes
+                       :storage :linear-memory}
                :state {:storage :linear-memory
                        :offset state-start
                        :bytes (- scratch-start state-start)
@@ -871,7 +883,7 @@
     :else 0))
 
 (defn- emit-process
-  [{:keys [channels controls locals frame-body buffers]}]
+  [{:keys [channels controls locals frame-body buffers lanes]}]
   (let [;; A generator (`:input false`, D23) has no input buffer, so it takes no
         ;; input pointer and the export arity matches the derived indices.
         input? (boolean (some #(= :input (:direction %)) buffers))
@@ -884,7 +896,13 @@
                            (wat-symbol (float-type)))]
                 (map #(wat-form "param" (local-name (:name %))
                                 (wat-symbol (wasm-type (:type %))))
-                     controls))
+                     controls)
+                ;; The lane region arrives as a byte offset, exactly like the
+                ;; input and output ports, so its accesses need no new
+                ;; addressing: the IR records channel 0 for every lane.
+                (when (seq lanes)
+                  [(wat-form "param" (wat-symbol "$lanes")
+                             (wat-symbol "i32"))]))
         local-forms (concat
                      (when (> channels 1)
                        [(wat-form "local" (wat-symbol "$channel")
@@ -1017,7 +1035,8 @@
        :exports exports
        :memory (assoc memory
                       :input-offset (get-in memory [:regions :input :offset])
-                      :output-offset (get-in memory [:regions :output :offset]))
+                      :output-offset (get-in memory [:regions :output :offset])
+                      :lanes-offset (get-in memory [:regions :lanes :offset]))
        :abi {:kind :wasm-process
              :exports exports
              :memory memory

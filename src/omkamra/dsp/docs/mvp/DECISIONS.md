@@ -705,3 +705,161 @@ typed parameters (P7d).
 rather than hardcoded, and all four targets plus the conformance plan and the
 browser testbed move together — which is exactly why it is bundled with P8's
 instance-handle change instead of done separately.
+
+---
+
+## D24 — The sequencing layer is host-side, and segmentation drives the kernel
+
+**Status.** Implemented in P9 as `omkamra.dsp.event` and `omkamra.dsp.schedule`.
+
+**Decision.** Events, the monotonic timeline, the ingress queue, its overflow
+policy, and event segmentation all live in a portable host-side layer
+(`.cljc`). The compiled kernel knows nothing about events, absolute time, or
+host objects; what crosses into it is a control value applied at a
+block-relative frame offset. A segment boundary is therefore just a point where
+the host sets controls and calls the process again, and **no backend changes to
+support sample-accurate automation**.
+
+**Rationale.** The PLAN already drew this line ("the sequencing layer owns
+timeline scheduling, preallocated event and queue memory, and delivers canonical
+timestamped messages to the kernel; it does not require the kernel to know about
+GUI or host-language objects"). Following it means the automation layer is
+written once, in code that runs identically on the JVM and in the browser, and
+that partition invariance follows from the language's per-frame updates instead
+of being re-established per backend.
+
+**Consequences.** Two clocks: `:frame` is an absolute 64-bit timeline position
+(32 bits is only ~12 hours at 48 kHz), while a kernel offset is small and
+32-bit. A kernel renders into the start of its buffer, so a segment's frames are
+copied through a preallocated scratch; a future ABI with a block offset would
+remove both copies. `:sequence` orders equal frames, and rendering must be
+identical under any partitioning — proven on all four targets, not assumed.
+
+## D25 — Overflow drops the oldest *future* event, or rejects the new one
+
+**Status.** Implemented in P9.
+
+**Decision.** When the ingress queue is full, the overflow policy evicts the
+oldest event that is still strictly in the future. An event that is already due
+or being dispatched is never evicted. If every queued event is due — so nothing
+is droppable — the incoming event is **rejected** instead, and the rejection is
+counted separately from the eviction.
+
+**Rationale.** Dropping the oldest *anything* would let a burst cause the audio
+thread to lose an event it already owes the kernel, which turns an overflow into
+a wrong note at the wrong time rather than a missing one. Counting evictions and
+rejections separately keeps those two very different failures distinguishable
+from the outside.
+
+**Consequences.** The producer must supply the current timeline position to
+`push-event!`, which keeps the queue free of a third shared field. All counters
+are fixed slots in a preallocated array, read in one snapshot (`queue-stats`),
+and the policy never logs, allocates, blocks, or throws.
+
+## D26 — Primitive-array access must be type-hinted
+
+**Status.** Learned and enforced in P9.
+
+**Decision.** Every `aget`/`aset` on a primitive array in a path that can run
+per frame, per block, or per event carries a type hint (`^longs`, `^objects`) or
+an explicit `(long ...)` coercion, and `(set! *warn-on-reflection* true)` is the
+tool that verifies it.
+
+**Rationale.** Without a resolvable overload, Clojure falls back to `Reflector`
+and a single `aset` into a `long[]` allocated about **24 KB**. In P9 this showed
+up as 74 KB per `begin-block!` call (three array writes) and 22 KB per queue
+push: the scheduling path allocated 6.5 MB per block. Adding hints took it to 48
+bytes per block and a push/pop cycle to zero.
+
+**Consequences.** An allocation test that looks unreasonably strict is not
+noise — P8's caught a per-call vector and P9's caught this. Both were real, and
+both were invisible to correctness tests.
+
+---
+
+## D27 — The kernel carries smoothing and slew; curves come from the host
+
+**Status.** The kernel half is implemented (P9c); the host half is the next slice.
+
+**Decision.** A control may declare its own per-frame carrier: `:smooth <one-pole
+coefficient>` or `:slew <maximum step per frame>`, both in the control's own
+units and both applied by the compiled frame loop. Setting such a control is a
+*target*, not a jump, and the ABI says so. Automation that is not one of those
+two shapes — arbitrary curves, envelopes, sequenced lanes — is supplied by the
+host as block-rate control buffers, not computed by the kernel.
+
+**Rationale.** Segment boundaries alone cannot animate a control *within* a
+segment, so something has to; and the two mechanisms split cleanly along a line
+of cost and generality. A per-frame one-pole is three arithmetic operations that
+desugar into state and arithmetic the language already has, so it needs **no new
+IR node, no ABI change and no backend change** — the input sample's binding to a
+`:buffer-load` expression was already the proof that a control can be bound to
+an arbitrary expression. Arbitrary curves, by contrast, cannot be expressed by
+segmentation at all, and computing them in the kernel would mean inventing curve
+types the DSP language does not have.
+
+**Consequences.** Both amounts are per *frame*; a per-block amount would make
+rendering depend on the host's block size and break P9's invariance requirement,
+which is why the mode is lowered into the frame body rather than applied at
+segment boundaries. A control's smoothed value lives in one arena slot and its
+update is one frame of latency, consistent with D22's simultaneous entry scalars.
+Linear/critical ramps to a target over a known duration remain unimplemented:
+they need either a per-frame division plus a counter, or a block-rate *prologue*,
+and the IR has no prologue concept today (the backends do — control slots are
+loaded per call — but the IR does not describe one). Per D27's split, a host that
+wants a linear ramp can supply it as a control buffer instead, which is the
+cheaper path to the same result. Control buffers themselves are not implemented
+yet; they need a buffer region in the ABI and its Wasm memory layout.
+
+---
+
+## D28 — Lanes are flat in the kernel and named in the ABI
+
+**Status.** Implemented on all four targets (P9d): the descriptor, the IR, the ABI,
+the interpreter, the JVM, JavaScript and Wasm — with an `:automation-lane` case in
+the shared catalog, so the browser matrix verifies JavaScript and Wasm against the
+portable-IR oracle alongside the JVM suite.
+
+**Decision.** A control may declare `:lane true`, and its value is then supplied
+by the host one float *per frame* — the host's mechanism for arbitrary automation
+curves. All of a process's lanes live in **one** flat `:lanes` region with a
+compile-time stride (`:frame-capacity`, default 1024 frames), so lane *i*
+occupies `[i * stride, …)` and a lane read is an ordinary `:buffer-load` with a
+`:frame-offset` index. The ABI names each lane individually with its buffer and
+offset, and `process!` takes `:lanes {:amount …}`; the host never sees the flat
+array unless it wants to write memory directly.
+
+**Rationale.** The flat layout buys the whole feature with **no new IR op and no
+new addressing concept**: `:buffer-load` already resolves by `:buffer-id` in all
+four backends, and `:frame-offset` already exists in all four, so a lane read is
+*the same shape as the input sample read*. The stride has to be compile-time for
+those offsets to be constants, which costs nothing because the Wasm layout
+already fixes a frame capacity (`:frame-capacity`, derived from its 4096-byte
+channel stride) and already imposes exactly this "no block longer than capacity"
+constraint on the input and output regions. Per-lane parameters would make
+addressing trivial but give the kernel a variable arity, i.e. a per-shape
+interface — the problem that made separate `DspSourceKernel` interfaces
+unacceptable in P8.
+
+**Consequences.** The lane region is a fixed allocation sized by the *maximum*
+frame capacity, so N lanes cost `N * 4096` bytes of every instance whether used
+or not. Because the stride is a *byte* count, a lane holds 1024 frames in f32 and
+only 512 in f64, and the ABI's `:lane-stride` reflects that — a lane offset is a
+compile-time *element* index, and the element width is what differs.
+
+**Two things the implementation taught.** First, channel-ness had to become a
+per-buffer fact rather than a per-process one. A lane region is flat even in a
+multi-channel process, and a one-channel buffer in a multi-channel process is a
+*broadcast* buffer: one lane driving both channels. Attaching `:per-channel?` to
+each buffer *access* in the IR covers all four backends with one question, and it
+uncovered a genuine latent bug — a multi-channel process that *declared* its
+`:process` had its audio ports normalized at descriptor time, before a channel
+count was known, so it was never subscripted. The audio ports now take the
+compile-time channel count by definition. Second, a lane is read with the same
+`:channel 0`, so Wasm's existing `channel * stride` term reduces to zero and the
+lane needs no new addressing at all. Lanes are excluded from the scalar `:controls` list, since they are
+not block-rate values at all — so lane arity never affects `:controls` arity
+checks. `:smooth` and `:slew` compose with a lane for free: a smoother's target
+is simply the control read, which is now a per-frame read. Specifying a lane for
+a target that cannot address the region is a compile error rather than a lane
+that silently reads zeros.

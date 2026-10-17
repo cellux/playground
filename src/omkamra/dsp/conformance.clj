@@ -54,10 +54,17 @@
 
 (defn- process-invocations
   [case precision blocks input?]
-  (let [block-invocations
+  (let [;; A lane carries one float per frame, so its values are block-indexed
+        ;; like the input trace. Every process invocation needs them, including
+        ;; the one-frame probes below: a lane process has no valid block without
+        ;; its region.
+        lane-item (fn [block frames]
+                    (when (:lane-samples case)
+                      {:lanes (acceptance/lane-samples precision case block frames)}))
+        block-invocations
         (mapv (fn [block]
                 (let [frames (nth blocks block)]
-                  (cond-> {:op :process :frames frames}
+                  (cond-> (merge {:op :process :frames frames} (lane-item block frames))
                     input?
                     (assoc :input (acceptance/input-samples precision case block
                                                             frames)))))
@@ -67,13 +74,15 @@
         special-invocations
         (if input?
           (mapv (fn [kind]
-                  {:op :process :frames 1 :input [(special-value precision kind)]})
+                  (merge {:op :process :frames 1 :input [(special-value precision kind)]}
+                         (lane-item 0 1)))
                 [:nan :infinity :-infinity])
           [])]
     (into [{:op :reset}]
           (concat block-invocations
                   (when input?
-                    [{:op :reset} {:op :process :frames 1 :input [0.0]}])
+                    [{:op :reset}
+                     (merge {:op :process :frames 1 :input [0.0]} (lane-item 0 1))])
                   (mapcat (fn [invocation] [{:op :reset} invocation])
                           special-invocations)))))
 
@@ -97,6 +106,15 @@
        :precision precision
        :ir ir
        :controls (:controls case)
+       ;; The lane region's shape is the ABI's, shared by every target: each
+       ;; lane is one `:lane-stride`-frame slice, named individually. Targets
+       ;; that address linear memory need the offsets; targets that take a host
+       ;; array need only the layout's order.
+       :lane-stride (get-in artifact [:abi :lane-stride])
+       ;; `name`, not `str`: the plan travels as JSON, where a keyword's `str`
+       ;; would carry its leading colon and would never match a lane lookup.
+       :lane-layout (mapv (fn [lane] {:name (name (:name lane)) :offset (:offset lane)})
+                          (get-in artifact [:abi :lanes]))
        :sample-rate acceptance/sample-rate
        :invocations (process-invocations case precision
                                          (acceptance/case-blocks case)
@@ -109,7 +127,7 @@
     (float-array values)))
 
 (defn- run-process-once
-  [artifact input controls sample-rate frames]
+  [artifact input controls sample-rate frames lanes]
   (let [precision (:precision (:ir artifact))
         out (real-array precision (repeat frames 0.0))
         ;; Whether an input is passed is a property of the process, not of the
@@ -120,7 +138,14 @@
                                     :frames frames
                                     :sample-rate sample-rate
                                     :controls controls}
-                             input? (assoc :input (real-array precision (or input [])))))
+                             input? (assoc :input (real-array precision (or input [])))
+                             ;; A lane is supplied by name; the artifact flattens
+                             ;; the names into its own region.
+                             (seq lanes)
+                             (assoc :lanes (into {}
+                                                 (map (fn [[name values]]
+                                                        [name (real-array precision values)]))
+                                                 lanes))))
     (vec out)))
 
 (defn run-function-plan
@@ -130,14 +155,15 @@
 (defn run-process-plan
   [artifact plan]
   (dsp/reset! artifact)
-  (reduce (fn [outputs {:keys [op input frames]}]
+  (reduce (fn [outputs {:keys [op input frames lanes]}]
             (case op
               :reset (do (dsp/reset! artifact) outputs)
               :process (conj outputs
                              (run-process-once artifact input
                                                (:controls plan)
                                                (:sample-rate plan)
-                                               frames))))
+                                               frames
+                                               lanes))))
           []
           (:invocations plan)))
 
@@ -244,5 +270,12 @@
                     (mapv (fn [invocation]
                             (cond-> invocation
                               (:input invocation)
-                              (update :input #(mapv encode-value %))))
+                              (update :input #(mapv encode-value %))
+                              (:lanes invocation)
+                              (update :lanes
+                                      (fn [lanes]
+                                        (into {} (map (fn [[lane values]]
+                                                        [(name lane)
+                                                         (mapv encode-value values)]))
+                                              lanes)))))
                           invocations)))))))

@@ -254,7 +254,11 @@
   (let [buffers (:buffers ir)
         inputs (filterv #(= :input (:direction %)) buffers)
         outputs (filterv #(= :output (:direction %)) buffers)
-        controls (mapv #(select-keys % [:name :type :default]) (:controls ir))
+        ;; The declared smoothing mode is part of the ABI: it tells a host that
+        ;; this control's value is carried across frames by the kernel, so
+        ;; setting it is a target, not an instantaneous jump.
+        controls (mapv #(select-keys % [:name :type :default :smooth :slew])
+                       (:controls ir))
         state (mapv #(select-keys % [:name :type :size :init :constant]) (:state ir))
         scratch (mapv #(select-keys % [:name :type :size :index]) (:scratch ir))
         scratch-values (mapv (fn [value] (assoc value :persistent? false))
@@ -330,6 +334,18 @@
      :frames (:frames ir)
      :sample-rate (:sample-rate ir)
      :controls controls
+     ;; Host-supplied per-frame automation. Each lane is one slice of the flat
+     ;; `:lanes` region, `:lane-stride` frames apart; the host addresses a lane
+     ;; by name, and only a host writing memory directly needs the offset.
+     :lane-stride (:frame-capacity ir)
+     :lanes (mapv (fn [index lane]
+                    (assoc (select-keys lane [:name :type :smooth :slew])
+                           :role :lane
+                           :index index
+                           :buffer :lanes
+                           :offset (* index (:frame-capacity ir))))
+                  (range)
+                  (:lanes ir))
      :state state
      :state-layout {:ownership :instance
                     :persistent? true
@@ -641,6 +657,47 @@
   (check-live! holder)
   (apply (:invoke holder) args))
 
+(clojure.core/defn- lane-region
+  "Flatten a `{:lane-name values}` context map into the ABI's single lane region.
+
+  The kernel sees one flat region with compile-time offsets; the host supplies
+  one named sequence per lane. This is the whole of the impedance mismatch, and
+  it costs one copy per call — a real-time host writes the region directly and
+  skips this path."
+  [artifact context]
+  (let [abi (:abi artifact)
+        lanes (:lanes abi)]
+    (when (and (seq lanes) (nil? (:lanes context)))
+      ;; A lane process has no valid block without its region, so say that here
+      ;; rather than letting a backend report an unknown buffer.
+      (throw (ex-info "this DSP process declares per-frame lanes"
+                      {:lanes (mapv :name lanes)})))
+    (if (empty? lanes)
+      context
+      (let [stride (long (:lane-stride abi))
+            supplied (:lanes context)
+            f64? (= :f64 (get-in abi [:precision]))
+            region (if f64?
+                     (double-array (* stride (count lanes)))
+                     (float-array (* stride (count lanes))))]
+        (doseq [{:keys [name offset]} lanes]
+          ;; The ABI names a lane with a symbol, as it does a control, but accept
+          ;; the keyword spelling too: a key that silently missed would publish
+          ;; zeros, which is the worst possible failure for automation.
+          (let [values (or (get supplied name) (get supplied (keyword name)))]
+            (when-not values
+              (throw (ex-info "a DSP lane has no values for this block"
+                              {:lane name :supplied (vec (keys supplied))})))
+            (let [count (min (count values) stride)]
+              (if f64?
+                (let [^doubles target region]
+                  (dotimes [index count]
+                    (aset target (int (+ offset index)) (double (nth values index)))))
+                (let [^floats target region]
+                  (dotimes [index count]
+                    (aset target (int (+ offset index)) (float (nth values index)))))))))
+        (assoc context :lanes region)))))
+
 (clojure.core/defn process!
   "Execute a process artifact or instance with its explicit ABI context.
 
@@ -656,7 +713,7 @@
                       {:entry (:entry artifact)})))
     (check-live! holder)
     (if-let [invoke-context (:invoke-context holder)]
-      (invoke-context context)
+      (invoke-context (lane-region artifact context))
       (throw (ex-info "this DSP target does not expose an explicit process context adapter"
                       {:target (:target artifact)})))))
 
@@ -667,17 +724,20 @@
   `float-controls` and `int-controls`. It verifies primitive array classes,
   buffer shape/length, control storage, and the holder's own state before
   processing."
-  [holder input output frames sample-rate float-controls int-controls]
-  (let [artifact (or (:artifact holder) holder)]
-    (when-not (= :process (:entry artifact))
-      (throw (ex-info "only process artifacts have a process ABI"
-                      {:entry (:entry artifact)})))
-    (when-not (= :jvm (:target artifact))
-      (throw (ex-info "the raw checked process ABI is currently JVM-specific"
-                      {:target (:target artifact)})))
-    (check-live! holder)
-    (jvm/process-checked! holder input output frames sample-rate
-                          float-controls int-controls)))
+  ([holder input output frames sample-rate float-controls int-controls]
+   (process-checked! holder input output frames sample-rate float-controls
+                     int-controls nil))
+  ([holder input output frames sample-rate float-controls int-controls lanes]
+   (let [artifact (or (:artifact holder) holder)]
+     (when-not (= :process (:entry artifact))
+       (throw (ex-info "only process artifacts have a process ABI"
+                       {:entry (:entry artifact)})))
+     (when-not (= :jvm (:target artifact))
+       (throw (ex-info "the raw checked process ABI is currently JVM-specific"
+                       {:target (:target artifact)})))
+     (check-live! holder)
+     (jvm/process-checked! holder input output frames sample-rate
+                           float-controls int-controls lanes))))
 
 (clojure.core/defn process-unchecked!
   "Execute a JVM process artifact or instance through its raw primitive ABI.
@@ -688,17 +748,20 @@
   `create-instance` handle owns its own. Use `process-checked!` at
   setup/development boundaries; retain `:unchecked` and its matching
   `Dsp*Process` interface in a real-time host when direct dispatch is required."
-  [holder input output frames sample-rate float-controls int-controls]
-  (let [artifact (or (:artifact holder) holder)]
-    (when-not (= :process (:entry artifact))
-      (throw (ex-info "only process artifacts have a process ABI"
-                      {:entry (:entry artifact)})))
-    (when-not (= :jvm (:target artifact))
-      (throw (ex-info "the raw unchecked process ABI is currently JVM-specific"
-                      {:target (:target artifact)})))
-    (check-live! holder)
-    (jvm/process-unchecked! holder input output frames sample-rate
-                            float-controls int-controls)))
+  ([holder input output frames sample-rate float-controls int-controls]
+   (process-unchecked! holder input output frames sample-rate float-controls
+                       int-controls nil))
+  ([holder input output frames sample-rate float-controls int-controls lanes]
+   (let [artifact (or (:artifact holder) holder)]
+     (when-not (= :process (:entry artifact))
+       (throw (ex-info "only process artifacts have a process ABI"
+                       {:entry (:entry artifact)})))
+     (when-not (= :jvm (:target artifact))
+       (throw (ex-info "the raw unchecked process ABI is currently JVM-specific"
+                       {:target (:target artifact)})))
+     (check-live! holder)
+     (jvm/process-unchecked! holder input output frames sample-rate
+                             float-controls int-controls lanes))))
 
 (clojure.core/defn initialize!
   "Initialize a process artifact or instance according to its lifecycle ABI."

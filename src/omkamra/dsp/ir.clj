@@ -6,6 +6,7 @@
   by ID. Effects are attached only to inherently effectful nodes and summarized
   on function/process roots."
   (:require [clojure.string :as str]
+            [clojure.walk :as walk]
             [omkamra.dsp.builtins :as builtins]))
 
 (def ^:private arithmetic-operators
@@ -1516,6 +1517,18 @@
                 :else requirements))]
       (walk initial body))))
 
+;; The byte distance between two lanes in the shared `:lanes` region. It is the
+;; same stride the Wasm layout gives a channel, so a lane's base offset is a
+;; compile-time constant in every backend — which is what lets a lane read be an
+;; ordinary `:frame-offset` buffer load. Because the stride is a *byte* count, a
+;; lane holds half as many frames in f64 as in f32, and a host must not render a
+;; block longer than that capacity.
+(def ^:private lane-stride-bytes 4096)
+
+(defn- lane-frame-capacity
+  [precision]
+  (quot lane-stride-bytes (if (= :f64 precision) 8 4)))
+
 (defn- process-input?
   "True when a definition's process has a sample input port.
 
@@ -1537,31 +1550,62 @@
                                  :channels channels}])
                              [{:name :output :direction :output :type :float
                                :channels channels}]))]
-    (mapv (fn [{:keys [name direction type channels]}]
+    (mapv (fn [{:keys [name direction type] buffer-channels :channels}]
             {:id name
              :direction direction
              :type type
-             :channels channels})
+             ;; The audio ports are per-channel *by definition*, whatever the
+             ;; descriptor happened to record: descriptor normalization runs
+             ;; before a channel count is known, so a declared input or output
+             ;; carries a placeholder. Any other buffer keeps its own channel
+             ;; count, which is what makes a one-channel buffer a broadcast
+             ;; buffer in a multi-channel process.
+             :channels (if (contains? #{:input :output} direction)
+                         channels
+                         (or buffer-channels 1))})
           (or declared default))))
 
 (defn- process-bindings
-  [definition state-bindings channels]
+  [definition state-bindings channels frame-capacity]
   (let [process (:process definition)
         input? (process-input? definition)
         sample-name (when input?
                       (or (get-in process [:input :name])
                           (get-in definition [:params 0 :name])))
         sample-param (some #(when (= sample-name (:name %)) %) (:params definition))
+        ;; A lane control is bound to a per-frame read from the shared `:lanes`
+        ;; region, not to a block-rate scalar, so it leaves the scalar control
+        ;; list entirely: the ABI reports it under `:lanes` instead. Lane *i*
+        ;; occupies `[i * frame-capacity, ...)`, a compile-time base, which is
+        ;; why this needs no new IR op.
+        lane-controls (if process
+                        (filterv :lane (:controls process))
+                        [])
+        lane-bindings (mapv (fn [index control]
+                              [(:name control)
+                               {:name (:name control)
+                                :type :float
+                                :kind :buffer
+                                :expression {:op :buffer-load
+                                             :buffer-id :lanes
+                                             :channel 0
+                                             :index {:op :frame-offset
+                                                     :offset (* (long index)
+                                                                (long frame-capacity))
+                                                     :type :int}
+                                             :type :float
+                                             :effects #{:read-memory}}}])
+                            (range) lane-controls)
         controls (if process
-                   (mapv (fn [{:keys [name type]}]
+                   (mapv (fn [{:keys [name type] :as control}]
                            (let [param (some #(when (= name (:name %)) %)
                                              (:params definition))]
-                             ;; A control port that declares a non-default type
-                             ;; (e.g. :int) types the local, since the shorthand
-                             ;; parameter list can only express :float.
-                             (cond-> param
+                             (cond-> (merge param (select-keys control [:smooth :slew]))
+                               ;; A control port that declares a non-default type
+                               ;; (e.g. :int) types the local, since the shorthand
+                               ;; parameter list can only express :float.
                                (and type (not= :float type)) (assoc :type type))))
-                         (:controls process))
+                         (remove :lane (:controls process)))
                    (vec (rest (:params definition))))
         frames (or (get-in process [:frames]) {:name 'frames :type :int})
         sample-rate (or (get-in process [:sample-rate])
@@ -1586,6 +1630,7 @@
     {:sample-name sample-name
      :channel channel
      :controls controls
+     :lanes lane-controls
      :frames frames
      :sample-rate sample-rate
      :bindings (into
@@ -1600,6 +1645,7 @@
                  (map (fn [control]
                         [(:name control) (assoc control :kind :control)])
                       controls)
+                 lane-bindings
                  state-bindings))}))
 
 (defn- process-diagnostics
@@ -1650,6 +1696,22 @@
                      :dsp/path [:memory buffer-id]}))
                 memory))))
 
+(defn- annotate-buffer-channeling
+  "Mark each buffer access with whether it is subscripted by channel.
+
+  A buffer is per-channel only if it declares more than one channel, and the
+  audio ports always take the process channel count. Recording this on the
+  access itself means no backend has to re-derive it — and a lane region, which
+  is always flat, is never subscripted even in a multi-channel process."
+  [frame-body per-channel-buffers]
+  (walk/postwalk
+   (fn [value]
+     (if (and (map? value)
+              (contains? #{:buffer-load :buffer-store} (:op value)))
+       (assoc value :per-channel? (contains? per-channel-buffers (:buffer-id value)))
+       value))
+   frame-body))
+
 (defn lower-process
   "Lower the entry descriptor directly to explicit process IR.
 
@@ -1668,7 +1730,16 @@
          expanded (expand-state (:state definition))
          states (:slots expanded)
          buffers (process-buffers definition channels)
-         {:keys [bindings channel controls frames sample-rate]} (process-bindings definition (:bindings expanded) channels)
+         ;; A buffer is subscripted by channel only when it is per-channel.
+         ;; Input and output are (they are channel-strided); a lane region is
+         ;; not, and a one-channel buffer in a multi-channel process is a
+         ;; *broadcast* buffer — one lane can drive both channels. Recording the
+         ;; fact here keeps the four backends from each guessing at it.
+         per-channel-buffers (set (keep #(when (> (:channels %) 1) (:id %)) buffers))
+         frame-capacity (long (or (:frame-capacity options)
+                                  (lane-frame-capacity (get options :precision :f32))))
+         {:keys [bindings channel controls lanes frames sample-rate]}
+         (process-bindings definition (:bindings expanded) channels frame-capacity)
          ;; Callees are lowered first, in dependency order, so every call site
          ;; can allocate its state partition (D19).
          modules (lower-definitions (dissoc definitions entry-id) options)
@@ -1731,7 +1802,8 @@
                    :value {:op :local :name (:name local) :type (:type local)}
                    :effects #{:write-state}})
                 (remove nil? state-results))))
-         frame-body (block frame-statements)
+         frame-body (annotate-buffer-channeling (block frame-statements)
+                                                per-channel-buffers)
          memory (memory-requirements buffers frame-body (:precision options))
          diagnostics (process-diagnostics frame-body memory)
          ir {:op :process
@@ -1744,6 +1816,8 @@
              :frames frames
              :sample-rate sample-rate
              :controls controls
+             :lanes lanes
+             :frame-capacity frame-capacity
              :locals @(:locals env)
              :state (into (mapv #(select-keys % [:name :type :size :init :index :constant])
                                 states)

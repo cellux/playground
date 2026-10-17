@@ -35,6 +35,15 @@
   #?(:clj (if (= :f64 precision) (double value) (unchecked-float value))
      :cljs (if (= :f64 precision) value (js/Math.fround value))))
 
+(defn lane-automation-samples
+  "A deterministic per-frame automation curve, indexed by block exactly like the
+  input trace, so the same block index yields the same lane value at the same
+  frame on every target."
+  [precision block frames]
+  {:amount (mapv (fn [frame]
+                   (real precision (/ (double (mod (+ frame (* 29 block)) 8)) 8.0)))
+                 (range frames))})
+
 (defn sine-input-samples
   "A deterministic trace whose alternating sign exercises conditionals."
   [precision block frames]
@@ -142,6 +151,18 @@
                   :body ['(* sample amount)]}
      :precisions [:f32 :f64]
      :controls [2.0]
+     :input-samples sine-input-samples}
+    {:id :automation-lane
+     :entry :process
+     :definition {:dsp/kind :function
+                  :name 'automation-lane
+                  :params ['sample 'amount]
+                  :return-type :float
+                  :process {:controls [{:name 'amount :lane true}]}
+                  :body ['(* sample amount)]}
+     :precisions [:f32 :f64]
+     :controls []
+     :lane-samples lane-automation-samples
      :input-samples sine-input-samples}
     {:id :one-pole
      :entry :process
@@ -438,6 +459,16 @@
                    :definition-var 'omkamra.dsp.library.delay/chorus
                    :controls [2.0 8.0 0.7]
                    :input-samples sine-input-samples})
+    ;; P9: smoothing and slew limiting declared on the control itself, so the
+    ;; kernel carries the value across frames with no DSP source at all.
+    (library-case {:id :smoothed-gain
+                   :definition-var 'omkamra.dsp.library.control/smoothed-gain
+                   :controls [0.8]
+                   :input-samples sine-input-samples})
+    (library-case {:id :slewed-gain
+                   :definition-var 'omkamra.dsp.library.control/slewed-gain
+                   :controls [0.8]
+                   :input-samples sine-input-samples})
     (library-case {:id :sync-oscillator
                    :definition-var 'omkamra.dsp.library.oscillator/sync-oscillator
                    :controls [220.0 2.0]
@@ -662,3 +693,8 @@
   "Return deterministic input samples for one conformance block."
   [precision case block frames]
   ((:input-samples case) precision block frames))
+
+(defn lane-samples
+  "Return per-frame lane values for one conformance block."
+  [precision case block frames]
+  ((:lane-samples case) precision block frames))

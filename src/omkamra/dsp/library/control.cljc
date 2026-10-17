@@ -42,3 +42,26 @@
       (if (< delta (- 0.0 step))
         (- y step)
         target))))
+
+;; The kernel can carry a control's value across frames itself: a control
+;; declared `:smooth` is a one-pole coefficient and one declared `:slew` is a
+;; per-frame limit, both applied by the compiled frame loop. These two have the
+;; same shape as `smoothing` and `slew-limit` above, but the state lives in the
+;; control rather than in the DSP source, so a host gets the behaviour by setting
+;; a target and nothing else. Both amounts are **per frame**: a per-block amount
+;; would make rendering depend on the host's block size.
+(dsp/defn smoothed-gain
+  "Gain whose amount is one-pole smoothed by the kernel, one step per frame.
+
+  Setting `amount` is therefore a target, not an instantaneous jump, which is
+  what stops a parameter change from clicking."
+  [sample amount]
+  {:process {:controls [{:name amount :smooth 0.01 :default 0.0}]}}
+  (* sample amount))
+
+(dsp/defn slewed-gain
+  "Gain whose amount moves by at most a fixed step per frame, the kernel's
+  slew limiter, so a jump in `amount` becomes a bounded ramp."
+  [sample amount]
+  {:process {:controls [{:name amount :slew 0.01 :default 0.0}]}}
+  (* sample amount))

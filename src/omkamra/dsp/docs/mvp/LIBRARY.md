@@ -379,6 +379,26 @@ Control-rate helpers: smooth a value, or limit how fast it may change. Both are 
 - **Return:** float
 - **Entry:** process entry and callable module
 
+### `omkamra.dsp.library.control/slewed-gain`
+
+Gain whose amount moves by at most a fixed step per frame, the kernel's slew limiter, so a jump in `amount` becomes a bounded ramp.
+
+- **Parameters:** `sample` float, `amount` float
+- **Controls:** `amount`
+- **State:** `amount-ramped` float
+- **Return:** float
+- **Entry:** process entry and callable module
+
+### `omkamra.dsp.library.control/smoothed-gain`
+
+Gain whose amount is one-pole smoothed by the kernel, one step per frame. Setting `amount` is therefore a target, not an instantaneous jump, which is what stops a parameter change from clicking.
+
+- **Parameters:** `sample` float, `amount` float
+- **Controls:** `amount`
+- **State:** `amount-ramped` float
+- **Return:** float
+- **Entry:** process entry and callable module
+
 ### `omkamra.dsp.library.control/smoothing`
 
 - **Parameters:** `sample` float, `target` float, `time` float

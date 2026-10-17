@@ -12,7 +12,9 @@
             [cljs.reader :as reader]
             [goog.object :as gobj]
             [omkamra.dsp.acceptance :as acceptance]
+            [omkamra.dsp.event :as event]
             [omkamra.dsp.interpreter :as interpreter]
+            [omkamra.dsp.schedule :as schedule]
             ["wabt" :default wabt]))
 
 (defonce app-state (atom nil))
@@ -146,24 +148,66 @@
   [plan]
   (reader/read-string (:ir plan)))
 
+(defn- lane-values-by-name
+  "The lane values one invocation supplies, decoded and keyed by lane name.
+
+  The plan travels as JSON, so a name arrives as a string where the source wrote
+  a symbol or a keyword; accept any spelling rather than silently reading zeros."
+  [precision lanes]
+  (when (seq lanes)
+    (into {}
+          (map (fn [[name values]] [name (real-array precision (decode-values values))]))
+          lanes)))
+
+(defn- lane-value-for
+  [values name]
+  (or (get values (keyword name)) (get values (symbol name)) (get values name)))
+
+(defn- lane-region
+  "Build the flat lane region a JavaScript kernel takes.
+
+  Each lane occupies one `:lane-stride`-frame slice at the offset the ABI gives
+  it, so the region is the whole of it — the same region a real-time host keeps
+  and refills instead of reallocating per block."
+  [plan precision lanes]
+  (when (seq (:lane-layout plan))
+    (let [stride (long (:lane-stride plan))
+          layout (:lane-layout plan)
+          region (real-array precision (repeat (* stride (count layout)) 0.0))
+          values (lane-values-by-name precision lanes)]
+      (doseq [{:keys [name offset]} layout
+              :let [supplied (lane-value-for values name)]
+              :when supplied]
+        ;; A lane's values are a JS typed array, which `count` and `nth` do not
+        ;; implement; read its length and elements directly.
+        (dotimes [i (min (.-length supplied) stride)]
+          (aset region (+ (long offset) i) (aget supplied i))))
+      region)))
+
 (defn- interpreter-process-outputs
-  [ir controls sample-rate invocations]
-  (let [state (interpreter/create-state ir)
+  "Run the portable IR in the browser, which is the oracle every target is
+  compared against. It takes the plan because a lane has to be flattened into a
+  region the same way the generated-target drivers do it."
+  [plan]
+  (let [ir (plan-ir plan)
         precision (:precision ir)
-        controls (decode-values controls)
-        sample-rate (decode-value sample-rate)]
-    (reduce (fn [outputs {:keys [op input frames]}]
+        state (interpreter/create-state ir)
+        controls (decode-values (:controls plan))
+        sample-rate (decode-value (:sample-rate plan))]
+    (reduce (fn [outputs {:keys [op input frames lanes]}]
               (case op
                 "reset" (do (interpreter/reset-state! ir state) outputs)
                 "process" (let [samples (when input (decode-values input))
+                                region (lane-region plan precision lanes)
                                 out (real-array precision (repeat frames 0.0))]
                             (interpreter/process-context
                              ir (cond-> {:output out :frames frames
                                          :sample-rate sample-rate
                                          :controls controls :state state}
-                                  samples (assoc :input (real-array precision samples))))
+                                  samples (assoc :input (real-array precision samples))
+                                  region (assoc :lanes region)))
                             (conj outputs (vec out)))))
-            [] invocations)))
+            [] (:invocations plan))))
 
 (defn- interpreter-function-values
   [ir vectors]
@@ -174,31 +218,35 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- js-process-runner
-  [module precision]
+  [module precision plan]
   (let [kernel ((gobj/get module "createKernel"))
         reset (.bind (gobj/get kernel "reset") kernel)
         process (gobj/get kernel "process")]
     {:reset reset
      ;; `samples` is nil for a generator (D23), whose kernel `process` takes no
      ;; input argument; the frame count always comes from the plan.
-     :process (fn [samples frames controls]
-                (let [out (real-array precision (repeat frames 0.0))]
+     :process (fn [samples frames controls lanes]
+                (let [out (real-array precision (repeat frames 0.0))
+                      ;; Any number of lanes is one flat region, and the kernel
+                      ;; takes it as one final argument.
+                      region (lane-region plan precision lanes)]
                   (.apply process kernel
                           (to-array (concat (when samples
                                               [(real-array precision samples)])
                                             [out frames acceptance/sample-rate]
-                                            controls)))
+                                            controls
+                                            (when region [region]))))
                   (vec out)))}))
 
 (defn- replay-process
   [plan {:keys [reset process]}]
   (let [controls (decode-values (:controls plan))]
     (reset)
-    (reduce (fn [outputs {:keys [op input frames]}]
+    (reduce (fn [outputs {:keys [op input frames lanes]}]
               (case op
                 "reset" (do (reset) outputs)
                 "process" (conj outputs (process (when input (decode-values input))
-                                                 frames controls))))
+                                                 frames controls lanes))))
             [] (:invocations plan))))
 
 ;; ---------------------------------------------------------------------------
@@ -223,11 +271,9 @@
              (-> (dynamic-import url)
                  (.then
                   (fn [module]
-                    (let [expected (interpreter-process-outputs
-                                    (plan-ir plan) (:controls plan)
-                                    (:sample-rate plan) (:invocations plan))
+                    (let [expected (interpreter-process-outputs plan)
                           actual (replay-process plan
-                                                 (js-process-runner module precision))]
+                                                 (js-process-runner module precision plan))]
                       (require! (results-match? :js precision actual expected)
                                 (str (:id c) " " (name precision)
                                      " JavaScript mismatch: "
@@ -241,10 +287,14 @@
   [c precision]
   (let [query (acceptance-query c precision)
         plan-url (str "/omkamra/dsp/testbed/plan" query)
-        wat-url (str "/omkamra/dsp/testbed/wasm-source" query)]
-    (-> (js/Promise.all #js [(fetch-json plan-url) (response-text wat-url)])
+        wat-url (str "/omkamra/dsp/testbed/wasm-source" query)
+        ;; The linear-memory layout is the module's, so read it from the module
+        ;; rather than repeating its offsets here.
+        metadata-url (str "/omkamra/dsp/testbed/wasm-metadata" query)]
+    (-> (js/Promise.all #js [(fetch-json plan-url) (response-text wat-url)
+                             (fetch-json metadata-url)])
         (.then
-         (fn [[plan wat]]
+         (fn [[plan wat metadata]]
            (-> (compile-wasm wat)
                (.then
                 (fn [bytes]
@@ -255,24 +305,36 @@
                                memory (gobj/get exports "memory")
                                reset (gobj/get exports "reset")
                                process (gobj/get exports "process")
-                               input-offset 0
-                               output-offset 4096
-                               expected (interpreter-process-outputs
-                                         (plan-ir plan) (:controls plan)
-                                         (:sample-rate plan) (:invocations plan))
+                               layout (:memory metadata)
+                               input-offset (:input-offset layout 0)
+                               output-offset (:output-offset layout 4096)
+                               lanes-offset (:lanes-offset layout 0)
+                               width (if (= :f64 precision) 8 4)
+                               expected (interpreter-process-outputs plan)
                                controls (decode-values (:controls plan))
-                               input-view (fn [frames]
-                                            (if (= :f64 precision)
-                                              (js/Float64Array. (.-buffer memory) input-offset (max 1 frames))
-                                              (js/Float32Array. (.-buffer memory) input-offset (max 1 frames))))
-                               output-view (fn [frames]
-                                             (if (= :f64 precision)
-                                               (js/Float64Array. (.-buffer memory) output-offset (max 1 frames))
-                                               (js/Float32Array. (.-buffer memory) output-offset (max 1 frames))))
+                               ;; Lane bases are element offsets, so a byte
+                               ;; position scales them by the element width.
+                               lane-view (fn [byte-offset frames]
+                                           (if (= :f64 precision)
+                                             (js/Float64Array. (.-buffer memory) byte-offset (max 1 frames))
+                                             (js/Float32Array. (.-buffer memory) byte-offset (max 1 frames))))
+                               input-view (partial lane-view input-offset)
+                               output-view (partial lane-view output-offset)
+                               write-lanes! (fn [lanes frames]
+                                              (when (seq (:lane-layout plan))
+                                                (let [values (lane-values-by-name precision lanes)]
+                                                  (doseq [{:keys [name offset]} (:lane-layout plan)
+                                                          :let [supplied (lane-value-for values name)]
+                                                          :when supplied]
+                                                    (.set (lane-view (+ lanes-offset (* (long offset) width))
+                                                                     frames)
+                                                          (.subarray supplied 0
+                                                                     (min (.-length supplied)
+                                                                          frames)))))))
                                actual (do
                                         (.call reset nil)
                                         (reduce
-                                         (fn [outputs {:keys [op input frames]}]
+                                         (fn [outputs {:keys [op input frames lanes]}]
                                            (case op
                                              "reset" (do (.call reset nil) outputs)
                                              "process"
@@ -280,11 +342,14 @@
                                                (when samples
                                                  (.set (input-view frames)
                                                        (real-array precision samples)))
+                                               (write-lanes! lanes frames)
                                                (.apply process nil
                                                        (to-array (concat (when samples [input-offset])
                                                                          [output-offset frames
                                                                           acceptance/sample-rate]
-                                                                         controls)))
+                                                                         controls
+                                                                         (when (seq (:lane-layout plan))
+                                                                           [lanes-offset]))))
                                                (conj outputs
                                                      (if (zero? frames)
                                                        []
@@ -766,7 +831,13 @@
                   (.apply process kernel
                           (to-array (concat [in out frames acceptance/sample-rate]
                                             controls)))
-                  (vec out)))}))
+                  (vec out)))
+     ;; Context-style entry so `schedule/render-block!` can drive it directly.
+     :process! (fn [{:keys [input output frames controls]}]
+                 (.apply process kernel
+                         (to-array (concat (when input [input])
+                                           [output frames acceptance/sample-rate]
+                                           controls))))}))
 
 (defn- wasm-process-instance
   "One independent Wasm instance, with its own linear memory."
@@ -787,7 +858,19 @@
                 (.apply process nil
                         (to-array (concat [input-offset output-offset frames
                                            acceptance/sample-rate] controls)))
-                (if (zero? frames) [] (vec (view output-offset frames))))}))
+                (if (zero? frames) [] (vec (view output-offset frames))))
+     ;; The kernel writes into linear memory, so the rendered frames are copied
+     ;; into the caller's array to match the JavaScript driver's shape.
+     :process! (fn [{:keys [input output frames controls]}]
+                 ;; Only `frames` elements of the caller's buffer are valid: the
+                 ;; scratch may be longer than the segment being rendered.
+                 (when input
+                   (.set (view input-offset frames) (.subarray input 0 frames)))
+                 (.apply process nil
+                         (to-array (concat (when input [input-offset])
+                                           [output-offset frames acceptance/sample-rate]
+                                           controls)))
+                 (.set output (view output-offset frames)))}))
 
 (defn- js-independence-test
   [precision]
@@ -835,6 +918,170 @@
                                             (wasm-process-instance (.-instance result)
                                                                    precision controls))
                                           (array-seq results))))))))))))))))
+
+;; ---------------------------------------------------------------------------
+;; Sample-accurate scheduling (P9)
+;; ---------------------------------------------------------------------------
+
+(def ^:private schedule-case :delay-line-wrap)
+
+;; Parameter changes at frames that are deliberately not block boundaries.
+(def ^:private schedule-timeline [[17 0.1] [40 0.9] [155 0.6]])
+
+(def ^:private schedule-frames 200)
+
+(defn- schedule-queue
+  [control-name timeline]
+  (let [queue (event/event-queue (max 4 (count timeline)))]
+    (doseq [[frame value] timeline]
+      (event/push-event! queue {:frame frame :sequence frame :type :parameter
+                                :name control-name :value value} 0))
+    queue))
+
+(defn- render-scheduled
+  "Render the 200-frame timeline in blocks of `block-size`, splitting each block
+  at event boundaries. One instance, one pass: state is not reset between
+  blocks, so a fresh instance must be used per pass."
+  [instance precision control-name timeline block-size controls]
+  (let [total schedule-frames
+        input (mapv #(Math/sin (* 0.05 %)) (range total))
+        zeros (fn [n] (real-array precision (repeat n 0.0)))
+        output (zeros total)
+        block-in (zeros block-size)
+        block-out (zeros block-size)
+        input-scratch (zeros block-size)
+        output-scratch (zeros block-size)
+        scheduler (schedule/scheduler (schedule-queue control-name timeline))
+        process! (:process! instance)]
+    (loop [start 0
+           controls controls]
+      (if (>= start total)
+        (vec output)
+        (let [length (min block-size (- total start))]
+          (dotimes [index length]
+            (aset block-in index (nth input (+ start index))))
+          (let [result (schedule/render-block!
+                        scheduler
+                        {:start start
+                         :frames length
+                         :input block-in
+                         :output block-out
+                         :input-scratch input-scratch
+                         :output-scratch output-scratch
+                         :sample-rate acceptance/sample-rate
+                         :controls controls
+                         :control-index {control-name 0}
+                         :process! process!})]
+            (dotimes [index length]
+              (aset output (+ start index) (aget block-out index)))
+            (recur (+ start length) (:controls result))))))))
+
+(defn- schedule-verdict
+  [target create-instances]
+  (-> (create-instances 4)
+      (.then
+       (fn [[long-block short-block tiny-block quantised-block]]
+         (let [control-name (:control-name long-block)
+               controls (:controls long-block)
+               precision (:precision long-block)
+               reference (render-scheduled long-block precision control-name
+                                           schedule-timeline schedule-frames controls)
+               ;; Three partitionings of the same timeline, each on its own
+               ;; instance, must agree exactly...
+               short (render-scheduled short-block precision control-name
+                                       schedule-timeline 64 controls)
+               tiny (render-scheduled tiny-block precision control-name
+                                      schedule-timeline 7 controls)
+               ;; ...and the control: the same block with the events *quantised*
+               ;; to the block boundary, which is what a host that ignores frame
+               ;; offsets would produce. If it matched, the comparison would be
+               ;; proving nothing about sample accuracy.
+               quantised (render-scheduled quantised-block precision control-name
+                                           [] schedule-frames [(second (last schedule-timeline))])
+               problems (cond-> []
+                          (not= reference short)
+                          (conj "a 64-frame partitioning differs from a 200-frame one")
+                          (not= reference tiny)
+                          (conj "a 7-frame partitioning differs from a 200-frame one")
+                          (= reference quantised)
+                          (conj (str "quantising the events to the block boundary "
+                                     "changed nothing, so the check is not sensitive "
+                                     "to frame offsets"))
+                          (every? zero? reference)
+                          (conj "the timeline rendered silence"))]
+           {:name (str "sample-accurate scheduling (" (name target) ")")
+            :passed? (empty? problems)
+            :targets [target]
+            :detail (if (empty? problems)
+                      (str "3 partitionings of a 200-frame timeline agree exactly, "
+                           "and quantising the events to the block boundary changes "
+                           "the output")
+                      (str/join "; " problems))})))))
+
+(defn- js-invariance-test
+  [precision]
+  (let [query (str "?case=" (name schedule-case) "&precision=" (name precision))
+        source-url (str "/omkamra/dsp/testbed/source" query)
+        plan-url (str "/omkamra/dsp/testbed/plan" query)]
+    (-> (js/Promise.all #js [(response-text source-url) (fetch-json plan-url)])
+        (.then
+         (fn [[source plan]]
+           (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
+                 url (js/URL.createObjectURL blob)
+                 controls (decode-values (:controls plan))
+                 control-name (get-in (plan-ir plan) [:controls 0 :name])]
+             ;; The blob URL is deliberately not revoked: the testbed is a
+             ;; one-shot page and the source is a few KB.
+             (-> (dynamic-import url)
+                 (.then
+                  (fn [module]
+                    (schedule-verdict
+                     :js
+                     (fn [count]
+                       (js/Promise.resolve
+                        (mapv (fn [_]
+                                (assoc (js-process-instance module precision controls)
+                                       :control-name control-name
+                                       :controls controls
+                                       :precision precision))
+                              (range count))))))))))))))
+
+(defn- wasm-invariance-test
+  [precision]
+  (let [query (str "?case=" (name schedule-case) "&precision=" (name precision))
+        plan-url (str "/omkamra/dsp/testbed/plan" query)
+        wat-url (str "/omkamra/dsp/testbed/wasm-source" query)]
+    (-> (js/Promise.all #js [(fetch-json plan-url) (response-text wat-url)])
+        (.then
+         (fn [[plan wat]]
+           (let [controls (decode-values (:controls plan))
+                 control-name (get-in (plan-ir plan) [:controls 0 :name])]
+             (-> (compile-wasm wat)
+                 (.then
+                  (fn [bytes]
+                    (schedule-verdict
+                     :wasm
+                     (fn [count]
+                       (-> (js/Promise.all
+                            (to-array (mapv (fn [_] (js/WebAssembly.instantiate bytes))
+                                            (range count))))
+                           (.then (fn [results]
+                                    (mapv (fn [result]
+                                            (assoc (wasm-process-instance (.-instance result)
+                                                                          precision controls)
+                                                   :control-name control-name
+                                                   :controls controls
+                                                   :precision precision))
+                                          (array-seq results))))))))))))))))
+
+(defn- schedule-invariance-tests
+  []
+  (-> (js/Promise.all
+       #js [(js-invariance-test :f32)
+            (js-invariance-test :f64)
+            (wasm-invariance-test :f32)
+            (wasm-invariance-test :f64)])
+      (.then (fn [results] (vec results)))))
 
 (defn- instance-independence-tests
   []
@@ -891,6 +1138,7 @@
                 [(fn [] (-> (bounded-loop-wasm-test) (.then (fn [r] [r]))))
                  (fn [] (-> (wasm-table-test) (.then (fn [r] [r]))))
                  (fn [] (instance-independence-tests))
+                 (fn [] (schedule-invariance-tests))
                  (fn [] (-> (audio-worklet-test :f32)
                             (.then (fn [a]
                                      (-> (audio-worklet-test :f64)

@@ -124,7 +124,18 @@
    [:map {:closed true}
     [:name [:or symbol? keyword?]]
     [:type {:optional true} ValueType]
-    [:default {:optional true} any?]]])
+    [:default {:optional true} any?]
+    ;; Declared smoothing modes, both in the control's own units *per frame*: a
+    ;; one-pole coefficient, or a slew limit. Per frame and not per block,
+    ;; because a block-rate amount would make rendering depend on the host's
+    ;; block size (P9's invariance requirement).
+    [:smooth {:optional true} number?]
+    [:slew {:optional true} number?]
+    ;; A lane's value is supplied by the host one float *per frame*, from the
+    ;; process's `:lanes` region, instead of as one block-rate scalar. It is the
+    ;; host's mechanism for arbitrary automation curves; `:smooth` and `:slew`
+    ;; compose with it, since they only change what the lane's target is.
+    [:lane {:optional true} boolean?]]])
 
 (def ^:private BufferSource
   [:map {:closed true}
@@ -604,6 +615,20 @@
     (when-not (some #(= name (:name %)) params)
       (fail "DSP process control refers to an unknown parameter"
             source path {:name name :parameters (mapv :name params)}))
+    (when (and (map? control) (contains? control :smooth) (contains? control :slew))
+      (fail "DSP control smoothing and slew limiting are alternatives"
+            source path {:control control}))
+    ;; Shorthand controls arrive as symbols or keywords, so every mode check
+    ;; must first establish that there is a control map at all.
+    (when (and (map? control) (contains? control :smooth) (not= :float type))
+      (fail "DSP smoothed controls must have type :float"
+            source path {:name name :type type}))
+    (when (and (map? control) (contains? control :slew) (not= :float type))
+      (fail "DSP slewed controls must have type :float"
+            source path {:name name :type type}))
+    (when (and (map? control) (:lane control) (not= :float type))
+      (fail "DSP per-frame lane controls must have type :float"
+            source path {:name name :type type}))
     (cond-> {:name name :type type}
       (and (map? control) (contains? control :default))
       (assoc :default
@@ -611,7 +636,10 @@
                (validate-source-form! (:default control) source
                                       (conj path :default))
                (normalize-initializer (:default control) type source
-                                      (conj path :default)))))))
+                                      (conj path :default))))
+      (map? control)
+      (merge (select-keys control [:smooth :slew])
+             (when (:lane control) {:lane true})))))
 
 (defn- normalize-buffer-name
   [name source path]
@@ -691,7 +719,19 @@
                    (if input?
                      (mapv :name (rest params))
                      (mapv :name params)))
-        buffers (normalize-buffers (:buffers process) channels source input?)]
+        buffers (normalize-buffers (:buffers process) channels source input?)
+        ;; Lane controls share one flat, host-written region: one slice of
+        ;; `:frame-capacity` frames per lane. The slicing is an addressing
+        ;; detail of the kernel; the host sees one named lane per control.
+        lane-controls (filterv #(and (map? %) (:lane %)) controls)
+        buffers (if (seq lane-controls)
+                  (do
+                    (when (some #(= :lanes (:name %)) buffers)
+                      (fail "DSP process buffers cannot be named :lanes"
+                            source [:process :buffers] {}))
+                    (conj buffers {:name :lanes :direction :control
+                                   :channels 1 :type :float}))
+                  buffers)]
     (when-not (and (integer? channels) (pos? channels))
       (fail "DSP process channels must be a positive integer"
             source [:process :channels] {:channels channels}))
@@ -794,6 +834,74 @@
             params)
       params)))
 
+(def ^:private ramp-modes [:smooth :slew])
+
+(defn- ramp-mode
+  "The declared smoothing mode of a control, as `[mode amount]`, or nil."
+  [control]
+  (some (fn [mode] (when (contains? control mode) [mode (get control mode)]))
+        ramp-modes))
+
+(defn- ramp-state-name
+  ;; The parameter must not be called `name`: it would shadow `clojure.core/name`
+  ;; and `(name name)` would silently become a map lookup returning nil.
+  [control-name]
+  (symbol (str (clojure.core/name control-name) "-ramped")))
+
+(defn- replace-symbol
+  "Replace every occurrence of the symbol `from` with `to` in a source form.
+
+  Safe as a plain tree walk because the language rejects shadowing an in-scope
+  binding (P7c), so a name inside a `let` cannot mean something else. Keywords,
+  which is how record fields and selectors are spelled, are untouched."
+  [form from to]
+  (cond
+    (= form from) to
+    (seq? form) (apply list (map #(replace-symbol % from to) form))
+    (vector? form) (mapv #(replace-symbol % from to) form)
+    (map? form) (reduce-kv (fn [result key value]
+                             (assoc result key (replace-symbol value from to)))
+                           form form)
+    :else form))
+
+(defn- ramp-update
+  "The per-frame update that moves a ramped control's own value one step toward
+  the raw control.
+
+  Both forms are deliberately per *frame*: a block-rate smoothing would make the
+  result depend on how the host partitioned its blocks, which P9's invariance
+  requirement forbids. The raw control is still the target, so a host sets it by
+  the ordinary control mechanism — mid-block events included."
+  [mode state-name control-name amount]
+  (case mode
+    :smooth (list '+ state-name
+                  (list '* (list '- control-name state-name) amount))
+    :slew (list '+ state-name
+                (list 'max
+                      (list 'min (list '- control-name state-name) amount)
+                      (list '- 0.0 amount)))))
+
+(defn- ramp-states
+  "Turn each ramped control into a float state slot plus the `:next` update that
+  carries its smoothed value, one step per frame."
+  [controls states source]
+  (let [taken (set (map :name states))]
+    (vec (keep (fn [control]
+                 (when-let [[mode amount] (ramp-mode control)]
+                   (let [name (:name control)
+                         state-name (ramp-state-name name)]
+                     (when (taken state-name)
+                       (fail "DSP ramped control needs a free state name"
+                             source [:process :controls]
+                             {:control name :state state-name}))
+                     {:control name
+                      :replaced state-name
+                      :state {:name state-name
+                              :type :float
+                              :init (or (:default control) 0.0)
+                              :next (ramp-update mode state-name name amount)}})))
+               controls))))
+
 (defn normalize
   "Normalize and validate a source descriptor before IR lowering."
   [definition]
@@ -832,6 +940,22 @@
             ;; A control's declared type types its parameter, so a module call
             ;; and a process entry agree on the parameter's type.
             params (annotate-control-types params process)
+            ;; A ramped control reads its own smoothed value instead of the raw
+            ;; control; the raw control is still the target the update moves
+            ;; toward. The rewrite covers the body and every *user* `:next`, and
+            ;; must happen before the synthesized updates are added — rewriting
+            ;; those would turn their target into the smoothed value itself.
+            ramps (ramp-states (:controls process) states source)
+            rewrite (fn [form]
+                      (reduce (fn [form {:keys [control replaced]}]
+                                (replace-symbol form control replaced))
+                              form ramps))
+            body (mapv rewrite body)
+            states (mapv (fn [state]
+                           (cond-> state
+                             (:next state) (update :next rewrite)))
+                         states)
+            states (into states (map :state ramps))
             normalized {:dsp/kind :function
                         :name (:name definition)
                         :params params

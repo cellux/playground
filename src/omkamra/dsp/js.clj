@@ -41,7 +41,7 @@
                   :channel (if (map? (:channel expression))
                              (lower-expression (:channel expression) channels)
                              (:channel expression))
-                  :channels channels
+                  :per-channel? (:per-channel? expression)
                   :index (lower-expression (:index expression) channels)}
     :binary {:op :binary :operator (:operator expression) :type (:type expression)
              :left (lower-expression (:left expression) channels)
@@ -84,7 +84,7 @@
                    :channel (if (map? (:channel statement))
                               (lower-expression (:channel statement) channels)
                               (:channel statement))
-                   :channels channels
+                   :per-channel? (:per-channel? statement)
                    :index (lower-expression (:index statement) channels)
                    :value (lower-expression (:value statement) channels)}
     (:state-store :array-store)
@@ -120,6 +120,7 @@
               :scratch (:scratch ir)
               :frames (:frames ir)
               :sample-rate (:sample-rate ir)
+              :lanes (:lanes ir)
               :frame-body (lower-statement (:frame-body ir) (:channels ir))}
     (throw (ex-info "unsupported IR entry in JS lowering" {:ir ir}))))
 
@@ -167,12 +168,14 @@
 (defn- buffer-source
   [operation]
   (let [name (name (:buffer-id operation))]
-    (if (= 1 (:channels operation))
-      name
+    ;; Only a per-channel buffer is subscripted, so a flat lane region is read
+    ;; the same way at every channel.
+    (if (:per-channel? operation)
       (str name "["
            (if (map? (:channel operation))
              (emit-expression (:channel operation))
-             (str (:channel operation))) "]"))))
+             (str (:channel operation))) "]")
+      name)))
 
 (defn- emit-expression
   [expression]
@@ -370,7 +373,7 @@
            "  }"]))
 
 (defn- emit-process
-  [{:keys [channels controls state scratch frame-body input?]}]
+  [{:keys [channels controls state scratch frame-body input? lanes]}]
   (let [arena (concat state scratch)
         control-params (map #(identifier (:name %)) controls)
         state-init (str "[" (str/join ", "
@@ -398,7 +401,10 @@
       [(str "  function process("
             (str/join ", " (concat (when input? ["input"])
                                    ["output" "frames" "sampleRate"]
-                                   control-params))
+                                   control-params
+                                   ;; Any number of lanes is one flat region, so
+                                   ;; it is one argument rather than one per lane.
+                                   (when (seq lanes) ["lanes"])))
             ") {")]
       (if (= 1 channels)
         (concat ["    for (let frame = 0; frame < frames; frame += 1) {"]

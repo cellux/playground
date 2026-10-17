@@ -7,77 +7,86 @@
 (definterface DspKernel
   (^void process [^floats input ^floats output ^int frames ^float sample-rate
                   ^floats float-controls ^ints int-controls
-                  ^floats float-state ^ints int-state]))
+                  ^floats float-state ^ints int-state
+                  ^floats lanes]))
 
 (definterface DspMultiKernel
   (^void process [^"[[F" input ^"[[F" output ^int frames ^float sample-rate
                   ^floats float-controls ^ints int-controls
-                  ^floats float-state ^ints int-state]))
+                  ^floats float-state ^ints int-state
+                  ^floats lanes]))
 
 (definterface DspKernelD64
   (^void process [^doubles input ^doubles output ^int frames ^double sample-rate
                   ^doubles float-controls ^ints int-controls
-                  ^doubles float-state ^ints int-state]))
+                  ^doubles float-state ^ints int-state
+                  ^doubles lanes]))
 
 (definterface DspMultiKernelD64
   (^void process [^"[[D" input ^"[[D" output ^int frames ^double sample-rate
                   ^doubles float-controls ^ints int-controls
-                  ^doubles float-state ^ints int-state]))
+                  ^doubles float-state ^ints int-state
+                  ^doubles lanes]))
 
-;; The unchecked adapters own persistent state, leaving a primitive block ABI
-;; for real-time hosts.  The checked API validates this same ABI before
-;; delegating to one of these interfaces.
+;; The final `lanes` argument is the block's flat per-frame automation region,
+;; or nil when the process declares no lane. All of a process's lanes share it,
+;; one `:frame-capacity`-frame slice each, so any number of lanes costs one
+;; argument rather than one argument per lane (D28).
 (definterface DspProcess
   (^void process [^floats input ^floats output ^int frames ^float sample-rate
-                  ^floats float-controls ^ints int-controls]))
+                  ^floats float-controls ^ints int-controls
+                  ^floats lanes]))
 
 (definterface DspMultiProcess
   (^void process [^"[[F" input ^"[[F" output ^int frames ^float sample-rate
-                  ^floats float-controls ^ints int-controls]))
+                  ^floats float-controls ^ints int-controls
+                  ^floats lanes]))
 
 (definterface DspProcessD64
   (^void process [^doubles input ^doubles output ^int frames ^double sample-rate
-                  ^doubles float-controls ^ints int-controls]))
+                  ^doubles float-controls ^ints int-controls
+                  ^doubles lanes]))
 
 (definterface DspMultiProcessD64
   (^void process [^"[[D" input ^"[[D" output ^int frames ^double sample-rate
-                  ^doubles float-controls ^ints int-controls]))
+                  ^doubles float-controls ^ints int-controls
+                  ^doubles lanes]))
 
 (deftype ^:private F32ProcessAdapter [^DspKernel kernel
                                       ^floats float-state
                                       ^ints int-state]
   DspProcess
   (^void process [_ ^floats input ^floats output ^int frames ^float sample-rate
-                  ^floats float-controls ^ints int-controls]
+                  ^floats float-controls ^ints int-controls ^floats lanes]
     (.process kernel input output frames sample-rate
-              float-controls int-controls float-state int-state)))
+              float-controls int-controls float-state int-state lanes)))
 
 (deftype ^:private F32MultiProcessAdapter [^DspMultiKernel kernel
                                            ^floats float-state
                                            ^ints int-state]
   DspMultiProcess
   (^void process [_ ^"[[F" input ^"[[F" output ^int frames ^float sample-rate
-                  ^floats float-controls ^ints int-controls]
+                  ^floats float-controls ^ints int-controls ^floats lanes]
     (.process kernel input output frames sample-rate
-              float-controls int-controls float-state int-state)))
+              float-controls int-controls float-state int-state lanes)))
 
 (deftype ^:private F64ProcessAdapter [^DspKernelD64 kernel
                                       ^doubles float-state
                                       ^ints int-state]
   DspProcessD64
   (^void process [_ ^doubles input ^doubles output ^int frames ^double sample-rate
-                  ^doubles float-controls ^ints int-controls]
+                  ^doubles float-controls ^ints int-controls ^doubles lanes]
     (.process kernel input output frames sample-rate
-              float-controls int-controls float-state int-state)))
+              float-controls int-controls float-state int-state lanes)))
 
 (deftype ^:private F64MultiProcessAdapter [^DspMultiKernelD64 kernel
                                            ^doubles float-state
                                            ^ints int-state]
   DspMultiProcessD64
   (^void process [_ ^"[[D" input ^"[[D" output ^int frames ^double sample-rate
-                  ^doubles float-controls ^ints int-controls]
+                  ^doubles float-controls ^ints int-controls ^doubles lanes]
     (.process kernel input output frames sample-rate
-              float-controls int-controls float-state int-state)))
+              float-controls int-controls float-state int-state lanes)))
 
 (def ^:private float-array-class (Class/forName "[F"))
 (def ^:private int-array-class (Class/forName "[I"))
@@ -152,7 +161,10 @@
 (defn- buffer-reference-instructions
   [operation slots labels]
   (let [buffer (get slots (:buffer-id operation))]
-    (if (:multi-channel? slots)
+    ;; A broadcast buffer — a one-channel buffer in a multi-channel process, and
+    ;; in particular a lane region — is read identically at every channel, so it
+    ;; is never subscripted.
+    (if (:per-channel? operation)
       (concat [[:aload buffer]]
               (channel-instructions (:channel operation) slots labels)
               [[:aaload]])
@@ -686,6 +698,33 @@
   (when (some #(= :input (:direction %)) (:buffers ir))
     (check-buffer! ir input :input frames)))
 
+(defn- check-lanes!
+  "Validate the flat lane region against the artifact's lane layout.
+
+  Lane bases are compile-time constants (`i * frame-capacity`), so a host must
+  allocate the whole region even when it renders a short block. Validating that
+  here keeps a short region from becoming an out-of-bounds read inside the audio
+  callback."
+  [artifact lanes]
+  (let [ir (:process-ir artifact)
+        declared (count (:lanes ir))]
+    (when (pos? declared)
+      (when (nil? lanes)
+        (throw (ex-info "this DSP process declares per-frame lanes"
+                        {:lanes (mapv :name (:lanes ir))})))
+      (when-not (instance? (real-array-class) lanes)
+        (throw (ex-info "DSP lane region has the wrong primitive type"
+                        {:precision (:precision ir)
+                         :actual (class lanes)})))
+      (let [required (* declared (long (:frame-capacity ir)))]
+        (when (< (alength lanes) required)
+          (throw (ex-info "DSP lane region is shorter than the lane layout"
+                          {:expected required
+                           :actual (alength lanes)
+                           :lane-count declared
+                           :lane-stride (:frame-capacity ir)}))))))
+  lanes)
+
 (defn process-unchecked!
   "Run a JVM process artifact through its primitive, state-owning ABI.
 
@@ -694,60 +733,78 @@
   primitive arrays. `float-controls` and `int-controls` must be the reusable
   physical control arrays described by `:control-layout`; state remains owned
   by the artifact. Real-time hosts should retain and call `:unchecked`
-  directly through its matching `Dsp*Process` interface when possible."
-  [holder input output frames sample-rate float-controls int-controls]
-  (let [adapter (:unchecked holder)
-        multi-channel? (:multi-channel? holder)]
-    (case (:precision holder)
-      :f32 (if multi-channel?
-             (.process ^DspMultiProcess adapter input output (int frames)
-                       (float sample-rate) float-controls int-controls)
-             (.process ^DspProcess adapter input output (int frames)
-                       (float sample-rate) float-controls int-controls))
-      :f64 (if multi-channel?
-             (.process ^DspMultiProcessD64 adapter input output (int frames)
-                       (double sample-rate) float-controls int-controls)
-             (.process ^DspProcessD64 adapter input output (int frames)
-                       (double sample-rate) float-controls int-controls)))))
+  directly through its matching `Dsp*Process` interface when possible.
+
+  The optional final argument is the flat per-frame lane region (D28)."
+  ([holder input output frames sample-rate float-controls int-controls]
+   (process-unchecked! holder input output frames sample-rate float-controls
+                       int-controls nil))
+  ([holder input output frames sample-rate float-controls int-controls lanes]
+   (let [artifact (or (:artifact holder) holder)
+         adapter (:unchecked holder)
+         multi-channel? (:multi-channel? holder)]
+     ;; One field read, so the real-time path stays allocation-free.
+     (when (and (:has-lanes? artifact) (nil? lanes))
+       (throw (ex-info "this DSP process declares per-frame lanes"
+                       {:lanes (mapv :name (:lanes (:process-ir artifact)))})))
+     (case (:precision holder)
+       :f32 (if multi-channel?
+              (.process ^DspMultiProcess adapter input output (int frames)
+                        (float sample-rate) float-controls int-controls lanes)
+              (.process ^DspProcess adapter input output (int frames)
+                        (float sample-rate) float-controls int-controls lanes))
+       :f64 (if multi-channel?
+              (.process ^DspMultiProcessD64 adapter input output (int frames)
+                        (double sample-rate) float-controls int-controls lanes)
+              (.process ^DspProcessD64 adapter input output (int frames)
+                        (double sample-rate) float-controls int-controls lanes))))))
 
 (defn process-checked!
   "Validate and run the raw primitive JVM process ABI.
 
   This has the same arguments as `process-unchecked!`, but verifies buffer
-  shapes and lengths, control storage, and artifact-owned state before it
-  delegates to the unchecked adapter."
-  [holder input output frames sample-rate float-controls int-controls]
-  (binding [*precision* (:precision holder)]
-    (let [artifact (or (:artifact holder) holder)
-          frames (int frames)
-          ir (:process-ir artifact)]
-      (when (neg? frames)
-        (throw (ex-info "DSP process frame count must not be negative"
-                        {:frames frames})))
-      (check-input! ir input frames)
-      (check-buffer! ir output :output frames)
-      (check-controls! (:control-layout holder) float-controls int-controls)
-      (check-state! (:state-layout holder) (:state holder))
-      (process-unchecked! holder input output frames sample-rate
-                          float-controls int-controls))))
+  shapes and lengths, lane region storage, control storage, and
+  artifact-owned state before it delegates to the unchecked adapter."
+  ([holder input output frames sample-rate float-controls int-controls]
+   (process-checked! holder input output frames sample-rate float-controls
+                     int-controls nil))
+  ([holder input output frames sample-rate float-controls int-controls lanes]
+   (binding [*precision* (:precision holder)]
+     (let [artifact (or (:artifact holder) holder)
+           frames (int frames)
+           ir (:process-ir artifact)]
+       (when (neg? frames)
+         (throw (ex-info "DSP process frame count must not be negative"
+                         {:frames frames})))
+       (check-input! ir input frames)
+       (check-buffer! ir output :output frames)
+       (check-controls! (:control-layout holder) float-controls int-controls)
+       (check-lanes! artifact lanes)
+       (check-state! (:state-layout holder) (:state holder))
+       (process-unchecked! holder input output frames sample-rate
+                           float-controls int-controls lanes)))))
 
 (defn- kernel-process!
-  [kernel multi-channel? input output frames sample-rate controls state]
+  [kernel multi-channel? input output frames sample-rate controls state lanes]
   (if (f64?)
     (if multi-channel?
       (.process ^DspMultiKernelD64 kernel input output frames sample-rate
                 ^doubles (:float controls) ^ints (:int controls)
-                ^doubles (:float state) ^ints (:int state))
+                ^doubles (:float state) ^ints (:int state)
+                ^doubles lanes)
       (.process ^DspKernelD64 kernel ^doubles input ^doubles output frames sample-rate
                 ^doubles (:float controls) ^ints (:int controls)
-                ^doubles (:float state) ^ints (:int state)))
+                ^doubles (:float state) ^ints (:int state)
+                ^doubles lanes))
     (if multi-channel?
       (.process ^DspMultiKernel kernel input output frames sample-rate
                 ^floats (:float controls) ^ints (:int controls)
-                ^floats (:float state) ^ints (:int state))
+                ^floats (:float state) ^ints (:int state)
+                ^floats lanes)
       (.process ^DspKernel kernel ^floats input ^floats output frames sample-rate
                 ^floats (:float controls) ^ints (:int controls)
-                ^floats (:float state) ^ints (:int state)))))
+                ^floats (:float state) ^ints (:int state)
+                ^floats lanes))))
 
 (defn- process-callable
   [precision kernel ir layout state control-layout controls-state]
@@ -766,12 +823,12 @@
         (write-controls! control-layout controls controls-state)
         (kernel-process! kernel (> (:channels ir) 1) input output frames
                          (if (f64?) 0.0 (float 0.0))
-                         controls-state state)
+                         controls-state state nil)
         nil))))
 
 (defn- process-context-callable
   [precision kernel ir layout state control-layout controls-state]
-  (fn [{:keys [input output frames sample-rate controls]
+  (fn [{:keys [input output frames sample-rate controls lanes]
         :or {sample-rate 0.0 controls []}}]
     (binding [*precision* precision]
       (when-not (= (count (:controls ir)) (count controls))
@@ -787,7 +844,7 @@
         (write-controls! control-layout controls controls-state)
         (kernel-process! kernel (> (:channels ir) 1) input output frames
                          (if (f64?) (double sample-rate) (float sample-rate))
-                         controls-state state)
+                         controls-state state lanes)
         nil))))
 
 (defn- slot-layout
@@ -839,7 +896,10 @@
             int-control-slot (inc float-control-slot)
             float-state-slot (inc int-control-slot)
             int-state-slot (inc float-state-slot)
-            first-local-slot (inc int-state-slot)
+            ;; The lane region is the last array parameter, so adding it shifts
+            ;; no existing slot number.
+            lanes-slot (inc int-state-slot)
+            first-local-slot (inc lanes-slot)
             [control-slots next-slot] (slot-layout (:controls ir) first-local-slot)
             [local-slots next-slot] (slot-layout (:locals ir) next-slot)
             channel-slot (when multi-channel? next-slot)
@@ -853,6 +913,7 @@
             slots (merge {:input 1 :output 2 :frames 3 :sample-rate sample-rate-slot
                           :frame frame-slot :multi-channel? multi-channel?
                           :state-layout state-slots}
+                         {:lanes lanes-slot}
                          (when multi-channel? {:channel channel-slot})
                          control-slots local-slots
                          {:next-temp (atom (inc frame-slot))})
@@ -891,7 +952,8 @@
                              :name :process
                              :desc [input-class input-class :int (real-type)
                                     (real-array-class) int-array-class
-                                    (real-array-class) int-array-class :void]
+                                    (real-array-class) int-array-class
+                                    (real-array-class) :void]
                              :emit (vec (concat control-initializers loops [[:return]]))}]}
             class (insn/define type)
             kernel (.newInstance ^Class class)
@@ -923,6 +985,7 @@
                                     (java.util.Arrays/fill ^ints (:int state) 0))
                                 (do (java.util.Arrays/fill ^floats (:float state) (float 0.0))
                                     (java.util.Arrays/fill ^ints (:int state) 0)))))
+                 :has-lanes? (boolean (seq (:lanes ir)))
                  :unchecked (unchecked-adapter precision kernel multi-channel? state)
                  :invoke (process-callable precision kernel ir state-layout state
                                            control-layout controls-state)

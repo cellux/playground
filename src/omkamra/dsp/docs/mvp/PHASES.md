@@ -313,6 +313,30 @@ and give every target an explicit create/reset/destroy lifecycle.
    because this phase *already* moves the process ABI's argument indices (the
    instance handle), so the descriptor/ABI/adapter rework is paid once.
 
+**Slices.** P9a (done) — `omkamra.dsp.event`: the v1 vocabulary with closed
+payload validation, frame-then-sequence ordering, and the preallocated SPSC
+queue with the drop-oldest-future policy and fixed counters (deliverables 1, 2,
+4). P9b (done) — `omkamra.dsp.schedule`: block-relative segmentation, a
+reusable allocation-free segment, and host-driven rendering, with partition
+invariance proven exactly on interpreter, JVM, JavaScript, and Wasm
+(deliverable 6). The kernel needed **no** change, because a segment boundary is
+just a point where the host sets controls and calls the process again (D24).
+P9c (done) — a control may declare `:smooth` (one-pole) or `:slew` (bounded
+step), both applied **per frame** by the compiled frame loop. This is the
+smoothing half of deliverable 3, and it needed no new IR node, no ABI change and
+no backend change: a per-frame one-pole desugars into state and arithmetic the
+language already has, with the control bound to a state read exactly as the input
+sample is bound to a buffer load (D27). P9d (done, all four targets) —
+host-supplied per-frame automation **lanes**: the other half of D27, flat in one
+region with a compile-time stride, named individually in the ABI (D28).
+
+**Not done.** Deliverable 3's *linear/critical* ramps to a target need a per-frame
+division plus a counter, or a block-rate prologue the IR does not have — and per
+D27 a host can supply them as a lane instead. Lanes are implemented on all four targets and covered
+by an `:automation-lane` catalog case. Deliverable 5's non-finite *containment* belongs with P10's
+voice pool, where "the affected voice" exists; the overflow and rejection
+counters are done.
+
 **Slices.** P8a (done) — the target-neutral instance lifecycle for
 `:interpreter` and `:jvm` (deliverables 1, 2), with differential independence
 tests (deliverable 5). P8b (done) — the ABI describes one create/reset/destroy

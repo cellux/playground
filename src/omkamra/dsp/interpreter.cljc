@@ -475,9 +475,12 @@
       (throw (ex-info "DSP buffer channel is out of bounds"
                       {:buffer-id (:buffer-id operation) :channel channel
                        :channels (:channels context)})))
-    (if (= 1 (:channels context))
-      buffer
-      (aget buffer channel))))
+    ;; A broadcast buffer is read the same at every channel, so it is never
+    ;; subscripted; `:lanes` is the case that matters, since a lane region is
+    ;; flat even when the process is not.
+    (if (:per-channel? operation)
+      (aget buffer channel)
+      buffer)))
 
 (defn- checked-buffer-index
   [operation locals context]
@@ -682,7 +685,7 @@
   callable does not pass it. `:controls` is a vector in process-signature
   order. This function is the reference implementation used by richer host
   adapters and by the browser conformance runner."
-  [ir {:keys [input output frames controls state sample-rate]
+  [ir {:keys [input output lanes frames controls state sample-rate]
        :or {controls [] sample-rate 0.0}}]
   (binding [*precision* (precision! ir)]
     (check-control-arity! ir controls)
@@ -697,16 +700,19 @@
           (execute-statement
            (:frame-body ir)
            (volatile! control-locals)
-           {:input input
-            :output output
-            :channels (:channels ir)
-            :channel channel
-            :frame frame
-            :frames frames
-            :sample-rate sample-rate
-            :checks (get-in ir [:options :checks] :development)
-            :state state
-            :definitions (:definitions ir)})))
+           (cond-> {:input input
+                    :output output
+                    :channels (:channels ir)
+                    :channel channel
+                    :frame frame
+                    :frames frames
+                    :sample-rate sample-rate
+                    :checks (get-in ir [:options :checks] :development)
+                    :state state
+                    :definitions (:definitions ir)}
+             ;; Buffers resolve by id, so the lane region needs only to be
+             ;; present under its own name.
+             lanes (assoc :lanes lanes)))))
       nil)))
 
 (defn process

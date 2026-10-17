@@ -944,6 +944,279 @@ independence tests on the JVM *and* in the browser, and optional input ports
 
 ---
 
+## P9a/P9b — The sequencing layer (deliverables 1, 2, 4 and 6)
+
+The PLAN already drew the line this phase needs: the **sequencing layer** is
+host-side and portable, owns the timeline and the capacity, and delivers
+canonical timestamped messages; the kernel owns typed state and never learns
+about events, host objects, or absolute time. So P9 added no backend change at
+all, and the whole phase is two new `.cljc` namespaces.
+
+**Two clocks, deliberately.** An event's `:frame` is an absolute, monotonic
+position on the synth timeline and is 64-bit, because 32 bits of frames is only
+about 12 hours at 48 kHz. An offset handed to a kernel is block-relative and
+small, so it stays inside the language's 32-bit `:int`. `:sequence` orders
+events sharing a frame, which is what makes rendering independent of where the
+host cut its blocks.
+
+**`omkamra.dsp.event`** — the v1 vocabulary (`:note-on`/`:note-off` with
+velocity and release velocity, `:pitch-bend`, `:control-change`, `:parameter`,
+`:pressure`, `:transport`, `:sample-rate`), with closed payload validation (a
+typo cannot silently become a no-op), `compare-events` ordering, and the SPSC
+ingress queue. The queue is fixed-capacity and preallocated; on the JVM its
+indices are `AtomicLong`s and its slots an `AtomicReferenceArray`, so a
+published event needs no lock. Overflow drops the **oldest future** event —
+never one already due or being dispatched — and when nothing is droppable it
+**rejects the incoming event** instead, so a burst can never make the audio
+thread lose an event it owes the kernel. Either way a fixed counter moves;
+nothing logs, allocates, blocks, or throws.
+
+**`omkamra.dsp.schedule`** — block-relative segmentation. `next-segment!`
+returns the scheduler's own reusable segment: an offset, a frame count, and the
+events due at that offset, read out of a preallocated buffer. An event due
+exactly at the block's end is deliberately left for the next block.
+
+**The kernel did not have to change, and that is the point.** A segment boundary
+is exactly a point where a control value changes, and the existing process ABI
+already lets a host set controls and render a block, so segmenting a block is
+repeated `process!` calls with the controls updated in between. Partition
+invariance then follows from the language's per-frame updates — which is
+*deliverable 6*, and it is now proven rather than argued: three partitionings
+(200, 64 and 7-frame blocks) of the same 200-frame timeline render **exactly
+identically** on the interpreter and JVM at f32 and f64, and in the browser on
+JavaScript and Wasm.
+
+The one real cost is slicing. A kernel renders into the start of its output
+buffer, so rendering frames `[k, k + n)` means copying that slice in and out of
+a preallocated scratch. That is the honest price of block-relative rendering
+against an ABI with no block offset; a host that grows one would drop both
+copies.
+
+**The checks carry their own falsification.** A dispatch at frame 17 renders
+*identically* to splitting the block by hand at 17, and moving the event by one
+frame moves the output by exactly one frame:
+
+```
+first sample where event@17 differs from event@18: 17
+first sample where event@17 differs from event@16: 16
+```
+
+So the equivalence is not vacuous. The browser check adds a second control: the
+same block with the events *quantised* to the block boundary — what a host that
+ignored frame offsets would produce — must **differ**, and it does.
+
+### Three bugs the tests caught
+
+1. **`copy-range!` lost its target offset** when I simplified it, so a later
+   segment's rendered frames were copied back to index 0. Every no-event case
+   passed (all segments start at 0) and every multi-block case failed. This is
+   precisely why the invariance test exists.
+2. **The `Segment` was given its own event array** while `next-segment!` filled
+   the scheduler's, so events were never readable and *no control ever
+   changed*. The invariance test passed — **vacuously**, because the timeline
+   was equivalent to no events at all. What exposed it was asserting that an
+   event *changes* the signal; the same lesson as P8c's negative control, which
+   is why every check here now has a positive or negative twin.
+3. **A reflective array access costs ~24 KB on this JVM.** `begin-block!` —
+   three writes to a `long[]` — allocated 74 KB per call, and one `push-event!`
+   22 KB, because Clojure could not resolve the `long[]` overload of
+   `aset`/`aget` and fell back to `Reflector`. `(set! *warn-on-reflection* true)`
+   named every site; adding a `^longs` hint (or an explicit `(long ...)`) took
+   the whole scheduling path from **6.5 MB per block to 48 bytes**, and a
+   push/pop cycle from 24,624 bytes to **0**. The pattern is worth remembering:
+   an unhinted primitive-array access in a hot path is not merely slow, it is
+   catastrophic, and reflection warnings are the tool that finds it.
+
+Two of the three were found only because a test asserted a *control* outcome as
+well as the intended one. That is now the house style for this phase.
+
+### Not done, and why
+
+- **Deliverable 3 (parameter ramps and one-pole smoothing as ABI-level
+  constructs)** is not implemented. P7 already ships `control/smoothing` and
+  `control/slew-limit` as DSP-language modules, and an ABI-level ramp is not the
+  same thing: it needs a per-*frame* interpolation inside the kernel (a `:ramp`
+  IR op across four backends), because a per-*segment* ramp would make the
+  result depend on where the host cut its blocks and would break deliverable 6
+  outright. That is a real piece of work, not a detail, and it is better done
+  deliberately than bolted on here.
+- **Deliverable 5's non-finite containment** is not implemented. The overflow
+  and rejection counters are (`queue-stats`). Containment — detecting a
+  non-finite output, silencing the affected voice — is a kernel-side policy
+  belonging with P10's voice pool, where "the affected voice" exists.
+
+**Verified.** JVM 81 tests / 852 assertions; browser 17/17 (four shared
+matrices, the WAT bounded-loop and sin-table checks, four instance-independence
+checks, four sample-accurate-scheduling checks, and three AudioWorklet
+adapters); `clj-kondo`/`cljfmt` clean.
+
+---
+
+## P9c — Control smoothing and slew, declared on the control (D27)
+
+Segmentation alone cannot animate a control *within* a segment, so a control can
+now declare its own per-frame carrier:
+
+```clojure
+(dsp/defn smoothed-gain
+  [sample amount]
+  {:process {:controls [{:name amount :smooth 0.01 :default 0.0}]}}
+  (* sample amount))
+```
+
+`:smooth` is a one-pole coefficient and `:slew` a maximum step per frame, both in
+the control's own units. Setting such a control becomes a *target* rather than a
+jump, and the ABI reports the mode so a host knows that.
+
+**No new IR node, no ABI change, no backend change.** A per-frame one-pole is
+three arithmetic operations, and lowering already has the mechanism: the input
+sample is bound to an arbitrary expression (`:buffer-load`), so a control can
+equally be bound to a *state read*, with the update prepended as that state's
+`:next`. `descriptor.clj` desugars a declared mode into one float state slot plus
+a `:next`, and rewrites reads of the control to read the state. The raw control
+remains the target, so a host drives it through the ordinary control mechanism —
+mid-block events included.
+
+Both amounts are **per frame**, which is the whole point: a per-*block* amount
+would make rendering depend on the host's block size and would break P9's
+invariance outright.
+
+**Verified on all four targets.** `smoothed-gain` and `slewed-gain` are library
+definitions with catalog cases, so the shared matrix covers JavaScript and Wasm
+(82 process cases now), and a dedicated test asserts the engine matches an
+independently computed f32 one-pole recurrence, that a slewed control takes
+bounded steps and lands exactly on its target, that the ABI reports the mode,
+and that `:smooth`/`:slew` on an `:int` control, both modes at once, and a
+non-numeric amount are all rejected. Partition independence is asserted with a
+target change *inside* the block, on interpreter and JVM at f32 and f64,
+including a check that the automation is doing something.
+
+**Three of my own mistakes, all caught by running it:**
+
+1. `ramp-state-name`'s parameter was called `name`, shadowing `clojure.core/name`
+   — so `(name name)` became a map lookup returning nil and every state came out
+   `-ramped`. The same class of mistake as the `case` parameter noted in the
+   reference section.
+2. The body/`:next` rewrite ran *after* the synthesized states were added, so it
+   rewrote the updates' own target into the smoothed value, making the update
+   `current += (current - current) * c`. The order is load-bearing: rewrite the
+   user's forms first, then append the synthesized states.
+3. `normalize-control` received shorthand controls as *symbols*, and my mode
+   checks assumed maps. Every mode check now establishes `map?` first.
+
+**Not done: host-supplied automation curves** (block-rate control buffers), which
+is the other half of D27. A lane needs a buffer region in the ABI, its Wasm
+memory layout, and a per-frame read in place of the control — the same
+`{:op :buffer-load}` shape the input sample already uses. Linear/critical ramps
+to a target stay unimplemented: they need a per-frame division plus a counter, or
+a block-rate prologue the IR does not have, and per D27 a host can supply them as
+a control buffer instead.
+
+---
+
+## P9d — Host-supplied automation curves: per-frame lanes (D28)
+
+A control can now declare `:lane true`, and its value comes from the host one
+float **per frame** — arbitrary curves, envelopes, sequenced lanes:
+
+```clojure
+(dsp/defn lane-gain
+  [sample amount]
+  {:process {:controls [{:name amount :lane true}]}}
+  (* sample amount))
+```
+
+```clojure
+(dsp/process! artifact {:input in :lanes {:amount cutoff-curve} :output out
+                        :frames 128 :sample-rate fs :controls []})
+```
+
+**The reconnaissance is the story.** My first estimate was that this needed a new
+IR op and a new region concept across four backends. It needed neither, because
+three things were already true and I checked rather than assumed:
+
+- every backend resolves `:buffer-load` **generically by `:buffer-id`** — the
+  interpreter via a context lookup, the JVM via a `slots` map keyed on the id;
+- `:frame-offset` (`frame + constant`) is **already implemented in all four**
+  backends and is already the IR's canonical form for a literal offset;
+- `frame-capacity` is already a fixed compile-time constant in the Wasm layout.
+
+So a lane read is *the same shape as the input sample read* —
+`{:op :buffer-load :buffer-id :lanes :index {:op :frame-offset :offset 0}}` —
+which is the strongest signal available that it fits the language instead of
+being bolted on.
+
+**What is implemented.** The descriptor accepts `:lane` and appends one
+`:lanes` region (`:direction :control`, which the buffer schema already had);
+lowering binds a lane control to the per-frame read and drops it from the scalar
+`:controls` list, since it is not a block-rate value; the ABI reports
+`:lanes [{:name amount :offset 0 …}]`, `:lane-stride`, and the region in
+`:buffers`/`:memory`; `process!` flattens `{:amount …}` into the region,
+accepting either spelling of the name; and the interpreter needed only to thread
+one more key, because its buffer lookup is already generic.
+
+Verified: one lane renders `[0.25 0.5 0.75 1.0]`; two lanes land at offsets 0 and
+1024 and stay independent; a lane with no values **fails loudly** rather than
+publishing zeros; and a lane composes with `:smooth` for free, since a smoother's
+target is just the control read — `[0.0 0.5 0.75 0.875]` for a coefficient of
+0.5.
+
+**One trap worth keeping.** The ABI names a lane with a *symbol*, as it names a
+control, and my first probe passed keywords — so the copy silently did nothing
+and the lane read zeros. That is the worst possible failure for automation, so
+the adapter now accepts either spelling *and* throws when a lane has no values.
+
+**All four targets, and the catalog.** The JVM took one extra array parameter on
+all eight `DspKernel`/`DspProcess` interfaces, threaded through the adapters,
+`kernel-process!`, `process-context-callable` and the raw `process-checked!`/
+`process-unchecked!` (which gained a 7th *arity* rather than a new signature, so
+no existing caller had to change). JavaScript and Wasm were small: JS gained a
+`lanes` parameter and reads `lanes[(frame + 0)]`; Wasm gained a `$lanes` pointer
+and a `:lanes` region between the audio ports and the state arena, and needed
+**no addressing change at all**, because a lane read carries `:channel 0` and the
+existing `channel * stride` term reduces to zero. `:automation-lane` is now a
+case in the shared catalog, so the browser matrix verifies both generated targets
+against the portable-IR oracle. Language suite **84 tests / 974 assertions**, and
+browser **17/17** with 84 process cases.
+
+**Three bugs, all worth keeping.**
+
+1. **Channel-ness was a per-process fact, and that was already wrong.** A lane
+   region is flat even in a multi-channel process, so "is this access subscripted
+   by channel" had to become a per-*buffer* question. Recording `:per-channel?` on
+   each buffer access in the IR answers it for all four backends at once — and it
+   exposed a latent bug: a multi-channel process that *declared* its `:process`
+   had its audio ports normalized at descriptor time, where no channel count is
+   known yet, so `process-buffers` trusted a placeholder `1` and never
+   subscripted the input at all. The audio ports now take the compile-time
+   channel count by definition, and a one-channel buffer stays a broadcast
+   buffer.
+2. **The lane stride is a byte count but a lane offset is an element index.**
+   f32 passed and f64 failed: 1024 elements span 4096 bytes only at 4 bytes per
+   element. The stride is now derived from the precision, so a lane holds 1024
+   frames in f32 and 512 in f64. This is exactly the class of bug a single-target
+   check would have missed — and the fix is pinned by an assertion on both
+   strides and both offsets.
+3. **`(str :amount)` is not `(name :amount)`.** The plan travels as JSON, so
+   serializing a lane's name with `str` produced `":amount"`, which could never
+   match a lookup on the page. It failed *quietly* as a mismatch rather than as
+   an error, since a missed lane simply reads zeros.
+
+**How the generated targets were verified before the catalog existed.** A short
+Node harness: compile a case for `:js` and `:wasm`, run it with the interpreter's
+output as the expectation, and drive it directly — `node_modules/.bin/wat2wasm`
+plus `WebAssembly.instantiate` for the module, and the emitted ES module for the
+JavaScript. It runs both precisions in seconds and reports the first differing
+sample, which is how the f64 stride bug surfaced. The catalog case is what keeps
+them honest from now on.
+
+**One ordering rule for the page.** The browser's oracle calls
+`interpreter/process-context` *directly*, so it does not pass through
+`dsp/process!`'s flattening and must flatten lanes itself — it now shares the
+drivers' `lane-region`, so all three agree by construction.
+
+---
+
 ## Handoff — current state after P6 (rolling entry)
 
 This is the one living entry, as opposed to the completed-phase entries above:
@@ -997,11 +1270,11 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   (CodeMirror) and compile them there, which means the compiler itself becomes
   portable and runs in SCI (P13). The library and every new language form are
   therefore authored as portable `.cljc` source forms.
-- Verified through `clojure_eval` on the running nREPL: JVM 77 tests / 781
-  assertions, browser 13/13 (four shared matrices matching 80 process cases and
+- Verified through `clojure_eval` on the running nREPL: JVM 81 tests / 852
+  assertions, browser 17/17 (four shared matrices matching 80 process cases and
   13/3 function cases on JavaScript and Wasm, the WAT bounded-loop and sin-table
-  checks, the four instance-independence checks, and the three AudioWorklet
-  adapters), and `clj-kondo`/`cljfmt` clean.
+  checks, four instance-independence checks, four sample-accurate-scheduling
+  checks, and the three AudioWorklet adapters), and `clj-kondo`/`cljfmt` clean.
 
 ### Architecture
 
