@@ -135,8 +135,8 @@
     :else nil))
 
 (declare lower-value lower-form lower-forms array-form? array-declaration
-         lower-place-store! rebase-slots rebase-records record-leaves
-         lower-record-value)
+         lower-place-store! reject-constant-store! rebase-slots rebase-records
+         record-leaves lower-record-value)
 
 (defn- frame-index
   "Lower a source buffer offset to an absolute per-frame index.
@@ -516,19 +516,46 @@
     (if-let [[record-name path] (field-access target)]
       (lower-place-store! form record-name path value-form env)
       (let [binding (get-in env [:bindings target])]
-        (when-not (valid-name? target)
-          (fail "DSP set! requires a local name or a field place" {:form form}))
-        (when-not (= :local (:kind binding))
-          (fail "DSP set! can only update mutable locals" {:form form :name target}))
-        (let [value (lower-value value-form env)]
-          (expect-type! (:type binding) (:value value) form)
-          (fragment (conj (:statements value)
-                          {:op :assign
-                           :name target
-                           :type (:type binding)
-                           :value (:value value)
-                           :effects #{:write-local}})
-                    {:op :local :name target :type (:type binding)}))))))
+        (cond
+          ;; A scalar state slot is writable from the body, the same way an
+          ;; aggregate slot is written with `state-store`: it is one slot in the
+          ;; same state arena. This is how a voice can publish a value the host
+          ;; reads back (the builtin `activity` slot is one of these), rather
+          ;; than only computing state through `:next`.
+          (= :state (:kind binding))
+          (do
+            (when (> (or (:size binding) 1) 1)
+              (fail "DSP set! on aggregate state must use aset"
+                    {:form form :name target :size (:size binding)}))
+            (reject-constant-store! form binding)
+            (let [value (lower-value value-form env)]
+              (expect-type! (:type binding) (:value value) form)
+              (void-fragment
+               (concat (:statements value)
+                       [{:op :state-store
+                         :state-id (:name binding)
+                         :index (:index binding)
+                         :size 1
+                         :type (:type binding)
+                         :value (:value value)
+                         :effects #{:write-state}}]))))
+
+          (not (valid-name? target))
+          (fail "DSP set! requires a local name or a field place" {:form form})
+
+          (not= :local (:kind binding))
+          (fail "DSP set! can only update mutable locals" {:form form :name target})
+
+          :else
+          (let [value (lower-value value-form env)]
+            (expect-type! (:type binding) (:value value) form)
+            (fragment (conj (:statements value)
+                            {:op :assign
+                             :name target
+                             :type (:type binding)
+                             :value (:value value)
+                             :effects #{:write-local}})
+                      {:op :local :name target :type (:type binding)})))))))
 
 (defn- loop-bound
   [form value source]
@@ -690,6 +717,35 @@
                  :type (:type binding)
                  :value (:value value)
                  :effects #{:write-state}}])))))
+
+(defn- lower-store-special
+  "Store a builtin, host-readable slot: `(store-special :activity value)`.
+
+  `effective-state` already added the slot to the definition's state, so this is
+  an ordinary scalar store. A module that writes a special slot gets its own,
+  private to its call site; only the process entry's are exposed in the ABI."
+  [form env]
+  (let [[_ id value-form & extra] form]
+    (when (or (not (keyword? id)) (nil? value-form) extra)
+      (fail "store-special requires a special slot id and one value"
+            {:form form :special id}))
+    (let [name (symbol (name id))
+          binding (get-in env [:bindings name])]
+      (when-not (and (= :state (:kind binding)) (= id (:special binding)))
+        (fail "store-special is only available for a declared special slot"
+              {:form form :special id}))
+      (reject-constant-store! form binding)
+      (let [value (lower-value value-form env)]
+        (expect-type! (:type binding) (:value value) form)
+        (void-fragment
+         (concat (:statements value)
+                 [{:op :state-store
+                   :state-id (:name binding)
+                   :index (:index binding)
+                   :size 1
+                   :type (:type binding)
+                   :value (:value value)
+                   :effects #{:write-state}}]))))))
 
 (defn- array-form?
   [form]
@@ -1013,12 +1069,36 @@
                                       (rebase-slots base (:state callee)))
                                (swap! (:records-more env) into
                                       (rebase-records base (:records callee)))
-                               base))]
-        (combine-fragments
-         args
+                               base))
+            [argument-statements argument-values]
+            (reduce (fn [[statements values] arg]
+                      (let [value (:value arg)]
+                        (if (contains? #{:local :const} (:op value))
+                          [(into statements (:statements arg))
+                           (conj values value)]
+                            ;; Hoist a computed argument into a local. Inlining
+                            ;; substitutes a parameter into the callee body once
+                            ;; per use, so a computed argument left in place is
+                            ;; duplicated by a callee that uses it more than
+                            ;; once — and a stateful argument would then run
+                            ;; twice against one partition.
+                          (let [local (fresh-local! env "argument" (:type value))]
+                            [(into statements
+                                   (concat (:statements arg)
+                                           [{:op :declare
+                                             :name (:name local)
+                                             :type (:type local)
+                                             :init value}]))
+                             (conj values {:op :local
+                                           :name (:name local)
+                                           :type (:type local)})]))))
+                    [[] []]
+                    args)]
+        (fragment
+         argument-statements
          {:op :call
           :function-id function-id
-          :args (mapv :value args)
+          :args argument-values
           :type (:return-type signature)
           :record-leaves (when (= :record (:return-type signature))
                            (:return-fields signature))
@@ -1067,6 +1147,7 @@
         (= 'buffer-store op) (lower-buffer-store form env)
         (= 'state-load op) (lower-state-load form env)
         (= 'state-store op) (lower-state-store form env)
+        (= 'store-special op) (lower-store-special form env)
         (= 'array op) (fail "array must be bound by a let binding" {:form form})
         (= 'array-load op) (lower-array-load form env)
         (= 'array-store op) (lower-array-store form env)
@@ -1233,10 +1314,76 @@
               entry (assoc state :index offset)]
           (recur (rest remaining) (+ offset size)
                  (conj slots (select-keys entry
-                                          [:name :type :size :init :index :next :constant]))
+                                          [:name :type :size :init :index :next
+                                           :constant :special :special-bit]))
                  (assoc bindings (:name state) (assoc entry :kind :state))
                  records)))
       {:slots slots :bindings bindings :records records})))
+
+(def ^:private special-slots
+  "Builtin, host-readable slots a definition can publish with `store-special`.
+
+  The key is the id written in the form; the value gives the slot's fixed bit,
+  type, and initial value. The bit is the ABI contract a host uses to address a
+  special (`:activity` is bit 0): a definition's specials occupy its first state
+  slots in ascending-bit order, so a host derives each slot's index from the
+  mask. `:activity` is the voice's finish signal (D39): a released voice is
+  freed when it reads <= 0. A voice that never writes it keeps its initial
+  value, so it stays until stolen."
+  {:activity {:bit 0 :type :int :init 1}})
+
+(defn- used-special-ids
+  "The special-slot ids a definition writes in its body."
+  [forms]
+  (let [found (volatile! #{})]
+    (letfn [(walk [form]
+              (cond
+                (seq? form)
+                (do (when (and (= 'store-special (first form))
+                               (keyword? (second form)))
+                      (vswap! found conj (second form)))
+                    (run! walk form))
+                (vector? form) (run! walk form)
+                (map? form) (run! (fn [[key value]] (walk key) (walk value)) form)
+                :else nil))]
+      (run! walk forms)
+      @found)))
+
+(defn- special-bits
+  "The fixed bits of the special slots a definition writes, ascending."
+  [definition]
+  (sort (map #(get-in special-slots [% :bit]) (used-special-ids (:body definition)))))
+
+(defn- special-mask
+  "The mask of builtin special slots a definition writes (D39)."
+  [definition]
+  (reduce (fn [mask bit] (bit-or mask (bit-shift-left 1 (long bit))))
+          0 (special-bits definition)))
+
+(defn- effective-state
+  "A definition's builtin special slots, then its declared state. The specials
+  come first, in ascending-bit order, so their logical indices are exactly the
+  low slots of the entry's state and a host can derive them from the mask (D39).
+  They are added before `expand-state` numbers the slots, so each is an ordinary
+  slot with an ordinary index."
+  [definition]
+  (let [states (vec (or (:state definition) []))
+        declared (set (map :name states))
+        special-states
+        (mapv (fn [id]
+                (let [slot (get special-slots id)
+                      name (symbol (name id))]
+                  (when-not slot
+                    (fail "unknown special slot"
+                          {:special id :supported (vec (sort (keys special-slots)))}))
+                  (when (contains? declared name)
+                    (fail "a special slot name collides with a declared state"
+                          {:special id :state name}))
+                  {:name name :type (:type slot) :init (:init slot)
+                   :special id :special-bit (:bit slot)}))
+              (sort-by #(get-in special-slots [% :bit])
+                       (used-special-ids (:body definition))))]
+    (into special-states states)))
 
 (defn- state-total
   [states]
@@ -1271,18 +1418,29 @@
                                   (walk next-form)))
                     (:state definition)))))
 
+(defn- dependency-order
+  "The linker's dependency order, which lowering must iterate explicitly.
+
+  `:definitions` is only insertion-ordered below Clojure's array-map threshold;
+  past eight definitions it is a hash-map, and iterating it would lower or size a
+  callee *after* its caller — so the call site would allocate a zero-size
+  partition and the arena would be undersized."
+  [unit]
+  (or (seq (:order unit)) (keys (:definitions unit))))
+
 (defn- module-state-sizes
   "Partition size of every definition: its own expanded state plus one
-  partition per static call site, recursively (D19). Definitions are dependency
-  ordered, so a callee's size is known before its caller's."
-  [definitions]
-  (reduce (fn [sizes [id definition]]
-            (assoc sizes id
-                   (+ (state-total (:slots (expand-state (:state definition))))
-                      (reduce + 0 (map (fn [call] (get sizes (second call) 0))
-                                       (definition-calls definition))))))
+  partition per static call site, recursively (D19). `order` is dependency order,
+  so a callee's size is known before its caller's."
+  [definitions order]
+  (reduce (fn [sizes id]
+            (let [definition (get definitions id)]
+              (assoc sizes id
+                     (+ (state-total (:slots (expand-state (effective-state definition))))
+                        (reduce + 0 (map (fn [call] (get sizes (second call) 0))
+                                         (definition-calls definition)))))))
           {}
-          definitions))
+          order))
 
 (defn- lower-record-fields
   "Flatten a record value's map form into leaf entries.
@@ -1350,7 +1508,7 @@
    (normalized-definition! definition)
    (let [return-type (:return-type definition)
          record-return (:return-record definition)
-         expanded (expand-state (:state definition))
+         expanded (expand-state (effective-state definition))
          states (:slots expanded)
          stateful? (boolean (seq (:state definition)))
          env (assoc (environment (base-bindings definition (:bindings expanded))
@@ -1443,10 +1601,13 @@
              ;; The arena is this module's own slots followed by one partition
              ;; per call site, all relative to this module's base.
              :state (into (mapv #(select-keys % [:name :type :size :init
-                                                 :index :constant])
+                                                 :index :constant :special
+                                                 :special-bit])
                                 states)
                           @(:state-more env))
              :state-size @(:call-offset env)
+             :special-mask (special-mask definition)
+             :special-count (count (special-bits definition))
              :records (vec @(:records-more env))
              :scratch (vec (:entries @(:scratch env)))
              :precision (:precision options)
@@ -1455,17 +1616,18 @@
      (assoc ir :effects (collect-effects body)))))
 
 (defn- lower-definitions
-  "Lower every definition in dependency order, exposing each lowered callee to
-  the ones that follow so call sites can allocate their state partitions."
-  [definitions options]
-  (reduce (fn [lowered [id definition]]
+  "Lower definitions in `order`, exposing each lowered callee to the ones that
+  follow so call sites can allocate their state partitions."
+  [definitions order options]
+  (reduce (fn [lowered id]
             (assoc lowered id
-                   (lower definition {:functions (signatures definitions)
-                                      :definition-id id
-                                      :options options
-                                      :modules lowered})))
+                   (lower (get definitions id)
+                          {:functions (signatures definitions)
+                           :definition-id id
+                           :options options
+                           :modules lowered})))
           (array-map)
-          definitions))
+          order))
 
 (defn lower-unit
   "Lower every descriptor in a linked compilation unit."
@@ -1474,7 +1636,7 @@
    (when-not (= :compilation-unit (:dsp/kind unit))
      (fail "DSP IR lowering expects a linked compilation unit" {:unit unit}))
    (let [definitions (:definitions unit)
-         lowered (lower-definitions definitions options)
+         lowered (lower-definitions definitions (dependency-order unit) options)
          entry (:entry unit)]
      (assoc (get lowered entry)
             :definitions lowered
@@ -1566,7 +1728,7 @@
           (or declared default))))
 
 (defn- process-bindings
-  [definition state-bindings channels frame-capacity]
+  [definition state-bindings frame-capacity]
   (let [process (:process definition)
         input? (process-input? definition)
         sample-name (when input?
@@ -1610,7 +1772,10 @@
         frames (or (get-in process [:frames]) {:name 'frames :type :int})
         sample-rate (or (get-in process [:sample-rate])
                         {:name 'sample-rate :type :float})
-        channel (if (= 1 channels) 0 {:op :channel :type :int})
+        ;; One evaluation per frame (D40): there is no channel loop, so the
+        ;; implicit channel is always 0. A multi-channel process indexes the
+        ;; output buffer explicitly.
+        channel 0
         index {:op :frame :type :int}
         sample-expression {:op :buffer-load
                            :buffer-id :input
@@ -1712,22 +1877,78 @@
        value))
    frame-body))
 
+(defn- audio-buffer?
+  [id]
+  (contains? #{:input :output} id))
+
+(defn- call-channel
+  "The channel form of a `buffer-load`/`buffer-store` call; nil means channel 0
+  (the one-offset shorthand omits it)."
+  [op args]
+  (case op
+    buffer-load (when (= 2 (count args)) (first args))
+    buffer-store (when (= 3 (count args)) (first args))
+    nil))
+
+(defn- audio-channels-in
+  "The highest constant channel a body addresses on an `:input`/`:output` buffer,
+  and whether any such channel is dynamic (so the width cannot be counted).
+
+  Only the entry body addresses the audio buffers — a callee is a function with
+  no buffer namespace — so this syntactic scan is the whole answer (D40)."
+  [form]
+  (let [max-channel (volatile! -1)
+        dynamic? (volatile! false)]
+    (letfn [(walk [form]
+              (if (seq? form)
+                (do
+                  (let [op (first form)]
+                    (when (and (contains? '#{buffer-load buffer-store} op)
+                               (audio-buffer? (second form)))
+                      (let [channel (call-channel op (nthrest form 2))]
+                        (cond
+                          (nil? channel) (vswap! max-channel max 0)
+                          (number? channel) (vswap! max-channel max (long channel))
+                          :else (vreset! dynamic? true)))))
+                  (run! walk form))
+                (cond
+                  (vector? form) (run! walk form)
+                  (map? form) (run! (fn [[key value]] (walk key) (walk value)) form)
+                  :else nil)))]
+      (walk form)
+      {:max-channel @max-channel :dynamic? @dynamic?})))
+
 (defn lower-process
   "Lower the entry descriptor directly to explicit process IR.
 
   The sample parameter is bound to a canonical input-buffer load while controls
-  and state retain their own binding kinds. No scalar IR rewriting is involved."
+  and state retain their own binding kinds. No scalar IR rewriting is involved.
+
+  The audio width is the declared `:channels`, or otherwise **counted** from the
+  body's `:input`/`:output` accesses (highest channel + 1), so a stereo body
+  needs no declaration (D40)."
   ([unit] (lower-process unit {}))
-  ([unit {:keys [channels options] :or {channels 1}}]
+  ([unit {:keys [channels options]}]
    (when-not (= :compilation-unit (:dsp/kind unit))
      (fail "DSP process lowering expects a linked compilation unit" {:unit unit}))
-   (when-not (and (integer? channels) (pos? channels))
-     (fail "DSP process channels must be a positive integer" {:channels channels}))
    (let [definitions (:definitions unit)
+         order (dependency-order unit)
          entry-id (:entry unit)
          definition (get definitions entry-id)
          _ (normalized-definition! definition)
-         expanded (expand-state (:state definition))
+         ;; Count the audio width from the body when the caller did not declare
+         ;; it: one more than the highest channel an `:input`/`:output` access
+         ;; names, or 1 for a scalar body (D40).
+         {:keys [max-channel dynamic?]} (audio-channels-in (:body definition))
+         channels (cond
+                    (some? channels) channels
+                    dynamic? (fail "a dynamic audio-buffer channel requires an explicit :channels"
+                                   {:name (:name definition)})
+                    :else (clojure.core/max 1 (inc (long max-channel))))
+         _ (when-not (and (integer? channels) (pos? channels))
+             (fail "DSP process channels must be a positive integer"
+                   {:channels channels}))
+         expanded (expand-state (effective-state definition))
          states (:slots expanded)
          buffers (process-buffers definition channels)
          ;; A buffer is subscripted by channel only when it is per-channel.
@@ -1738,18 +1959,15 @@
          per-channel-buffers (set (keep #(when (> (:channels %) 1) (:id %)) buffers))
          frame-capacity (long (or (:frame-capacity options)
                                   (lane-frame-capacity (get options :precision :f32))))
-         {:keys [bindings channel controls lanes frames sample-rate]}
-         (process-bindings definition (:bindings expanded) channels frame-capacity)
+         {:keys [bindings controls lanes frames sample-rate]}
+         (process-bindings definition (:bindings expanded) frame-capacity)
          ;; Callees are lowered first, in dependency order, so every call site
          ;; can allocate its state partition (D19).
-         modules (lower-definitions (dissoc definitions entry-id) options)
+         modules (lower-definitions definitions (remove #(= entry-id %) order) options)
          ;; The entry arena is its own state, then one partition per call site,
          ;; then local-array scratch. Partition sizes are static, so scratch
          ;; starts after the whole state region.
-         total-state (get (module-state-sizes definitions) entry-id)
-         _ (when (and (> channels 1) (pos? total-state))
-             (fail "stateful multi-channel DSP processes are not supported yet"
-                   {:name (:name definition) :channels channels}))
+         total-state (get (module-state-sizes definitions order) entry-id)
          env (environment bindings (signatures definitions) (or options {})
                           (into {} (map (juxt :id identity) buffers))
                           modules)
@@ -1757,15 +1975,23 @@
          _ (reset! (:records-more env) (vec (:records expanded)))
          _ (reset! (:scratch env) {:next total-state :entries []})
          output (lower-forms (:body definition) env)
-         _ (when-not (:value output)
-             (fail "DSP process body does not produce an output value"
-                   {:name (:name definition)}))
-         _ (expect-type! :float (:value output) (:body definition))
-         output-local (fresh-local! env "output" :float)
-         output-declaration {:op :declare
-                             :name (:name output-local)
-                             :type :float
-                             :init (:value output)}
+         _ (when (:value output)
+             (expect-type! :float (:value output) (:body definition)))
+         ;; A scalar body is the one-channel sugar: lowering stores it to channel
+         ;; 0. A `:void` body has written `:output` itself, per channel (D40).
+         output-local (when (:value output) (fresh-local! env "output" :float))
+         output-declaration (when output-local
+                              {:op :declare
+                               :name (:name output-local)
+                               :type :float
+                               :init (:value output)})
+         output-store (when output-local
+                        {:op :buffer-store
+                         :buffer-id :output
+                         :channel 0
+                         :index {:op :frame :type :int}
+                         :value {:op :local :name (:name output-local) :type :float}
+                         :effects #{:write-memory}})
          state-results
          (mapv (fn [state]
                  (when-let [next-form (:next state)]
@@ -1786,14 +2012,9 @@
          (vec
           (concat
            (:statements output)
-           [output-declaration]
+           (when output-declaration [output-declaration])
            (mapcat :statements (remove nil? state-results))
-           [{:op :buffer-store
-             :buffer-id :output
-             :channel channel
-             :index {:op :frame :type :int}
-             :value {:op :local :name (:name output-local) :type :float}
-             :effects #{:write-memory}}]
+           (when output-store [output-store])
            (map (fn [{:keys [state local]}]
                   {:op :state-store
                    :state-id (:name state)
@@ -1806,6 +2027,17 @@
                                                 per-channel-buffers)
          memory (memory-requirements buffers frame-body (:precision options))
          diagnostics (process-diagnostics frame-body memory)
+         ;; A special is a host-facing contract of the entry process only. A
+         ;; callee's special slot would otherwise leak into the entry's state
+         ;; (rebased into a call partition) where no host reads it.
+         own-special-count (count (filter :special states))
+         _ (when-let [stray (seq (filter (fn [slot]
+                                           (and (:special slot)
+                                                (>= (long (:index slot))
+                                                    (long own-special-count))))
+                                         @(:state-more env)))]
+             (fail "store-special is only available in the entry definition"
+                   {:specials (mapv :special stray)}))
          ir {:op :process
              :name (:name definition)
              :id entry-id
@@ -1819,10 +2051,13 @@
              :lanes lanes
              :frame-capacity frame-capacity
              :locals @(:locals env)
-             :state (into (mapv #(select-keys % [:name :type :size :init :index :constant])
+             :state (into (mapv #(select-keys % [:name :type :size :init :index :constant
+                                                 :special :special-bit])
                                 states)
                           @(:state-more env))
              :state-size @(:call-offset env)
+             :special-mask (special-mask definition)
+             :special-count (count (special-bits definition))
              :records (vec @(:records-more env))
              :scratch (vec (:entries @(:scratch env)))
              :precision (:precision options)
@@ -2130,5 +2365,5 @@
                 (keys bitwise-operators)
                 builtins/operators
                 ['if 'let 'do 'set! 'while 'break 'continue
-                 'buffer-load 'buffer-store 'state-load 'state-store
+                 'buffer-load 'buffer-store 'state-load 'state-store 'store-special
                  'int->float 'float->int])))

@@ -397,10 +397,15 @@ through Clojure.
 
 ### JavaScript
 
-The JavaScript backend lowers portable IR to structured JS-like IR and emits an
-ES module. Function artifacts export `invoke`; process artifacts export
+The JavaScript backend lowers portable IR to a structured JS-shaped IR, turns
+that into ClojureScript forms, and lets `squint.compiler` emit the ES module
+(D41). Function artifacts export `invoke`; process artifacts export
 `createKernel`. Process kernels include instance-local state and `init`,
-`reset`, and `process` operations.
+`reset`, and `process` operations, and expose the state arena so a host can read
+a voice's special slots.
+
+Because a kernel is installed as one script, the module stays **standalone**:
+nothing lowers to a `squint_core` reference and the module imports nothing.
 
 Both precision policies are emitted. The `:f32` policy inserts `Math.fround` at
 semantic boundaries and uses `Float32Array`; `:f64` uses JavaScript numbers and
@@ -592,7 +597,8 @@ A synth-oriented runtime must support:
 
 - preallocated voice pools and deterministic voice stealing;
 - per-voice initialization, release, reset, and termination;
-- mono, legato, retrigger, polyphonic, and unison modes;
+- mono, legato, retrigger, and polyphonic modes (unison is a voice transform,
+  D36, not a mode);
 - per-voice and global modulation;
 - stereo spreading, voice tails, and effect tails;
 - independent synth instances created from one compiled artifact.
@@ -709,7 +715,10 @@ automated CI browser job. There is no separate Node conformance runner.
   expose reusable independent instance regions or host-managed state handles.
 - Wasm artifacts expose WAT but do not contain compiled binary bytes.
 - Wasm channel stride is currently a fixed 4096 bytes.
-- JS/Wasm worklet setup still depends on testbed-assembled metadata.
+- JS/Wasm worklet setup still depends on testbed-assembled metadata. The kernel's
+  own shape (output width and whether it takes an input) now comes from the
+  artifact ABI (D40), but the processor options that carry it are still assembled
+  by the testbed rather than generated from a standalone installation API (P14).
 - The JavaScript worklet status protocol is less complete than the Wasm
   adapter's init/reset protocol.
 - The compiler currently runs on the JVM; browser tests receive generated
@@ -881,10 +890,50 @@ Optimization follows conformance and safety work. Initial safe candidates are:
 - dead-local and unreachable-branch elimination;
 - local copy propagation;
 - bounded-loop simplification;
-- a conservative inlining policy with code-size limits.
+- a conservative inlining policy with code-size limits;
+- deduplication of identical inlined bodies (unrolled voices emit K copies);
+- common-subexpression folding for **stateless** subexpressions only.
+
+Call-argument hoisting (binding each computed argument to a local before
+inlining) is already in the lowerer; it is what keeps parameter substitution from
+re-duplicating an argument once per use, and from running a stateful argument
+twice.
 
 Run differential tests before and after optimization. Do not reassociate
 floating-point expressions unless a separately selected policy permits it.
+
+### 10. DSP form macros (exploration, not scheduled)
+
+Explore letting **plain Clojure functions act as macros inside DSP forms** —
+functions `(forms…) -> form` that the compiler calls at compile time during an
+expansion pass ahead of `descriptor/normalize` (the way Clojure expands before
+analysis), with the result spliced into the body. A symbol→function registry
+replaces `defmacro`, shared by the JVM front end and the P13 SCI front end.
+
+Where it would help:
+
+- **Expression-scope transformers.** `unison`/`through`/`mix` are whole
+  *definition* transforms today (D36–D38); an in-body `(unison 3 detune (osc …))`
+  would cover one-off structures that do not deserve a named definition.
+- **The strictly-binary operator surface.** A `nary` macro expanding
+  `(+ a b c)` to the required nesting removes a real, ongoing annoyance.
+- **Generation and partial application.** Chord voicings, currying a library
+  definition with baked-in constants, splicing a small subgraph fragment.
+
+Where it does not help: sharing/fan-out (already `let`; D38), and inline control
+declaration such as `smooth` (controls live in the `:process` map, so a macro
+that needs the whole definition *is* a transformer).
+
+Hazards to design against: **hygiene** (a macro introducing locals needs gensym
+discipline); **effects/linearity** (expanding a form containing `store-special`
+or a stateful call duplicates side effects — the same trap `lower-call` argument
+hoisting fixes); a **bounded expansion budget** (as `inlining-statement-limit`);
+and error attribution to the macro's own name and form.
+
+Rule: a macro is a way to *write* the existing typed language, not to bypass IR
+invariants — the same constraint as optimizer lowerings (only among lowerings the
+system can express). The lowest-risk first prototype is `nary` sugar plus
+expression-scope transformers.
 
 ## Validation and release gates
 
@@ -963,8 +1012,8 @@ src/omkamra/dsp/targets/jvm.clj                   JVM bytecode backend
 src/omkamra/dsp/targets/js.clj                    JS-like lowering and emitter
 src/omkamra/dsp/targets/wasm.clj                  Wasm lowering and WAT emission
 src/omkamra/dsp/harness/catalog.cljc           shared semantic cases
-src/omkamra/dsp/worklet_adapter.cljs      JavaScript worklet adapter
-src/omkamra/dsp/wasm_worklet_adapter.cljs Wasm worklet adapter
+src/omkamra/dsp/worklet_adapters/js.cljs   JavaScript worklet adapter
+src/omkamra/dsp/worklet_adapters/wasm.cljs Wasm worklet adapter
 src/omkamra/dsp/harness/testbed.clj                browser development endpoints
 src/omkamra/dsp/harness/testbed.cljs               browser conformance harness
 src/omkamra/dsp_test.clj                   Clojure/JVM test suite

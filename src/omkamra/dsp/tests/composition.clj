@@ -2,7 +2,52 @@
   (:require [clojure.test :refer [deftest is]]
             [omkamra.dsp :as dsp]
             [omkamra.dsp.library.delay :as delay]
-            [omkamra.dsp.library.filter :as filter]))
+            [omkamra.dsp.library.envelope]
+            [omkamra.dsp.library.filter :as filter]
+            [omkamra.dsp.library.oscillator]
+            [omkamra.dsp.library.pitch]))
+
+;; Two voices whose unit has **nine** definitions, so the linker's
+;; `:definitions` map is a hash-map and no longer iteration-ordered. The outer
+;; one only wraps the inner, so it must pass its controls straight through.
+(omkamra.dsp/defn nested-inner
+  [gate note bend detune cutoff q attack decay sustain release]
+  {:process {:input false}}
+  (omkamra.dsp.library.filter/biquad-multimode
+   (* (omkamra.dsp.library.envelope/exponential-adsr gate attack decay sustain release)
+      (omkamra.dsp.library.oscillator/saw-oscillator
+       (omkamra.dsp.library.pitch/pitch->frequency note bend detune 440.0 69.0)))
+   cutoff q 0))
+
+(omkamra.dsp/defn nested-outer
+  [gate note bend detune cutoff q attack decay sustain release]
+  {:process {:input false}}
+  (nested-inner gate note bend detune cutoff q attack decay sustain release))
+
+(deftest nested-composition-keeps-dependency-order-past-eight-definitions
+  ;; Regression. Past eight definitions the linker's `:definitions` map becomes
+  ;; a hash-map, so lowering and state sizing must iterate its `:order`. Before
+  ;; the fix a callee could be lowered *after* its caller, the call site would
+  ;; allocate a zero-size partition, and the arena was undersized (the
+  ;; interpreter threw, the JVM emitted unverifiable bytecode, and JavaScript
+  ;; compiled to silently wrong code). Nine definitions here.
+  (let [controls [1.0 60.0 0.0 0.0 1000.0 1.0 0.01 0.1 0.7 0.2]
+        run (fn [definition target]
+              (let [artifact (dsp/compile definition {:target target :entry :process})
+                    output (float-array 64)]
+                (dsp/process! artifact {:output output :frames 64 :sample-rate 44100.0
+                                        :controls controls})
+                [(:state-size (:ir artifact)) (vec output)]))
+        [inner-size inner] (run #'nested-inner :jvm)
+        [outer-size outer] (run #'nested-outer :jvm)]
+    (is (= 7 inner-size) "adsr (2) + saw (1) + biquad record (4)")
+    (is (= 7 outer-size)
+        "the wrapper's arena includes the callee's whole partition")
+    (is (not (every? zero? inner)) "and the voice sounds")
+    (is (= inner outer) "the wrapper passes its controls straight through")
+    (is (= 7 (:state-size (:ir (dsp/compile #'nested-outer
+                                            {:target :interpreter :entry :process}))))
+        "the interpreter arena has the same size")))
 
 (deftest record-owning-modules-compose
   ;; A module that owns a record/buffer composes like any other: each call site
@@ -147,3 +192,107 @@
          #"cannot shadow an in-scope binding"
          (dsp/compile (assoc-in definition [:body 0] '(let [sample 1.0] sample))
                       {:entry :process})))))
+
+;; A callee that uses its argument twice, and a caller that passes it the output
+;; of a stateful module. A computed argument must be evaluated once, not once per
+;; use: without argument hoisting the generated targets inlined the one-pole call
+;; twice against the one partition, advancing it twice and diverging from the
+;; interpreter.
+(omkamra.dsp/defn twice-argument
+  [x]
+  (+ x x))
+
+(omkamra.dsp/defn stateful-argument
+  [sample]
+  {:process {:controls []}}
+  (twice-argument (filter/one-pole sample 0.5)))
+
+(deftest a-computed-argument-is-evaluated-once
+  (let [run (fn [target]
+              (let [artifact (dsp/compile #'stateful-argument {:target target :entry :process})
+                    input (float-array (repeat 8 1.0))
+                    output (float-array 8)]
+                (dsp/process! artifact {:input input :output output :frames 8
+                                        :sample-rate 48000.0 :controls []})
+                (vec output)))]
+    (is (= (run :interpreter) (run :jvm))
+        "the stateful argument advances once per frame in both targets")))
+
+;; A scalar state slot written from the body. This is the general mechanism a
+;; voice uses to publish a host-readable value (the builtin `activity` slot is
+;; one such slot), instead of only computing state through `:next`.
+(omkamra.dsp/defn body-writable-state
+  [sample]
+  {:state [{:name level :type :float :init 0.0}]
+   :process {:controls []}}
+  (do (set! level (+ level 1.0))
+      level))
+
+(deftest a-body-can-write-a-scalar-state-slot
+  (let [run (fn [target]
+              (let [artifact (dsp/compile #'body-writable-state
+                                          {:target target :entry :process})
+                    input (float-array 3)
+                    output (float-array 3)]
+                (dsp/process! artifact {:input input :output output :frames 3
+                                        :sample-rate 48000.0 :controls []})
+                (vec output)))]
+    (is (= [1.0 2.0 3.0] (run :interpreter))
+        "the written slot persists across frames on the interpreter")
+    (is (= [1.0 2.0 3.0] (run :jvm))
+        "and the JVM writes the same slot")))
+
+;; A builtin special slot: `store-special` writes it, and the ABI exposes it for
+;; the host (D39). This is the slot the voice pool reads to free a finished
+;; voice; here the definition reads it back to prove the round trip.
+(omkamra.dsp/defn activity-slot-voice
+  [sample]
+  {:process {:controls []}}
+  (do (store-special :activity 7)
+      (int->float activity)))
+
+(deftest a-builtin-special-slot-is-writable-and-exposed
+  (let [run (fn [target]
+              (let [artifact (dsp/compile #'activity-slot-voice
+                                          {:target target :entry :process})
+                    input (float-array 2)
+                    output (float-array 2)]
+                (dsp/process! artifact {:input input :output output :frames 2
+                                        :sample-rate 48000.0 :controls []})
+                {:out (vec output)
+                 :special (:special-slots (:abi artifact))
+                 :mask (:special-mask (:abi artifact))}))]
+    (doseq [target [:interpreter :jvm]]
+      (let [{:keys [out special mask]} (run target)]
+        (is (= [7.0 7.0] out)
+            (str "store-special round-trips through the builtin slot on " target))
+        (is (= :int (get-in special [:activity :type])))
+        (is (= 'activity (get-in special [:activity :name])))
+        (is (= 0 (get-in special [:activity :bit]))
+            (str "the special's fixed bit is in the ABI on " target))
+        (is (= 0 (get-in special [:activity :index]))
+            (str "the special occupies the low state slot on " target))
+        (is (= 1 (long mask))
+            (str "the ABI exposes the special mask on " target))))))
+
+;; A special is the entry process's host-facing contract. A callee that writes
+;; one would have its slot buried in a call partition, so lowering refuses it
+;; rather than silently exposing a slot no host reads.
+(omkamra.dsp/defn special-callee
+  [x]
+  (do (store-special :activity 1)
+      x))
+
+(omkamra.dsp/defn special-caller
+  []
+  {:process {:input false :controls []}}
+  (special-callee 0.5))
+
+(deftest a-callee-cannot-publish-a-special
+  (let [error (try
+                (dsp/compile #'special-caller {:target :interpreter :entry :process})
+                nil
+                (catch clojure.lang.ExceptionInfo e e))]
+    (is (some? error) "lowering refuses a callee that publishes a special")
+    (is (re-find #"store-special is only available in the entry definition"
+                 (ex-message error)))))

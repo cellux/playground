@@ -889,7 +889,10 @@
             multi-channel? (> channels 1)
             control-layout (state-layout (:controls ir))
             ;; State and local-array scratch share one arena, so scratch slots
-            ;; are additional entries in the same typed arrays.
+            ;; are additional entries in the same typed arrays. The state-only
+            ;; layout is kept as well: it says how much of each physical array a
+            ;; reset covers.
+            state-only-layout (state-layout (:state ir))
             state-layout (state-layout (concat (:state ir) (:scratch ir)))
             sample-rate-slot 4
             float-control-slot (+ sample-rate-slot (real-param-width))
@@ -923,14 +926,10 @@
                                frame-body
                                [[:iinc frame-slot 1] [:goto :frame-loop]
                                 [:mark :frame-done]])
-            loops (if multi-channel?
-                    (concat [[:iconst-0] [:istore channel-slot] [:mark :channel-loop]
-                             [:iconst-0] [:istore frame-slot] [:mark :frame-loop]]
-                            frame-loop
-                            [[:iinc channel-slot 1] [:iload channel-slot]
-                             [:ldc channels] [:if-icmplt :channel-loop]])
-                    (concat [[:iconst-0] [:istore frame-slot] [:mark :frame-loop]]
-                            frame-loop))
+            ;; One evaluation per frame (D40): no channel loop. A multi-channel
+            ;; process writes its output channels explicitly.
+            loops (concat [[:iconst-0] [:istore frame-slot] [:mark :frame-loop]]
+                          frame-loop)
             control-initializers
             (mapcat (fn [[control {:keys [storage index]}]]
                       (let [array-slot (if (= :float storage)
@@ -966,18 +965,41 @@
             create-instance
             (fn []
               (let [state {:float (real-array (:float-count state-layout))
-                           :int (int-array (:int-count state-layout))}]
-                ;; The factory runs long after `compile-process` returns, so it
-                ;; must rebind the precision the layout helpers read.
-                (binding [*precision* precision]
-                  (reset-state! ir state-layout state))
+                           :int (int-array (:int-count state-layout))}
+                    ;; The factory runs long after `compile-process` returns, so
+                    ;; the precision the layout helpers read is rebound here.
+                    f64-precision (binding [*precision* precision]
+                                    (reset-state! ir state-layout state)
+                                    (boolean (f64?)))
+                    ;; The initial state, captured once and copied back by
+                    ;; `reset`. Re-deriving it from the IR costs this JVM about
+                    ;; 50 KB a call -- it is a `doseq` over lazy seqs -- which no
+                    ;; lifecycle operation in the audio path can afford, and a
+                    ;; voice steal is a reset. State slots come first in the
+                    ;; arena, so the prefix of each physical array is exactly
+                    ;; what `reset-state!` writes; scratch is left alone.
+                    state-floats (int (:float-count state-only-layout))
+                    state-ints (int (:int-count state-only-layout))
+                    initial-float (if f64-precision
+                                    (java.util.Arrays/copyOfRange
+                                     ^doubles (:float state) 0 state-floats)
+                                    (java.util.Arrays/copyOfRange
+                                     ^floats (:float state) 0 state-floats))
+                    initial-int (java.util.Arrays/copyOfRange
+                                 ^ints (:int state) 0 state-ints)]
                 {:state state
                  :state-layout state-layout
                  :control-layout control-layout
                  :precision precision
                  :multi-channel? multi-channel?
-                 :reset #(binding [*precision* precision]
-                           (reset-state! ir state-layout state))
+                 :reset (fn []
+                          (if f64-precision
+                            (System/arraycopy ^doubles initial-float 0
+                                              ^doubles (:float state) 0 state-floats)
+                            (System/arraycopy ^floats initial-float 0
+                                              ^floats (:float state) 0 state-floats))
+                          (System/arraycopy ^ints initial-int 0
+                                            ^ints (:int state) 0 state-ints))
                  :destroy (fn []
                             (binding [*precision* precision]
                               (if (f64?)

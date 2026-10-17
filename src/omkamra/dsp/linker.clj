@@ -10,7 +10,7 @@
 
 (def ^:private language-forms
   (into '#{if let do set! while break continue buffer-load buffer-store
-           state-load state-store array array-load array-store aget aset
+           state-load state-store store-special array array-load array-store aget aset
            field set-field! int->float float->int
            + - * / = not= < <= > >= and or not
            bit-and bit-or bit-xor bit-not

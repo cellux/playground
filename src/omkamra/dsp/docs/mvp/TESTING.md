@@ -23,10 +23,16 @@ below evaluates in it.
 | `src/omkamra/dsp/harness/browser.clj` | Clojure-side browser driver (spel + `:on-demand-http`). |
 | `src/omkamra/dsp/harness/fixtures.clj` | Shared `dsp/defn` fixtures and measuring helpers the tests use. |
 | `src/omkamra/dsp/tests/suite.clj` | Requires every test namespace; `run-all` runs the whole language suite. |
+| `src/omkamra/dsp/synth.cljc` | The synth description and the pure-data runtime configuration (P10). |
+| `src/omkamra/dsp/synth/pool.cljc` | Preallocated voices, allocation/stealing, the note lifecycle, block rendering. |
+| `src/omkamra/dsp/hosts.clj` | The assembler: `synth-bundle`, `compile-synth`, and which kernel a target gets. |
+| `src/omkamra/dsp/hosts/*.{clj,cljc,cljs}` | The kernels (`jvm`, `interpreter`, `js`) and the plumbing they share (`mixing`). |
+| `src/omkamra/dsp/tests/synth.clj` | The synth runtime suite: description, pool, modes, lifecycle, allocation. |
+| `src/omkamra/dsp/examples/demo_synth.clj` | The example instrument and one possible host-side modulation wiring (D34). |
 | `src/omkamra/dsp/targets/*.{clj,cljc}` | The four backends; `targets/capability.cljc` declares what each serves. |
 
 The split follows `DECISIONS.md` D7/D13: **runtime semantics live once in
-`acceptance.cljc`**, and the **interpreter is the single oracle** for every
+`harness/catalog.cljc`**, and the **interpreter is the single oracle** for every
 target; compiler-internal checks stay in the JVM suite because they are not
 runtime semantics.
 
@@ -154,6 +160,26 @@ is process-only:
 The first run also compiles the Shadow build and can take longer than later
 runs; raise `:timeout` on a cold cache.
 
+### The JavaScript target emits through Squint
+
+The JavaScript backend does not build JavaScript text. It builds ClojureScript
+*forms* (plain data) and hands them to `squint.compiler`, which owns the syntax —
+statements, `let` ordering, precedence, and name mangling (D41). Two
+consequences for tests:
+
+- the exact spelling of a generated kernel is Squint's, so `tests/js.clj` pins
+  the **contract** — the ES-module export shape, the physical type, and the rule
+  that the module is standalone — and leaves behaviour to the browser suite;
+- `every-catalog-case-is-a-standalone-javascript-module` compiles every catalog
+  case to JavaScript and asserts that no source contains a `squint_core`
+  reference or an import. That is the regression guard for the rule: a construct
+  that lowered to a Squint standard-library call would break an AudioWorklet
+  install, so it fails here rather than in the browser.
+
+While working on the emitter, Node is the fast loop: compile a fixture to `:js`,
+write `:source` to a `.mjs` file, and run it against the interpreter's output.
+The browser suite is the authority.
+
 ### The interactive page
 
 `browser/run!` uses a fresh headless browser. To watch a run, open
@@ -161,7 +187,7 @@ runs; raise `:timeout` on a cold cache.
 checks**; the results render in the page. Append `?autorun=0` to prevent the
 automatic run.
 
-### What the 9 checks cover
+### What the browser checks cover
 
 1. the shared **process** matrix — every `acceptance/cases` entry, f32 and f64,
    on JavaScript and Wasm;
@@ -169,8 +195,22 @@ automatic run.
    entry, f32 and f64, on JavaScript;
 3. a WAT bounded-loop trap check;
 4. a WAT check of the f32 sine **lookup-table** strategy (`:wasm-math :table`);
-5. the Squint JavaScript AudioWorklet adapters (f32 and f64);
-6. the Wasm AudioWorklet adapter (f32).
+5. instance independence and schedule invariance, JavaScript and Wasm, f32 and
+   f64;
+6. the JavaScript AudioWorklet adapter (f32 and f64) and the Wasm adapter
+   (f32 and f64);
+7. the **pool hosts** — `omkamra.dsp.hosts.js` and `omkamra.dsp.hosts.wasm`
+   driving `omkamra.dsp.synth.pool`, each compared against the interpreter pool
+   over the same events (P10d).
+
+The pool host checks are the only ones that exercise the sequencing layer rather
+than a single kernel. The page fetches a compiled voice — `/synth-bundle` carries
+its runtime configuration, ABI, and interpreter IR (and, for `?target=wasm`, the
+module's WAT and linear-memory layout), and `/synth-source` its JavaScript module
+— plays one note through a pool over each kernel, and compares the rendered block
+and the released voice's fate. The two hosts differ in exactly one way: the
+JavaScript kernel is handed the callback's arrays, while the Wasm kernel writes
+into its own linear memory.
 
 Wasm is process-only, so function-entry cases run on the interpreter, JVM, and
 JavaScript; Wasm coverage for the same operators comes from process cases such
@@ -226,6 +266,58 @@ cljfmt check src/omkamra/dsp src/omkamra/dsp.clj src/omkamra/dsp_test.clj
 Both should report no errors. `.clj-kondo/config.edn` mirrors spel's
 `with-*` `:lint-as` entries so the browser driver lints cleanly.
 
+**How the DSP forms are linted.** `dsp/defn`, `dsp/fn`, and `dsp/defstruct`
+contain embedded DSP data, not Clojure, so `:hooks` replace them with a plain
+`def` and clj-kondo does not look inside. A namespace required *only* for
+symbols used inside those bodies can therefore look unused; prefer
+fully-qualified symbols, or rarely a local
+`#_{:clj-kondo/ignore [:unused-namespace]}`. `dsp/def` is different: its value is
+ordinary Clojure (the combinators), so it is `:lint-as clojure.core/def`, which
+lints the expression and counts its aliases. Treating `dsp/defn`/`dsp/fn` as
+`defn`/`fn` (`:lint-as` plus a form-scoped `:unresolved-symbol` exclusion) was
+tried and rejected: it still reports `redundant do` and nested-`+` noise that the
+DSP language legitimately uses, and a per-symbol exclusion list is not worth it.
+
+### Future: a DSP-aware clj-kondo linter
+
+The compromise above is fine for now; the ideal is a linter that understands DSP
+forms. clj-kondo's extension point is an `analyze-call` hook that can call
+`api/reg-finding!`. The linter would parse a `dsp/defn`/`dsp/fn` form (docstring,
+parameters or spec, options, body), walk the body with the DSP's scopes, and
+report DSP-level problems: an unknown builtin or wrong builtin arity, a call to
+a symbol that is neither a local, language form, builtin, record, nor resolvable
+var, and an unresolvable fully-qualified library reference. That is the check
+that would catch `omkamra.dsp.library.filter/one-pol` while leaving `pow` and
+`sample-rate` alone.
+
+Three findings from an experiment make that a substantial piece, and they are
+why it is postponed:
+
+1. **Hooks cannot reuse our language definition.** A hook is loaded from
+   `.clj-kondo`, not the project classpath (`(require '[omkamra.dsp.builtins])`
+   fails with `Could not find namespace`). The linter would have to embed the
+   builtin/operator tables, or have them generated into the hook file — the
+   maintenance burden that made the `:lint-as` approach unattractive.
+2. **There is no `mark-used`.** `clj-kondo.hooks-api` offers node construction,
+   `sexpr`, `resolve`, `ns-analysis`, and `reg-finding!`, but no way to mark a
+   namespace or var as used, and `api/resolve` does **not** do it as a side
+   effect (verified: the unused-namespace warning persists). So an opaque,
+   DSP-aware linter cannot fix the unused-namespace false positive that started
+   this. Only a hook that hands the body back to clj-kondo's analyzer can, which
+   is the approach rejected above.
+3. **Delegating to Clojure analysis is noisy and can mis-type.** `:lint-as
+   clojure.core/defn` marks usages but also emits `redundant-nested-call` and,
+   worse, makes clj-kondo believe a definition var is a *function*, so unrelated
+   `(:field definition)` uses fail `:type-mismatch`. A hook returning
+   `(do (def name nil) (clojure.core/fn params body))` avoids the mis-typing and
+   lints clean, but it is still "analyze as Clojure", which is not what we want.
+
+The eventual shape: an `omkamra.dsp.lint` namespace in the project with the
+language tables, referenced from the hook config, plus a separate decision on
+usage tracking. Until then, `dsp/def` is linted as `def`,
+`dsp/defn`/`dsp/fn`/`dsp/defstruct` are opaque, and a namespace used only inside
+them gets a local ignore.
+
 ---
 
 ## CI
@@ -270,3 +362,46 @@ clojure -M:dev:linux -e "
 - **First browser run times out:** it also compiles the Shadow build; raise
   `:timeout` or warm the build by loading
   `http://127.0.0.1:8080/omkamra/dsp/harness/testbed` once.
+
+## The synth runtime suite
+
+`omkamra.dsp.tests.synth` tests the host-side runtime, not DSP code, so its oracle
+is a pool running over the **reference interpreter**. The JVM pool's output must
+equal the interpreter pool's output sample for sample, bit for bit, over a
+sequence with two voices, a release, and a third note; mixing must equal the sum
+of voices rendered alone; and rendering a block must be invariant under splitting
+it into smaller blocks.
+
+Properties that are stated rather than compared carry a negative twin, so none of
+them can pass vacuously: the three stealing policies are checked on a note order
+where they *disagree*; "a released voice is given up first" is checked where the
+policy alone would pick a different voice; the block-size check verifies the
+comparison is over real audio; and the allocation check measures the allocating
+reference path to show its bound has teeth.
+
+The **voice modes** (D33) are checked two ways, because most of their difference
+is structural and one of them is not. State and held-note fallback are read
+through `voice-snapshot`; the legato/retrigger difference is only audible, so it
+is rendered — a retriggered voice starts its block from zero while a legato one
+keeps sounding — and every mode is also rendered on the JVM *and* the reference
+interpreter, so a fallback pitch change is exercised across the kernel seam.
+
+The **host control channel and the example instrument** (D34) are checked the
+same way: `set-voice-controls!`/`read-controls!` must reach the voice and refuse
+a bad index or a destroyed pool, and the demo synth must sound and be changed by
+each kind of modulation source (velocity, mod wheel, pitch bend), with the
+interpreter host rendering the same samples. The **standard pitch-domain
+sources** (D35) are read back directly: a note-on delivers the gate, note, bend
+(scaled by `:bend-range`), and detune; a release closes the gate but keeps the
+pitch; and a `:unison` pool delivers the spread as `:detune` cents.
+
+Two things worth knowing before adding a check:
+
+* **An allocation assertion must warm.** Thread-allocation numbers taken before
+  the JIT has compiled the code — and especially right after a reload — read the
+  compiler rather than the code, by up to 400x, and they look stable enough to
+  believe. The suite warms 20 000 cycles before measuring.
+* **The bound is set below the mistake, not at zero.** A whole cycle is held
+  under 2 KB, deliberately far below the ~24 KB of a single reflective call
+  (D26), so the class of regression it guards against cannot hide under it. What
+  remains is measured and documented (D31), not hidden.

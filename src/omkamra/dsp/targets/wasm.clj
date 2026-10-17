@@ -947,25 +947,8 @@
                           locals))
         frame-loop (emit-frame-loop frame-body)
         loop-body
-        (if (= 1 channels)
-          [(wat-form "local.set" (wat-symbol "$frame") (wat-form "i32.const" 0))
-           frame-loop]
-          [(wat-form "local.set" (wat-symbol "$channel") (wat-form "i32.const" 0))
-           (wat-form
-            "block" (wat-symbol "$channel-done")
-            (wat-form
-             "loop" (wat-symbol "$channels-loop")
-             (wat-form "local.set" (wat-symbol "$frame") (wat-form "i32.const" 0))
-             frame-loop
-             (wat-form "local.set" (wat-symbol "$channel")
-                       (wat-form "i32.add"
-                                 (wat-form "local.get" (wat-symbol "$channel"))
-                                 (wat-form "i32.const" 1)))
-             (wat-form "br_if" (wat-symbol "$channel-done")
-                       (wat-form "i32.ge_u"
-                                 (wat-form "local.get" (wat-symbol "$channel"))
-                                 (wat-form "i32.const" channels)))
-             (wat-form "br" (wat-symbol "$channels-loop"))))])]
+        [(wat-form "local.set" (wat-symbol "$frame") (wat-form "i32.const" 0))
+         frame-loop]]
     (apply list
            (concat [(wat-symbol "func") (wat-symbol "$process")
                     (wat-form "export" "process")]

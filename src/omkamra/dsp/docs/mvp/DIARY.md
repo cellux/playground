@@ -1217,11 +1217,714 @@ drivers' `lane-region`, so all three agree by construction.
 
 ---
 
-## Handoff — current state after P9 (rolling entry)
+## P10a — The sequencing runtime: description, voice pool, allocation (P10 partly complete)
+
+P10 is the largest phase left, so it is cut into slices. **P10a** is the
+runtime's foundation and the whole of it is `PLAN.md`'s second layer:
+
+* `omkamra.dsp.synth` (.cljc) — the description: a closed schema, validation,
+  note-to-frequency tuning, and the **runtime configuration**, which is pure data
+  (keywords, numbers, strings, nil) and therefore portable between hosts;
+* `omkamra.dsp.synth.pool` (.cljc) — the live pool: preallocated voices,
+  deterministic allocation and stealing, the note lifecycle, and block rendering,
+  behind one small `Kernel` protocol;
+* `omkamra.dsp.synth.host` (.clj) — the JVM and reference-interpreter adapters,
+  and `compile-synth`, which compiles the voice artifact and derives the runtime
+  configuration *from that artifact's own ABI*.
+
+No language, IR, ABI, or backend surface changed. A voice is an ordinary
+generator process (D23) and per-voice state is the artifact's own instance state
+(P8), so a pool of N voices is N instances of one compiled program, and a target
+that can already run a process can already host a pool. The compiler is untouched.
+
+**What the pool guarantees.** Allocation is the lowest free voice. Stealing
+prefers a *releasing* voice to a sounding one, then applies the declared key
+(oldest note-on, lowest note, highest note), and the lowest index breaks a tie —
+so the sequence of events, and nothing else, determines which voice is taken. A
+stolen voice is reset, so it is indistinguishable from a fresh one. `note-off!`
+releases every voice sounding that note, which is what makes a repeated note-on
+followed by one note-off behave as a player expects, and an unmatched note-off is
+ignored rather than an error. All of it is documented, tested, and checked
+against a twin.
+
+**The oracle for a runtime, not just for a kernel.** The same pool runs over the
+reference interpreter (`interpreter-kernel`), so the JVM pool's output is
+compared sample-for-sample against the interpreter's, bit for bit, over a
+sequence that includes two voices, a release, and a third note. Mixing is checked
+against the sum of voices rendered alone, and rendering a block is checked to be
+invariant under partitioning it into smaller blocks (one 128-frame block equals
+two 64-frame blocks) — the same invariance P9 required of automation.
+
+**Three findings worth keeping.**
+
+1. **`dsp/reset!` allocated about 50 KB a call.** `reset-state!` re-derives the
+   initial state from the IR with a `doseq` over lazy seqs. Nothing had noticed
+   because a reset was assumed to be a setup-time operation — but a voice *steal*
+   is a reset, so P10a is the first caller that needed one in an audio path. A
+   reset is now a snapshot copy (D32), which is allocation-free and faster.
+2. **An un-inferred value at `aset` is a reflective `RT.aset` call.** Rewriting a
+   `case` as a `cond` in the control writer left the compiler unable to infer a
+   primitive, and `aset` silently became reflective: about 24 KB per control, per
+   note (D26's class of mistake). Nothing failed; the *allocation test* is what
+   found it, and only after reflection warnings were switched on did the compiler
+   say so outright. **Keep `*warn-on-reflection*` on across reloads.**
+3. **Clojure cannot implement a primitive-hinted protocol method.** `reify` and
+   `deftype` both refuse to implement one ("Can't find matching method ... leave
+   off hints for auto match"), so primitive arguments at a protocol seam box. That
+   is why the pool's seam costs a few hundred bytes per block and cannot be made
+   exactly zero without dropping to a whole-block call or a generated interface
+   (D31).
+
+**A measurement lesson, learned the hard way.** Thread-allocation numbers were
+taken without warming past the JIT's compilation tiers, first on freshly reloaded
+classes. A cold measurement read **296 KB** per cycle where the steady state is
+**~690 bytes** — a 400x error, and it was stable enough to look real. Worse, it
+supported a wrong conclusion: I attributed the cost to `case` boxing and rewrote
+working code on the strength of it, *introducing* the reflective `aset` above.
+The real, compiler-reported boxing was the `steal-index` loop argument, and the
+`^long` return hint is what fixed it. **An allocation assertion must warm, and a
+cold number is not evidence.**
+
+**Not in P10a.** The monophonic and unison modes (which are refused rather than
+accepted-and-ignored), per-voice and global modulation routing, voice and effect
+tails, stereo spreading, and the CLJS/AudioWorklet host. The pool is `.cljc` from
+the start and its logic is host-neutral, but only the JVM and interpreter adapters
+exist so far.
+
+**The open question P10c inherits, with the evidence already gathered.**
+
+Voice tails need the kernel to tell the host that a voice has finished, and the
+reconnaissance says that is the one genuinely new mechanism in P10:
+
+* a **JS or Wasm instance does not expose its state** — the JavaScript kernel
+  closes over its arena and returns only `{process, init, reset, destroy}` — so
+  reading a voice's envelope out of its state array is JVM-only;
+* a **multi-channel process replicates** its body per channel rather than
+  carrying a different signal per channel, so a second "activity" output cannot
+  ride alongside the audio;
+* the **output buffer** is therefore the only channel every target already
+  writes, and the `:lanes` region is the one structure that is *already* a
+  host-supplied flat region with a compile-time stride — which makes a symmetric
+  *output* status region, or a declared state readback, the two candidates.
+
+Whichever is chosen, P10a's only assumption is that a released voice is
+expendable: a pool of capacity C behaves correctly under any number of notes
+because stealing prefers released voices.
+
+## P10b-i — Voice modes (D33)
+
+The four missing modes are in, and **no compiler surface changed**: a mode is a
+policy the pool applies to the same compiled voice, so P10b-i touches only
+`omkamra.dsp.synth` (the vocabulary and its validation) and
+`omkamra.dsp.synth.pool` (the dispatch), and adds tests. The five modes now
+differ observably, and every difference is asserted:
+
+* `:poly` — unchanged from P10a (lowest free voice, else the declared steal).
+* `:mono` — one voice; every note-on retriggers it; a note-off releases only
+  when the sounding note is released, so there is no fallback.
+* `:legato` — one voice; an overlapping note-on takes over the pitch while the
+  envelope keeps its level; a release falls back to the previously held note.
+* `:retrigger` — the same note stack as `:legato`, but every note-on retriggers.
+* `:unison` — the whole pool sounds one note, each voice detuned by a symmetric
+  spread in cents, so the centre of the pool stays in tune.
+
+**The one new structure is a bounded held-note stack.** `:legato` and
+`:retrigger` need to know which notes are down, in order, to fall back on a
+release; the stack is sized by a declared `:held-notes` capacity, lives in
+primitive `long` arrays beside the pool's other state, and forgets its *oldest*
+note when full — the drop-oldest discipline D25 already chose for the ingress
+queue, rather than growing without bound. Retriggering is a reset (D32), so it
+restarts the oscillator phase and the envelope from zero; a click-free "attack
+from the current level" would need a trigger input the kernel does not have and
+is deliberately not claimed.
+
+**How the modes are checked.** State transitions are read through
+`voice-snapshot`, and the legato/retrigger distinction — which is *only* audible
+— is checked by rendering: a retriggered voice starts its block from zero while a
+legato voice keeps sounding, and the two blocks must differ. Every mode is also
+rendered on the JVM **and** the reference interpreter, so a pitch change made by
+falling back is exercised through the kernel seam as well as the pool.
+`omkamra.dsp.tests.synth` is now 19 tests / 118 assertions; the full JVM suite is
+104 tests / 1113 assertions, all green.
+
+**Not in P10b-i.** The per-voice **pan** offset that unison and stereo spreading
+both want, because `:channels` is still fixed at 1 (P10d). Release tails,
+because a released voice is not freed until the kernel can report that its
+envelope has finished (P10c) — so a capacity-1 pool retriggers its releasing
+voice, which is documented behaviour rather than a defect. And modulation
+routing, which is the rest of P10b.
+
+## P10b-ii — Modulation as an example instrument (D34)
+
+Modulation is delivered as `omkamra.dsp.examples.demo-synth`, an example
+instrument, rather than as a core mechanism. The distinction matters: `PLAN.md`
+lists modulation routing as a sequencing-layer *goal*, and there are several
+non-equivalent ways to reach it (a declarative route table, a per-target
+callback, routing in DSP source, a first-class modulation signal). Freezing one
+of them into `omkamra.dsp.synth` now would presume additive
+`base + depth × source` routing and a host-side matrix before any consumer has
+asked. So the example is where the experiment lives.
+
+**The one thing core gained.** `omkamra.dsp.synth.pool/set-voice-controls!`
+publishes a `double` array in ABI order to a voice. It is a *delivery channel*,
+not a routing model: every design above needs the host to be able to write a
+voice's controls, and this is the smallest affordance that allows it. The plan is
+still the default a host may compose with, override, or ignore.
+
+**What the example demonstrates.** A voice (band-limited saw → multimode biquad
+→ exponential ADSR) and a route table,
+`{:source ... :target :control :depth n}` applied as `base + depth × value` with
+an optional `:cents` multiplicative form for pitch. Sources are per-voice
+(`:velocity`, `:note`, the latter in octaves from middle C) or global
+(`{:controller n}`, `:pitch-bend`). The demo **owns its control values** — it
+tracks note, velocity, gate, and frequency by the voice index `note-on!` returns,
+which is what a routing layer is — so its render loop allocates nothing and does
+not need the pool to store per-voice values. It is checked two ways: the pool
+primitive directly, and the instrument end to end (velocity, mod wheel, and pitch
+bend each change the output, and the interpreter host renders the same samples).
+`omkamra.dsp.tests.synth` is now 21 tests / 128 assertions; the full JVM suite is
+106 tests / 1123 assertions, all green.
+
+**Patterns the example exposes, for inspection before anything is promoted.**
+These are observations, not proposals; each would be a decision of its own:
+
+1. **`note-off!` reports a count, not the voices it released.** The demo mirrors
+   the release in its own arrays to know which gates to drop. A core API that
+   reports the released indices — into a preallocated buffer, so the audio path
+   stays clean — would remove the mirroring entirely.
+2. **Reading a voice without allocating.** `voice-snapshot` is diagnostic and
+   allocates; the demo sidesteps it by owning its state. Either the pool offers a
+   preallocated per-voice read, or host-owned control state is the intended shape
+   and the pool should say so.
+3. **Control-name resolution.** The demo rebuilds a name→position map from
+   `:control-plan` in every instrument. That mapping looks like it belongs beside
+   the plan rather than in each host.
+4. **A global source bank.** The demo invents `controllers` and `bends` arrays.
+   The scheduler already carries these values as events; a single host structure
+   both could share is plausible.
+5. **The instrument lifecycle.** "Compile a description, build a pool, allocate
+   the host's arrays" is boilerplate every host will repeat. A core synth
+   *instance* object is the obvious candidate, once a second instrument shows the
+   same shape.
+
+### Pitch moved into the DSP (D35)
+
+The first thing the inspection produced was not a promotion but a **direction**,
+and it came from a question the example raised: where does pitch bend live? The
+answer, prototyped here and then promoted, is the kernel. A voice takes `note`,
+`bend`, and `detune` (cents) and converts them to Hz in the DSP language, per
+sample and inlined; the runtime never computes a frequency, and pitch bend is not
+a route.
+
+**Stage (a), then the promotion.** First the conversion was the example's own
+`dsp/defn`; it is now the library default `omkamra.dsp.library.pitch`
+(`pitch->frequency` over `cents->ratio`), rendered into `LIBRARY.md` like every
+other module. Then the standard vocabulary moved into core: `:bend` and `:detune`
+are in `control-sources`, `:bend-range` (cents) is a description field, the pool
+has a **global source bank** (`set-pitch-bend!`) and a per-voice detune, and
+`read-controls!` was added as the read half of `set-voice-controls!`. Unison's
+spread is delivered as `:detune`. With that, the example stopped re-implementing
+the plan: it reads the pool's values, adds its route deltas, and publishes them
+back.
+
+**What protects the decision** is a differential check: the compiled
+`pitch->frequency` must match the host's `note->frequency`, note for note (it
+does, within f32), and 200 cents must be two semitones. If the two drift, the
+test says so.
+
+Stage (b) — a transformer that bakes a named conversion into the voice, defaults
+with one option and any piece overridable (a plain Clojure function over a
+`dsp/defn` value, not a new DSL) — stays a P11 candidate; it is mostly sugar but
+also derives the ABI.
+
+**A language constraint the promotion surfaced.** The DSP arithmetic operators
+are **strictly binary**: `(+ a b c)` is an error, not a three-operand sum. The
+first version of `pitch->frequency` used one and was rejected at lowering with
+`DSP binary operators require two operands`. Any n-ary arithmetic must be nested;
+the compiler's message is exact and the fix is mechanical.
+
+### State layout was undersized for nested composition (found by D36, fixed)
+
+Building the `unison` transform (D36) surfaced a **pre-existing compiler bug**:
+the state arena is sized too small when a process calls a composite process whose
+body feeds a record-state module a *product* of two stateful calls. The generated
+program compiles for the interpreter and JavaScript but cannot *run*, and the JVM
+backend fails at class definition.
+
+A hand-written wrapper reproduces it, so it is not the transformer:
+
+```clojure
+(dsp/defn w-voice [gate note bend detune cutoff resonance attack decay sustain release]
+  {:process {:input false}}
+  (omkamra.dsp.examples.demo-synth/demo-voice
+   gate note bend detune cutoff resonance attack decay sustain release))
+```
+
+- interpreter: compiles, then `dsp/process!` throws
+  `Index 3 out of bounds for length 3` (from `interpreter.cljc` `state-value`);
+- JVM: `dsp/compile` throws `VerifyError: Bad type on operand stack` (or an NPE
+  inside `insn`);
+- JavaScript: compiles — the layout error is not exercised at compile time.
+
+Narrowing, all with `:process` entries over the same voice core:
+
+| wrapper body | result |
+|---|---|
+| `(saw-oscillator f)` | ok |
+| `(biquad (* adsr saw) cutoff q)` | ok |
+| `(biquad-multimode adsr cutoff q 0)` | ok |
+| `(filter-voice gate cutoff q …)` | ok |
+| `(biquad-multimode (* adsr saw) cutoff q 0)` | **fails** |
+
+So the trigger is the combination of a record-state module, a product of two
+stateful calls as its sample, and one more level of composition. `biquad` and
+`biquad-multimode` share the `biquad-state` record, so the difference is the
+multimode body — the `:int` `mode` control and its `if` branches — which points at
+the interaction between `if` scoping (P7c), state partitioning, and inlining.
+
+**Root cause and fix.** The linker builds `:definitions` by `into` an
+`array-map`, but past **eight** entries an array-map becomes a hash-map. The IR
+lowering then iterated that map (`lower-definitions`, `module-state-sizes`), so
+the dependency order was lost exactly when a unit grew past eight definitions —
+which is why `inner-pf` (8 definitions) worked and `outer-pf` (9) did not.
+Lowering and state sizing now iterate the linker's authoritative `:order`
+(`ir/dependency-order`). The regression test
+`nested-composition-keeps-dependency-order-past-eight-definitions` builds a
+nine-definition unit and asserts the wrapper's arena equals the callee's; its
+teeth are real — the raw map order puts the callee *after* its dependency.
+
+**Why it mattered beyond transforms.** The same lost order sized the state
+arena, and JavaScript compiled the undersized arena **without complaint**, so
+any composition past eight definitions was silently wrong on that target.
+
+### Unison moved out of the pool (D36, done)
+
+The transform is validated and the pool mode is gone. **Removed**: `:unison` from
+`voice-modes` and `mode-codes`; `:unison-detune` (description field, validation,
+config); `mode-unison` and `unison-note-on!`; the one dispatch branch; and
+`sound-voice!`'s `detune` parameter (a fresh voice is in tune). **Kept**:
+`:detune` as a standard host source, now produced by `set-detune!` (per voice),
+with `sound-voice!` setting each voice to zero.
+
+**The oracle changed, for the better.** The transform test no longer compares to
+the pool mode (which is gone); it asserts that the generated voice equals the sum
+of N separately-rendered detuned copies, and the match is **bit-exact**. Writing
+it surfaced a trap worth keeping: `pool/render!` does **not** re-resolve
+controls, so `set-detune!` after `note-on!` has no effect until controls are
+written again — the oracle therefore sets the detune in the description. (The
+demo's own layer sidesteps this because it re-writes controls every block, via
+`read-controls!` + `set-voice-controls!`.)
+
+### `dsp/fn`, and control modes as transformers (D37, step 1)
+
+Two things landed, and they are the same idea: a definition is a value.
+
+* **`dsp/fn`** is the anonymous counterpart of `dsp/defn` — the descriptor
+  returned as a value instead of bound. `dsp/defn` collapsed to
+  `(def name (capture …))`; both share a new private `capture-definition`, so
+  there is one capture path. The value carries a generated internal `:name` and
+  the defining namespace's source, so it links directly. `dsp/fn` shadows
+  `clojure.core/fn` in `omkamra.dsp`, so every `fn` inside that namespace is now
+  `clojure.core/fn`, and `fn` is in `:refer-clojure :exclude`.
+* **`smooth`/`slew` transformers** in the example. They only *set metadata*
+  (`:smooth`/`:slew` on a control) and let `descriptor/normalize` desugar it,
+  exactly as the inline declaration does. So the inline form and the transformer
+  are one mechanism, and the transform works on anonymous `dsp/fn` values.
+
+`(def voice (dsp/fn …))` and `(-> (dsp/fn …) (smooth :cutoff 0.01))` both work.
+
+**Checks.** `dsp-fn-is-an-anonymous-definition-value` (the value carries a
+raw `:name` and the defining namespace, and renders); and
+`control-transforms-match-the-inline-declaration` (the transform and the inline
+`:smooth`/`:slew` render **bit-identically** on the interpreter and the JVM,\nthe plain voice does not, and an unknown control is refused). JVM suite is 112
+tests / 1152 assertions; the browser matrix is 19/19.
+
+### Step 2 — call-emitting transforms on anonymous values (D37)
+
+`unison` emits calls to the definition it wraps, so a fresh anonymous `dsp/fn`
+value had no Var for the linker to resolve. The fix is *value-carried
+dependencies*: a call-emitting transform returns a **derived definition** — the
+example's `derived-definition` — which keeps the wrapped voice's interface
+(parameters, return type, process declaration, options, source), takes a
+**fresh internal name**, and records the original under its fully-qualified id
+in `:dsp/dependencies`. `dsp/link` gathers `:dsp/dependencies` transitively from
+the entry and any supplied `:definitions`, and passes them to the linker as
+supplied definitions.
+
+The fresh name is load-bearing. The derived body calls the original, so keeping
+the original's id would be a self-call; reusing it as the entry id also collides
+with the carried dependency. The helper carries *all* interface fields rather
+than enumerating them, so a new interface field needs no transformer change.
+Two smaller pieces: the descriptor schema admits `:dsp/dependencies`
+(`normalize` still drops it, and `link` reads the raw value before normalizing),
+and the `fn`-shadowing trap recurred — the new helper first used unqualified
+`fn`, which `dsp/fn` turned into a descriptor and `reduce-kv` then tried to call
+as a function; it is `clojure.core/fn` now.
+
+**Checks.** `a-call-emitting-transform-links-an-anonymous-value`: an anonymous
+voice transformed with `unison` links (its `:definitions` holds the carried
+original) and renders the summed detuned copies bit-for-bit on the interpreter
+and the JVM. `transforms-compose-and-carry-dependencies-transitively`: `smooth`
+∘ `unison` keeps the control mode and links; `unison` ∘ `unison` carries a
+three-definition chain; both render. The named unison oracle still passes. JVM
+114 tests / 1163 assertions; browser 19/19; kondo/cljfmt clean.
+
+That closed D37. The helpers have since graduated to core: `omkamra.dsp.graph`
+holds the substrate and `omkamra.dsp.combinators` the combinators, with `share`
+as the last of the tree-expressible set. The next step is the D36 inventory.
+
+## D38 — Clojure assembles the static graph; the engine owns dynamic instances
+
+The transform work landed on a principle, now written down as D38: an audio
+graph is assembled in ordinary Clojure and crosses into the compiler exactly
+once — *build → optimize → lower → link*, with the linker as the boundary. A
+definition value *is* the fixed expression, so combinators are plain functions
+and `->`/`reduce`/`map` compose them.
+
+Two things make it concrete. First, the fixed expression already is a graph; the
+one thing a tree cannot express is **fan-out**, because state is per call site
+(D19), so writing a node twice makes two independent instances. A graph
+description therefore earns its existence by **sharing** — one stateful node for
+several consumers — plus room for optimization passes. Until a combinator needs
+fan-out, the definition-value combinators are the graph; `share` is the forcing
+function. Second, **optimizing transformers are data → data rewrites** that
+choose among lowerings the system can already express: constant folding, dedup
+of *stateless* blocks (never stateful ones), dead-node elimination,
+unroll-versus-reuse, and backend code-dedup. Rewrites such as "fixed-N poly →
+runtime loop" need arrayed state we do not have, and "unrolled voices → one
+kernel, K instances" *is* the pool. An optimizer removes cost the naive shape
+does not need; it cannot invent a lowering.
+
+This round also added two combinators: `sum` (`reduce` over `mix`) and `poly`
+(fixed-N, with a per-slot copy of every control via a `derived-definition`
+override). `poly` is the *static* half of polyphony — the pool is the dynamic
+half — so it is a node with a lowering policy, not a peer of `unison`/`mix`.
+`three-voice-poly` matches `three-voice-poly-by-hand` bit-for-bit on a three-note
+chord, and `three-oscillator-by-sum` matches `three-oscillator`.
+
+**Checks.** `a-fixed-n-poly-voice-has-independent-slots` (the chord matches the
+hand-written sum) and the extended mix test (`reduce` over `mix` agrees). JVM
+117 tests / 1173 assertions; browser 19/19; kondo/cljfmt clean.
+
+### Hoisting: computed arguments and combinator controls
+
+Duplicating a voice should not duplicate its parameters. Investigating found two
+things. Parameters are already top-level (they are the definition's params), so
+the duplication is not there; it is in the **inliner**: it substitutes a call's
+argument expression into the callee body once per use of the parameter. A
+callee that uses its parameter twice therefore duplicated a computed argument —
+`(tap (+ a b))` with `(defn tap [x] (* x x))` lowered to `(* (+ a b) (+ a b))`.
+Worse, a *stateful* argument duplicated this way ran twice against one state
+partition, so a generated target diverged from the interpreter (which does not
+inline). `lower-call` now binds every computed argument to a fresh local, so the
+inliner substitutes a local read; `a-computed-argument-is-evaluated-once` pins
+interpreter-equals-JVM for a stateful argument used twice.
+
+At the combinator layer, `poly` now hoists the **shared** controls and expands
+only the **per-slot** ones (`:per-slot`, default `[:gate :note]`): a
+`[gate note detune]` voice becomes `[detune gate_0 note_0 gate_1 note_1 ...]`,
+not three copies of every control.
+
+That also corrects D38's premise. The fixed expression has `let`, so read-only
+fan-out is expressible without any graph IR; a `share` combinator would be a
+code-generation pattern, not a new layer. The graph description is now justified
+only by optimization/inspection, or by shared *mutable* state (which is a record,
+not a value).
+
+**Checks after hoisting.** JVM 118 tests / 1174 assertions; browser 19/19;
+kondo/cljfmt clean.
+
+### `share`, and the optimization stage
+
+`share` landed as the combinator form of `let`: it binds the voice's output once
+and hands it to a builder, so several consumers read one instance instead of
+creating one call site — and therefore one state partition (D19) — each. The
+demo keeps the signal identical while the duplicated version owns more state
+slots, which is exactly what the combinator buys.
+
+This is the point where the compiler needs an **optimization stage**, and it is
+already tracked (P15 deliverable 4, `PLAN.md` §9). What is new is the concrete
+candidate list, now recorded in D38: deduplicate identical inlined bodies
+(unrolled voices emit K copies through `inline-calls`), fold **stateless** common
+subexpressions only, and note that argument hoisting is the first piece and is
+already in the lowerer.
+
+## P10c — Voice tails and containment (in progress)
+
+Tails turned out to hinge on one design question: how does the pool know a voice
+has finished? Audio level is not an answer — a delay pre-roll, an LFO gate, a
+reverb, or a self-sequencing voice can be silent for seconds and then sound — so
+the signal must be *declared*, not inferred (D39). The default is unchanged and
+safe: a released voice is kept until it is stolen (it is exactly the voice
+stealing prefers), and tails already sound because `render!` mixes every
+non-`free` voice.
+
+The enabling piece landed first: a **scalar state slot is now body-writable**.
+`set!` on a declared scalar state lowers to the same `:state-store` an aggregate
+slot already used. That is the general mechanism that was missing — persistent
+state could previously only be computed through `:next`, which cannot see body
+locals, so a library ADSR's output could not become a flag.
+
+On top of it, `store-special` and the builtin `:activity` slot:
+
+* `(store-special :activity value)` writes a builtin, host-readable slot.
+* `effective-state` scans the body for `store-special` ids and adds the slot
+  *before* `expand-state` numbers slots, so it gets an ordinary index and
+  `module-state-sizes` (the arena sizing that must agree with lowering) counts
+  it. No dynamic mid-lowering append, so the ordering bug class from earlier
+  cannot recur.
+* The process ABI exposes `:special-slots {:activity {:name :type :index}}`.
+
+One gotcha: `store-special` had to be added to the linker's `language-forms`
+(and the IR's operator set), otherwise the linker treated it as a call to a
+missing definition `store-special`.
+
+**Checks.** `a-body-can-write-a-scalar-state-slot` (a counter written and read
+back across frames, interpreter and JVM),
+`a-builtin-special-slot-is-writable-and-exposed` (the round trip plus the ABI
+shape), the end-to-end gate: `a-declared-activity-frees-a-released-voice`,
+`a-voice-without-activity-stays-until-stolen`, and
+`a-declared-activity-defaults-to-active`, and containment:
+`a-non-finite-voice-is-contained`, `a-runaway-magnitude-is-clamped`, and
+`containment-can-be-disabled`. JVM 129 tests / 1215 assertions; browser 19/19;
+kondo/cljfmt clean.
+
+**Readback and gate.** `Kernel/read-specials!` fills a *preallocated* double
+array from the voice's state, so the audio path still allocates nothing. Each
+kernel resolves a special's logical index to a **physical array slot once, at
+construction** (like `control-slots`), so the audio path never re-enters a map —
+this replaced a `(get state-slots logical)` hash lookup per block. Specials are
+encoded as a **mask** with fixed bits (`:activity` = 0), and each definition's
+specials occupy its **first** state slots in ascending-bit order; because
+activity is the lowest bit, its readback position is 0. The ABI exposes
+`:special-mask` and `:special-slots {:activity {:name :type :bit :index}}`; the
+runtime config carries the mask and the count. A callee's `store-special` is
+rejected at lowering (its slot would be buried in a call partition). The pool
+resets and frees a *releasing* voice when `:activity` reads <= 0. Two gotchas:
+the voice map nests the instance, so `:state` lives at `(:state (:instance
+voice))`; and releasing a voice resets it first, because `sound-voice!` treats a
+`free` voice as fresh and would otherwise reuse stale state.
+
+**Containment (D39).** A kernel policy, not a compiler one. `:reset` (the
+default, per `PLAN.md`) scans the block and, on a non-finite sample, silences it
+and `reset!`s the voice so it recovers, bumping a `:containment` pool counter;
+`:sanitize` instead contains each sample before summing (non-finite -> 0, a
+finite runaway clamped to `1e6`) but does not reset, and is the only policy that
+clamps *finite* runaways; `:off` runs the plain loop. Traps: a boxed `contain`
+allocated a Double per sample (the zero-allocation test caught it, so it is
+primitive-hinted), and Clojure's `(float Inf)` *throws*, so the f32 mixing path
+uses `unchecked-float`. The policy branch is per-block (like `f64?`), never
+per-sample.
+
+**Remaining.** The JS/Wasm `read-specials!` and containment, with the P10d host.
+(This is host code: the compiled voice never contains containment.)
+
+## P10d — The JavaScript target emits through Squint (D41)
+
+**Delivered.** The JavaScript backend no longer builds JavaScript text. The
+portable IR still lowers to the same JS-shaped IR, but emission now builds
+*ClojureScript forms* — plain data — and hands them to `squint.compiler`, which
+owns the syntax: statements, `let` ordering, operator precedence, and name
+mangling. The emitter decides only the structure of the module, and `js*` is left
+to the handful of spellings that are the point (`Math.fround`, `| 0`, `break`,
+`continue`, `NaN`, and the array and kernel literals).
+
+**Why.** The string emitter had to get precedence, temporaries, the
+statement/expression split, and `let` ordering right by hand, and the result was
+only checkable by asserting on the text it produced. With Squint owning the
+syntax, the emitter is form construction — the same "assemble the graph in
+Clojure" D38 asks for — and the forms are data, so the path to `PLAN.md` §4's
+browser-side compilation opens up. Squint was already a dependency (the worklet
+adapters use it).
+
+**Four rules, each enforced at run time rather than compile time**, so each is
+what a change here has to respect:
+
+* a local that is `set!` must carry `^:mutable`, or Squint emits `const` and the
+  assignment throws while audio runs;
+* `break` and `continue` have no ClojureScript form, so they are `js*`;
+* `js*` never names a local — Squint mangles locals — so values are spliced in;
+* nothing may lower to a `squint_core` reference, because a kernel is installed
+  as one standalone script.
+
+The last is the subtle one, and it took a while to pin down. Squint calls its
+standard library for any value it cannot prove is a boolean: `and`/`or`/`not`
+become `squint_core.truth_`/`squint_core.not`, `=` becomes `squint_core._EQ_`,
+and an `if`/`while` condition it cannot prove boolean is wrapped in `truth_`.
+`^boolean` hints are *not* the answer — they make `and`/`or` lower to a
+value-preserving ternary, which then needs `truth_` in a condition. What works is
+to stay inside what Squint already recognises as boolean: the native comparisons
+(`<`, `<=`, `>`, `>=`, and `==`), with `:not=` written as `(not (== a b))` — that
+is `!(a === b)`; `and`/`or`/`not` only over operands that are provably boolean
+(anything else is compared with `true`); and a `^boolean` declaration for a
+boolean argument or local, so that `(not (not x))` is `!!x`, which is how a
+boolean argument is normalised at the boundary — an `AudioParam`, or a pool's
+control array, arrives as a number.
+
+**Verified.** Node runs the generated module for `one-pole` (mono, stateful) and
+`stereo-cross` (two channels) bit-identically to the interpreter. The browser
+conformance suite — every catalog case, f32 and f64, on JavaScript and Wasm —
+passes 19/19. `tests/js.clj` now asserts the module contract (the export shape,
+the physical type, and no `squint_core` over the whole catalog) instead of the
+emitted text, and four older tests that pinned JavaScript text were rewritten to
+pin the target-level shape or the ABI (`ir.clj`, `process.clj`, `memory.clj`,
+`automation.clj`). JVM 137 tests / 1437 assertions.
+
+**Consequences.** The kernel object exposes its state arena, so a host can read a
+voice's special slots (D39) without a second entry point. The Wasm target is
+untouched — WAT is still hand-emitted — so the two native backends now differ in
+authoring style.
+
+---
+
+## P10d — The browser host and the worklet boundary (D40, slice 3)
+
+**Delivered.** A pool runs in the browser over a generated JavaScript module. The
+kernels moved out of `omkamra.dsp.synth.host` into an `omkamra.dsp.hosts` family
+— `.jvm`, `.interpreter`, `.js`, with `.wasm` still to come — and the plumbing
+every one of them shares (the containment policy, and the planar blocks a voice
+is rendered into and mixed through) into `omkamra.dsp.hosts.mixing`. `mixing` is
+`.cljc`, so the JVM suite and the browser testbed run the *same* reference oracle
+rather than two copies of it. `omkamra.dsp.hosts` itself is the assembler:
+`synth-bundle` compiles a description and derives its runtime configuration from
+the artifact's own ABI, and `compile-synth` adds a JVM-side kernel. A browser host
+builds its own from the bundle, which is what makes the browser check a
+differential test rather than a comparison against shipped vectors.
+
+**The browser check.** `omkamra.dsp.harness.testbed` fetches a compiled voice
+(`/synth-bundle`: runtime, ABI, and interpreter IR; `/synth-source`: the
+JavaScript module) and plays one note through two pools that differ only in their
+kernel — one over the module's `createKernel`, one over the interpreter — then
+compares the rendered block and asserts the released voice was freed. That single
+check covers what a browser kernel has to provide beyond rendering: two planar
+channels, per-frame shared state, a host-readable special slot (`:activity`), and
+containment.
+
+**The worklet boundary.** The adapter used to call the kernel once per channel.
+With one evaluation per frame (D40) the kernel indexes its own channels, so the
+adapter now calls it **once** and hands it the callback's own arrays — one channel
+array for a mono kernel, the array of them otherwise — and silences the channels
+the kernel does not write. The kernel's shape (`channels`, `inputChannels`)
+travels in processor options from the ABI. Nothing is up-mixed any more: placing
+a mono voice in a stereo field is the voice's business (`effect/pan`), exactly as
+slice 2 decided. Keeping the one-pole worklet check honest meant stating in the
+page that its kernel is mono with one input channel, while the callback still has
+two output channels.
+
+**Verified.** Browser 20/20 (the new `JavaScript pool host` among them); JVM 137
+tests / 1437 assertions; `clj-kondo`/`cljfmt` clean.
+
+**The Wasm host.** `omkamra.dsp.hosts.wasm` is the same kernel seam over a Wasm
+module, and is where the two browser hosts genuinely differ: a Wasm kernel is not
+handed the block. `process` takes the byte offset of its output region and writes
+channel `c` at `offset + c * channel-stride` in its own linear memory, so a
+voice's scratch is a set of typed-array views over its instance's memory and
+mixing is arithmetic rather than a copy. A Wasm instance owns its memory, so a
+voice *is* an instance — `create-voice` instantiates the module — and
+`read-specials!` reads each special out of the state region, where element `index`
+sits at `offset + index * element-bytes` at both widths (D39). The worklet
+adapter calls the export once per block and copies each channel out of memory
+into the callback's arrays, silencing channels the kernel did not write.
+
+**P10 is complete.** The pool, the four kernel hosts, the browser checks, and the
+worklet boundary are all in place; what remains for the reference instrument is
+P11.
+
+---
+
+## Handoff — current state (rolling entry)
 
 This is the one living entry, as opposed to the completed-phase entries above:
 what exists, how it fits together, what is open, and what to do next. It may be
 rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
+
+### Resume here
+
+- **Where.** `omkamra.dsp` is a DSP compiler (macros → descriptors → typed IR →
+  interpreter/JVM/JS/Wasm) plus a host-side sequencing layer. P0–P10 and the
+  transformer work D33–D41 are done; **P10 is complete**, and the next phase is
+  P11 (the reference synthesizer acceptance fixture).
+- **Pitch domain (D35).** A voice takes `note`/`bend`/`detune` (cents) and
+  converts to Hz in the DSP (`omkamra.dsp.library.pitch/pitch->frequency`); the
+  pool delivers the standard sources and stays pitch-agnostic.
+- **Synth runtime.** `omkamra.dsp.synth` (description → pure-data config);
+  `synth.pool` (modes `{poly, mono, legato, retrigger}`, allocation/stealing,
+  global source bank `set-pitch-bend!`/`set-detune!`, `read-controls!` +
+  `set-voice-controls!`); `omkamra.dsp.hosts` (the assembler: `synth-bundle`,
+  `compile-synth`) over the kernel family `hosts.{jvm,interpreter,js}` and their
+  shared plumbing `hosts.mixing`.
+- **Stereo (P10d, D40, slices 1a–3 done).** One evaluation per frame;
+  multi-channel output is explicit per-channel stores; state may be shared across
+  channels. A stereo voice renders a **planar** block through the pool, which
+  sums voices plainly (it never pans). `:pan` is a standard **per-voice** source
+  (`set-pan!`, the stereo counterpart of `:detune`); a voice that binds no `:pan`
+  control pans inside its own DSP instead. The library `effect/pan` (equal-power,
+  -1..1) and `effect/stereo-spread` (Haas) both return a `stereo-pair`. The
+  browser host is `omkamra.dsp.hosts.js` (a `Kernel` over a generated JavaScript
+  module) and `omkamra.dsp.hosts.wasm` (views over a Wasm instance's own
+  linear memory), each checked against the interpreter pool by the browser suite
+  (`JavaScript pool host`, `Wasm pool host`); both worklet adapters call a kernel
+  once per block. **P10 is complete.**
+- **JavaScript target (D41).** The JS backend emits by building ClojureScript
+  forms and compiling them with Squint, so the module is standalone (no
+  `squint_core`, no import) and the emitter no longer writes JavaScript text.
+  `tests/js.clj` pins the contract and the catalog-wide standalone rule; Node is
+  the fast loop while working on it. The Wasm target still emits WAT by hand.
+- **Voice tails (P10c, D39).** Tails are *declared, not inferred*: a
+  released voice is kept until stolen by default; a voice that writes the builtin
+  `:activity` slot is reset + freed when it reads ≤ 0. A scalar state slot is now
+  body-writable (`set!`), which is what lets a body local (e.g. an ADSR's output)
+  become a flag; `(store-special :activity v)` writes the builtin slot, added to
+  the state by scanning the body, with default `:init 1` (active). Specials are a
+  **bitmask** with fixed bits (`:activity` = 0) placed at the **front** of the
+  entry's state; the ABI exposes `:special-mask` + `:special-slots`, and each
+  kernel resolves the physical slot **at construction** (no map lookup on the
+  audio path). `compile-synth` carries the mask. A callee's `store-special` is
+  rejected. Non-finite containment is a **kernel policy** (`:containment
+  :reset` default — silences + resets + counts, per `PLAN.md`; `:sanitize`
+  contains; `:off`), applied per voice before mixing. **Remaining:** the JS/Wasm
+  readback and containment (with P10d).
+- **Definition values and transformers.** `dsp/fn` returns an anonymous
+  definition value; `dsp/defn` is `def` + the same capture; `dsp/def` names a
+  derived value; `->` chains transforms. **Promoted to core:**
+  `omkamra.dsp.graph` holds the substrate (`definition-id`, `parameter-symbols`,
+  `definition-call`, `derived-definition`), and `omkamra.dsp.combinators` holds
+  `unison`, `mix`, `sum`, `through`, `poly`, `share`, and `smooth`/`slew`.
+  `omkamra.dsp.examples.demo-synth` is the instrument that uses them.
+- **Graph model (D38).** Build in Clojure, lower once, link; the fixed expression
+  is already a DAG via `let`, so fan-out does not force a new IR. Hoisting is the
+  cost control: computed call arguments bind once at lowering, `poly` hoists
+  shared controls and expands only `:per-slot` ones, and `share` is a `let`.
+- **Optimization stage.** Already planned (P15 deliverable 4, `PLAN.md` §9);
+  D38 records the concrete candidates (dedup of identical inlined bodies,
+  stateless CSE) and that argument hoisting is in place.
+- **Removed from the pool:** `:unison`, `unison-detune`, the unison branch; the
+  mode set is `{poly, mono, legato, retrigger}`.
+- **Tests.** JVM `(omkamra.dsp.tests.suite/run-all)` — 137 tests / 1437
+  assertions; browser `(omkamra.dsp.harness.browser/run! {:server? false})` —
+  21/21. See `TESTING.md`.
+- **P10d — stereo (D40, in progress).** The compiler model is now *one evaluation
+  per frame*, not run-per-channel: the four targets lost their channel loop, the
+  implicit `channel` is 0, a `:void` body that writes `:output` (a process, by
+  that fact alone — no `:process` map needed) writes per channel, and stateful
+  multi-channel compiles — so a shared-state stereo voice (reverb,
+  `stereo-spread`) is expressible. Bodies also follow `defn`: several forms are
+  an implicit `(do ...)`. Slices 1a–2 are done (the audio width is *counted* from
+  the body's buffer accesses, and a stereo voice renders a **planar** block
+  through the pool, whose voices are summed plainly); remaining: the
+  CLJS/AudioWorklet host (3).
+- **Next.** P11 (the reference synthesizer acceptance fixture), or first the
+  D36 inventory — the transforms still unimplemented (oversampling; stereo
+  spread, now unblocked), promoted one at a time as the instrument needs them.
+- **Linting.** `.clj-kondo` uses opaque hooks for `dsp/defn`/`dsp/fn`/`dsp/defstruct`
+  and `:lint-as clojure.core/def` for `dsp/def`; a real DSP-aware linter is
+  designed but deferred (three findings in `TESTING.md`).
+- **Exploration (deferred).** Plain Clojure functions as macros inside DSP forms
+  — an expansion pass ahead of normalized descriptors; rationale, candidates, and
+  hazards are in `PLAN.md` §10.
+- **State.** Everything since P10a is uncommitted (staged/working tree); the user
+  commits when P10 is finalized. The dev nREPL is running; the `:on-demand-http`
+  Shadow watcher is running.
 
 - **P7 (DSP standard library) is complete.** Eight `.cljc` sub-namespaces under
   `omkamra.dsp.library` cover band-limited oscillators (PolyBLEP saw/pulse/
@@ -1239,6 +1942,41 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   and drives the kernel by segmentation; the kernel itself carries declared
   `:smooth`/`:slew` control modes (D27) and host-supplied per-frame automation
   lanes (D28), and no backend has a ramp or curve op.
+- **P10a is complete** — see the P10a entry above. A synth is one serialisable
+  description that yields a voice artifact and a pure-data runtime
+  configuration; `omkamra.dsp.synth.pool` runs N kernel instances with
+  deterministic allocation and stealing, the note lifecycle, and block
+  rendering; and `omkamra.dsp.synth.host` adapts the JVM and the reference
+  interpreter, so a pool is checked against the interpreter hosting the same
+  pool. No compiler surface changed.
+- **P10b-i (voice modes) is complete** — see the P10b-i entry above. `:mono`,
+  `:legato`, `:retrigger`, and `:unison` are declared allocation policies over
+  the same pool (D33); the monophonic held-note stack is bounded by a declared
+  `:held-notes` capacity, and unison detunes symmetrically in cents. Still
+  host-side, still no compiler surface.
+- **P10b-ii (modulation) is complete, as an example (D34).** Core gained exactly
+  one affordance, `omkamra.dsp.synth.pool/set-voice-controls!`; the wiring lives
+  in `omkamra.dsp.examples.demo-synth`, the growing example instrument. Patterns
+  the example exposes are listed for inspection before any is promoted to core.
+- **Pitch is pitch-domain, converted in DSP (D35).** The vocabulary is core
+  now: `control-sources` has `:bend`/`:detune`, the description has `:bend-range`,
+  the pool has a global source bank (`set-pitch-bend!`) and a per-voice detune,
+  and the conversion default is
+  `omkamra.dsp.library.pitch/pitch->frequency`. `read-controls!` was added as the
+  read half of the host control channel. Only the (b) transformer remains.
+- **Voice transforms are functions over definition values (D36).** `dsp/def`
+  names a derived definition, `->` chains transforms, and `unison` is the first
+  one. **Validated and promoted**: the transform is bit-identical to the sum of
+  its detuned copies (interpreter and JVM), and the pool's `:unison`,
+  `unison-detune`, and unison branch are removed. `:detune` stays a host source,
+  set by `set-detune!`. The mode set is `{poly, mono, legato, retrigger}`.
+- **A definition is a value (D37).** `dsp/fn` is the anonymous counterpart of
+  `dsp/defn` (one shared `capture-definition`), so definitions compose with `->`.
+  `smooth`/`slew` are transformers that *set metadata* the compiler already
+  desugars (D27), so the inline and transformer surfaces are one mechanism and
+  match bit-for-bit; they work on anonymous `dsp/fn` values. Call-emitting
+  transforms (`unison`) work on anonymous values too: the derived value carries
+  the original in `:dsp/dependencies`, which `link` supplies.
 - **Verification.** `omkamra.dsp-test` on the JVM is the primary suite, with an
   `:automation-lane` and other catalog cases shared through `omkamra.dsp
   .acceptance`; the browser testbed runs the same catalog on JavaScript and Wasm
@@ -1347,14 +2085,20 @@ when they were written.
 ### Architecture
 
 ```text
-omkamra.dsp.acceptance        (.cljc)  data-only conformance catalog
-omkamra.dsp.conformance       (.clj)   plan building, JVM differential driver
-omkamra.dsp.interpreter       (.cljc)  portable reference interpreter (the oracle)
-omkamra.dsp.library           (.cljc)  first DSP standard-library entries (seed of P7)
-omkamra.dsp.builtins          (.clj)   builtin registry (signatures/effects/expansion)
-omkamra.dsp.browser           (.clj)   spel/on-demand-http browser driver
-omkamra.dsp.testbed           (.clj)   HTTP endpoints: source, wat, metadata, plan
-omkamra.dsp.testbed           (.cljs)  browser differential suite
+omkamra.dsp.targets.capability   (.cljc)  what each target serves (D29)
+omkamra.dsp.targets.interpreter  (.cljc)  portable reference interpreter (the oracle)
+omkamra.dsp.targets.{jvm,js,wasm}         the three code generators
+omkamra.dsp.descriptor, ir, linker, builtins   the compiler front end
+omkamra.dsp.library.*            (.cljc)  the DSP standard library (P7)
+omkamra.dsp.event, schedule      (.cljc)  the host-side sequencing layer (P9)
+omkamra.dsp.synth                (.cljc)  synth description + runtime configuration (P10a)
+omkamra.dsp.synth.pool           (.cljc)  preallocated voices, allocation, rendering (P10a)
+omkamra.dsp.synth.host           (.clj)   JVM/interpreter kernels, compile-synth (P10a)
+omkamra.dsp.harness.catalog      (.cljc)  data-only conformance catalog
+omkamra.dsp.harness.conformance  (.clj)   plan building, JVM differential driver
+omkamra.dsp.harness.{browser,testbed}     spel driver and the browser suite
+omkamra.dsp.harness.fixtures     (.clj)   shared test fixtures
+omkamra.dsp.tests.*              (.clj)   the suite, by subject (tests.suite/run-all)
 ```
 
 ### Interpreter-oracle conformance
@@ -1563,21 +2307,34 @@ the same definition must not compile to a function on JS and a process on Wasm.
 
 ### Next steps
 
-P1–P9 are complete except for the residuals listed under "Open issues" and the
-two partial P9 deliverables (`PHASES.md`, P9 "Not done"): linear/critical ramps,
-which a host can supply as a lane instead, and non-finite containment, which
-belongs with P10's voice pool.
+P1–P9 are complete, and P10 is under way, except for the residuals listed under
+"Open issues" and the two partial P9 deliverables (`PHASES.md`, P9 "Not done"):
+linear/critical ramps, which a host can supply as a lane instead, and non-finite
+containment, which belongs with P10's voice pool.
 
-1. **P10 — voice pool and synth runtime.** Where D23's per-note mapping lives,
-   where non-finite containment belongs, and where the ABI's per-voice region
-   layout pays off.
-2. **A structured capability diagnostic.** There is still no registry-level,
+1. **Finish the transformer layer (D36/D37).** Step 2: give anonymous `dsp/fn`
+   values an internal id and carry their anonymous dependencies in the value
+   (`:dsp/dependencies`), fed to `link`'s `:definitions`, so
+   `(-> (dsp/fn …) (unison …))` resolves. Then work the inventory one transform
+   at a time: oversampling; stereo spread (needs P10d's multi-channel output);
+   per-voice effects. (`:smooth`/`:slew` is done as D37 and stays compiler sugar.)
+2. **P10c — voice and effect tails, and non-finite containment.** This is where
+   the one genuinely new mechanism lives: the kernel has to report that a voice
+   has finished. The P10a entry records the reconnaissance — a JS/Wasm instance
+   does not expose its state, a multi-channel process replicates rather than
+   carrying a different signal per channel, and the output buffer is the only
+   channel every target already writes — so the candidates are an *output* status
+   region symmetric with `:lanes`, or a declared state readback.
+3. **P10d — stereo spreading, effect tails, and the CLJS/AudioWorklet host.**
+   The pool is `.cljc` and host-neutral already; this is the adapter, plus the
+   second channel everywhere.
+4. **A structured capability diagnostic.** There is still no registry-level,
    pre-flight check: an unimplemented `[operator type]` fails in a backend's
    `:default` method at emission time. Worth doing before P12 adds more surface.
-3. **Generated-target (JS/Wasm) development guards**, and restoring the dropped
+5. **Generated-target (JS/Wasm) development guards**, and restoring the dropped
    Wasm f64 AudioWorklet check. Lanes are a live example of the gap: the Wasm
    *worklet* adapter does not carry a lane region, because no case drives it.
-4. **The D20 partition-coloring pass is deferred, now with numbers.** D20
+6. **The D20 partition-coloring pass is deferred, now with numbers.** D20
    permits reusing a partition only when it is **dead on frame entry**, and
    colours both persistent state and P4 scratch. Measured over all 83 catalog
    process cases: **663** persistent-state slots against **14** scratch slots,
@@ -1659,11 +2416,27 @@ Remaining:
 See `TESTING.md`. Short version, through `clojure_eval`:
 
 ```clojure
-;; JVM
-(require '[clojure.test :as t] 'omkamra.dsp-test)
-(t/run-tests 'omkamra.dsp-test)
+;; The edit-reload-test loop: initialize clj-reload BEFORE editing, then reload
+;; after each edit. Do not substitute `require :reload`: it leaves dependents
+;; stale, which shows up as stale protocol classes and phantom failures.
+(require '[clj-reload.core :as reload])
+(reload/init {:dirs ["src"] :output :quiet})       ; once, before editing
+(let [r (reload/reload)] (select-keys r [:unloaded :loaded]))
 
-;; Browser (JS + Wasm)
-(require '[omkamra.dsp.browser :as browser])
+;; JVM (99 tests, 1074 assertions)
+(require 'omkamra.dsp.tests.suite)
+(omkamra.dsp.tests.suite/run-all)
+
+;; Browser (JS + Wasm), 19 checks. `:on-demand-http` starts the Shadow watcher;
+;; do not start a second one.
+(require '[omkamra.dev.on-demand-http :as on-demand-http])
+(on-demand-http/start!)
+(require '[omkamra.dsp.harness.browser :as browser])
 (browser/run!)
 ```
+
+Two traps worth remembering: reloading a namespace **invalidates REPL aliases**
+and class identity, so prefer fully-qualified names in evals and expect
+`instance?` checks against reloaded classes to be meaningless; and a reloaded
+namespace is JIT-cold, so an allocation measurement taken right after one reads
+the compiler, not the code.

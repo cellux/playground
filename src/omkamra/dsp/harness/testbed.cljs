@@ -13,8 +13,12 @@
             [goog.object :as gobj]
             [omkamra.dsp.harness.catalog :as catalog]
             [omkamra.dsp.event :as event]
+            [omkamra.dsp.hosts.interpreter :as interpreter-host]
+            [omkamra.dsp.hosts.js :as js-host]
+            [omkamra.dsp.hosts.wasm :as wasm-host]
             [omkamra.dsp.targets.interpreter :as interpreter]
             [omkamra.dsp.schedule :as schedule]
+            [omkamra.dsp.synth.pool :as pool]
             ["wabt" :default wabt]))
 
 (defonce app-state (atom nil))
@@ -581,10 +585,16 @@
                              :channelCount 2
                              :channelCountMode "explicit"
                              :outputChannelCount #js [2]
+                             ;; `one-pole` is mono with one input channel:
+                             ;; the callback still has two output channels, and
+                             ;; the adapter silences the one the kernel does not
+                             ;; write (D40 — placing a mono voice is the voice's
+                             ;; business, not the adapter's).
                              :processorOptions #js {:kernelUrl (if f64?
                                                                  "/omkamra/dsp/harness/testbed/source-f64"
                                                                  "/omkamra/dsp/harness/testbed/source")
-                                                    :channels 2
+                                                    :inputChannels 1
+                                                    :channels 1
                                                     :frameCapacity 256
                                                     :elementBytes (if f64? 8 4)
                                                     :elementType (if f64? "f64" "f32")
@@ -1222,6 +1232,109 @@
                                 (js->clj metadata :keywordize-keys true))))))))))
         (.then (fn [worklet] (conj results worklet))))))
 
+;; ---------------------------------------------------------------------------
+;; The browser pool host (P10d)
+;; ---------------------------------------------------------------------------
+
+(defn- fetch-edn
+  [url]
+  (-> (js/fetch url)
+      (.then (clojure.core/fn [response] (.text response)))
+      (.then (clojure.core/fn [text] (reader/read-string text)))))
+
+(defn- planar-block
+  "A planar `channels` x `frames` block: the shape a pool renders into, and the
+  shape an audio callback hands over."
+  [channels frames]
+  (let [block (js/Array. channels)]
+    (dotimes [channel channels]
+      (aset block channel (js/Float32Array. frames)))
+    block))
+
+(defn- render-pool
+  "Render `frames` through `pool`, as a vector of channel sample vectors."
+  [pool channels frames]
+  (let [block (planar-block channels frames)]
+    (pool/render! pool block frames 48000.0)
+    (mapv (clojure.core/fn [channel] (vec (array-seq (aget block channel))))
+          (range channels))))
+
+(defn- play-note
+  "Play one note through `pool`: a held block, then the block after release.
+
+  The voice writes `:activity`, so the release block is also what frees it."
+  [pool channels]
+  (pool/note-on! pool 60 1.0)
+  (let [held (render-pool pool channels 4)]
+    (pool/note-off! pool 60)
+    (let [released (render-pool pool channels 1)]
+      {:held held
+       :released released
+       :voices (count (pool/voice-snapshot pool))})))
+
+(defn- check-host-pool
+  "Compare a pool over a browser kernel against the interpreter pool, over the
+  same note and the same block, and report the result as a check.
+
+  The pools differ only in their kernel — the runtime configuration, the events,
+  and the block are identical — so any difference is the host's."
+  [name runtime abi ir channels kernel]
+  (let [actual (play-note (pool/voice-pool runtime kernel) channels)
+        expected (play-note (pool/voice-pool runtime
+                                             (interpreter-host/interpreter-kernel ir abi))
+                            channels)]
+    (require! (= actual expected)
+              (str name " drifted from the interpreter: "
+                   (pr-str actual) " vs " (pr-str expected)))
+    (require! (zero? (:voices actual))
+              (str name ": a declared :activity should free the released voice"))
+    {:name name
+     :passed? true
+     :detail (str "stereo pool matched the interpreter over "
+                  (count (first (:held actual))) " frames across "
+                  channels " channels")}))
+
+(defn- javascript-pool-test
+  "The JavaScript host: the kernel is handed the callback's own arrays."
+  []
+  (-> (js/Promise.all
+       #js [(fetch-edn "/omkamra/dsp/harness/testbed/synth-bundle")
+            (response-text "/omkamra/dsp/harness/testbed/synth-source")])
+      (.then
+       (clojure.core/fn [[bundle source]]
+         (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
+               url (js/URL.createObjectURL blob)]
+           (-> (dynamic-import url)
+               (.then
+                (clojure.core/fn [module]
+                  (let [abi (:abi bundle)]
+                    (check-host-pool
+                     "JavaScript pool host"
+                     (:runtime bundle) abi (reader/read-string (:ir bundle))
+                     (get-in abi [:channels :count])
+                     (js-host/js-kernel (gobj/get module "createKernel") abi
+                                        {:precision (:precision bundle)})))))
+               (.finally (clojure.core/fn [] (js/URL.revokeObjectURL url)))))))))
+
+(defn- wasm-pool-test
+  "The Wasm host: the same differential check over a kernel that writes into its
+  own linear memory, which is the one way the two browser hosts differ."
+  []
+  (-> (fetch-edn "/omkamra/dsp/harness/testbed/synth-bundle?target=wasm")
+      (.then
+       (clojure.core/fn [bundle]
+         (-> (compile-wasm (:wat bundle))
+             (.then
+              (clojure.core/fn [bytes]
+                (let [module (js/WebAssembly.Module. bytes)
+                      abi (:abi bundle)]
+                  (check-host-pool
+                   "Wasm pool host"
+                   (:runtime bundle) abi (reader/read-string (:ir bundle))
+                   (get-in abi [:channels :count])
+                   (wasm-host/wasm-kernel module abi (:memory bundle)
+                                          {:precision (:precision bundle)}))))))))))
+
 (defn- run-suite!
   [summary results-list]
   (render-results! summary results-list [])
@@ -1237,7 +1350,9 @@
       (.then (fn [matrix-results]
                (run-promise-sequence
                 summary results-list matrix-results
-                [(fn [] (-> (bounded-loop-wasm-test) (.then (fn [r] [r]))))
+                [(fn [] (-> (javascript-pool-test) (.then (fn [r] [r]))))
+                 (fn [] (-> (wasm-pool-test) (.then (fn [r] [r]))))
+                 (fn [] (-> (bounded-loop-wasm-test) (.then (fn [r] [r]))))
                  (fn [] (-> (wasm-table-test) (.then (fn [r] [r]))))
                  (fn [] (-> (wasm-table-cos-accuracy-test) (.then (fn [r] [r]))))
                  (fn [] (instance-independence-tests))

@@ -59,6 +59,30 @@ Bartlett (triangular) window over the normalised phase `phase`. Rises linearly f
 - **Return:** float
 - **Entry:** callable module
 
+## `omkamra.dsp.library.pitch`
+
+Pitch: the standard pitch-domain controls and their conversion to frequency. A voice in this system takes pitch in the **pitch domain** — a MIDI `note` plus `bend` and `detune` in cents — and converts it to Hz in the kernel, per sample, rather than receiving a precomputed frequency from the host (`DECISIONS.md` D35). These functions are the default conversions; a voice is free to define its own (they are ordinary `dsp/defn`s), and a declarative form that injects the tuning and the algorithm is a later step.
+
+### `omkamra.dsp.library.pitch/cents->ratio`
+
+The frequency ratio of `cents` cents: `2^(cents/1200)`. A semitone is 100 cents, so this is how bend and detune multiply a frequency.
+
+- **Parameters:** `cents` float
+- **Controls:** none (not a process entry)
+- **State:** none (stateless)
+- **Return:** float
+- **Entry:** callable module
+
+### `omkamra.dsp.library.pitch/pitch->frequency`
+
+The frequency in Hz of MIDI `note`, bent by `bend` cents and detuned by `detune` cents, in a tuning of `reference` Hz at `reference-note` (the usual tuning is 440.0 at 69). Equal temperament, evaluated in the kernel: a bend or a detune is applied per sample rather than quantised to a block boundary, and it is inlined into the voice's frame loop, so it costs no more than the `pow` it is.
+
+- **Parameters:** `note` float, `bend` float, `detune` float, `reference` float, `reference-note` float
+- **Controls:** none (not a process entry)
+- **State:** none (stateless)
+- **Return:** float
+- **Entry:** callable module
+
 ## `omkamra.dsp.library.oscillator`
 
 Oscillators.
@@ -418,6 +442,16 @@ Waveshaping and other effects.
 - **State:** none (stateless)
 - **Return:** float
 - **Entry:** process entry and callable module
+
+### `omkamra.dsp.library.effect/pan`
+
+Equal-power pan of a mono `sample` to a stereo pair. `position` runs -1 (hard left) to 1 (hard right), 0 centre, and the channel gains keep total power constant (`left^2 + right^2 = sample^2`). Returns a `stereo-pair`, so it is a module: a process entry projects it and writes the two channels (D40). Pair it with a `:pan` control (`set-pan!`) to let the host place a voice, or call it with a computed position to pan inside the DSP.
+
+- **Parameters:** `sample` float, `position` float
+- **Controls:** none (not a process entry)
+- **State:** none (stateless)
+- **Return:** record `omkamra.dsp.library.effect/stereo-pair`
+- **Entry:** callable module
 
 ### `omkamra.dsp.library.effect/stereo-spread`
 

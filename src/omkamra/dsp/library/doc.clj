@@ -12,6 +12,7 @@
 (def library-namespaces
   "Library namespaces, in reference order."
   '[omkamra.dsp.library.math
+    omkamra.dsp.library.pitch
     omkamra.dsp.library.oscillator
     omkamra.dsp.library.noise
     omkamra.dsp.library.envelope

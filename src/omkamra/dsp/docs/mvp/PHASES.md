@@ -391,6 +391,23 @@ matrix checks JavaScript and Wasm against the portable-IR oracle.
 
 **Depends on.** P9.
 
+**Slices.** P10a (description, voice pool, allocation/stealing, note lifecycle,
+block rendering) is complete — see `DIARY.md`. P10b-i (voice modes:
+mono/legato/retrigger, D33) is complete; `:unison` turned out to be a voice
+*transform* rather than a mode (D36), and is out of the pool. P10b-ii delivers per-voice and
+global modulation as an **example instrument** rather than a core schema (D34),
+and promotes the standard pitch-domain sources it demonstrated into core (D35):
+`:bend`/`:detune` in `control-sources`, `:bend-range`, the pool's global source
+bank and `read-controls!`, and the library `pitch->frequency` default. P10c adds
+voice and effect tails with
+non-finite containment, which is where the kernel must start reporting that a
+voice has finished; P10d adds stereo spreading and the browser hosts (JavaScript
+and Wasm) behind the pool, together with the worklet boundary.
+Deliverables 1, 2, 6 and the core of 3 land in P10a; the modes of 3 in P10b-i; 4
+in P10b-ii; 5 across P10c and P10d.
+
+**Status.** Complete. See `DIARY.md` for P10a–P10d and `DECISIONS.md` D33–D41.
+
 **Deliverables.**
 
 1. Preallocated voice pools with explicit capacity and per-voice state layout
@@ -399,6 +416,8 @@ matrix checks JavaScript and Wasm against the portable-IR oracle.
 3. Per-voice init/release/reset/terminate lifecycle, mono/legato/retrigger/
    poly/unison modes.
 4. Per-voice and global modulation routing with bounded route counts.
+   *(Demonstrated in `omkamra.dsp.examples.demo-synth`; the route schema is
+   deliberately left out of core until the reference synth forces its shape — D34.)*
 5. Voice and effect tails, stereo spreading, and arbitrary block sizes.
 6. A serializable host-target sequencing configuration separate from the Wasm
    module.
@@ -506,7 +525,12 @@ after conformance holds.
 4. Conservative optimization: precision-aware constant folding, dead-local and
    unreachable-branch elimination, local copy propagation, bounded-loop
    simplification, and size-limited inlining, each guarded by differential
-   tests and a no-reassociation rule for floating point.
+   tests and a no-reassociation rule for floating point. Two further candidates
+   surfaced by the combinator work (D38): deduplicating identical inlined bodies
+   (an unrolled voice emits K copies through `inline-calls`) and folding
+   **stateless** common subexpressions only. `lower-call` already hoists a
+   computed argument to a local before inlining, so substitution cannot
+   re-duplicate it per use — nor run a stateful argument twice.
 
 *(P15a, done — pulled forward.)* Deliverable 1's capability half: every target
 declares what it serves (`omkamra.dsp.capability`), and `dsp/compile` refuses a

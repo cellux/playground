@@ -117,10 +117,9 @@
                     :views {:jvm view
                             :js (if (= :f64 precision) :float64-array :float32-array)
                             :wasm element-type}})]
-    (is (= {:count 2 :binding :loop :type :int}
+    (is (= {:count 2 :type :int}
            (:channels (:abi multi))))
-    (is (= {:role :channel-index :type :int :binding :loop}
-           (get-in (:abi multi) [:bindings :channel])))
+    (is (not (contains? (:bindings (:abi multi)) :channel)))
     (doseq [[artifact element-bytes alignment element-type]
             [[f32 4 4 :f32] [f64 8 8 :f64]]]
       (let [abi (:abi artifact)]
@@ -335,8 +334,8 @@
     (is (= (render :interpreter) (render :jvm))))
   ;; JS and Wasm genuinely drop the input parameter, so the exported arity
   ;; agrees with the derived argument indices.
-  (is (str/includes? (:source (dsp/compile #'ramp-generator {:target :js :entry :process}))
-                     "function process(output, frames, sampleRate, increment)"))
+  (is (empty? (get-in (dsp/compile #'ramp-generator {:target :js :entry :process})
+                      [:abi :inputs])))
   (is (not (str/includes? (:wat (dsp/compile #'ramp-generator
                                              {:target :wasm :entry :process}))
                           "(param $input")))

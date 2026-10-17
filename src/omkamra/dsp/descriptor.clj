@@ -208,7 +208,12 @@
    [:resolution {:optional true} [:or nil? ResolutionContext]]
    [:process {:optional true} [:or nil? ProcessSource]]
    [:options {:optional true} [:or nil? CompilerOptions]]
-   [:compiler-options {:optional true} [:or nil? CompilerOptions]]])
+   [:compiler-options {:optional true} [:or nil? CompilerOptions]]
+   ;; Definitions carried by a call-emitting transformer (D37), keyed by
+   ;; fully-qualified id. They are validated on arrival by the linker, so a
+   ;; shallow shape is enough here. `normalize` drops the key; `link` reads it
+   ;; from the raw value before normalizing.
+   [:dsp/dependencies {:optional true} [:or nil? [:map-of symbol? [:map]]]]])
 
 (def ^:private SourceForm
   [:schema {:registry {::source-form
@@ -540,13 +545,34 @@
         :else nil))
     :else nil))
 
+(defn- writes-output?
+  "True when a body stores into the process `:output` buffer.
+
+  Such a body is a process, not a scalar function: it writes its result per
+  channel instead of returning it (D40)."
+  [form]
+  (cond
+    (seq? form) (boolean (or (and (= 'buffer-store (first form))
+                                  (= :output (second form)))
+                             (some writes-output? form)))
+    (vector? form) (boolean (some writes-output? form))
+    (map? form) (boolean (some (fn [[key value]]
+                                 (or (writes-output? key) (writes-output? value)))
+                               form))
+    :else false))
+
 (defn- validate-expression-types!
   [body params states return-type source]
   (let [env (into {}
                   (concat (map (juxt :name :type) params)
                           (map (juxt :name :type) states)))
         actual (expression-type body env source [:body 0])]
-    (when (and actual (not= actual return-type))
+    ;; A body that writes the process output buffer is a process: it may be
+    ;; `:void` (per-channel stores, D40) instead of returning the one-channel
+    ;; scalar sugar. Any other void body is still a mismatch.
+    (when (and actual
+               (not= actual return-type)
+               (not (and (= :void actual) (writes-output? body))))
       (fail "DSP expression does not match the declared return type"
             source [:body 0] {:expected return-type :actual actual :form body}))
     (doseq [[index {:keys [name type next]}]
@@ -780,6 +806,10 @@
        :sample-rate sample-rate
        :controls controls
        :channels channels
+       ;; `:channels` above is always concrete (default 1); this records whether
+       ;; the author actually wrote one, so the lowerer can count the width from
+       ;; the body otherwise (D40).
+       :channels-declared? (contains? process :channels)
        :buffers buffers
        :lifecycle lifecycle})))
 

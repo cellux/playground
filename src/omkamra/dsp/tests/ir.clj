@@ -3,7 +3,9 @@
             [clojure.test :refer [deftest is]]
             [omkamra.dsp :as dsp]
             [omkamra.dsp.harness.catalog :as catalog]
-            [omkamra.dsp.harness.fixtures :refer [add-bias boolean-gate channel-mix clip gain one-pole shifted-buffer sum-count]]))
+            [omkamra.dsp.harness.fixtures :refer [add-bias boolean-gate clip gain
+                                                  one-pole shifted-buffer stereo-cross
+                                                  stereo-state-ramp sum-count]]))
 
 (deftest interpreter-vertical-slice
   (let [artifact (dsp/compile gain {:target :interpreter})]
@@ -214,7 +216,9 @@
         jvm (dsp/compile definition {:target :jvm})
         javascript (dsp/compile definition {:target :js})]
     (is (= 7 (dsp/invoke jvm 7)))
-    (is (str/includes? (:source javascript) "count | 0"))))
+    ;; The int result is coerced for the JavaScript target; the exact spelling of
+    ;; the coercion belongs to Squint.
+    (is (str/includes? (:source javascript) "| 0"))))
 
 (deftest boolean-operators-short-circuit-and-compose
   (doseq [target [:interpreter :jvm]]
@@ -252,18 +256,41 @@
                            right)))))))
 
 (deftest multichannel-processes-all-channels
+  ;; D40: a multi-channel body writes each output channel explicitly; there is
+  ;; no per-channel loop. `stereo-cross`: out0 = in0 + in1, out1 = in0 - in1.
   (let [array-class (Class/forName "[F")
         input (into-array array-class [(float-array [1.0 2.0])
-                                       (float-array [10.0 20.0])])
+                                       (float-array [3.0 4.0])])
         output (into-array array-class [(float-array [99.0 99.0])
                                         (float-array [99.0 99.0])])]
     (doseq [target [:interpreter :jvm]]
-      (let [artifact (dsp/compile channel-mix
-                                  {:target target :entry :process :channels 2})]
+      (let [artifact (dsp/compile stereo-cross
+                                  {:target target :entry :process})]
+        ;; No `:channels` was declared: the compiler counted 2 from the body.
         (is (= 2 (get-in artifact [:abi :inputs 0 :channels])))
+        (is (= 2 (get-in artifact [:abi :channels :count])))
         (dsp/invoke artifact input output 2)
-        (is (= [[11.0 22.0] [20.0 40.0]]
+        (is (= [[4.0 6.0] [-2.0 -2.0]]
                (mapv vec output)))))))
+
+(deftest a-multi-form-defn-body-is-an-implicit-do
+  ;; `dsp/defn` mirrors `clojure.core/defn`: several body forms become one
+  ;; `(do ...)`, so `stereo-cross` needs no explicit `do`.
+  (let [body (:body @#'stereo-cross)]
+    (is (= 1 (count body)))
+    (is (= 'do (first (first body))))))
+
+(deftest stateful-multichannel-runs-once-per-frame
+  ;; The point of D40: shared state advances once per frame, not once per
+  ;; channel. A channel loop would advance `counter` twice as fast.
+  (doseq [target [:interpreter :jvm]]
+    (let [artifact (dsp/compile stereo-state-ramp
+                                {:target target :entry :process})
+          output (into-array (Class/forName "[F")
+                             [(float-array 3) (float-array 3)])]
+      (dsp/process! artifact {:output output :frames 3
+                              :sample-rate 48000.0 :controls []})
+      (is (= [[0.0 1.0 2.0] [0.0 2.0 4.0]] (mapv vec output))))))
 
 (deftest explicit-buffer-loads-and-stores-work
   (doseq [target [:interpreter :jvm]]

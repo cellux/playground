@@ -2,7 +2,9 @@
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [omkamra.dsp :as dsp]
-            [omkamra.dsp.harness.fixtures :refer [allocated-bytes gain one-pole raw-process-noop thread-allocation-meter]]))
+            [omkamra.dsp.harness.fixtures :refer [allocated-bytes gain one-pole
+                                                  raw-process-noop stereo-cross
+                                                  thread-allocation-meter]]))
 
 (deftest jvm-checked-and-unchecked-primitive-process-adapters
   (doseq [precision [:f32 :f64]]
@@ -44,10 +46,9 @@
     (testing (name precision)
       (let [f64? (= :f64 precision)
             array-class (if f64? (Class/forName "[D") (Class/forName "[F"))
-            artifact (dsp/compile gain {:target :jvm
-                                        :entry :process
-                                        :channels 2
-                                        :precision precision})
+            artifact (dsp/compile stereo-cross {:target :jvm
+                                                :entry :process
+                                                :precision precision})
             input (into-array array-class
                               [(if f64? (double-array [1.0 2.0])
                                    (float-array [1.0 2.0]))
@@ -58,18 +59,15 @@
                                 (if f64? (double-array 2) (float-array 2))])
             float-controls (get-in artifact [:controls :float])
             int-controls (get-in artifact [:controls :int])]
-        (if f64?
-          (aset-double ^doubles float-controls 0 2.0)
-          (aset-float ^floats float-controls 0 (float 2.0)))
         (is (if f64?
               (instance? omkamra.dsp.targets.jvm.DspMultiProcessD64 (:unchecked artifact))
               (instance? omkamra.dsp.targets.jvm.DspMultiProcess (:unchecked artifact))))
         (dsp/process-checked! artifact input output 2 48000.0
                               float-controls int-controls)
-        (is (= [[2.0 4.0] [6.0 8.0]] (mapv vec output)))
+        (is (= [[4.0 6.0] [-2.0 -2.0]] (mapv vec output)))
         (dsp/process-unchecked! artifact input output 2 48000.0
                                 float-controls int-controls)
-        (is (= [[2.0 4.0] [6.0 8.0]] (mapv vec output)))))))
+        (is (= [[4.0 6.0] [-2.0 -2.0]] (mapv vec output)))))))
 
 (deftest jvm-unchecked-process-adapter-does-not-allocate-after-warmup
   (if-let [meter (thread-allocation-meter)]

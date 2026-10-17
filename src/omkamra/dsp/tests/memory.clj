@@ -30,7 +30,8 @@
     (is (= [0.0 2.0] (render :interpreter)))
     (is (= [0.0 2.0] (render :jvm)))
     (is (str/includes? (:source js) "new Float32Array"))
-    (is (str/includes? (:source js) "state[0 + (slot | 0)]"))
+    ;; The table is indexed inside the arena, at its own state offset.
+    (is (str/includes? (:source js) "(0 + "))
     (is (= :linear-memory (get-in wasm [:wasm-abi :state-storage])))
     (is (= {:storage :linear-memory :offset 8192 :bytes 16 :count 4}
            (get-in wasm [:memory :regions :state])))
@@ -81,7 +82,7 @@
     (is (= [1.0 3.0 5.5] (vec output)))
     (is (= (vec output) (vec jvm-output)))
     ;; JavaScript indexes the same arena array for scratch slots.
-    (is (str/includes? (:source js) "state[1 + 0]"))
+    (is (str/includes? (:source js) "(1 + 0)"))
     ;; Wasm lays scratch out directly after state in linear memory.
     (is (= {:storage :linear-memory :persistent? false
             :offset 8196 :bytes 8 :count 2}

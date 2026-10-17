@@ -6,7 +6,9 @@
             ;; are already loaded. A require whose names appear nowhere in code
             ;; is still doing work here.
             [omkamra.dsp.harness.call-fixture]
+            [omkamra.dsp.library.envelope]
             [omkamra.dsp.library.filter :as filter]
+            [omkamra.dsp.library.oscillator]
             [omkamra.dsp.harness.catalog :as catalog]
             [omkamra.dsp.event :as event]
             [omkamra.dsp.schedule :as schedule])
@@ -103,6 +105,27 @@
 (omkamra.dsp/defn channel-mix
   [sample]
   (+ sample (buffer-load :input 1 0)))
+
+;; D40: one evaluation per frame; a multi-channel body writes its output
+;; channels explicitly. `out0 = in0 + in1`, `out1 = in0 - in1`. Writing `:output`
+;; is what makes it a process, so no `:process` map is needed even though the
+;; body is `:void`.
+(omkamra.dsp/defn stereo-cross
+  [sample]
+  (buffer-store :output 0 0 (+ sample (buffer-load :input 1 0)))
+  (buffer-store :output 1 0 (- sample (buffer-load :input 1 0))))
+
+;; D40: a *stateful* generator writing two channels from one shared state slot.
+;; If the model looped channels, `counter` would advance once per channel; the
+;; test asserts it advances once per frame instead.
+(omkamra.dsp/defn stereo-state-ramp
+  []
+  {:process {:input false :controls []}
+   :state [{:name counter :type :int :init 0
+            :next (+ counter 1)}]}
+  (do
+    (buffer-store :output 0 0 (int->float counter))
+    (buffer-store :output 1 0 (int->float (* 2 counter)))))
 
 (omkamra.dsp/defn explicit-gain
   [{:params [{:name sample :type :float}
@@ -388,3 +411,62 @@
                                     :sample-rate 48000.0
                                     :controls []})
     (mapv double (vec output))))
+
+;; ---------------------------------------------------------------------------
+;; Synth runtime fixtures (P10)
+;; ---------------------------------------------------------------------------
+
+(omkamra.dsp/defn sine-voice
+  "The smallest thing that is a voice: a sine carrier shaped by an exponential
+  ADSR. Both parts are stateful library modules, so a voice exercises P6
+  composition end to end through the pool as well.
+
+  The library calls are fully qualified on purpose. `dsp/call` resolves a
+  qualified symbol against the aliases of the namespace that *initiates the
+  link* -- here a test namespace -- so an alias that only exists in this file
+  would not resolve."
+  [gate frequency attack decay sustain release]
+  {:process {:input false}}
+  (* (omkamra.dsp.library.envelope/exponential-adsr gate attack decay sustain release)
+     (omkamra.dsp.library.oscillator/sine-oscillator frequency)))
+
+(def sine-voice-description
+  "A synth description over `sine-voice`. The definition is a Var here because
+  that is convenient in a test; normalisation turns it into the symbol that
+  makes a description serialisable."
+  {:id :sine-voice
+   :capacity 4
+   :max-block-frames 128
+   :voice {:definition #'sine-voice
+           :controls {:gate {:source :gate}
+                      :frequency {:source :frequency}
+                      :attack {:constant 0.005}
+                      :decay {:constant 0.1}
+                      :sustain {:constant 0.7}
+                      :release {:constant 0.2}}}})
+
+;; ---------------------------------------------------------------------------
+;; The browser host (P10d)
+;; ---------------------------------------------------------------------------
+;;
+;; A stereo, stateful voice that declares `:activity`, so the browser pool test
+;; exercises what a JS/Wasm kernel has to provide beyond rendering: two planar
+;; channels, per-frame shared state, a readable special slot, and freeing a
+;; voice after release.
+(dsp/defn browser-stereo-voice
+  [gate]
+  {:process {:input false}
+   :state [{:name phase :type :float :init 0.0
+            :next (+ phase 1.0)}]}
+  (do
+    (store-special :activity (if (<= gate 0.0) 0 1))
+    (buffer-store :output 0 0 (* gate (* 0.001 phase)))
+    (buffer-store :output 1 0 (* gate (- 0.0 (* 0.001 phase))))))
+
+(def browser-stereo-description
+  {:id :browser-stereo
+   :capacity 2
+   :mode :poly
+   :max-block-frames 128
+   :voice {:definition #'browser-stereo-voice
+           :controls {:gate {:source :gate}}}})

@@ -11,6 +11,7 @@
             [omkamra.dsp.library.math :as math]
             [omkamra.dsp.library.noise :as noise]
             [omkamra.dsp.library.oscillator :as oscillator]
+            [omkamra.dsp.library.pitch :as pitch]
             [omkamra.dsp.harness.fixtures :refer [naive-saw stereo-sum]]))
 
 (deftest band-limited-oscillators
@@ -190,3 +191,60 @@
   (doseq [ns-sym doc/library-namespaces
           [name _] (doc/module-definitions ns-sym)]
     (is (str/includes? (doc/render) (str ns-sym "/" name)))))
+
+(deftest pitch-conversion
+  ;; The pitch-domain defaults (D35): `cents->ratio` is the ratio, and
+  ;; `pitch->frequency` is equal temperament with bend and detune applied. That
+  ;; they agree with the host's own tuning is the point — the conversion moved
+  ;; into the kernel, so the two must not drift.
+  (let [invoke (fn [v & args]
+                 (double (apply dsp/invoke
+                                (dsp/compile v {:target :jvm :entry :function})
+                                args)))]
+    (is (< (Math/abs (- (invoke #'pitch/cents->ratio 1200.0) 2.0)) 1.0e-6)
+        "an octave is a ratio of two")
+    (is (< (Math/abs (- (invoke #'pitch/cents->ratio 100.0)
+                        (Math/pow 2.0 (/ 100.0 1200.0))))
+           1.0e-6)
+        "a semitone is 100 cents")
+    (is (< (Math/abs (- (invoke #'pitch/pitch->frequency 69.0 0.0 0.0 440.0 69.0) 440.0))
+           1.0e-4))
+    (is (< (Math/abs (- (invoke #'pitch/pitch->frequency 60.0 0.0 0.0 440.0 69.0) 261.6256))
+           1.0e-3))
+    (is (< (Math/abs (- (invoke #'pitch/pitch->frequency 69.0 200.0 0.0 440.0 69.0) 493.8833))
+           1.0e-3)
+        "200 cents up is two semitones")
+    (is (< (Math/abs (- (invoke #'pitch/pitch->frequency 69.0 0.0 -100.0 440.0 69.0) 415.3047))
+           1.0e-3)
+        "detune is cents too")))
+
+;; D40/P10d: the `pan` module. `panned-stereo` projects the pair into the two
+;; output channels.
+(dsp/defn panned-stereo
+  [position]
+  {:process {:input false :controls [{:name position}]}}
+  (let [pair (effect/pan 1.0 position)]
+    (buffer-store :output 0 0 (:left pair))
+    (buffer-store :output 1 0 (:right pair))))
+
+(deftest pan-is-equal-power
+  (doseq [target [:interpreter :jvm]]
+    (let [artifact (dsp/compile panned-stereo {:target target :entry :process})
+          render (fn [position]
+                   (let [output (into-array (Class/forName "[F")
+                                            [(float-array 1) (float-array 1)])
+                         ^objects out output]
+                     (dsp/process! artifact {:output out :frames 1
+                                             :sample-rate 48000.0
+                                             :controls [position]})
+                     [(double (aget ^floats (aget out 0) 0))
+                      (double (aget ^floats (aget out 1) 0))]))]
+      (is (= [1.0 0.0] (render -1.0)) (str "hard left on " target))
+      (is (= [0.0 1.0] (render 1.0)) (str "hard right on " target))
+      (let [[left right] (render 0.0)]
+        (is (< (Math/abs (- left (Math/sqrt 0.5))) 1.0e-5)
+            (str "centre left on " target))
+        (is (< (Math/abs (- right (Math/sqrt 0.5))) 1.0e-5)
+            (str "centre right on " target))
+        (is (< (Math/abs (- (+ (* left left) (* right right)) 1.0)) 1.0e-5)
+            (str "centre keeps power on " target))))))

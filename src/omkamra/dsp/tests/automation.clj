@@ -272,9 +272,12 @@
   (testing "the generated targets take one region and read it per frame"
     (let [js (:source (dsp/compile #'lane-gain {:target :js :entry :process}))
           wasm (dsp/compile #'lane-gain {:target :wasm :entry :process})]
-      (is (re-find #"function process\(input, output, frames, sampleRate, lanes\)" js))
-      (is (re-find #"Math\.fround\(input\[frame\]\)" js))
-      (is (re-find #"lanes\[\(frame \+ 0\)\]" js)
+      ;; The generated names and spellings are Squint's, so these pin the
+      ;; target-level shape: the argument list, an input read per frame, and a
+      ;; lane read per frame from the region.
+      (is (re-find #"\(input, output, frames, sampleRate, lanes\)" js))
+      (is (re-find #"input\[frame" js))
+      (is (re-find #"lanes\[\(frame" js)
           "a lane is read per frame from the region")
       (is (re-find #"\$lanes" (:wat wasm)))
       (is (= 4096 (get-in wasm [:memory :regions :lanes :bytes]))

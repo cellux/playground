@@ -30,3 +30,17 @@
   (let [side (- (delay-line sample delay) sample)]
     {:left (+ sample (* width side))
      :right (- sample (* width side))}))
+
+(dsp/defn pan
+  "Equal-power pan of a mono `sample` to a stereo pair.
+
+  `position` runs -1 (hard left) to 1 (hard right), 0 centre, and the channel
+  gains keep total power constant (`left^2 + right^2 = sample^2`). Returns a
+  `stereo-pair`, so it is a module: a process entry projects it and writes the
+  two channels (D40). Pair it with a `:pan` control (`set-pan!`) to let the host
+  place a voice, or call it with a computed position to pan inside the DSP."
+  [sample position]
+  {:return-type stereo-pair}
+  (let [t (* 0.5 (+ (clamp position -1.0 1.0) 1.0))]
+    {:left (* sample (sqrt (- 1.0 t)))
+     :right (* sample (sqrt t))}))

@@ -1,6 +1,31 @@
 (ns omkamra.dsp.targets.js
-  "Structured JavaScript lowering and ES-module emission for DSP IR."
-  (:require [clojure.string :as str]))
+  "Structured JavaScript lowering and ES-module emission for DSP IR.
+
+  Lowering turns portable IR into a JavaScript-shaped IR (as before). Emission
+  then builds *ClojureScript forms* — plain data — and hands them to
+  `squint.compiler`, which owns the JavaScript syntax: statements, `let`
+  ordering, operator precedence, and name mangling. Nothing here writes
+  JavaScript text except through `js*`, and then only for the exact spellings
+  that are the point (`Math.fround`, `| 0`, `break`).
+
+  Three rules follow from letting Squint own the syntax. Each is a *runtime*
+  constraint, not a compile-time one, so they are what a change here must
+  respect:
+
+  * a local that is `set!` must carry `^:mutable`, or Squint emits `const` and
+    the assignment throws when the audio runs (P10d);
+  * `break` and `continue` have no ClojureScript form; they are written as
+    `(js* \"break\")` and `(js* \"continue\")`;
+  * `js*` never names a local — Squint mangles locals — so every value is
+    spliced in as `~{}` rather than written by hand;
+  * nothing may lower to a `squint_core` reference, because the artifact is a
+    standalone module. Squint calls its standard library for any value it cannot
+    prove is a boolean, so booleans are built from native comparisons, boolean
+    arguments and locals are declared `^boolean`, and `and`/`or`/`not` only ever
+    see operands Squint can prove boolean."
+  (:require [clojure.string :as str]
+            [clojure.walk :as walk]
+            [squint.compiler :as squint]))
 
 (def ^:dynamic *precision* nil)
 
@@ -124,106 +149,135 @@
               :frame-body (lower-statement (:frame-body ir) (:channels ir))}
     (throw (ex-info "unsupported IR entry in JS lowering" {:ir ir}))))
 
-(defn- number-source
+;; ---------------------------------------------------------------------------
+;; JavaScript IR -> ClojureScript forms
+;; ---------------------------------------------------------------------------
+
+;; The module's own names. Everything the emitter introduces is prefixed, so it
+;; cannot collide with a control name or a lowered local; the argument names of
+;; `process` are the ABI's, and are the one place Squint's mangling is invisible
+;; to the host.
+(def ^:private state-arena '__dsp_state)
+(def ^:private frame-counter 'frame)
+(def ^:private init-name '__dsp_init)
+(def ^:private reset-name '__dsp_reset)
+(def ^:private destroy-name '__dsp_destroy)
+(def ^:private process-name '__dsp_process)
+
+(def ^:private fround-helper '__dsp_fround)
+(def ^:private i32-helper '__dsp_i32)
+
+(defn- number-form
+  "A floating-point literal, already coerced to the target width."
   [value]
-  (let [value (if (f64?) (double value) (float value))]
-    (cond
-      (if (f64?) (Double/isNaN value) (Float/isNaN value)) "NaN"
-      (if (f64?) (Double/isInfinite value) (Float/isInfinite value))
-      (if (pos? value) "Infinity" "-Infinity")
-      :else (str value))))
+  (if (f64?)
+    (let [value (double value)]
+      (cond (Double/isNaN value) '(js* "NaN")
+            (Double/isInfinite value) (if (pos? value)
+                                        '(js* "Infinity")
+                                        '(js* "-Infinity"))
+            :else value))
+    (let [value (float value)]
+      (list fround-helper
+            (cond (Float/isNaN value) '(js* "NaN")
+                  (Float/isInfinite value) (if (pos? value)
+                                             '(js* "Infinity")
+                                             '(js* "-Infinity"))
+                  :else value)))))
 
-(defn- value-source
-  [expression]
-  (case (:type expression)
-    :boolean (if (:value expression) "true" "false")
-    :int (str (int (:value expression)))
-    (if (f64?)
-      (number-source (:value expression))
-      (str "Math.fround(" (number-source (:value expression)) ")"))))
+(defn- coerce-form
+  "Coerce a form to a DSP type, the way the target's arithmetic requires.
 
-(defn- coerce-source
-  [type source]
+  A boolean needs no coercion here: a boolean value is either a comparison or a
+  logical, which already lower to a real JavaScript boolean, or an argument that
+  `normalize-booleans` has already turned into one."
+  [type form]
   (case type
-    :int (str "(" source " | 0)")
-    :boolean (str "!!(" source ")")
-    :float (if (f64?) source (str "Math.fround(" source ")"))))
+    :int (list i32-helper form)
+    :float (if (f64?) form (list fround-helper form))
+    form))
 
-(defn- comparison-operator
-  [operator]
-  (case operator := "===" :not= "!==" (name operator)))
+(defn- default-form
+  "The initial value of a declaration the lowering left without one."
+  [type]
+  (case type
+    :int 0
+    :boolean false
+    (if (f64?) 0.0 (list fround-helper 0.0))))
 
-(defn- bitwise-operator
-  [operator]
-  (case operator
-    :bit-and "&"
-    :bit-or "|"
-    :bit-xor "^"
-    :bit-shift-left "<<"
-    :bit-shift-right ">>"
-    :unsigned-bit-shift-right ">>>"))
+(def ^:private binary-tokens
+  {:+ "+" :- "-" :* "*" :/ "/" :rem "%"
+   :bit-and "&" :bit-or "|" :bit-xor "^"
+   :bit-shift-left "<<" :bit-shift-right ">>" :unsigned-bit-shift-right ">>>"})
 
-(declare emit-expression emit-statement-lines emit-builtin)
+;; Squint reaches for its standard library for anything it cannot prove is already
+;; a boolean: `and`/`or`/`not` become `squint_core.truth_`/`squint_core.not`, `=`
+;; becomes `squint_core._EQ_`, and an `if`/`while` condition it cannot prove
+;; boolean is wrapped in `squint_core.truth_`. A kernel has to be a standalone
+;; module, so the emitter stays inside what Squint lowers to plain JavaScript:
+;; the native comparisons below, or from an argument declared `^boolean`.
+(def ^:private native-comparisons
+  {:< '< :<= '<= :> '> :>= '>= := '==})
 
-(defn- buffer-source
+(defn- js-binary
+  [tokens operator left right]
+  (list 'js* (str "((~{} " (tokens operator) " ~{}))") left right))
+
+(declare expression-form boolean-form)
+
+(defn- known-boolean?
+  "True when Squint can already see that a form is a boolean, which is what stops
+  it wrapping the form in a standard-library call. A native comparison is one, and
+  so is `and`/`or`/`not` of booleans."
+  [expression]
+  (case (:op expression)
+    :compare true
+    :logical true
+    :constant (= :boolean (:type expression))
+    false))
+
+(defn- truth-form
+  "A form Squint reads as a boolean. Every boolean here is a real boolean, so
+  comparing it with `true` is exact."
+  [form]
+  (list '== form true))
+
+(defn- boolean-form
+  "An expression as a boolean Squint can prove is a boolean."
+  [expression]
+  (if (known-boolean? expression)
+    (expression-form expression)
+    (truth-form (expression-form expression))))
+
+(defn- logical-form
+  "`and`, `or`, and `not` are ordinary ClojureScript forms here: given boolean
+  operands, Squint lowers them to `&&`, `||`, and `!` without a library call."
+  [expression]
+  (let [[left right] (:args expression)]
+    (case (:operator expression)
+      :not (list 'not (boolean-form left))
+      :and (list 'and (boolean-form left) (boolean-form right))
+      :or (list 'or (boolean-form left) (boolean-form right)))))
+
+(defn- index-form
+  [statement]
+  (if-let [element-index (:element-index statement)]
+    (list '+ (:index statement) (expression-form element-index))
+    (:index statement)))
+
+(defn- buffer-form
   [operation]
-  (let [name (name (:buffer-id operation))]
+  (let [name (symbol (name (:buffer-id operation)))]
     ;; Only a per-channel buffer is subscripted, so a flat lane region is read
     ;; the same way at every channel.
     (if (:per-channel? operation)
-      (str name "["
-           (if (map? (:channel operation))
-             (emit-expression (:channel operation))
-             (str (:channel operation))) "]")
+      (list 'aget name (if (map? (:channel operation))
+                         (expression-form (:channel operation))
+                         (:channel operation)))
       name)))
 
-(defn- emit-expression
-  [expression]
-  (case (:op expression)
-    :constant (value-source expression)
-    :local (coerce-source (:type expression) (identifier (:name expression)))
-    (:state-load :array-load)
-    (coerce-source (:type expression)
-                   (str "state[" (:index expression)
-                        (when-let [element-index (:element-index expression)]
-                          (str " + " (emit-expression element-index)))
-                        "]"))
-    :frame "frame"
-    :frames "frames"
-    :sample-rate "sampleRate"
-    :frame-offset (str "(frame + " (:offset expression) ")")
-    :frame-plus (str "(frame + " (emit-expression (:offset expression)) ")")
-    :channel "channel"
-    :buffer-load (coerce-source :float
-                                (str (buffer-source expression)
-                                     "[" (emit-expression (:index expression)) "]"))
-    :binary (coerce-source (:type expression)
-                           (str "(" (emit-expression (:left expression)) " "
-                                (name (:operator expression)) " "
-                                (emit-expression (:right expression)) ")"))
-    :compare (str "(" (emit-expression (:left expression)) " "
-                  (comparison-operator (:operator expression)) " "
-                  (emit-expression (:right expression)) ")")
-    :logical (case (:operator expression)
-               :not (str "(!" (emit-expression (first (:args expression))) ")")
-               :and (str "(" (emit-expression (first (:args expression))) " && "
-                         (emit-expression (second (:args expression))) ")")
-               :or (str "(" (emit-expression (first (:args expression))) " || "
-                        (emit-expression (second (:args expression))) ")"))
-    :bitwise (coerce-source :int
-                            (if (= :bit-not (:operator expression))
-                              (str "(~" (emit-expression (first (:args expression))) ")")
-                              (str "(" (emit-expression (first (:args expression))) " "
-                                   (bitwise-operator (:operator expression)) " "
-                                   (emit-expression (second (:args expression))) ")")))
-    :builtin (coerce-source (:type expression) (emit-builtin expression))
-    :convert (case (:operator expression)
-               :int->float (coerce-source :float (emit-expression (:value expression)))
-               :float->int (coerce-source :int
-                                          (str "Math.trunc(" (emit-expression (:value expression)) ")")))))
-
 (defmulti emit-builtin
-  "JavaScript emission for a primitive builtin, dispatched on `[operator type]`."
+  "A JavaScript form for a primitive builtin, dispatched on `[operator type]`."
   (fn [expression] [(:builtin expression) (:type expression)]))
 
 (defmethod emit-builtin :default
@@ -233,12 +287,13 @@
 
 (defn- unary-builtin
   [method expression]
-  (str method "(" (emit-expression (first (:args expression))) ")"))
+  (list 'js* (str method "(~{})") (expression-form (first (:args expression)))))
 
 (defn- binary-builtin
   [method expression]
-  (str method "(" (emit-expression (first (:args expression))) ", "
-       (emit-expression (second (:args expression))) ")"))
+  (list 'js* (str method "(~{}, ~{})")
+        (expression-form (first (:args expression)))
+        (expression-form (second (:args expression)))))
 
 (defmethod emit-builtin [:abs :float] [e] (unary-builtin "Math.abs" e))
 (defmethod emit-builtin [:abs :int] [e] (unary-builtin "Math.abs" e))
@@ -266,160 +321,314 @@
 
 (defmethod emit-builtin [:copysign :float]
   [expression]
-  (let [x (emit-expression (first (:args expression)))
-        y (emit-expression (second (:args expression)))]
-    (str "(((" y " < 0) || ((" y " === 0) && ((1 / " y ") < 0))) ? -Math.abs(" x
-         ") : Math.abs(" x "))")))
+  ;; JavaScript has no `Math.copysign`. `x` and `y` are pure by the time they
+  ;; reach here — the lowering hoists computed arguments into locals — so
+  ;; repeating them costs evaluation, not effects.
+  (let [x (expression-form (first (:args expression)))
+        y (expression-form (second (:args expression)))]
+    (list 'js* (str "(((~{} < 0) || ((~{} === 0) && ((1 / ~{}) < 0)))"
+                    " ? -Math.abs(~{}) : Math.abs(~{}))")
+          y y y x x)))
 
 (defmethod emit-builtin [:rem :int]
   [expression]
-  (str "(" (emit-expression (first (:args expression))) " % "
-       (emit-expression (second (:args expression))) ")"))
+  (js-binary binary-tokens :rem
+             (expression-form (first (:args expression)))
+             (expression-form (second (:args expression)))))
 
-(defn- indent
-  [level text]
-  (str (apply str (repeat (* 2 level) " ")) text))
+(defn- expression-form
+  [expression]
+  (case (:op expression)
+    :constant (case (:type expression)
+                :boolean (if (:value expression) true false)
+                :int (int (:value expression))
+                (number-form (:value expression)))
+    :local (coerce-form (:type expression) (:name expression))
+    :frame frame-counter
+    :frames 'frames
+    :sample-rate 'sampleRate
+    :channel 'channel
+    :frame-offset (list '+ frame-counter (:offset expression))
+    :frame-plus (list '+ frame-counter (expression-form (:offset expression)))
+    (:state-load :array-load)
+    (coerce-form (:type expression) (list 'aget state-arena (index-form expression)))
+    :buffer-load (coerce-form :float
+                              (list 'aget (buffer-form expression)
+                                    (expression-form (:index expression))))
+    :binary (coerce-form (:type expression)
+                         (js-binary binary-tokens (:operator expression)
+                                    (expression-form (:left expression))
+                                    (expression-form (:right expression))))
+    :compare (let [left (expression-form (:left expression))
+                   right (expression-form (:right expression))
+                   operator (:operator expression)]
+               (if-let [native (native-comparisons operator)]
+                 (list native left right)
+                 ;; `:not=` has no native ClojureScript operator that is not `=`'s
+                 ;; deep equality; `(not (== a b))` is exactly `!(a === b)`.
+                 (list 'not (list '== left right))))
+    :logical (logical-form expression)
+    :bitwise (if (= :bit-not (:operator expression))
+               (coerce-form :int (list 'js* "(~ ~{})"
+                                       (expression-form (first (:args expression)))))
+               (coerce-form :int
+                            (js-binary binary-tokens (:operator expression)
+                                       (expression-form (first (:args expression)))
+                                       (expression-form (second (:args expression))))))
+    :builtin (coerce-form (:type expression) (emit-builtin expression))
+    :convert (case (:operator expression)
+               :int->float (coerce-form :float (expression-form (:value expression)))
+               :float->int (coerce-form :int
+                                        (list 'js* "Math.trunc(~{})"
+                                              (expression-form (:value expression)))))
+    (throw (ex-info "unsupported expression in JS emission"
+                    {:expression expression}))))
 
-(defn- default-source
-  [type]
+(declare statement-forms)
+
+(defn- loop-form
+  "A `while`, with the loop's statically required iteration bound when it has
+  one. The counter is checked before the body, so a loop that cannot finish
+  traps instead of running until the audio thread starves."
+  [{:keys [condition body bound]}]
+  (let [body (statement-forms [body])]
+    (if bound
+      (let [counter (with-meta (gensym "__iter") {:mutable true})
+            reached (gensym "__reached")]
+        (list 'let [counter 0]
+              (list 'while (boolean-form condition)
+                    (cons 'do
+                          (concat
+                           [(list 'let [reached (list '>= counter bound)]
+                                  (list 'set! counter (list '+ counter 1))
+                                  (list 'if (truth-form reached)
+                                        (list 'throw
+                                              (list 'js/Error.
+                                                    "DSP loop exceeded its iteration bound"))
+                                        nil))]
+                           body)))))
+      (list 'while (boolean-form condition) (cons 'do body)))))
+
+(defn- statement-form
+  ;; A trailing `:return` is a function's value, and Squint returns a body's last
+  ;; form, so it is emitted as the value itself. Any other position is an early
+  ;; return the syntax needs said out loud.
+  ([statement] (statement-form statement true))
+  ([statement last?]
+   (case (:op statement)
+     :assign (list 'set! (:name statement) (expression-form (:value statement)))
+     :expression (expression-form (:value statement))
+     :return (if last?
+               (expression-form (:value statement))
+               (list 'js* "return ~{}" (expression-form (:value statement))))
+     :if (list 'if (boolean-form (:condition statement))
+               (cons 'do (statement-forms [(:then statement)]))
+               (cons 'do (statement-forms [(:else statement)])))
+     :while (loop-form statement)
+     :break '(js* "break")
+     :continue '(js* "continue")
+     :buffer-store (list 'aset (buffer-form statement)
+                         (expression-form (:index statement))
+                         (coerce-form :float (expression-form (:value statement))))
+     (:state-store :array-store)
+     (list 'aset state-arena (index-form statement)
+           (coerce-form (:type statement) (expression-form (:value statement))))
+     (throw (ex-info "unsupported statement in JS emission"
+                     {:statement statement})))))
+
+(defn- statement-forms
+  "The forms a statement sequence becomes.
+
+  A declaration opens a `let`, so a local is declared where the target declared
+  it and the rest of the sequence is its body; the rest of the sequence is
+  therefore nested inside it rather than appended after it."
+  [statements]
+  (when (seq statements)
+    (let [statement (first statements)
+          remaining (rest statements)]
+      (case (:op statement)
+        :block (concat (statement-forms (:statements statement))
+                       (statement-forms remaining))
+        :declare (let [name (:name statement)
+                       metadata (cond-> {:mutable true}
+                                  (= :boolean (:type statement))
+                                  (assoc :tag 'boolean))
+                       init (if (contains? statement :init)
+                              (expression-form (:init statement))
+                              (default-form (:type statement)))]
+                   ;; Every declared local is mutable: the target's assigns are
+                   ;; not known here, and a `set!` to a `const` is a runtime
+                   ;; error rather than a compile-time one. A boolean local is
+                   ;; also tagged, so Squint lowers the boolean forms around it
+                   ;; to native JavaScript.
+                   [(list 'let [(with-meta name metadata) init]
+                          (cons 'do (statement-forms remaining)))])
+        (cons (statement-form statement (empty? remaining))
+              (statement-forms remaining))))))
+
+;; ---------------------------------------------------------------------------
+;; The module
+;; ---------------------------------------------------------------------------
+
+(defn- arena-values
+  "Every arena slot as `[type initial-value]`, state first then scratch. A
+  fixed-size array's initial value is a vector, one entry per element."
+  [js-ir]
+  (concat (mapcat (fn [{:keys [type init size]}]
+                    (map (fn [value] [type value])
+                         (if (= 1 (or size 1)) [init] init)))
+                  (:state js-ir))
+          (mapcat (fn [{:keys [type size]}]
+                    (repeat (or size 1) [type 0]))
+                  (:scratch js-ir))))
+
+(defn- literal-text
+  [type value]
   (case type
-    :int "0"
-    :boolean "false"
-    (if (f64?) "0" "Math.fround(0)")))
+    :int (str (int value))
+    :boolean (if value "true" "false")
+    (let [value (double value)]
+      (cond (Double/isNaN value) "NaN"
+            (Double/isInfinite value) (if (pos? value) "Infinity" "-Infinity")
+            :else (let [text (str (if (f64?) value (float value)))]
+                    (if (f64?) text (str "Math.fround(" text ")")))))))
 
-(defn- emit-statement-lines
-  [statement level]
-  (case (:op statement)
-    :block (mapcat #(emit-statement-lines % level) (:statements statement))
-    :declare [(indent level
-                      (str "let " (identifier (:name statement))
-                           " = " (if-let [init (:init statement)]
-                                   (emit-expression init)
-                                   (default-source (:type statement))) ";"))]
-    :assign [(indent level (str (identifier (:name statement)) " = "
-                                (emit-expression (:value statement)) ";"))]
-    :expression [(indent level (str (emit-expression (:value statement)) ";"))]
-    :return [(indent level (str "return " (emit-expression (:value statement)) ";"))]
-    :if (concat
-         [(indent level (str "if (" (emit-expression (:condition statement)) ") {"))]
-         (emit-statement-lines (:then statement) (inc level))
-         [(indent level "} else {")]
-         (emit-statement-lines (:else statement) (inc level))
-         [(indent level "}")])
-    :while (let [condition (emit-expression (:condition statement))
-                 body (emit-statement-lines (:body statement) (inc level))]
-             (if-let [bound (:bound statement)]
-               (let [counter (str "__dsp_iterations_" level)]
-                 (concat
-                  [(indent level (str "let " counter " = 0;")) (indent level (str "while (" condition ") {"))
-                   (indent (inc level)
-                           (str "if (" counter "++ >= " bound ") throw new Error(\"DSP loop exceeded its iteration bound\");"))]
-                  body
-                  [(indent level "}")]))
-               (concat [(indent level (str "while (" condition ") {"))]
-                       body
-                       [(indent level "}")])))
-    :break [(indent level "break;")]
-    :continue [(indent level "continue;")]
-    :buffer-store [(indent level
-                           (str (buffer-source statement) "["
-                                (emit-expression (:index statement)) "] = "
-                                (coerce-source :float
-                                               (emit-expression (:value statement))) ";"))]
-    (:state-store :array-store)
-    [(indent level
-             (str "state[" (:index statement)
-                  (when-let [element-index (:element-index statement)]
-                    (str " + " (emit-expression element-index)))
-                  "] = "
-                  (coerce-source (:type statement)
-                                 (emit-expression (:value statement))) ";"))]))
+(defn- arena-form
+  "The arena literal: a typed array when every slot is a float, so the common
+  case keeps its element type, and a plain array otherwise."
+  [js-ir]
+  (let [values (arena-values js-ir)
+        literal (list 'js* (str "["
+                                (str/join ", " (map (fn [[type value]]
+                                                      (literal-text type value))
+                                                    values))
+                                "]"))]
+    (if (every? (fn [[type _]] (= type :float)) values)
+      (list (if (f64?) 'js/Float64Array. 'js/Float32Array.) literal)
+      literal)))
 
-(defn- emit-lines
-  [lines]
-  (str (str/join "\n" lines) "\n"))
+(defn- init-forms
+  [js-ir]
+  (mapcat (fn [{:keys [index init type size]}]
+            (map-indexed (fn [offset value]
+                           (list 'aset state-arena (+ index offset)
+                                 (coerce-form type
+                                              (expression-form {:op :constant
+                                                                :type type
+                                                                :value value}))))
+                         (if (= 1 (or size 1)) [init] init)))
+          (:state js-ir)))
 
-(defn- emit-function
-  [{:keys [params body]}]
-  (emit-lines
-   (concat [(str "export function invoke("
-                 (str/join ", " (map (comp identifier :name) params)) ") {")]
-           (emit-statement-lines body 1)
-           ["}"])))
+(defn- parameter-symbol
+  "A parameter as a binding symbol, tagged when it is a boolean so Squint lowers
+  the boolean forms around it to native JavaScript."
+  [parameter]
+  (let [name (symbol (identifier (:name parameter)))]
+    (if (= :boolean (:type parameter))
+      (with-meta name {:tag 'boolean})
+      name)))
 
-(defn- homogeneous-float-arena?
-  [arena]
-  (every? #(= :float (:type %)) arena))
+(defn- normalize-booleans
+  "A boolean argument may arrive as a number: an `AudioParam` is a number, and a
+  pool's control arrays are numeric. The boundary turns each one into a real
+  boolean, once — `(not (not x))` is `!!x`, because the argument is `^boolean` —
+  so that everything downstream is a boolean and can be compared with `true`."
+  [parameters body]
+  (let [names (map parameter-symbol (filter #(= :boolean (:type %)) parameters))]
+    (if (seq names)
+      (list 'let (vec (mapcat (fn [name]
+                                [name (list 'not (list 'not name))])
+                              names))
+            body)
+      body)))
 
-(defn- emit-lifecycle-lines
-  [state]
-  (concat ["  function init() {"]
-          (mapcat (fn [{:keys [index init type size]}]
-                    (map-indexed (fn [element-index value]
-                                   (str "    state[" (+ index element-index) "] = "
-                                        (coerce-source type
-                                                       (value-source {:type type :value value})) ";"))
-                                 (if (= 1 (or size 1)) [init] init)))
-                  state)
-          ["  }"
-           "  function reset() {"
-           "    init();"
-           "  }"
-           ;; `destroy` is the release half of the lifecycle vocabulary: it drops
-           ;; the instance's persistent state. The kernel object itself is then
-           ;; ready to be collected.
-           "  function destroy() {"
-           "    state.fill(0);"
-           "  }"]))
+(defn- process-form
+  [js-ir]
+  (let [controls (map parameter-symbol (:controls js-ir))
+        params (vec (concat (when (:input? js-ir) ['input])
+                            ['output 'frames 'sampleRate]
+                            controls
+                            ;; Any number of lanes is one flat region, so it is
+                            ;; one argument rather than one per lane.
+                            (when (seq (:lanes js-ir)) ['lanes])))
+        frame (with-meta frame-counter {:mutable true})
+        ;; One evaluation per frame (D40): no channel loop.
+        body (normalize-booleans
+              (:controls js-ir)
+              (list 'let [frame 0]
+                    (list 'while (list '< frame-counter 'frames)
+                          (cons 'do
+                                (concat
+                                 (statement-forms [(:frame-body js-ir)])
+                                 [(list 'set! frame-counter
+                                        (list i32-helper
+                                              (list '+ frame-counter 1)))])))))]
+    (list 'defn (with-meta 'createKernel {:export true}) []
+          (list 'let [state-arena (arena-form js-ir)]
+                (list 'letfn [(list init-name [] (cons 'do (init-forms js-ir)))
+                              (list reset-name [] (list init-name))
+                              ;; `destroy` is the release half of the lifecycle
+                              ;; vocabulary: it drops the instance's persistent
+                              ;; state, and the kernel object is then ready to be
+                              ;; collected.
+                              (list destroy-name [] (list '.fill state-arena 0))
+                              (list process-name params body)]
+                      (list init-name)
+                      ;; The kernel object exposes its arena as well as the
+                      ;; lifecycle, so a host can read a voice's special slots
+                      ;; (D39) without a second entry point.
+                      (list 'js* (str "({process: ~{}, init: ~{}, reset: ~{},"
+                                      " destroy: ~{}, state: ~{}})")
+                            process-name init-name reset-name destroy-name
+                            state-arena))))))
 
-(defn- emit-process
-  [{:keys [channels controls state scratch frame-body input? lanes]}]
-  (let [arena (concat state scratch)
-        control-params (map #(identifier (:name %)) controls)
-        state-init (str "[" (str/join ", "
-                                      (concat
-                                       (mapcat (fn [{:keys [type init size]}]
-                                                 (map #(value-source {:type type :value %})
-                                                      (if (= 1 (or size 1)) [init] init)))
-                                               state)
-                                       ;; Scratch occupies the arena after state
-                                       ;; and starts zeroed.
-                                       (mapcat (fn [{:keys [type size]}]
-                                                 (repeat (or size 1)
-                                                         (value-source {:type type :value 0})))
-                                               scratch)))
-                        "]")
-        state-decl (if (homogeneous-float-arena? arena)
-                     (str "  const state = new " (if (f64?) "Float64Array" "Float32Array")
-                          "(" state-init ");")
-                     (str "  const state = " state-init ";"))]
-    (emit-lines
-     (concat
-      ["export function createKernel() {"
-       state-decl]
-      (emit-lifecycle-lines state)
-      [(str "  function process("
-            (str/join ", " (concat (when input? ["input"])
-                                   ["output" "frames" "sampleRate"]
-                                   control-params
-                                   ;; Any number of lanes is one flat region, so
-                                   ;; it is one argument rather than one per lane.
-                                   (when (seq lanes) ["lanes"])))
-            ") {")]
-      (if (= 1 channels)
-        (concat ["    for (let frame = 0; frame < frames; frame += 1) {"]
-                (emit-statement-lines frame-body 3)
-                ["    }"])
-        (concat [(str "    for (let channel = 0; channel < " channels
-                      "; channel += 1) {")
-                 "      for (let frame = 0; frame < frames; frame += 1) {"]
-                (emit-statement-lines frame-body 4)
-                ["      }" "    }"]))
-      ["  }" "  init();" "  return {process, init, reset, destroy};" "}"]))))
+(defn- function-form
+  [js-ir]
+  (list 'defn (with-meta 'invoke {:export true})
+        (mapv parameter-symbol (:params js-ir))
+        (normalize-booleans (:params js-ir)
+                            (cons 'do (statement-forms [(:body js-ir)])))))
+
+(defn- helper-definition
+  [name template]
+  (list 'defn- name (vector 'x) (list 'js* template 'x)))
+
+(def ^:private helper-definitions
+  [[fround-helper (helper-definition fround-helper "Math.fround(~{})")]
+   [i32-helper (helper-definition i32-helper "(~{} | 0)")]])
+
+(defn- referenced?
+  [form symbol]
+  (boolean (some #(= symbol %) (tree-seq coll? seq form))))
+
+(defn- strip-location
+  "Drop reader metadata, so the only metadata that reaches Squint is the
+  metadata this emitter means: `^:mutable`, `^:export`, and `^boolean`."
+  [form]
+  (walk/postwalk (fn [value]
+                   (if (instance? clojure.lang.IObj value)
+                     (vary-meta value dissoc :line :column :file)
+                     value))
+                 form))
+
+(defn- squint-source
+  [js-ir]
+  (let [definition (case (:op js-ir)
+                     :function (function-form js-ir)
+                     :process (process-form js-ir))]
+    (binding [*print-meta* true]
+      (str (str/join "\n\n"
+                     (map (comp pr-str strip-location)
+                          (concat (map second
+                                       (filter (fn [[helper _]]
+                                                 (referenced? definition helper))
+                                               helper-definitions))
+                                  [definition])))
+           "\n"))))
 
 (defn emit-module
   [js-ir]
   (binding [*precision* (:precision js-ir)]
-    (case (:op js-ir)
-      :function (emit-function js-ir)
-      :process (emit-process js-ir))))
+    ;; `:elide-imports` keeps the artifact a standalone module: every form above
+    ;; lowers to plain JavaScript, so it never reaches for the Squint stdlib.
+    (squint/compile-string (squint-source js-ir) {:elide-imports true})))

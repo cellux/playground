@@ -6,6 +6,7 @@
   namespace is for: require this, not the individual namespaces."
   (:require [clojure.test :as test]
             [omkamra.dsp.tests.automation]
+            [omkamra.dsp.tests.combinators]
             [omkamra.dsp.tests.composition]
             [omkamra.dsp.tests.conformance]
             [omkamra.dsp.tests.descriptor]
@@ -17,6 +18,7 @@
             [omkamra.dsp.tests.linker]
             [omkamra.dsp.tests.memory]
             [omkamra.dsp.tests.process]
+            [omkamra.dsp.tests.synth]
             [omkamra.dsp.tests.wasm]))
 
 (def test-namespaces
@@ -31,9 +33,11 @@
     omkamra.dsp.tests.process
     omkamra.dsp.tests.memory
     omkamra.dsp.tests.composition
+    omkamra.dsp.tests.combinators
     omkamra.dsp.tests.library
     omkamra.dsp.tests.conformance
-    omkamra.dsp.tests.automation])
+    omkamra.dsp.tests.automation
+    omkamra.dsp.tests.synth])
 
 (defn run-all
   "Run every DSP test namespace and return the `clojure.test` summary."

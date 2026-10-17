@@ -695,24 +695,23 @@
                                (map (fn [{:keys [name type]} value]
                                       [name (coerce-value type value)])
                                     (:controls ir) controls))]
-      (dotimes [channel (:channels ir)]
-        (dotimes [frame frames]
-          (execute-statement
-           (:frame-body ir)
-           (volatile! control-locals)
-           (cond-> {:input input
-                    :output output
-                    :channels (:channels ir)
-                    :channel channel
-                    :frame frame
-                    :frames frames
-                    :sample-rate sample-rate
-                    :checks (get-in ir [:options :checks] :development)
-                    :state state
-                    :definitions (:definitions ir)}
+      (dotimes [frame frames]
+        (execute-statement
+         (:frame-body ir)
+         (volatile! control-locals)
+         (cond-> {:input input
+                  :output output
+                  :channels (:channels ir)
+                  :channel 0
+                  :frame frame
+                  :frames frames
+                  :sample-rate sample-rate
+                  :checks (get-in ir [:options :checks] :development)
+                  :state state
+                  :definitions (:definitions ir)}
              ;; Buffers resolve by id, so the lane region needs only to be
              ;; present under its own name.
-             lanes (assoc :lanes lanes)))))
+           lanes (assoc :lanes lanes))))
       nil)))
 
 (defn process

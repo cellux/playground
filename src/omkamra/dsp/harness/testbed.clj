@@ -6,6 +6,8 @@
             [omkamra.dsp :as dsp]
             [omkamra.dsp.harness.catalog :as catalog]
             [omkamra.dsp.harness.conformance :as conformance]
+            [omkamra.dsp.harness.fixtures :as fixtures]
+            [omkamra.dsp.hosts :as hosts]
             [squint.compiler :as squint]))
 
 (def one-pole (:definition (catalog/case-by-id :one-pole)))
@@ -156,12 +158,15 @@
   (let [artifact (dsp/compile one-pole {:target :js
                                         :entry :process
                                         :precision precision})
-        physical-type (:physical-type artifact)]
-    {:processor-name "omkamra-dsp-kernel"
-     :kernel-url (if (= :f64 precision)
+        physical-type (:physical-type artifact)
+        abi (:abi artifact)]
+    {:kernel-url (if (= :f64 precision)
                    "/omkamra/dsp/harness/testbed/source-f64"
                    "/omkamra/dsp/harness/testbed/source")
-     :channels 2
+     ;; The kernel's own shape, from its ABI: the width it writes and whether it
+     ;; takes an input at all.
+     :channels (long (get-in abi [:channels :count] 1))
+     :input-channels (count (:inputs abi))
      :frame-capacity 256
      :element-bytes (:element-bytes physical-type)
      :element-type (name (:element-type physical-type))
@@ -178,20 +183,29 @@
     "maxValue" 10
     "automationRate" "k-rate"}])
 
+(def ^:private javascript-worklet-source
+  "src/omkamra/dsp/worklet_adapters/js.cljs")
+
+(def ^:private wasm-worklet-source
+  "src/omkamra/dsp/worklet_adapters/wasm.cljs")
+
 (defn- worklet-source
-  [path metadata]
-  (let [processor-name (if (str/ends-with? path "wasm_worklet_adapter.cljs")
-                         "omkamra-dsp-wasm-kernel"
-                         (:processor-name metadata))]
-    (-> (squint/compile-string
-         (slurp (io/file path))
-         {:elide-imports true})
-        (str/replace "__OMKAMRA_DSP_KERNEL_URL__"
-                     (:kernel-url metadata))
-        (str/replace "__OMKAMRA_DSP_PROCESSOR_NAME__"
-                     processor-name)
-        (str/replace "__OMKAMRA_DSP_PARAMETER_DESCRIPTORS__"
-                     (json/generate-string parameter-descriptors)))))
+  "An adapter source, with the placeholders filled in.
+
+  The placeholders are how one adapter serves several kernels: the page decides
+  the kernel module's URL and the name the processor registers under, and states
+  them here rather than the adapter hard-coding them."
+  [path processor-name metadata]
+  (cond-> (squint/compile-string (slurp (io/file path)) {:elide-imports true})
+    (:kernel-url metadata)
+    (str/replace "__OMKAMRA_DSP_KERNEL_URL__" (:kernel-url metadata))
+
+    true
+    (str/replace "__OMKAMRA_DSP_PROCESSOR_NAME__" processor-name)
+
+    true
+    (str/replace "__OMKAMRA_DSP_PARAMETER_DESCRIPTORS__"
+                 (json/generate-string parameter-descriptors))))
 
 (defn- squint-worklet-response
   [precision]
@@ -199,7 +213,8 @@
     (javascript-response
      (str "import * as squint_core from '/omkamra/dsp/harness/testbed/squint-core';\n"
           "import { createKernel } from '" (:kernel-url metadata) "';\n"
-          (worklet-source "src/omkamra/dsp/worklet_adapter.cljs" metadata)))))
+          (worklet-source javascript-worklet-source "omkamra-dsp-kernel"
+                          metadata)))))
 
 (defn squint-worklet
   [_request]
@@ -213,5 +228,46 @@
   [_request]
   (javascript-response
    (str "import * as squint_core from '/omkamra/dsp/harness/testbed/squint-core';\n"
-        (worklet-source "src/omkamra/dsp/wasm_worklet_adapter.cljs"
-                        (worklet-metadata :f32)))))
+        (worklet-source wasm-worklet-source "omkamra-dsp-wasm-kernel" {}))))
+
+;; ---------------------------------------------------------------------------
+;; The browser pool host (P10d)
+;; ---------------------------------------------------------------------------
+
+(defn- requested-target
+  [request]
+  (keyword (or (request-parameter request "target") "js")))
+
+(defn- browser-synth-bundle
+  [target precision]
+  (hosts/synth-bundle fixtures/browser-stereo-description
+                      {:target target :precision precision}))
+
+(defn synth-bundle
+  "Serve the compiled voice's runtime configuration, ABI, and interpreter IR.
+
+  `:runtime` is the sequencing half and is pure data; `:abi` says what the kernel
+  looks like; `:ir` travels as EDN text so the page runs the same reference
+  interpreter the JVM suite does. That is what makes the browser check a
+  differential test rather than a comparison against shipped vectors. A `:wasm`
+  bundle also carries the module's WAT and its linear-memory layout."
+  [request]
+  (let [target (requested-target request)
+        precision (requested-precision request)
+        {:keys [runtime artifact]} (browser-synth-bundle target precision)]
+    {:status 200
+     :headers {"content-type" "application/edn; charset=utf-8"
+               "cache-control" "no-store"}
+     :body (pr-str (cond-> {:runtime runtime
+                            :abi (:abi artifact)
+                            :ir (pr-str (:ir artifact))
+                            :precision (:precision artifact)
+                            :target target}
+                     (= :wasm target)
+                     (assoc :wat (:wat artifact) :memory (:memory artifact))))}))
+
+(defn synth-source
+  "Serve the compiled voice as a JavaScript ES module."
+  [request]
+  (javascript-response
+   (:source (:artifact (browser-synth-bundle :js (requested-precision request))))))

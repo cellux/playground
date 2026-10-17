@@ -1,5 +1,21 @@
-(ns omkamra.dsp.wasm-worklet-adapter
+(ns omkamra.dsp.worklet-adapters.wasm
   (:require [squint.defclass :refer [defclass]]))
+
+;; A Wasm kernel is the one host that does not receive its block: `process` takes
+;; the byte offsets of its input and output regions, and writes channel `c` at
+;; `offset + c * channel-stride` in its own linear memory. So the adapter calls
+;; the kernel **once** for the whole block (D40 — the kernel indexes its own
+;; channels), then copies each channel out of memory into the array the callback
+;; hands over. That copy is the whole of the boundary here.
+;;
+;; The kernel's shape comes from processor options: `channels` is the width it
+;; writes, and `inputChannels` is 0 for a generator, which is what a voice is
+;; (D23), so the process signature is `(output, frames, sampleRate, ...controls)`
+;; rather than `(input, output, frames, sampleRate, ...controls)`.
+;;
+;; Element indices rather than byte offsets index the memory view (the module's
+;; ABI is validated to be aligned), and the views are kept, so a block allocates
+;; nothing.
 
 (defclass DSPWasmProcessor
   (extends AudioWorkletProcessor)
@@ -30,6 +46,7 @@
                      element-bytes (or (aget processor-options "elementBytes") 4)
                      element-type (or (aget processor-options "elementType") "f32")
                      channels (or (aget processor-options "channels") 1)
+                     input-channels (or (aget processor-options "inputChannels") 1)
                      input-offset (or (aget processor-options "inputOffset") 0)
                      output-offset (or (aget processor-options "outputOffset") 0)
                      channel-stride (or (aget processor-options "channelStride") 4096)
@@ -46,8 +63,10 @@
                                             (* frame-capacity element-bytes))
                                          (+ input-offset
                                             (* (max 0 (dec channels)) channel-stride)
-                                            (* frame-capacity element-bytes)))]
+                                            (* frame-capacity element-bytes)))
+                     control-offset (+ 3 (if (pos? input-channels) 1 0))]
                  (set! (.-channels this) channels)
+                 (set! (.-input-channels this) input-channels)
                  (set! (.-element-bytes this) element-bytes)
                  (set! (.-element-type this) element-type)
                  (set! (.-input-offset this) input-offset)
@@ -57,6 +76,7 @@
                  (set! (.-required-bytes this) required-bytes)
                  (set! (.-valid-config this)
                        (and (pos? channels)
+                            (not (neg? input-channels))
                             (pos? element-bytes)
                             (pos? channel-stride)
                             (pos? frame-capacity)
@@ -64,9 +84,10 @@
                             wasm-bytes))
                  (set! (.-control-names this) control-names)
                  (set! (.-control-defaults this) control-defaults)
+                 (set! (.-control-offset this) control-offset)
                  ;; Reuse this array for the positional Wasm ABI.
                  (set! (.-process-args this)
-                       (js/Array. (+ 4 (.-length control-names))))
+                       (js/Array. (+ control-offset (.-length control-names))))
                  (-> (js/WebAssembly.instantiate wasm-bytes)
                      (.then
                       (fn [result]
@@ -115,82 +136,80 @@
                  output-channels (aget outputs 0)]
              (if-not output-channels
                true
-               (let [channels (min (.-channels this)
-                                   (.-length output-channels))
-                     input-count (when input-channels
-                                   (.-length input-channels))
-                     output-count (.-length output-channels)
+               (let [output-count (.-length output-channels)
                      frames (if (pos? output-count)
                               (.-length (aget output-channels 0))
-                              0)]
+                              0)
+                     input-wanted (.-input-channels this)
+                     input-count (if input-channels (.-length input-channels) 0)
+                     ;; A kernel writes its own width, and never more channels
+                     ;; than the callback has.
+                     channels (min (.-channels this) output-count)]
                  (if (or (not (.-ready this))
                          (not (.-valid-config this))
-                         (not input-channels)
                          (zero? channels)
-                         (zero? input-count)
-                         (> frames (.-frame-capacity this))
-                         (> (max (+ (.-output-offset this)
-                                    (* (max 0 (dec (.-channels this)))
-                                       (.-channel-stride this))
-                                    (* frames (.-element-bytes this)))
-                                 (+ (.-input-offset this)
-                                    (* (max 0 (dec (.-channels this)))
-                                       (.-channel-stride this))
-                                    (* frames (.-element-bytes this))))
-                            (.-byteLength (.-buffer (.-memory this)))))
+                         (and (pos? input-wanted) (zero? input-count))
+                         (> frames (.-frame-capacity this)))
                    (do
                      (dotimes [channel output-count]
                        (.fill (aget output-channels channel) 0))
                      true)
                    (let [memory (.-memory this)
                          memory-buffer (.-buffer memory)]
+                     ;; A growing module replaces its buffer; re-view it when
+                     ;; that happens rather than per block.
                      (when (not= memory-buffer (.-memory-buffer this))
                        (set! (.-memory-view this)
                              (if (= "f64" (.-element-type this))
                                (js/Float64Array. memory-buffer)
                                (js/Float32Array. memory-buffer)))
                        (set! (.-memory-buffer this) memory-buffer))
-                     (let [memory-view (.-memory-view this)
+                     (let [view (.-memory-view this)
+                           width (.-element-bytes this)
+                           input-index (/ (.-input-offset this) width)
+                           output-index (/ (.-output-offset this) width)
+                           stride-index (/ (.-channel-stride this) width)
                            process-args (.-process-args this)
-                           element-width (.-element-bytes this)
-                           input-index (/ (.-input-offset this) element-width)
-                           output-index (/ (.-output-offset this) element-width)
-                           stride-index (/ (.-channel-stride this) element-width)
                            control-names (.-control-names this)
-                           control-defaults (.-control-defaults this)]
+                           control-defaults (.-control-defaults this)
+                           control-offset (.-control-offset this)]
                        (dotimes [control (.-length control-names)]
                          (let [name (aget control-names control)
                                parameter (aget parameters name)
                                value (if (and parameter (pos? (.-length parameter)))
                                        (aget parameter 0)
                                        (aget control-defaults control))]
-                           (aset process-args (+ 4 control) value)))
+                           (aset process-args (+ control-offset control) value)))
+                       ;; Write the input the kernel reads, up-mixing by
+                       ;; repeating the last supplied channel when the kernel
+                       ;; declares more than the graph connected.
+                       (when (pos? input-wanted)
+                         (dotimes [channel input-wanted]
+                           (let [source (aget input-channels
+                                              (min channel (dec input-count)))]
+                             (dotimes [frame frames]
+                               (aset view (+ input-index (* channel stride-index) frame)
+                                     (aget source frame))))))
+                       ;; One call for the whole block (D40): the kernel writes
+                       ;; every channel itself.
+                       (if (pos? input-wanted)
+                         (do
+                           (aset process-args 0 (.-input-offset this))
+                           (aset process-args 1 (.-output-offset this))
+                           (aset process-args 2 frames)
+                           (aset process-args 3 sampleRate))
+                         (do
+                           (aset process-args 0 (.-output-offset this))
+                           (aset process-args 1 frames)
+                           (aset process-args 2 sampleRate)))
+                       (.apply (.-process-fn this) nil process-args)
+                       ;; Copy each channel the kernel wrote back out, and
+                       ;; silence the ones it did not.
                        (dotimes [channel channels]
-                         (let [input-channel (min channel (dec input-count))
-                               input (aget input-channels input-channel)
-                               output (aget output-channels channel)
-                               input-base (+ input-index (* channel stride-index))
-                               output-base (+ output-index (* channel stride-index))
-                               input-offset (+ (.-input-offset this)
-                                               (* channel (.-channel-stride this)))
-                               output-offset (+ (.-output-offset this)
-                                                (* channel (.-channel-stride this)))]
+                         (let [target (aget output-channels channel)
+                               base (+ output-index (* channel stride-index))]
                            (dotimes [frame frames]
-                             (aset memory-view (+ input-base frame)
-                                   (aget input frame)))
-                           (if (= 1 (.-length control-names))
-                             (.call (.-process-fn this)
-                                    nil input-offset output-offset frames sampleRate
-                                    (aget process-args 4))
-                             (do
-                               (aset process-args 0 input-offset)
-                               (aset process-args 1 output-offset)
-                               (aset process-args 2 frames)
-                               (aset process-args 3 sampleRate)
-                               (.apply (.-process-fn this) nil process-args)))
-                           (dotimes [frame frames]
-                             (aset output frame
-                                   (aget memory-view (+ output-base frame))))))
+                             (aset target frame (aget view (+ base frame))))))
                        (dotimes [channel (max 0 (- output-count channels))]
                          (.fill (aget output-channels (+ channels channel)) 0))
                        true))))))))

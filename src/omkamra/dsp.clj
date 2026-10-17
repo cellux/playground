@@ -7,7 +7,7 @@
   loads/stores, and a channel-configurable block-processing ABI.
   Definitions are data; their bodies are never run as ordinary Clojure
   expressions."
-  (:refer-clojure :exclude [compile defn defstruct reset!])
+  (:refer-clojure :exclude [compile defn defstruct fn reset!])
   (:require [clojure.string :as str]
             [omkamra.dsp.targets.capability :as capability]
             [omkamra.dsp.descriptor :as descriptor]
@@ -50,13 +50,13 @@
         aliases (ns-aliases ns)
         refers (ns-refers ns)]
     {:aliases (into {}
-                    (keep (fn [reference]
+                    (keep (clojure.core/fn [reference]
                             (when-let [target (get aliases
                                                    (some-> reference namespace symbol))]
                               [(symbol (namespace reference)) (ns-name target)])))
                     references)
      :refers (into {}
-                   (keep (fn [reference]
+                   (keep (clojure.core/fn [reference]
                            (when-let [v (and (nil? (namespace reference))
                                              (get refers reference))]
                              (when-not (= 'clojure.core (-> v meta :ns ns-name))
@@ -72,26 +72,13 @@
                           :dsp/form form}
                          data))))
 
-(clojure.core/defmacro defn
-  "Capture a DSP function definition as a descriptor.
+(clojure.core/defn- capture-definition
+  "Build a `:function` descriptor from `dsp/defn`/`dsp/fn` arguments.
 
-  The shorthand form is:
-
-    (dsp/defn gain [sample amount] (* sample amount))
-
-  An explicit descriptor may be packed into the parameter vector:
-
-    (dsp/defn gain
-      [{:params [{:name sample :type :float}]
-        :return-type :float}
-       sample])
-
-  Both forms capture source data; DSP bodies are never executed as ordinary
-  Clojure expressions during definition or compilation."
-  [name & args]
-  (when-not (valid-definition-name? name)
-    (macro-fail "dsp/defn name must be a non-blank symbol"
-                &form [:name] {:name name}))
+  `label` names the form for diagnostics, `name` is the definition's name (or a
+  generated one for an anonymous `dsp/fn`), and `form` is the macro's `&form`, for
+  the source location."
+  [label name form args]
   (let [[doc args] (if (string? (first args))
                      [(first args) (next args)]
                      [nil args])
@@ -123,40 +110,88 @@
                          [{} body])
         spec (merge spec options)]
     (when-not (vector? params)
-      (macro-fail "dsp/defn params must be a vector"
-                  &form [:params] {:name name :params params}))
+      (macro-fail (str label " params must be a vector")
+                  form [:params] {:name name :params params}))
     (when (and (not explicit-params?) (not (every? symbol? params)))
-      (macro-fail "dsp/defn parameters must be symbols"
-                  &form [:params] {:name name :params params}))
+      (macro-fail (str label " parameters must be symbols")
+                  form [:params] {:name name :params params}))
     (when-not (= (count params)
                  (count (set (map #(if (symbol? %) % (:name %)) params))))
-      (macro-fail "dsp/defn parameter names must be unique"
-                  &form [:params] {:name name :params params}))
-    (when-not (= 1 (count body))
-      (macro-fail "dsp/defn requires exactly one body expression"
-                  &form [:body] {:name name :body body}))
+      (macro-fail (str label " parameter names must be unique")
+                  form [:params] {:name name :params params}))
+    (when-not (pos? (count body))
+      (macro-fail (str label " requires at least one body expression")
+                  form [:body] {:name name :body body}))
     (when (contains? spec :dependencies)
-      (macro-fail "dsp/defn infers dependencies from ordinary DSP calls"
-                  &form [:dependencies] {:name name}))
+      (macro-fail (str label " infers dependencies from ordinary DSP calls")
+                  form [:dependencies] {:name name}))
     (let [source (merge
-                  (select-keys (meta &form) [:file :line :column])
-                  {:namespace (ns-name *ns*)})
-          captured (cond-> {:dsp/kind :function
-                            :name name
-                            :params params
-                            :return-type (or (:return-type spec) :float)
-                            :state (:state spec)
-                            :body (vec body)
-                            :source source
-                            :resolution (macro-resolution *ns* body)}
-                     (some? doc) (assoc :doc doc)
-                     (contains? spec :process)
-                     (assoc :process (:process spec))
-                     (contains? spec :options)
-                     (assoc :options (:options spec))
-                     (contains? spec :compiler-options)
-                     (assoc :compiler-options (:compiler-options spec)))]
-      (list 'def name (list 'quote captured)))))
+                  (select-keys (meta form) [:file :line :column])
+                  {:namespace (ns-name *ns*)})]
+      (cond-> {:dsp/kind :function
+               :name name
+               :params params
+               :return-type (or (:return-type spec) :float)
+               :state (:state spec)
+               ;; Like `clojure.core/defn`, several body forms are an implicit
+               ;; `(do ...)`. A single form is left exactly as written, so a
+               ;; captured descriptor's `[:body 0]` is still the author's form.
+               :body (vec (if (= 1 (count body)) body [(cons 'do body)]))
+               :source source
+               :resolution (macro-resolution *ns* body)}
+        (some? doc) (assoc :doc doc)
+        (contains? spec :process)
+        (assoc :process (:process spec))
+        (contains? spec :options)
+        (assoc :options (:options spec))
+        (contains? spec :compiler-options)
+        (assoc :compiler-options (:compiler-options spec))))))
+
+(clojure.core/defmacro defn
+  "Capture a DSP function definition as a descriptor.
+
+  The shorthand form is:
+
+    (dsp/defn gain [sample amount] (* sample amount))
+
+  As in `defn`, several body expressions are an implicit `(do ...)`:
+
+    (dsp/defn stereo-cross [sample]
+      (buffer-store :output 0 0 sample)
+      (buffer-store :output 1 0 sample))
+
+  An explicit descriptor may be packed into the parameter vector:
+
+    (dsp/defn gain
+      [{:params [{:name sample :type :float}]
+        :return-type :float}
+       sample])
+
+  Both forms capture source data; DSP bodies are never executed as ordinary
+  Clojure expressions during definition or compilation."
+  [name & args]
+  (when-not (valid-definition-name? name)
+    (macro-fail "dsp/defn name must be a non-blank symbol"
+                &form [:name] {:name name}))
+  (list 'def name (list 'quote (capture-definition "dsp/defn" name &form args))))
+
+(clojure.core/defmacro fn
+  "Capture an anonymous DSP definition as a value.
+
+  `dsp/fn` is to `dsp/defn` what `clojure.core/fn` is to `defn`: it captures the
+  same descriptor but returns it as a value instead of binding a Var, so a
+  definition composes with `->` and with transformers:
+
+    (def voice
+      (-> (dsp/fn [sample amount] {:process {:controls [{:name amount}]}}
+            (* sample amount))
+          (unison {:count 3})))
+
+  The descriptor carries a generated internal name and the defining namespace's
+  source, so it links directly; `dsp/def` replaces the name when the value is
+  bound to a Var."
+  [& args]
+  (list 'quote (capture-definition "dsp/fn" (gensym "dsp-fn-") &form args)))
 
 (clojure.core/defmacro defstruct
   "Capture a DSP state-record shape as data bound to a Var.
@@ -189,7 +224,7 @@
     (when (seq body)
       (macro-fail "dsp/defstruct takes field definitions and one optional options map"
                   &form [:body] {:body body}))
-    (let [fields (mapv (fn [field]
+    (let [fields (mapv (clojure.core/fn [field]
                          (if (symbol? field)
                            {:name field :type :float :init 0.0}
                            field))
@@ -203,16 +238,76 @@
                                  :source source}
                                 options))))))
 
+(clojure.core/defmacro def
+  "Bind `name` to a DSP definition produced by a transformer.
+
+  `dsp/defn` captures a definition from a source form; `dsp/def` takes an
+  ordinary Clojure expression whose *value* is already a definition, so derived
+  voices compose with `->`:
+
+    (dsp/def unison-lead
+      (-> lead-voice
+          (unison {:count 3 :detune 15})))
+
+  The Var holds the descriptor and is resolvable by the linker exactly like a
+  `dsp/defn` Var. `:name` and `:source` are stamped here, so a transformer does
+  not need to know where it is being defined."
+  [name definition]
+  (when-not (valid-definition-name? name)
+    (macro-fail "dsp/def name must be a non-blank symbol"
+                &form [:name] {:name name}))
+  (let [source (merge (select-keys (meta &form) [:file :line :column])
+                      {:namespace (ns-name *ns*)})]
+    `(~'def ~name
+            (let [definition# ~definition]
+              (when-not (and (map? definition#) (= :function (:dsp/kind definition#)))
+                (throw (ex-info "dsp/def expects a DSP definition value"
+                                {:name '~name :definition definition#})))
+              (assoc definition# :name '~name :source (quote ~source))))))
+
+(clojure.core/defn- carried-definitions
+  "Collect the definitions reachable from `entries` through `:dsp/dependencies`.
+
+  A call-emitting transformer returns a definition whose body calls the original,
+  which for an anonymous `dsp/fn` value has no Var to resolve. The transformer
+  records the original in `:dsp/dependencies`; here those become supplied
+  definitions, transitively, so a chain of transforms links."
+  [entries]
+  (loop [pending (vec entries)
+         found {}]
+    (if (empty? pending)
+      found
+      (let [entry (peek pending)
+            value (if (var? entry) @entry entry)
+            dependencies (when (map? value) (:dsp/dependencies value))
+            fresh (when (map? dependencies)
+                    (reduce-kv (clojure.core/fn [m id dependency]
+                                 (if (contains? found id)
+                                   m
+                                   (assoc m id dependency)))
+                               {}
+                               dependencies))]
+        (recur (into (pop pending) (vals fresh))
+               (merge found fresh))))))
+
 (clojure.core/defn link
   "Link a DSP descriptor or Var into a compilation unit.
 
   A linked unit resolves ordinary DSP calls using the defining namespace's
   Clojure alias/refer mappings. Anonymous descriptors can provide reachable
-  definitions with `{:definitions {qualified-id descriptor-or-var}}`."
+  definitions with `{:definitions {qualified-id descriptor-or-var}}`.
+
+  A definition produced by a call-emitting transformer carries the definitions it
+  calls in `:dsp/dependencies`; they are supplied here automatically, so a
+  transform of an anonymous `dsp/fn` value links like one of a named voice."
   ([definition]
-   (linker/link definition))
+   (link definition {}))
   ([definition options]
-   (linker/link definition options)))
+   (let [options (or options {})
+         supplied (:definitions options)
+         carried (carried-definitions (cons definition (vals supplied)))]
+     (linker/link definition
+                  (assoc options :definitions (merge carried supplied))))))
 
 (clojure.core/defn- linked-unit?
   [value]
@@ -260,11 +355,13 @@
         ;; setting it is a target, not an instantaneous jump.
         controls (mapv #(select-keys % [:name :type :default :smooth :slew])
                        (:controls ir))
-        state (mapv #(select-keys % [:name :type :size :init :constant]) (:state ir))
+        state (mapv #(select-keys % [:name :type :size :init :constant :special
+                                     :special-bit])
+                    (:state ir))
         scratch (mapv #(select-keys % [:name :type :size :index]) (:scratch ir))
-        scratch-values (mapv (fn [value] (assoc value :persistent? false))
+        scratch-values (mapv (clojure.core/fn [value] (assoc value :persistent? false))
                              scratch)
-        records (mapv (fn [record]
+        records (mapv (clojure.core/fn [record]
                         {:name (:name record)
                          :struct (:struct-name record)
                          :size (:size record)
@@ -273,12 +370,29 @@
                          :ownership :instance
                          :fields (:leaves record)})
                       (:records ir))
-        state-values (mapv (fn [index value]
+        state-values (mapv (clojure.core/fn [index value]
                              (assoc value
                                     :index index
                                     :persistent? true))
                            (range)
                            state)
+        ;; Builtin, host-readable slots a voice publishes (D39). `:activity` is
+        ;; the finish signal; a pool reads it back and frees a released voice
+        ;; when it is <= 0. Specials occupy the low state slots in ascending-bit
+        ;; order, so the leading `:special-count` slots are exactly the ones the
+        ;; entry declares (never a callee's partition slot).
+        special-count (long (or (:special-count ir) 0))
+        special-slots (into {}
+                            (keep (clojure.core/fn [value]
+                                    (when (and (:special value)
+                                               (< (long (:index value))
+                                                  special-count))
+                                      [(:special value)
+                                       {:name (:name value)
+                                        :type (:type value)
+                                        :bit (:special-bit value)
+                                        :index (:index value)}])))
+                            state-values)
         physical-type (physical-type-policy ir)
         element-type (:element-type physical-type)
         element-bytes (:element-bytes physical-type)
@@ -290,8 +404,9 @@
      :entry :process
      :precision (:precision ir)
      :physical-type physical-type
+     ;; One evaluation per frame (D40): the output has `:count` channels and the
+     ;; body addresses them explicitly, so there is no channel loop or binding.
      :channels {:count (:channels ir)
-                :binding (if (> (:channels ir) 1) :loop :constant)
                 :type :int}
      :inputs inputs
      :outputs outputs
@@ -301,7 +416,7 @@
                      :element-type element-type
                      :element-bytes element-bytes
                      :alignment element-bytes
-                     :buffers (mapv (fn [buffer]
+                     :buffers (mapv (clojure.core/fn [buffer]
                                       (merge (select-keys buffer [:id :direction
                                                                   :type :channels])
                                              (get-in ir [:memory (:id buffer)])))
@@ -320,10 +435,7 @@
                           :sample-rate (assoc (:sample-rate ir)
                                               :role :sample-rate
                                               :argument-index (+ base 2))
-                          :channel {:role :channel-index
-                                    :type :int
-                                    :binding (if (> (:channels ir) 1) :loop :constant)}
-                          :controls (mapv (fn [index control]
+                          :controls (mapv (clojure.core/fn [index control]
                                             (assoc control
                                                    :role :control
                                                    :argument-index (+ base 3 index)))
@@ -339,7 +451,7 @@
      ;; `:lanes` region, `:lane-stride` frames apart; the host addresses a lane
      ;; by name, and only a host writing memory directly needs the offset.
      :lane-stride (:frame-capacity ir)
-     :lanes (mapv (fn [index lane]
+     :lanes (mapv (clojure.core/fn [index lane]
                     (assoc (select-keys lane [:name :type :smooth :slew])
                            :role :lane
                            :index index
@@ -348,6 +460,8 @@
                   (range)
                   (:lanes ir))
      :state state
+     :special-mask (long (or (:special-mask ir) 0))
+     :special-slots special-slots
      :state-layout {:ownership :instance
                     :persistent? true
                     :values state-values}
@@ -403,7 +517,7 @@
   (case target
     :interpreter
     (artifact :interpreter :function lowered (function-abi lowered)
-              (fn [& args]
+              (clojure.core/fn [& args]
                 (interpreter/invoke lowered args))
               options)
 
@@ -472,16 +586,16 @@
   (case target
     :interpreter
     (let [create-instance
-          (fn []
+          (clojure.core/fn []
             (let [state (interpreter/create-state lowered)]
               {:state state
                :reset #(interpreter/reset-state! lowered state)
                :destroy #(interpreter/reset-state! lowered state)
-               :invoke (fn [input output frames & controls]
+               :invoke (clojure.core/fn [input output frames & controls]
                          (interpreter/process lowered input output frames
                                               controls state))
                :invoke-context
-               (fn [context]
+               (clojure.core/fn [context]
                  (interpreter/process-context lowered
                                               (assoc context :state state)))}))
           instance (create-instance)]
@@ -605,11 +719,17 @@
                   (capability/checks-default target))
          options (assoc options :checks checks)
          _ (check-capabilities! target entry (:precision options) options)
-         channels (if (or (contains? compile-options :channels)
-                          (contains? (:options definition) :channels))
+         ;; An explicit `:channels` (compile option, definition option, or
+         ;; `:process`) wins; otherwise nil lets the lowerer *count* the width
+         ;; from the body's buffer accesses (D40). `normalize-options` always
+         ;; injects a default, so the test is on the raw maps, not on `options`.
+         channels (cond
+                    (or (contains? compile-options :channels)
+                        (contains? (:options definition) :channels))
                     (:channels options)
-                    (or (get-in definition [:process :channels])
-                        (:channels options)))]
+                    (:channels-declared? (:process definition))
+                    (get-in definition [:process :channels])
+                    :else nil)]
      (when-not (contains? #{:f32 :f64} (:precision options))
        (throw (ex-info "DSP precision must be :f32 or :f64"
                        {:dsp/error :unsupported-option
