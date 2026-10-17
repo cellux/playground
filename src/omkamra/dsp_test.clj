@@ -834,10 +834,22 @@
                        meter
                        #(dotimes [_ calls]
                           (dsp/process-unchecked! artifact input output 64 48000.0
-                                                  float-controls int-controls)))]
-        (is (<= processed baseline)
+                                                  float-controls int-controls)))
+            ;; Comparing the two totals for exact equality passes with no
+            ;; headroom at all: the measured no-op loop already reports a few
+            ;; bytes of its own, so a single stray byte anywhere in the measured
+            ;; region fails the check. Allow a few bytes per call instead.
+            ;;
+            ;; That is still a real bound rather than a fudge, because every
+            ;; possible per-call allocation is far larger: a boxed scalar or a
+            ;; small object is tens of bytes, and the regression this guards
+            ;; against — an unhinted primitive-array access — was ~24 KB per
+            ;; call (D26). This bound is ~6000x below it.
+            allowance (* 4 calls)]
+        (is (<= processed (+ baseline allowance))
             (str "unchecked JVM process allocated " processed
-                 " bytes; fixed-arity baseline allocated " baseline))))
+                 " bytes against a fixed-arity baseline of " baseline
+                 " over " calls " calls (allowed " allowance " bytes)"))))
     (is true "thread allocation counters are unavailable on this JVM")))
 
 (deftest process-zero-frames-leaves-output-untouched
