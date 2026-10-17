@@ -1217,11 +1217,34 @@ drivers' `lane-region`, so all three agree by construction.
 
 ---
 
-## Handoff — current state after P6 (rolling entry)
+## Handoff — current state after P9 (rolling entry)
 
 This is the one living entry, as opposed to the completed-phase entries above:
 what exists, how it fits together, what is open, and what to do next. It may be
 rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
+
+- **P7 (DSP standard library) is complete.** Eight `.cljc` sub-namespaces under
+  `omkamra.dsp.library` cover band-limited oscillators (PolyBLEP saw/pulse/
+  square/triangle, PWM, hard sync), noise, linear and exponential AR/ADSR and
+  LFOs, one-pole/biquad/multimode/SVF filters, delay/chorus/distortion and
+  linear/cubic/allpass interpolation, and stereo spreading. `docs/mvp/
+  LIBRARY.md` is generated from the docstrings with a drift guard.
+- **P8 (process instances, D23) is complete.** `dsp/create-instance` returns an
+  independent state region over the same compiled program, `dsp/destroy!`
+  releases it, and every lifecycle function accepts an artifact *or* an
+  instance. A process input port is optional (`:input false`), which makes a
+  generator just a process with no input buffer.
+- **P9 (sample-accurate automation) is complete** — see P9a–P9d above. The
+  sequencing layer (`omkamra.dsp.event`, `omkamra.dsp.schedule`) is host-side
+  and drives the kernel by segmentation; the kernel itself carries declared
+  `:smooth`/`:slew` control modes (D27) and host-supplied per-frame automation
+  lanes (D28), and no backend has a ramp or curve op.
+- **Verification.** `omkamra.dsp-test` on the JVM is the primary suite, with an
+  `:automation-lane` and other catalog cases shared through `omkamra.dsp
+  .acceptance`; the browser testbed runs the same catalog on JavaScript and Wasm
+  against the portable-IR oracle. Every check carries a positive or negative
+  twin: a value that must change, a lane that must be reported missing, a stride
+  that must differ between precisions.
 
 ### Where things stand
 
