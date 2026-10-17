@@ -121,6 +121,15 @@
     :options {:checks :none}}
    (* sample amount)])
 
+(dsp/defn declared-development-gain
+  "A definition that asks for runtime validation, which only the interpreter
+  implements. Declaring it in the definition must count as asking for it."
+  [{:params [{:name sample :type :float}]
+    :return-type :float
+    :process {}
+    :options {:checks :development}}
+   sample])
+
 (dsp/defn call-fixture-twice
   [sample]
   (calls/double-sample (calls/double-sample sample)))
@@ -173,6 +182,7 @@
             :loop-bound nil
             :wasm-math :polynomial}
            (:options artifact))))
+
   (testing "unknown options"
     (let [error (try
                   (dsp/compile gain {:not-an-option true})
@@ -193,6 +203,75 @@
       (is (= :invalid-definition (-> error ex-data :dsp/error)))
       (is (= [:params 0 0] (-> error ex-data :dsp/path)))
       (is (some? (-> error ex-data :malli/explanation))))))
+
+(deftest capability-diagnostics-name-what-a-target-serves
+  (testing "a default is always something the target actually serves"
+    (is (= :development (get-in (dsp/compile gain) [:options :checks]))
+        "the interpreter implements runtime validation")
+    (doseq [target [:jvm :js :wasm]]
+      (is (= :none (get-in (dsp/compile gain {:target target :entry :process})
+                           [:options :checks]))
+          (str target " must not claim validation it does not implement"))))
+  (testing "the entry default is not derived from the target"
+    ;; Deliberate: the same definition compiled for JS and for Wasm must not
+    ;; quietly become a function on one and a process on the other. Wasm serves
+    ;; one entry, so a defaulted entry is an unsupported request and says so.
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"it serves :process entries, not :function"
+         (dsp/compile gain {:target :wasm})))
+    (is (= :function (:entry (dsp/compile gain)))
+        "the default entry is unchanged, and still valid where it is served"))
+  (testing "runtime validation is an interpreter-only capability"
+    (doseq [target [:jvm :js :wasm]]
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"it serves :checks :none, not :development"
+           (dsp/compile gain {:target target :checks :development}))
+          (name target)))
+  ;; The positive twin. Without it the loop above would pass if the check
+  ;; rejected every target, or if :development were unsupported everywhere.
+    (is (= :development (:checks (:options (dsp/compile gain {:target :interpreter
+                                                              :checks :development}))))))
+  (testing "the Wasm lookup table exists only at f32"
+    (is (= :table (:wasm-math (:options (dsp/compile gain {:target :wasm
+                                                           :entry :process
+                                                           :wasm-math :table})))))
+    (is (= :polynomial (:wasm-math (:options (dsp/compile gain {:target :wasm
+                                                                :entry :process
+                                                                :precision :f64
+                                                                :wasm-math :polynomial})))))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"it serves :wasm-math :polynomial at :f64, not :table"
+         (dsp/compile gain {:target :wasm :entry :process :precision :f64
+                            :wasm-math :table}))))
+  (testing "Wasm serves the process entry only"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"it serves :process entries, not :function"
+         (dsp/compile gain {:target :wasm :entry :function})))
+    (is (= :process (:entry (dsp/compile gain {:target :wasm :entry :process})))))
+  (testing "every unsupported request is reported, not just the first"
+    (let [data (try (dsp/compile gain {:target :wasm :entry :function
+                                       :precision :f64 :wasm-math :table})
+                    nil
+                    (catch clojure.lang.ExceptionInfo error (ex-data error)))]
+      (is (= :unsupported-capability (:dsp/error data)))
+      (is (= :wasm (:target data)))
+    ;; Two distinct asks are unsupported here; one error lists both.
+      (is (= #{:entry :wasm-math} (set (map :capability (:capabilities data)))))))
+  (testing "a definition may declare an option a target cannot serve"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"it serves :checks :none, not :development"
+         (dsp/compile declared-development-gain {:target :js :entry :process})))
+    ;; The positive twin: the same declaration is honoured where it can be, so
+    ;; the error above is about the target rather than about the declaration.
+    (is (= :development (:checks (:options (dsp/compile declared-development-gain)))))
+    ;; A definition declaring something its target does serve is fine.
+    (is (= :none (:checks (:options (dsp/compile explicit-gain
+                                                 {:target :js :entry :process})))))))
 
 (deftest state-and-process-validation
   (let [normalized (descriptor/normalize

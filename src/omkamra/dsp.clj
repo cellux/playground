@@ -9,6 +9,7 @@
   expressions."
   (:refer-clojure :exclude [compile defn defstruct reset!])
   (:require [clojure.string :as str]
+            [omkamra.dsp.capability :as capability]
             [omkamra.dsp.descriptor :as descriptor]
             [omkamra.dsp.interpreter :as interpreter]
             [omkamra.dsp.linker :as linker]
@@ -537,6 +538,27 @@
                     {:target target
                      :supported #{:interpreter :jvm :js :wasm}}))))
 
+(clojure.core/defn- check-capabilities!
+  "Reject options this target cannot serve, naming what it does serve.
+
+  This runs before any lowering, so a target that cannot honour a request fails
+  with one legible error instead of emitting code that silently ignores it or
+  substitutes something else."
+  [target entry precision options]
+  (let [problems (capability/problems {:target target
+                                       :entry entry
+                                       :precision precision
+                                       :checks (:checks options)
+                                       :wasm-math (:wasm-math options)})]
+    (when (seq problems)
+      (throw (ex-info (capability/describe problems target)
+                      {:dsp/error :unsupported-capability
+                       :target target
+                       :entry entry
+                       :precision precision
+                       :capabilities problems}))))
+  options)
+
 (clojure.core/defn compile
   "Compile a DSP descriptor for `:interpreter`, `:jvm`, `:js`, or `:wasm`.
 
@@ -572,6 +594,17 @@
                     [:options]))
          target (:target options)
          entry (:entry options)
+         ;; Runtime validation is a capability, and only the interpreter
+         ;; implements it, so its default has to follow the target. Otherwise
+         ;; every generated-target compile would carry `:development` in its
+         ;; effective options while honouring nothing, and an unsupported value
+         ;; could not be told apart from the default.
+         checks (if (or (contains? compile-options :checks)
+                        (contains? (:options definition) :checks))
+                  (:checks options)
+                  (capability/checks-default target))
+         options (assoc options :checks checks)
+         _ (check-capabilities! target entry (:precision options) options)
          channels (if (or (contains? compile-options :channels)
                           (contains? (:options definition) :channels))
                     (:channels options)

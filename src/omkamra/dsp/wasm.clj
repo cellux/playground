@@ -524,10 +524,33 @@
             (i32-const (:offset (:table (:regions memory))))
             (wat-symbol (wat-data-string (f32-little-endian-bytes (sine-table-values))))))
 
-(defn- f64-sin-table
-  "f32 lookup-table sin with linear interpolation (the `:table` strategy)."
-  [x]
+(defn- f32-table-lookup
+  "One period of sine from the f32 table, with linear interpolation.
+
+  `offset` shifts the look-up by whole table entries, which is how cosine is
+  obtained: a quarter period is exactly `table-entry-count / 4` entries, an
+  integer.
+
+  The shift happens *after* range reduction, in index space where the offset is
+  exact, so it contributes no error. Shifting the argument instead — looking up
+  `x + pi/2` — rounds the argument before reducing it, a relative error of order
+  `ulp(x)`; measured against `Math.cos`, that alone doubled the error of the
+  `:table` strategy at |x| ~ 1e10 and left cosine worse than sine at every
+  magnitude where the shift was visible at all.
+
+  The scaled index is bound to a local because a WAT expression is a tree: a
+  temporary used three times is emitted three times, which duplicated the whole
+  range reduction and cost about half the speed of this strategy.
+
+  Wrapping uses a remainder rather than a compare-and-subtract for the same
+  reason, and it also covers the edge case where the reduced phase lands exactly
+  on the period: the table is sampled inclusively so entry N is entry 0, and an
+  unwrapped index of N would read entry N+1, one past the last."
+  [x offset]
   (let [two-pi (* 2.0 Math/PI)
+        scaled-local (wat-symbol "$scaled")
+        raw-local (wat-symbol "$raw")
+        index-local (wat-symbol "$index")
         nonfinite (wat-form "i32.or"
                             (wat-form "f64.eq" (wat-form "f64.abs" x)
                                       (f64-const Double/POSITIVE_INFINITY))
@@ -537,23 +560,29 @@
                        (f64-mul (f64-const two-pi)
                                 (wat-form "f64.floor"
                                           (f64-mul safe (f64-const (/ 1.0 two-pi))))))
-        scaled (f64-mul phase (f64-const (/ table-entry-count two-pi)))
-        index (wat-form "i32.trunc_f64_s" scaled)
-        fraction (f64-sub scaled (wat-form "f64.convert_i32_s" index))
+        scaled (f64-add (f64-mul phase (f64-const (/ table-entry-count two-pi)))
+                        (f64-const offset))
+        raw (wat-form "i32.trunc_f64_s" (wat-form "local.get" scaled-local))
+        index (wat-form "i32.rem_u" (wat-form "local.get" raw-local)
+                        (i32-const table-entry-count))
+        fraction (f64-sub (wat-form "local.get" scaled-local)
+                          (wat-form "f64.convert_i32_s" (wat-form "local.get" raw-local)))
         load (fn [delta]
                (wat-form "f32.load"
                          (wat-form "i32.add"
                                    (i32-const (+ *table-offset*
                                                  (* table-stride-bytes delta)))
                                    (wat-form "i32.mul" (i32-const table-stride-bytes)
-                                             index))))
+                                             (wat-form "local.get" index-local)))))
         low (wat-form "f64.promote_f32" (load 0))
         high (wat-form "f64.promote_f32" (load 1))
         general (f64-add low (f64-mul fraction (f64-sub high low)))]
-    (wat-form "select" (f64-const Double/NaN) general nonfinite)))
+    {:locals [["scaled" "f64"] ["raw" "i32"] ["index" "i32"]]
+     :statements [(wat-form "local.set" scaled-local scaled)
+                  (wat-form "local.set" raw-local raw)
+                  (wat-form "local.set" index-local index)]
+     :result (wat-form "select" (f64-const Double/NaN) general nonfinite)}))
 
-;; Emulated builtins are emitted once as shared f64 -> f64 Wasm functions and
-;; called from each use site, so module size does not multiply with call sites.
 (def ^:private emulated-operators
   "Builtins Wasm has no native instruction for; each gets a shared function."
   #{:exp :sin :cos :tan :sinh :cosh :tanh :log :atan :asin :acos :atan2 :pow})
@@ -663,9 +692,10 @@
   (let [x (first args)]
     (case operator
       :exp (f64-exp x)
-      :sin (if (table-active?) (f64-sin-table x) (:sin (f64-sin-cos x)))
+      :sin (if (table-active?) (f32-table-lookup x 0.0) (:sin (f64-sin-cos x)))
       :cos (if (table-active?)
-             (f64-sin-table (f64-add x (f64-const half-pi)))
+             ;; A quarter period, in entries, applied after reduction.
+             (f32-table-lookup x (* 0.25 table-entry-count))
              (:cos (f64-sin-cos x)))
       :tan (f64-div (emulated-call :sin x) (emulated-call :cos x))
       :sinh (f64-div (f64-sub (emulated-call :exp x)

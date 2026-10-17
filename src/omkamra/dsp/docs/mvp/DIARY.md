@@ -1368,15 +1368,48 @@ omkamra.dsp.testbed           (.cljs)  browser differential suite
 
 ### Open issues
 
-1. **Capability diagnostics are implicit.** There is no registry-level,
-   pre-flight capability check; an unimplemented `[operator type]` fails in the
-   backend's `:default` method at emission time. P2's builtins are supported
-   everywhere, so nothing exercises a richer model yet. P3 (Wasm has no
-   `sin`/`cos`/`exp`/`log`) is where this should be made explicit.
-2. **Reduced browser coverage from the rewrite.** The old suite had separate
-   generated-kernel and Wasm-module checks plus a Wasm f64 AudioWorklet check;
-   those were folded into the shared matrix or dropped. The Wasm **f64**
-   AudioWorklet adapter is no longer exercised. Re-add if desired.
+1. **(Done, D29.) Capability diagnostics are now explicit — and the real gaps
+   were not where the original note guessed.** It assumed the operator set was the place to declare
+   support, because Wasm has no native `sin`/`cos`/`exp`/`log`. That is stale:
+   P3 gave every transcendantal an emulation, so **every builtin is served on all
+   four targets** and a per-operator capability table would be speculative —
+   unreachable code with no way to test it. The differences that actually exist
+   are in the *options and entry kinds*, and two of the three are silent:
+   - **`:checks :development` is honoured only by the interpreter.** Verified: no
+     backend mentions it, and it is not surfaced in the ABI, so requesting it for
+     the JVM, JS or Wasm buys nothing and says nothing. This is also what the old
+     "generated-target development guards" item meant.
+   - **`:wasm-math :table` is f32-only** and silently becomes `:polynomial` at
+     f64 (the table is a byte-stride region, so it has no f64 form).
+   - **The `:function` entry is unavailable on Wasm** — by design, but reported as
+     a generic unsupported-target failure rather than as "Wasm serves process
+     entries only".
+
+   All three are now declared in `omkamra.dsp.capability` and refused at compile
+   time with a message naming what the target does serve; `:checks` is a
+   per-target default, so a generated-target compile no longer claims validation
+   it does not implement. The rest of P15 deliverable 1 — allocation, reflection,
+   locks, unbounded loops, unvalidated memory access — is still outstanding,
+   though the IR's `:diagnostics` channel already carries the loop and dynamic
+   index warnings.
+2. **(Done.) Browser coverage is restored.** The dropped Wasm **f64**
+   AudioWorklet check is back: the worklet step now renders at both precisions,
+   and the f64 case is the one that matters, because the adapter reads its
+   element type and width from processor options — so the *same* adapter source
+   has to serve f64, and only the module behind it changes. Checking f32 alone
+   left that untested. Browser suite 19/19.
+
+   The other two checks the rewrite folded away are genuinely covered by the
+   shared matrix: the "generated-kernel" checks are the JavaScript path the
+   matrix already drives per case, and the "Wasm-module" checks are the Wasm path
+   it drives the same way. Neither needs a separate check.
+
+   One thing worth knowing about the restored check: the f32 and f64 renders
+   report the *same* peak, because the worklet case is a one-pole at coefficient
+   0.5, whose arithmetic is exact in both precisions, and `OfflineAudioContext`
+   narrows to f32 in any case. So it does not discriminate the precisions
+   numerically — what it tests is the adapter's element width, where getting 8
+   bytes wrong would misalign every read and show up as silence or garbage.
 3. **Function-entry cases are JS-only.** Wasm is process-only by design, so the
    function matrix runs on interpreter/JVM/JS; Wasm coverage for the same
    operators comes from process cases.
@@ -1385,6 +1418,63 @@ omkamra.dsp.testbed           (.cljs)  browser differential suite
    JVM (`d2i`), with JavaScript/Wasm behavior of their own. The conversion
    special-value contract is still open (`PLAN.md`); P4 hit it through an
    int-array test and routed around it.
+5. **The allocation test no longer compares exact totals** (fixed). It asserted
+   `processed <= baseline` over two exact thread-allocation measurements, which
+   passes with *zero* headroom: both sides read 9880 bytes over 10 000 calls, so
+   one stray byte failed it. It now allows four bytes per call, which is still a
+   real bound rather than a fudge — every possible per-call allocation is far
+   larger (a boxed scalar is tens of bytes; the regression it guards against was
+   ~24 KB per call, D26). Negative control: the same measurement reads an
+   allocating reference path at 994 MB across the same loops, 24 862x the
+   allowance, so the bound has teeth.
+
+### P15a — Explicit capability diagnostics (pulled forward, D29)
+
+`dsp/compile` now refuses an option the chosen target cannot serve, before any
+lowering, instead of letting a backend ignore it or substitute something else:
+
+```
+DSP target :wasm cannot serve the requested options: it serves :process entries,
+not :function; it serves :wasm-math :polynomial at :f64, not :table
+```
+
+Every unsupported request is reported at once, and the error carries the
+machine-readable form too (`{:dsp/error :unsupported-capability :capabilities
+[{:capability :entry :requested :function :supported #{:process}} ...]}`).
+
+**The work was mostly finding out that the note was wrong.** It claimed the gap
+to declare was the operator set, because Wasm has no native transcendentals. P3
+had already closed that with emulations, so a per-operator table would have been
+entries that all say `true` — untestable code. The differences that actually
+exist are in the options and entry kinds, and two were silent: validation
+(`:checks :development`) is implemented only by the interpreter, and the f32
+lookup table silently became `:polynomial` at f64.
+
+**One consequence was load-bearing, not cosmetic.** `:checks` had to become a
+per-target default. With the single global default of `:development`, every
+generated-target compile would have carried `:development` in its effective
+options while honouring nothing, and an unsupported value would have been
+indistinguishable from the default — so the check would have fired on every
+build. Deriving the default from the target makes the effective value always
+servable, which is exactly what lets an unsupported value mean "somebody asked
+for this". The `:entry` default is the opposite case and stays global on purpose:
+the same definition must not compile to a function on JS and a process on Wasm.
+
+**Two mistakes of mine, both instructive.**
+
+- The first draft of `problems` destructured `{:keys [checks wasm-math]}` from the
+  target table *and* took them from the requested options under the same names.
+  The shadowing made `(contains? checks requested-checks)` compare the table
+  against itself, so the `:checks` capability could **never** be reported — a
+  vacuous check of the exact kind this project keeps rediscovering. The test's
+  negative twin (the interpreter must still accept `:development`) is what would
+  have caught it had the assertion not been written against the table.
+- A test inserted at a prefix-matching anchor landed *inside* the neighbouring
+  `deftest`, which is legal enough to compile but produces an inline `def`.
+  `cljfmt` then re-indented it to match its new nesting, which made the mistake
+  look deliberate. Indentation is not evidence of structure; the lint warning
+  was. The anchor now matches the closing parens, and the replacement is verified
+  by checking what precedes and follows it.
 
 ### Gotchas burned into this session
 
@@ -1442,25 +1532,79 @@ belongs with P10's voice pool.
 3. **Generated-target (JS/Wasm) development guards**, and restoring the dropped
    Wasm f64 AudioWorklet check. Lanes are a live example of the gap: the Wasm
    *worklet* adapter does not carry a lane region, because no case drives it.
-4. **Deferred, optional: the D20 partition-coloring pass** (dead-on-frame-entry
-   state and P4 scratch), most valuable once P10 gives many sibling modules.
+4. **The D20 partition-coloring pass is deferred, now with numbers.** D20
+   permits reusing a partition only when it is **dead on frame entry**, and
+   colours both persistent state and P4 scratch. Measured over all 83 catalog
+   process cases: **663** persistent-state slots against **14** scratch slots,
+   and only 4 cases have any scratch at all, each a single array — so there is
+   nothing to share *within* a case, and the pass would save nothing on any case
+   that exists.
 
-### Wasm lookup table — done, with follow-ups
+   There is also a structural reason the state half can never pay. A partition is
+   dead on frame entry exactly when every path writes it before reading it; but
+   that is the definition of state that **carries no information across the
+   frame boundary**. Every library module reads its state before writing it —
+   that is why it is state — so a state partition the analysis would accept is
+   one whose contents were never needed. The payoff is therefore real but
+   confined to *scratch*: a module that refills a buffer each frame before
+   reading it, such as an FFT or convolution block, which the corpus does not
+   have.
+
+   So if it is built, it should be **scoped to scratch**: that removes the
+   riskiest half (touching persistent state means instance-state sizing and the
+   ABI) and keeps the half with a reachable beneficiary. Otherwise it waits for a
+   real one.
+
+### Wasm lookup table — benchmarked, cosine fixed, with follow-ups
 
 Steps 1 and 2 are done (shared emulation functions; f32 sine table via
-`:wasm-math :table`). Remaining:
+`:wasm-math :table`). Measured on this machine with the four-calls-per-sample
+benchmark, warmed, best of three, at f32:
 
-- **Benchmark** the table against the polynomial before changing the default;
-  `:polynomial` is still the default.
+| | `:polynomial` | `:table` |
+|---|---|---|
+| cost per `sin` | 137.1 ns | **24.3 ns** (5.65x faster) |
+| cost per `cos` | 137.0 ns | **25.4 ns** |
+| module text | 25 584 bytes | 51 928 bytes |
+| linear memory | 8 192 bytes | 24 580 bytes |
+
+**`cos` is fixed.** It was looked up as `sin(x + π/2)`, which rounds the
+argument *before* the range reduction — an error of order `ulp(x)`. The quarter
+period is now applied *after* reduction, in index space, where it is exactly
+`entry-count / 4`. Measured against `Math.cos` at |x| ~ 1e10, cosine error went
+from 2.0e-6 to 1.4e-6, and the cos/sin error ratio from 1.415 to 0.99: cosine is
+now no worse than sine, with the residual being the terms they share.
+
+**But the item was smaller than it looked, and that is the useful finding.** The
+posited shift error is ~`|x| * 2^-52`, while the range reduction's own error is
+~2π times larger and therefore dominates. So the shift contributes at most about
+a sixth of the total, and it only *appears* to double the error when a maximum is
+taken over few samples, because the error oscillates. Any real accuracy work at
+large arguments belongs in the **range reduction**, not here: it is what makes
+the polynomial strategy degrade from 3e-8 at |x| ~ 1e6 to 1.7e-7 at |x| ~ 1e9,
+and it affects `sin` exactly as much as `cos`. A Cody-Waite or double-double
+reduction would lift both.
+
+**Two incidental improvements.** Binding the scaled index to a Wasm local was
+needed because a WAT expression is a tree: the first version of the fix
+referenced the reduction three times, which emitted it three times and *cost*
+half the table strategy's speed (32.6 ns to 47.5 ns). Doing it with locals took
+it to 24.3 ns — better than before the change — and shrank the module text below
+its original size. The index wrap also uses a remainder rather than a
+compare-and-subtract, which covers a latent edge case: a reduced phase landing
+exactly on the period produced an index of N, and reading entry N+1 one past the
+last.
+
+Remaining:
+
 - **f64**: a raw table would be too large; consider a piecewise minimax
   coefficient table if f64 Wasm speed ever matters.
 - **`exp`** has no table (polynomial only); fine while it is not hot.
-- **Table size**: 4097 f32 entries (16 KB payload, ~53 KB WAT text). Could
+- **Table size**: 4097 f32 entries (16 KB payload, ~52 KB WAT text). Could
   shrink to 2049 entries if the interpolation error stays acceptable, or grow
   for margin.
-- **Cos** currently reuses `$dsp_sin` with a π/2 phase shift; acceptable for
-  the tested ranges but a direct quarter-period offset would be more accurate
-  for large arguments.
+- **`:wasm-math :table` is f32-only and silently ignored at f64** (see open
+  issues; it is now a compile error rather than a silent fallback).
 - **`:wasm-math :table` is f32-only and silently ignored for f64** (the table is
   a byte-stride region, so it has no f64 form). A caller asking for `:table` at
   f64 gets the polynomial emulation without being told.

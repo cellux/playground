@@ -863,3 +863,42 @@ checks. `:smooth` and `:slew` compose with a lane for free: a smoother's target
 is simply the control read, which is now a per-frame read. Specifying a lane for
 a target that cannot address the region is a compile error rather than a lane
 that silently reads zeros.
+
+---
+
+## D29 — A target declares what it serves, and refuses what it cannot
+
+**Status.** Implemented (P15a, deliverable 1's capability half pulled forward).
+
+**Decision.** `omkamra.dsp.capability` is the single place that records what each
+target can serve, and `dsp/compile` rejects a request a target cannot honour
+*before* lowering, with a structured error that names what the target does serve
+instead. For validated options the default is derived from the target, so an
+unsupported effective value can only have been asked for explicitly.
+
+**Rationale.** Three capability differences exist, and two of them were silent:
+`:checks :development` is implemented only by the interpreter, and `:wasm-math
+:table` is f32-only. A silent substitution is worse than a refusal — a caller who
+asks for validation a target does not implement, or for a strategy it will not
+use, has no way to find out. The third (`:function` on Wasm) already failed, but
+as a generic unsupported-target error rather than as "Wasm serves process
+entries".
+
+The **operator set is deliberately absent**. The original note assumed Wasm's
+missing `sin`/`cos`/`exp`/`log` intrinsics were the gap to declare; P3 closed
+that with emulations, so every builtin is now served on all four targets. A
+per-operator table whose entries would all say `true` is untestable code, so it
+is omitted and the backends' `:default` methods remain the backstop. Adding it
+later is a one-line change.
+
+**Consequences.** The `:checks` default must be per-target. With a single global
+default every generated-target compile would carry `:development` in its
+effective options while honouring nothing, and an unsupported value could not be
+told apart from the default — the check would fire on every build. The `:entry`
+default is deliberately **not** target-derived: the same definition must not
+quietly compile to a function on JS and a process on Wasm, so a defaulted entry
+that a target cannot serve is refused and says which entry it serves.
+
+This is strict refusal rather than a warning. The intent is to relax individual
+capabilities to warnings later, with evidence of what a refusal cost — rather
+than to start permissive and never tighten.

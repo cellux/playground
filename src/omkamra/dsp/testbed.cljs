@@ -872,6 +872,99 @@
                                            controls)))
                  (.set output (view output-offset frames)))}))
 
+(defn- wasm-table-probe
+  "Instantiate a catalog case as an f32 lookup-table kernel.
+
+  Returns its `process`, so a test can drive it with its own inputs rather than
+  the catalog's block plan."
+  [c]
+  (-> (response-text (str "/omkamra/dsp/testbed/wasm-source"
+                          (binding [*wasm-math* :table]
+                            (acceptance-query c :f32))))
+      (.then compile-wasm)
+      (.then (fn [bytes] (js/WebAssembly.instantiate bytes)))
+      (.then
+       (fn [result]
+         (let [instance (wasm-process-instance (.-instance result) :f32 [])]
+           (:reset instance)
+           (:process instance))))))
+
+(defn- wasm-table-cos-accuracy-test
+  "Under the lookup-table strategy, cosine must be no worse than sine.
+
+  Cosine was obtained by looking up `sin(x + pi/2)`, which rounds the argument
+  *before* the range reduction — an error of order `ulp(x)`. At |x| ~ 1e10 that
+  doubled the strategy's error (2.0e-6 against 1.0e-6 for sine at the same
+  inputs). Applying the quarter period after reduction, in index space where it
+  is exactly `entry-count / 4`, removes the term, so the two errors become the
+  same one: the table's, plus the range reduction's.
+
+  So the assertion is relational, `cos <= 1.2 x sin`. That is sharper than an
+  absolute bound, whose margin here is a few percent: the term being removed is
+  at most ~1/6 of the total error, because the range reduction is ~2*pi times
+  larger and dominates. A max over sampled arguments overstates the ratio (the
+  errors oscillate), which is why both constants were measured: the shift gives
+  1.415 at |x| ~ 1e10 and the fix gives 0.986 to 1.017, so the bound separates
+  them with ~18% margin on the passing side and ~18% on the failing side. The
+  inputs, the table and the arithmetic are all deterministic, so those numbers
+  are reproducible rather than statistical.
+
+  The absolute bound on sine is the calibration that keeps the ratio honest: it
+  fails if the table itself is broken, which would otherwise let a ratio of two
+  large errors pass.
+
+  Arguments are rounded to f32 before *either* the kernel or the reference sees
+  them. Comparing an f32 kernel against a reference computed on the unrounded
+  double is a different argument — at |x| ~ 1e10 one f32 step is ~1024, an error
+  of order 1."
+  []
+  (let [name "Wasm lookup table cos accuracy"
+        frames 1024
+        bounds [[1.0e3 5.0e-7] [1.0e10 1.5e-6]]
+        inputs (fn [magnitude]
+                 (mapv (fn [index]
+                         (js/Math.fround (* magnitude (+ 0.5 (/ index frames)))))
+                       (range frames)))
+        error (fn [process magnitude reference]
+                (let [xs (inputs magnitude)]
+                  (apply max
+                         (map (fn [a b] (js/Math.abs (- a b)))
+                              (process xs frames)
+                              (map reference xs)))))]
+    (-> (js/Promise.all
+         #js [(wasm-table-probe (acceptance/case-by-id :cos))
+              (wasm-table-probe (acceptance/case-by-id :sin))])
+        (.then
+         (fn [[cos-process sin-process]]
+           (let [measured (mapv (fn [[magnitude bound]]
+                                  {:magnitude magnitude
+                                   :bound bound
+                                   :sin (error sin-process magnitude js/Math.sin)
+                                   :cos (error cos-process magnitude js/Math.cos)})
+                                bounds)
+                 violated (filter (fn [{:keys [sin cos bound]}]
+                                    (or (> sin bound)
+                                        (> cos (+ (* 1.2 sin) 1.0e-9))))
+                                  measured)
+                 detail (fn [{:keys [magnitude sin cos]}]
+                          (str magnitude ": cos/sin " (js/Math.round (* 1000 (/ cos sin))) "e-3"))]
+             (require! (empty? violated)
+                       (str name ": "
+                            (str/join
+                             "; "
+                             (map (fn [{:keys [magnitude sin cos bound]}]
+                                    (str "at |x| ~ " magnitude " sine " sin
+                                         " (bound " bound ") cosine " cos
+                                         " vs " (* 1.5 sin)))
+                                  violated))))
+             {:name name
+              :passed? true
+              :detail (str "error ratios " (str/join ", " (map detail measured)))})))
+        (.catch (fn [error]
+                  {:name name
+                   :passed? false
+                   :detail (or (.-message error) (str error))})))))
+
 (defn- js-independence-test
   [precision]
   (let [query (str "?case=" (name independence-case) "&precision=" (name precision))
@@ -1106,19 +1199,28 @@
           steps))
 
 (defn- wasm-worklet-step
-  [results]
-  (-> (js/fetch "/omkamra/dsp/testbed/wasm-metadata")
-      (.then (fn [response] (.json response)))
-      (.then (fn [metadata]
-               (-> (js/fetch "/omkamra/dsp/testbed/wasm-source")
-                   (.then (fn [response] (.text response)))
-                   (.then (fn [wat]
-                            (-> (compile-wasm wat)
-                                (.then (fn [bytes]
-                                         (wasm-audio-worklet-test
-                                          bytes
-                                          (js->clj metadata :keywordize-keys true))))))))))
-      (.then (fn [worklet] (conj results worklet)))))
+  "Render through the Wasm AudioWorklet adapter at one precision.
+
+  Both precisions matter, and the f64 one is the interesting case: the adapter
+  reads its element type and width from processor options, so *the same adapter
+  source* has to work for f64 as well as f32, and only the module behind it
+  changes. Checking f32 alone would leave that untested."
+  [precision results]
+  (let [suffix (if (= :f64 precision) "-f64" "")]
+    (-> (js/fetch (str "/omkamra/dsp/testbed/wasm-metadata" suffix))
+        (.then (fn [response] (.json response)))
+        (.then
+         (fn [metadata]
+           (-> (js/fetch (str "/omkamra/dsp/testbed/wasm-source" suffix))
+               (.then (fn [response] (.text response)))
+               (.then
+                (fn [wat]
+                  (-> (compile-wasm wat)
+                      (.then (fn [bytes]
+                               (wasm-audio-worklet-test
+                                bytes
+                                (js->clj metadata :keywordize-keys true))))))))))
+        (.then (fn [worklet] (conj results worklet))))))
 
 (defn- run-suite!
   [summary results-list]
@@ -1137,13 +1239,15 @@
                 summary results-list matrix-results
                 [(fn [] (-> (bounded-loop-wasm-test) (.then (fn [r] [r]))))
                  (fn [] (-> (wasm-table-test) (.then (fn [r] [r]))))
+                 (fn [] (-> (wasm-table-cos-accuracy-test) (.then (fn [r] [r]))))
                  (fn [] (instance-independence-tests))
                  (fn [] (schedule-invariance-tests))
                  (fn [] (-> (audio-worklet-test :f32)
                             (.then (fn [a]
                                      (-> (audio-worklet-test :f64)
                                          (.then (fn [b] [a b])))))))])))
-      (.then #(wasm-worklet-step %))
+      (.then #(wasm-worklet-step :f32 %))
+      (.then #(wasm-worklet-step :f64 %))
       (.then (fn [results]
                (render-results! summary results-list results)
                results))

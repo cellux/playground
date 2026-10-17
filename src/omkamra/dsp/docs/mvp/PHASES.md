@@ -508,6 +508,14 @@ after conformance holds.
    simplification, and size-limited inlining, each guarded by differential
    tests and a no-reassociation rule for floating point.
 
+*(P15a, done — pulled forward.)* Deliverable 1's capability half: every target
+declares what it serves (`omkamra.dsp.capability`), and `dsp/compile` refuses a
+request it cannot honour, naming what it does serve (D29). The three real
+differences are runtime validation, the f32-only lookup table, and Wasm's
+process-only entry. The remaining half of deliverable 1 — allocation, reflection,
+locks, unbounded loops, unvalidated memory access — is open, though the IR's
+`:diagnostics` channel already carries the loop and dynamic-index warnings.
+
 ---
 
 ## P16 — Automated conformance and release gates
