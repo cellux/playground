@@ -87,6 +87,6 @@
 "
   [sample rate depth mix]
   {:process {:controls [{:name rate} {:name depth} {:name mix}]}}
-  (let [d (* depth (lfo 0.0 rate 2))
+  (let [d (* depth (lfo rate 2))
         wet (delay-line sample d)]
     (+ (* (- 1.0 mix) sample) (* mix wet))))

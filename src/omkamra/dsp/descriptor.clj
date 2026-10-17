@@ -140,7 +140,7 @@
 
 (def ^:private ProcessSource
   [:map {:closed true}
-   [:input {:optional true} ProcessPortSource]
+   [:input {:optional true} [:or false? ProcessPortSource]]
    [:output {:optional true} ProcessPortSource]
    [:frames {:optional true}
     [:map {:closed true}
@@ -622,10 +622,15 @@
   name)
 
 (defn- normalize-buffers
-  [buffers channels source]
+  [buffers channels source input?]
   (let [buffers (if (nil? buffers)
-                  [{:name :input :direction :input :channels channels :type :float}
-                   {:name :output :direction :output :channels channels :type :float}]
+                  ;; A generator (`:input false`, D23) has no input buffer at
+                  ;; all, so its body cannot load a sample and its effects stay
+                  ;; free of a spurious `:read-memory`.
+                  (cond-> [{:name :output :direction :output
+                            :channels channels :type :float}]
+                    input? (conj {:name :input :direction :input
+                                  :channels channels :type :float}))
                   (mapv (fn [buffer]
                           (assoc buffer
                                  :name (normalize-buffer-name
@@ -655,17 +660,26 @@
                 buffers)
       (fail "DSP process input and output buffers must have type :float"
             source [:process :buffers] {:buffers buffers}))
-    (when-not (every? (set (map :direction buffers)) [:input :output])
-      (fail "DSP process buffers must declare input and output buffers"
-            source [:process :buffers] {:buffers buffers}))
+    ;; A process must always declare an output; only a generator (whose
+    ;; `:input` is false) may have no input buffer at all.
+    (when-not (every? (set (map :direction buffers))
+                      (if input? [:input :output] [:output]))
+      (fail "DSP process buffers must declare output, and input unless the process is a generator"
+            source [:process :buffers] {:buffers buffers :input? input?}))
     buffers))
 
 (defn- normalize-process
   [process params source]
   (let [channels (or (:channels process) 1)
-        input (normalize-process-port (:input process)
-                                      (:name (first params)) :float channels
-                                      source [:process :input] params)
+        ;; `:input false` declares a generator: it has no sample parameter, no
+        ;; input buffer, and every parameter is a control. An absent `:input`
+        ;; still means the default port, so `false` is the only way to say
+        ;; "none".
+        input? (not (false? (:input process)))
+        input (when input?
+                (normalize-process-port (:input process)
+                                        (:name (first params)) :float channels
+                                        source [:process :input] params))
         output (normalize-process-port (:output process)
                                        :output :float channels
                                        source [:process :output] nil)
@@ -674,8 +688,10 @@
                         {:name :sample-rate :type :float})
         controls (if (contains? process :controls)
                    (:controls process)
-                   (mapv :name (rest params)))
-        buffers (normalize-buffers (:buffers process) channels source)]
+                   (if input?
+                     (mapv :name (rest params))
+                     (mapv :name params)))
+        buffers (normalize-buffers (:buffers process) channels source input?)]
     (when-not (and (integer? channels) (pos? channels))
       (fail "DSP process channels must be a positive integer"
             source [:process :channels] {:channels channels}))
@@ -693,8 +709,8 @@
                                              params)
                          controls (range))
           control-names (map :name controls)
-          signature-names (concat [(:name input)
-                                   (:name output)
+          signature-names (concat (when input [(:name input)])
+                                  [(:name output)
                                    (:name frames)
                                    (:name sample-rate)]
                                   control-names)
@@ -704,7 +720,7 @@
                                          sort
                                          vec)
           lifecycle (merge {:init true :reset true} (:lifecycle process))]
-      (when-not (= channels (:channels input) (:channels output))
+      (when (and input? (not= channels (:channels input) (:channels output)))
         (fail "DSP process input and output channels must match"
               source [:process] {:channels channels
                                  :input (:channels input)
@@ -713,7 +729,7 @@
         (fail "DSP process signature names must be unique"
               source [:process]
               {:names duplicate-signature-names}))
-      (when (some #(= (:name input) (:name %)) controls)
+      (when (and input? (some #(= (:name input) (:name %)) controls))
         (fail "DSP process input cannot also be a control"
               source [:process :controls] {:input (:name input)
                                            :controls control-names}))

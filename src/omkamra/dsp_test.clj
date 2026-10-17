@@ -277,7 +277,7 @@
            :body [1.0]})))
     (is (thrown-with-msg?
          clojure.lang.ExceptionInfo
-         #"input and output buffers"
+         #"must declare output"
          (descriptor/normalize
           {:dsp/kind :function
            :name 'missing-buffers
@@ -988,7 +988,7 @@
     (is (str/includes? source "Math.fround"))
     (is (str/includes? source "function init()"))
     (is (str/includes? source "function reset()"))
-    (is (str/includes? source "return {process, init, reset}"))))
+    (is (str/includes? source "return {process, init, reset, destroy}"))))
 
 (deftest javascript-and-jvm-f64-backends
   (let [javascript (dsp/compile one-pole {:target :js
@@ -1921,6 +1921,138 @@
                           [#'oscillator/sync-oscillator [220.0 2.0]]]]
       (is (= (render v controls :interpreter 512 gates)
              (render v controls :jvm 512 gates))))))
+
+(deftest process-instances-are-independent-and-destroyable
+  (let [artifact (dsp/compile #'delay/delay-line {:target :jvm :entry :process})
+        render (fn [holder input]
+                 (let [frames (count input)
+                       output (float-array frames)]
+                   (dsp/process! holder {:input (float-array input)
+                                         :output output
+                                         :frames frames
+                                         :sample-rate 44100.0
+                                         :controls [16.0]})
+                   (vec output)))
+        impulse (into [1.0] (repeat 31 0.0))
+        silence (vec (repeat 16 0.0))
+        a (dsp/create-instance artifact)
+        b (dsp/create-instance artifact)]
+    (is (dsp/process-instance? a))
+    (is (not (dsp/process-instance? artifact)))
+    ;; Instantiating allocates a private state region rather than sharing the
+    ;; artifact's.
+    (is (not (identical? (:state a) (:state b))))
+    ;; Differential independence: `a` hears an impulse and its line still holds
+    ;; it; `b`, fed only silence, stays silent with a zeroed state.
+    (is (= 1.0 (nth (render a impulse) 16)))
+    (is (every? zero? (render b silence)))
+    (is (some (complement zero?) (:float (:state a))))
+    (is (every? zero? (:float (:state b))))
+    ;; Resetting one instance leaves the other alone.
+    (dsp/reset! b)
+    (is (some (complement zero?) (:float (:state a))))
+    ;; Destroying releases the state and rejects further use.
+    (dsp/destroy! a)
+    (is (every? zero? (:float (:state a))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"destroyed" (render a [0.0])))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"destroyed" (dsp/reset! a)))
+    ;; The artifact is not an instance: it cannot be destroyed, and destroying
+    ;; an instance never disturbs it.
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"create-instance" (dsp/destroy! artifact)))
+    (is (= 1.0 (nth (render artifact impulse) 16))))
+  ;; The interpreter exposes the same lifecycle and agrees with the JVM.
+  (let [artifact (dsp/compile #'delay/delay-line {:target :interpreter :entry :process})
+        impulse (into [1.0] (repeat 31 0.0))
+        render (fn [holder]
+                 (let [output (float-array 32)]
+                   (dsp/process! holder {:input (float-array impulse)
+                                         :output output
+                                         :frames 32
+                                         :sample-rate 44100.0
+                                         :controls [16.0]})
+                   (vec output)))
+        instance (dsp/create-instance artifact)]
+    (is (dsp/process-instance? instance))
+    (is (= (render artifact) (render instance)))
+    (dsp/destroy! instance)
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"destroyed" (render instance))))
+  ;; Every target names the same create/reset/destroy lifecycle, and no handle
+  ;; is shared between instances of one artifact.
+  (is (= {:interpreter {:create :create-instance :reset :reset! :destroy :destroy!}
+          :jvm {:create :create-instance :reset :reset! :destroy :destroy!}
+          :js {:create :createKernel :reset :reset :destroy :destroy}
+          :wasm {:create :instantiate :reset :reset :destroy :release}}
+         (into {}
+               (map (fn [target]
+                      [target (get-in (dsp/compile #'delay/delay-line
+                                                   {:target target :entry :process})
+                                      [:abi :instance :operations])]))
+               [:interpreter :jvm :js :wasm])))
+  (doseq [target [:interpreter :jvm :js :wasm]]
+    (let [handle (get-in (dsp/compile #'delay/delay-line {:target target :entry :process})
+                         [:abi :instance :handle])]
+      (is (contains? #{:state-region :kernel-handle :wasm-instance} (:kind handle)))
+      (is (false? (:shared? handle))))))
+
+(dsp/defn ramp-generator
+  "A generator: `:input false`, so every parameter is a control (D23)."
+  [increment]
+  {:state [{:name s :type :float :init 0.0 :next (+ s increment)}]
+   :process {:input false}}
+  s)
+
+(deftest generators-have-no-input-port
+  (let [abi (:abi (dsp/compile #'ramp-generator {:target :interpreter :entry :process}))]
+    ;; The port and its buffer are gone, and the dead `:buffer-load` with them,
+    ;; so a generator no longer claims to read memory.
+    (is (= [] (:inputs abi)))
+    (is (= [:output] (mapv :id (:buffers abi))))
+    (is (not (contains? (:bindings abi) :input)))
+    (is (= #{:read-state :write-state :write-memory} (:effects abi)))
+    ;; Argument indices are derived, so removing the input shifts every later
+    ;; argument down by one and the ABI matches the emitted arity.
+    (is (= [0 1 2]
+           (mapv #(get-in abi [:bindings % :argument-index])
+                 [:output :frames :sample-rate])))
+    (is (= 3 (get-in abi [:bindings :controls 0 :argument-index])))
+    ;; With no input port, every parameter is a control.
+    (is (= '[increment] (mapv :name (:controls abi)))))
+  ;; A body cannot mention the sample: the binding does not exist.
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"unknown local"
+       (dsp/compile {:dsp/kind :function
+                     :name 'bad-generator
+                     :params ['increment]
+                     :return-type :float
+                     :process {:input false}
+                     :body ['(+ sample increment)]}
+                    {:target :interpreter :entry :process})))
+  ;; Same samples on the interpreter and the JVM, with no input at all.
+  (let [render (fn [target]
+                 (let [artifact (dsp/compile #'ramp-generator
+                                             {:target target :entry :process})
+                       output (float-array 4)]
+                   (dsp/process! artifact {:output output :frames 4
+                                           :sample-rate 8.0 :controls [0.25]})
+                   (vec output)))]
+    (is (= [0.0 0.25 0.5 0.75] (render :interpreter)))
+    (is (= (render :interpreter) (render :jvm))))
+  ;; JS and Wasm genuinely drop the input parameter, so the exported arity
+  ;; agrees with the derived argument indices.
+  (is (str/includes? (:source (dsp/compile #'ramp-generator {:target :js :entry :process}))
+                     "function process(output, frames, sampleRate, increment)"))
+  (is (not (str/includes? (:wat (dsp/compile #'ramp-generator
+                                             {:target :wasm :entry :process}))
+                          "(param $input")))
+  ;; The library's oscillators and noise sources are generators now.
+  (doseq [v [#'oscillator/sine-oscillator #'oscillator/saw-oscillator
+             #'oscillator/pulse-oscillator #'oscillator/square-oscillator
+             #'oscillator/triangle-oscillator #'oscillator/lfo
+             #'oscillator/sync-oscillator #'noise/white-noise #'noise/pink-noise]]
+    (let [abi (:abi (dsp/compile v {:target :interpreter :entry :process}))]
+      (is (= [] (:inputs abi)) (str (:name abi)))
+      (is (not (contains? (:effects abi) :read-memory)) (str (:name abi))))))
 
 (deftest library-reference-is-current
   ;; `LIBRARY.md` is rendered from the descriptors themselves (docstrings carry

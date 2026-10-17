@@ -760,6 +760,190 @@ plus the D23 optional input port (P8) and the D20 coloring pass.
 
 ---
 
+## P8a/P8b — Target-neutral process instances (deliverables 1, 2, 4, 5 done)
+
+The artifact/program and the instance are now separate concepts.
+
+- **`dsp/create-instance`** returns an independent instance of a compiled
+  process artifact; **`dsp/destroy!`** releases it; `dsp/reset!`,
+  `dsp/process!`, `dsp/process-checked!`, `dsp/process-unchecked!`,
+  `dsp/invoke` and `dsp/initialize!` accept *either* a plain artifact (which
+  keeps owning one implicit state region, exactly as before) *or* an instance.
+  `dsp/process-instance?` distinguishes them.
+- **The JVM already had the right shape.** Its generated kernel class takes the
+  state arrays as *arguments*, so state never lives in the kernel object.
+  Instantiating therefore allocates a fresh state region against the *same*
+  compiled class and recompiles nothing. The interpreter gets the same factory
+  over `interpreter/create-state`.
+- **Independence is asserted, not assumed**: two instances of one delay line,
+  one fed an impulse and one fed silence — the fed instance's state is live, the
+  other's stays exactly zero; `reset!` on one leaves the other's ring intact;
+  `destroy!` zeroes the state and makes further use throw; the artifact is never
+  disturbed. Interpreter and JVM instances of one artifact agree exactly.
+- **One lifecycle vocabulary on every target** (deliverable 4). `:instance`
+  gained `:operations` and an abstract `:handle`, so no target-specific object
+  leaks into portable IR:
+
+  | target | create | reset | destroy | handle kind |
+  |---|---|---|---|---|
+  | interpreter / JVM | `create-instance` | `reset!` | `destroy!` | `:state-region` |
+  | JS | `createKernel` | `reset` | `destroy` | `:kernel-handle` |
+  | Wasm | `instantiate` | `reset` | `release` | `:wasm-instance` |
+
+  A top-level `:program {:ownership :artifact :mutable? false :shareable? true}`
+  states the artifact/instance split. The JS kernel gained a real `destroy()`
+  (it had only `init`/`reset`); a Wasm instance owns its linear memory, so its
+  release is dropping the instance.
+
+**A latent bug this caught.** `process-unchecked!` is the audio hot path, and
+my first version routed it through a helper returning `[artifact instance]` — a
+2-element vector per call. The existing
+`jvm-unchecked-process-adapter-does-not-allocate-after-warmup` test failed with
+651 376 bytes against an 11 304-byte baseline (≈65 bytes/call), consistently.
+Replacing the helper with an `or` over a map lookup made it allocation-free. The
+test that looked flaky in P7 was doing its job; the GC noise is separate, this
+was real.
+
+**Two small traps worth remembering.** The JVM instance factory runs long after
+`compile-process` returns, so it must rebind `*precision*` itself — the layout
+helpers read it, and `f64?` is a *function* (`(f64?)`), not a value, so
+`(if f64? ...)` silently takes the f64 branch. And `target-instance` returns the
+*instance description*; the Wasm path initially used its result as the whole
+ABI, which made `:abi` the instance map.
+
+**Still to do in P8 — deliverable 6, D23 (optional input ports).** See the P8d
+entry below, where it was implemented; the JVM's kernel-internal signature
+deliberately keeps the input parameter, and the reasoning is recorded there.
+
+---
+
+## P8d — Optional input ports (D23, deliverable 6)
+
+A process may now declare `:input false`. It then has **no sample parameter, no
+input buffer, and no input binding**, and every parameter is a control:
+
+```clojure
+(dsp/defn sine-oscillator
+  [frequency]
+  {:process {:input false :controls [{:name frequency}]}}
+  ...)
+```
+
+What the declaration actually removes:
+
+- **The dead `:buffer-load` and the false `:read-memory`.** A generator's
+  `:effects` is now `#{:read-state :write-state :write-memory}`. Before, the
+  ignored `sample` still emitted a real input load, so `:effects` — a real-time
+  policy signal — lied about the process reading memory. This was D23's whole
+  point.
+- **The `:input` binding**, and with it the port in `:buffers`/`:inputs`.
+- **The argument-index arithmetic.** `process-abi` used to hardcode `0,1,2,3`
+  plus `4 + index`; it now derives every index from the buffer list. A generator
+  is `output 0, frames 1, sample-rate 2, controls 3+`; an ordinary process is
+  unchanged. This is the rework P8 was scheduled to absorb.
+
+**One predicate holds it together.** `ir/process-input?` must distinguish *no
+`:process` map at all* (an ordinary block processor whose first parameter is the
+sample — `{:entry :process}` on a plain definition still works) from *a
+`:process` map whose `:input` normalized to nil* (an explicit `:input false`).
+Both look like `nil` in different places, so the rule is on the presence of the
+map, not of the value.
+
+**Adapters: host-facing yes, kernel-internal no — a deliberate amendment to
+D23.** The context adapters (interpreter and JVM) tolerate a missing `:input`,
+and JS and Wasm *emit the shorter signature* — `function process(output, frames,
+sampleRate, increment)` and a `$process` with no `(param $input …)` — so the
+exported arity genuinely agrees with the derived indices, and the browser
+runners dispatch on the ABI rather than guessing. The **JVM's generated kernel
+method still takes the input array, and a generator's adapter passes nil.**
+D23 said "no input argument in any adapter"; doing that literally would need
+`DspSourceKernel`-style interfaces ×4 (f32/f64 × mono/multi-channel), duplicating
+the kernel emission and every adapter for no semantic gain: the array never
+reaches the ABI, the effects, or the frame body. Recorded rather than quietly
+skipped.
+
+**Library migrated.** All nine generators dropped their ignored `sample`:
+`sine`/`saw`/`pulse`/`square`/`triangle`/`sync` oscillators, `lfo`, and
+`white-noise`/`pink-noise`. Call sites followed — `chorus` now says
+`(lfo rate 2)` instead of `(lfo 0.0 rate 2)`, `square-oscillator` says
+`(pulse-oscillator frequency 0.5)` — and the docstrings that explained the
+ignored parameter no longer have to.
+
+**One subtlety in the plan/runner path.** The frame count now always comes from
+the plan's `:frames`, never from the input length. A 0-frame invocation of an
+ordinary process has an *empty but present* input, and `(seq input)` cannot tell
+that apart from "no input at all"; the decision belongs to the compiled ABI
+(`:inputs`), not to the data. The browser's interpreter oracle had the same bug,
+which surfaced as a `sine-oscillator` mismatch whose describer could only say
+"block count actual 5 expected 5".
+
+**Verified.** JVM 77 tests / 781 assertions; browser 9/9 with 80 process cases
+matched on JavaScript and Wasm, now including the migrated generators. New test
+`generators-have-no-input-port` asserts the empty `:inputs`, the clean effects,
+the derived indices, that every parameter became a control, that mentioning
+`sample` is an "unknown local" error, that interpreter and JVM agree, that the
+JS/Wasm exports drop the parameter, and that all nine library generators are
+clean of `:read-memory`.
+
+**Still to do in P8 — P8c.** A browser-side demonstration that JS and Wasm
+instances are independent (two kernels / two instantiations). The JVM test
+already asserts the lifecycle vocabulary on all four targets, and each Wasm
+instantiation owns its own memory, so this is a verification gap rather than a
+capability gap.
+
+---
+
+## P8c — Instance independence in the browser (P8 complete)
+
+The browser suite now proves that instances of one compiled kernel are
+independent on both generated targets, adding four checks (JavaScript and Wasm,
+each at f32 and f64) and taking the suite from 9 to **13**. The protocol drives
+the same impulse through one instance alone and through a second instance with a
+*third*, silent instance driven between every block:
+
+- the impulse instance's output must be **identical** in both runs, so the silent
+  instance never disturbed it;
+- the silent instance's output must be **all zeros**, so it never observed the
+  impulse instance's state;
+- the impulse must leave *observable* state, or the comparison would pass
+  vacuously.
+
+**The check carries its own negative control, and it immediately caught a real
+weakness.** The protocol is run a second time over a *single* instance handed to
+all three roles. That is sharing, so it must be rejected; a check that cannot
+fail its own control cannot detect sharing at all, and a silent control is
+reported as a failure rather than ignored.
+
+The first version used `:delay-line-unit` — a 1-sample delay — with 4-frame
+blocks. The negative control found nothing, and the reason is instructive: with a
+1-sample delay the line **flushes itself inside every block**, so a shared
+instance and two independent ones produce exactly the same outputs. The check
+would have passed forever while being unable to detect the thing it exists to
+detect. Switching to `:delay-line-wrap` (a 30.25-sample delay) over 12 rounds
+makes the state survive across block boundaries and lets the impulse emerge, so
+sharing shifts the output timing and the silent instance reads out the impulse's
+tail. The control's own findings are now printed as evidence — "the impulse
+instance's output changed when a second instance ran between its blocks; a silent
+instance produced output, so it observed another instance's state" — both of
+which are sharing signals, not vacuity.
+
+One implementation trap: the Wasm instantiations must use `mapv`, not `repeat`.
+`(repeat n (js/WebAssembly.instantiate bytes))` evaluates `instantiate` **once**
+and repeats the value, so all three "instances" would have been the same object
+sharing one linear memory.
+
+**Verified.** Browser 13/13; JVM 77 tests / 781 assertions; `clj-kondo`/`cljfmt`
+clean.
+
+**P8 is complete** — all six deliverables: the target-neutral
+`create-instance`/`reset!`/`destroy!` lifecycle, interpreter and JVM factories
+producing independent instances without recompiling, one create/reset/destroy
+vocabulary on all four targets, ABI instance handles and ownership, differential
+independence tests on the JVM *and* in the browser, and optional input ports
+(D23).
+
+---
+
 ## Handoff — current state after P6 (rolling entry)
 
 This is the one living entry, as opposed to the completed-phase entries above:
@@ -813,11 +997,11 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   (CodeMirror) and compile them there, which means the compiler itself becomes
   portable and runs in SCI (P13). The library and every new language form are
   therefore authored as portable `.cljc` source forms.
-- Verified through `clojure_eval` on the running nREPL: JVM 75 tests / 714
-  assertions, browser 9/9 (the process matrix matches 80 cases on JavaScript
-  and Wasm, covering the P4 array/record/table cases, the P5 delay-line and
-  place cases, the P6 composition cases including `filter-voice` and
-  `svf-voice`, and the whole P7 library), `clj-kondo`/`cljfmt` clean.
+- Verified through `clojure_eval` on the running nREPL: JVM 77 tests / 781
+  assertions, browser 13/13 (four shared matrices matching 80 process cases and
+  13/3 function cases on JavaScript and Wasm, the WAT bounded-loop and sin-table
+  checks, the four instance-independence checks, and the three AudioWorklet
+  adapters), and `clj-kondo`/`cljfmt` clean.
 
 ### Architecture
 

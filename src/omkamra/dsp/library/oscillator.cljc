@@ -7,12 +7,12 @@
   "Sine oscillator: `phase` advances by `frequency / sample-rate` each sample
   and wraps at 1.0, so `sin` sees an angle in turns scaled to radians.
 "
-  [sample frequency]
+  [frequency]
   {:state [{:name phase
             :init 0.0
             :next (let [advanced (+ phase (* frequency (/ 1.0 sample-rate)))]
                     (if (>= advanced 1.0) (- advanced 1.0) advanced))}]
-   :process {:controls [{:name frequency}]}}
+   :process {:input false :controls [{:name frequency}]}}
   (sin (* 6.283185307179586 phase)))
 
 ;; --- Band-limited oscillators (PolyBLEP) ------------------------------------
@@ -37,14 +37,14 @@
 
 (dsp/defn saw-oscillator
   "Band-limited sawtooth: a rising ramp from -1 to 1, corrected at the wrap.
-  The leading `sample` parameter is ignored — the process shape needs an input
-  port — so as a module it is called `(saw-oscillator 0.0 frequency)`.
+  A generator (`:input false`), so it is called `(saw-oscillator frequency)`
+  rather than carrying an ignored sample argument.
 "
-  [sample frequency]
+  [frequency]
   {:state [{:name phase
             :init 0.0
             :next (fract (+ phase (/ frequency sample-rate)))}]
-   :process {:controls [{:name frequency}]}}
+   :process {:input false :controls [{:name frequency}]}}
   (let [dt (/ frequency sample-rate)]
     (- (- (* 2.0 phase) 1.0) (polyblep phase dt))))
 
@@ -52,11 +52,11 @@
   "Band-limited pulse of width `width` in (0, 1); 0.5 is a square. Two edges per
   period, so two corrections.
 "
-  [sample frequency width]
+  [frequency width]
   {:state [{:name phase
             :init 0.0
             :next (fract (+ phase (/ frequency sample-rate)))}]
-   :process {:controls [{:name frequency} {:name width}]}}
+   :process {:input false :controls [{:name frequency} {:name width}]}}
   (let [dt (/ frequency sample-rate)
         naive (if (< phase width) 1.0 -1.0)]
     (- (+ naive (polyblep phase dt))
@@ -66,9 +66,9 @@
   "A square is the half-width pulse, reached through the ordinary call
   mechanism, so it needs no state of its own.
 "
-  [sample frequency]
-  {:process {:controls [{:name frequency}]}}
-  (pulse-oscillator sample frequency 0.5))
+  [frequency]
+  {:process {:input false :controls [{:name frequency}]}}
+  (pulse-oscillator frequency 0.5))
 
 ;; The triangle is the integral of the band-limited square, so it inherits the
 ;; square's band limiting. The integral lives in a record (explicit update
@@ -86,9 +86,9 @@
   The leaky integrator removes the integral's DC and is scaled to reach +-1; the
   amplitude is a mild function of frequency (+-1.5% across 50 Hz..2 kHz) and the
   first cycle has a start-up transient, both documented rather than corrected."
-  [sample frequency]
+  [frequency]
   {:state [{:name s :struct triangle-state}]
-   :process {:controls [{:name frequency}]}}
+   :process {:input false :controls [{:name frequency}]}}
   (let [dt (/ frequency sample-rate)
         square (- (+ (if (< (:phase s) 0.5) 1.0 -1.0)
                      (polyblep (:phase s) dt))
@@ -106,11 +106,11 @@
 ;; (`shape` 0), triangle (1), or sine (2). The same module at audio rate is an
 ;; ordinary oscillator, so it needs no separate state.
 (dsp/defn lfo
-  [sample frequency shape]
+  [frequency shape]
   {:state [{:name phase
             :init 0.0
             :next (fract (+ phase (* frequency (/ 1.0 sample-rate))))}]
-   :process {:controls [{:name frequency} {:name shape :type :int}]}}
+   :process {:input false :controls [{:name frequency} {:name shape :type :int}]}}
   (if (< shape 1)
     phase
     (if (< shape 2)
@@ -130,9 +130,9 @@
   BLEP-corrected, so this is the one oscillator here that is not band-limited,
   and it aliases at high `ratio`.
 "
-  [sample frequency ratio]
+  [frequency ratio]
   {:state [{:name s :struct sync-state}]
-   :process {:controls [{:name frequency} {:name ratio}]}}
+   :process {:input false :controls [{:name frequency} {:name ratio}]}}
   (let [dtm (* frequency (/ 1.0 sample-rate))
         raw (+ (:master s) dtm)
         wrapped (>= raw 1.0)

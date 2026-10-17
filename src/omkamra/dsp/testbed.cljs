@@ -152,17 +152,16 @@
         precision (:precision ir)
         controls (decode-values controls)
         sample-rate (decode-value sample-rate)]
-    (reduce (fn [outputs {:keys [op input]}]
+    (reduce (fn [outputs {:keys [op input frames]}]
               (case op
                 "reset" (do (interpreter/reset-state! ir state) outputs)
-                "process" (let [input (decode-values input)
-                                frames (count input)
-                                in (real-array precision input)
+                "process" (let [samples (when input (decode-values input))
                                 out (real-array precision (repeat frames 0.0))]
                             (interpreter/process-context
-                             ir {:input in :output out :frames frames
-                                 :sample-rate sample-rate
-                                 :controls controls :state state})
+                             ir (cond-> {:output out :frames frames
+                                         :sample-rate sample-rate
+                                         :controls controls :state state}
+                                  samples (assoc :input (real-array precision samples))))
                             (conj outputs (vec out)))))
             [] invocations)))
 
@@ -180,12 +179,14 @@
         reset (.bind (gobj/get kernel "reset") kernel)
         process (gobj/get kernel "process")]
     {:reset reset
-     :process (fn [input controls]
-                (let [frames (count input)
-                      in (real-array precision input)
-                      out (real-array precision (repeat frames 0.0))]
+     ;; `samples` is nil for a generator (D23), whose kernel `process` takes no
+     ;; input argument; the frame count always comes from the plan.
+     :process (fn [samples frames controls]
+                (let [out (real-array precision (repeat frames 0.0))]
                   (.apply process kernel
-                          (to-array (concat [in out frames acceptance/sample-rate]
+                          (to-array (concat (when samples
+                                              [(real-array precision samples)])
+                                            [out frames acceptance/sample-rate]
                                             controls)))
                   (vec out)))}))
 
@@ -193,10 +194,11 @@
   [plan {:keys [reset process]}]
   (let [controls (decode-values (:controls plan))]
     (reset)
-    (reduce (fn [outputs {:keys [op input]}]
+    (reduce (fn [outputs {:keys [op input frames]}]
               (case op
                 "reset" (do (reset) outputs)
-                "process" (conj outputs (process (decode-values input) controls))))
+                "process" (conj outputs (process (when input (decode-values input))
+                                                 frames controls))))
             [] (:invocations plan))))
 
 ;; ---------------------------------------------------------------------------
@@ -270,15 +272,17 @@
                                actual (do
                                         (.call reset nil)
                                         (reduce
-                                         (fn [outputs {:keys [op input]}]
+                                         (fn [outputs {:keys [op input frames]}]
                                            (case op
                                              "reset" (do (.call reset nil) outputs)
                                              "process"
-                                             (let [samples (decode-values input)
-                                                   frames (count samples)]
-                                               (.set (input-view frames) (real-array precision samples))
+                                             (let [samples (when input (decode-values input))]
+                                               (when samples
+                                                 (.set (input-view frames)
+                                                       (real-array precision samples)))
                                                (.apply process nil
-                                                       (to-array (concat [input-offset output-offset frames
+                                                       (to-array (concat (when samples [input-offset])
+                                                                         [output-offset frames
                                                                           acceptance/sample-rate]
                                                                          controls)))
                                                (conj outputs
@@ -657,6 +661,190 @@
 ;; Suite
 ;; ---------------------------------------------------------------------------
 
+;; ---------------------------------------------------------------------------
+;; Instance independence (P8)
+;; ---------------------------------------------------------------------------
+
+;; A delay line with a delay far longer than one block, because the state has to
+;; survive *across* block boundaries for sharing to be detectable at all. A
+;; 1-sample delay flushes itself inside a 4-frame block, and a shared instance
+;; then looks exactly like two independent ones — which is what the negative
+;; control caught.
+(def ^:private independence-case :delay-line-wrap)
+
+(def ^:private independence-block 4)
+
+;; Long enough for the impulse to emerge through a 30.25-sample delay (~block 8),
+;; so the comparison can never pass vacuously.
+(def ^:private independence-rounds 12)
+
+(defn- silence?
+  [outputs]
+  (every? (fn [block] (every? zero? block)) outputs))
+
+(defn- independence-problems
+  "Run the independence protocol over `[alone impulse silent]` instances and
+  return the violations it finds.
+
+  The impulse instance runs once on its own and once with the silent instance
+  driven between its blocks; the two sequences must agree exactly, and the
+  silent instance must stay silent. The impulse must leave observable state, or
+  the comparison would pass vacuously."
+  [[alone-instance impulse-instance silent-instance]]
+  (let [impulse [1.0 0.0 0.0 0.0]
+        silence [0.0 0.0 0.0 0.0]
+        rounds independence-rounds
+        alone (mapv (fn [_] ((:process alone-instance) impulse independence-block))
+                    (range rounds))
+        ;; Interleaved: impulse instance, then the silent one, each round.
+        interleaved (mapv (fn [_] [((:process impulse-instance) impulse independence-block)
+                                   ((:process silent-instance) silence independence-block)])
+                          (range rounds))
+        impulse-out (mapv first interleaved)
+        silent-out (mapv second interleaved)]
+    (cond-> []
+      (not= impulse-out alone)
+      (conj (str "the impulse instance's output changed when a second instance "
+                 "ran between its blocks"))
+      (not (silence? silent-out))
+      (conj (str "a silent instance produced output, so it observed another "
+                 "instance's state"))
+      (silence? alone)
+      (conj (str "the impulse left no observable state, so the comparison "
+                 "proves nothing")))))
+
+(defn- instance-independence
+  "Prove that instances of one compiled kernel do not share state.
+
+  The protocol is run twice. Once over genuinely distinct instances, which must
+  find no sharing; and once over a single instance handed to all three roles,
+  which *is* sharing and therefore must be caught. A check that cannot fail its
+  own negative control cannot detect sharing at all, so a silent control is
+  reported as a failure rather than ignored."
+  [target create-instances]
+  (-> (js/Promise.all
+       #js [(-> (create-instances 3)
+                (.then (fn [instances] (independence-problems instances))))
+            (-> (create-instances 1)
+                (.then (fn [[instance]]
+                         (independence-problems [instance instance instance]))))])
+      (.then
+       (fn [reports]
+         (let [[problems control] (array-seq reports)
+               result (fn [passed? detail]
+                        {:name (str "instance independence (" (name target) ")")
+                         :passed? passed?
+                         :targets [target]
+                         :detail detail})]
+           (cond
+             (empty? control)
+             (result false
+                     (str "the check failed its own negative control: sharing one "
+                          "instance between all three roles went undetected"))
+
+             (seq problems)
+             (result false (str/join "; " problems))
+
+             :else
+             (result true
+                     (str independence-rounds " interleaved rounds at a "
+                          "30.25-sample delay: the impulse instance was identical "
+                          "alone and alongside a second instance, the silent instance "
+                          "stayed all zeros, and one shared instance was correctly "
+                          "rejected — " (str/join "; " control) ")"))))))))
+
+(defn- js-process-instance
+  "One independent JavaScript kernel from a compiled module."
+  [module precision controls]
+  (let [kernel ((gobj/get module "createKernel"))
+        reset (gobj/get kernel "reset")
+        process (gobj/get kernel "process")]
+    {:reset (fn [] (.call reset kernel))
+     :process (fn [samples frames]
+                (let [out (real-array precision (repeat frames 0.0))
+                      in (real-array precision samples)]
+                  (.apply process kernel
+                          (to-array (concat [in out frames acceptance/sample-rate]
+                                            controls)))
+                  (vec out)))}))
+
+(defn- wasm-process-instance
+  "One independent Wasm instance, with its own linear memory."
+  [^js instance precision controls]
+  (let [exports (.-exports instance)
+        memory (gobj/get exports "memory")
+        reset (gobj/get exports "reset")
+        process (gobj/get exports "process")
+        input-offset 0
+        output-offset 4096
+        view (fn [offset frames]
+               (if (= :f64 precision)
+                 (js/Float64Array. (.-buffer memory) offset (max 1 frames))
+                 (js/Float32Array. (.-buffer memory) offset (max 1 frames))))]
+    {:reset (fn [] (.call reset nil))
+     :process (fn [samples frames]
+                (.set (view input-offset frames) (real-array precision samples))
+                (.apply process nil
+                        (to-array (concat [input-offset output-offset frames
+                                           acceptance/sample-rate] controls)))
+                (if (zero? frames) [] (vec (view output-offset frames))))}))
+
+(defn- js-independence-test
+  [precision]
+  (let [query (str "?case=" (name independence-case) "&precision=" (name precision))
+        source-url (str "/omkamra/dsp/testbed/source" query)
+        plan-url (str "/omkamra/dsp/testbed/plan" query)]
+    (-> (js/Promise.all #js [(response-text source-url) (fetch-json plan-url)])
+        (.then
+         (fn [[source plan]]
+           (let [controls (decode-values (:controls plan))
+                 blob (js/Blob. #js [source] #js {:type "text/javascript"})
+                 url (js/URL.createObjectURL blob)]
+             (-> (dynamic-import url)
+                 (.then (fn [module]
+                          (instance-independence
+                           :js
+                           (fn [count]
+                             (js/Promise.resolve
+                              (mapv (fn [_] (js-process-instance module precision controls))
+                                    (range count)))))))
+                 (.finally #(js/URL.revokeObjectURL url)))))))))
+
+(defn- wasm-independence-test
+  [precision]
+  (let [query (str "?case=" (name independence-case) "&precision=" (name precision))
+        plan-url (str "/omkamra/dsp/testbed/plan" query)
+        wat-url (str "/omkamra/dsp/testbed/wasm-source" query)]
+    (-> (js/Promise.all #js [(fetch-json plan-url) (response-text wat-url)])
+        (.then
+         (fn [[plan wat]]
+           (let [controls (decode-values (:controls plan))]
+             (-> (compile-wasm wat)
+                 (.then
+                  (fn [bytes]
+                    (instance-independence
+                     :wasm
+                     (fn [count]
+                       ;; `mapv`, not `repeat`: each instantiation must be a
+                       ;; distinct instance with its own memory.
+                       (-> (js/Promise.all
+                            (to-array (mapv (fn [_] (js/WebAssembly.instantiate bytes))
+                                            (range count))))
+                           (.then (fn [results]
+                                    (mapv (fn [result]
+                                            (wasm-process-instance (.-instance result)
+                                                                   precision controls))
+                                          (array-seq results))))))))))))))))
+
+(defn- instance-independence-tests
+  []
+  (-> (js/Promise.all
+       #js [(js-independence-test :f32)
+            (js-independence-test :f64)
+            (wasm-independence-test :f32)
+            (wasm-independence-test :f64)])
+      (.then (fn [results] (vec results)))))
+
 (defn- run-promise-sequence
   [summary results-list previous-results steps]
   (reduce (fn [promise step]
@@ -702,6 +890,7 @@
                 summary results-list matrix-results
                 [(fn [] (-> (bounded-loop-wasm-test) (.then (fn [r] [r]))))
                  (fn [] (-> (wasm-table-test) (.then (fn [r] [r]))))
+                 (fn [] (instance-independence-tests))
                  (fn [] (-> (audio-worklet-test :f32)
                             (.then (fn [a]
                                      (-> (audio-worklet-test :f64)

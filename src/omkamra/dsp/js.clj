@@ -111,6 +111,10 @@
               :name (:name ir)
               :precision (:precision ir)
               :channels (:channels ir)
+              ;; A generator (`:input false`, D23) has no input buffer, so its
+              ;; `process` takes no input argument and the emitted arity matches
+              ;; the ABI's derived argument indices.
+              :input? (boolean (some #(= :input (:direction %)) (:buffers ir)))
               :controls (:controls ir)
               :state (:state ir)
               :scratch (:scratch ir)
@@ -357,10 +361,16 @@
           ["  }"
            "  function reset() {"
            "    init();"
+           "  }"
+           ;; `destroy` is the release half of the lifecycle vocabulary: it drops
+           ;; the instance's persistent state. The kernel object itself is then
+           ;; ready to be collected.
+           "  function destroy() {"
+           "    state.fill(0);"
            "  }"]))
 
 (defn- emit-process
-  [{:keys [channels controls state scratch frame-body]}]
+  [{:keys [channels controls state scratch frame-body input?]}]
   (let [arena (concat state scratch)
         control-params (map #(identifier (:name %)) controls)
         state-init (str "[" (str/join ", "
@@ -385,9 +395,11 @@
       ["export function createKernel() {"
        state-decl]
       (emit-lifecycle-lines state)
-      [(str "  function process(input, output, frames, sampleRate"
-            (when (seq control-params)
-              (str ", " (str/join ", " control-params))) ") {")]
+      [(str "  function process("
+            (str/join ", " (concat (when input? ["input"])
+                                   ["output" "frames" "sampleRate"]
+                                   control-params))
+            ") {")]
       (if (= 1 channels)
         (concat ["    for (let frame = 0; frame < frames; frame += 1) {"]
                 (emit-statement-lines frame-body 3)
@@ -397,7 +409,7 @@
                  "      for (let frame = 0; frame < frames; frame += 1) {"]
                 (emit-statement-lines frame-body 4)
                 ["      }" "    }"]))
-      ["  }" "  init();" "  return {process, init, reset};" "}"]))))
+      ["  }" "  init();" "  return {process, init, reset, destroy};" "}"]))))
 
 (defn emit-module
   [js-ir]

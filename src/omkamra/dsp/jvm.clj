@@ -677,6 +677,15 @@
              (F64MultiProcessAdapter. ^DspMultiKernelD64 kernel float-state int-state)
              (F64ProcessAdapter. ^DspKernelD64 kernel float-state int-state)))))
 
+(defn- check-input!
+  "Validate the input buffer when the process declares one.
+
+  A generator (`:input false`, D23) has no input buffer, so its input argument
+  is nil and there is nothing to check; the kernel never loads it."
+  [ir input frames]
+  (when (some #(= :input (:direction %)) (:buffers ir))
+    (check-buffer! ir input :input frames)))
+
 (defn process-unchecked!
   "Run a JVM process artifact through its primitive, state-owning ABI.
 
@@ -686,10 +695,10 @@
   physical control arrays described by `:control-layout`; state remains owned
   by the artifact. Real-time hosts should retain and call `:unchecked`
   directly through its matching `Dsp*Process` interface when possible."
-  [artifact input output frames sample-rate float-controls int-controls]
-  (let [adapter (:unchecked artifact)
-        multi-channel? (:multi-channel? artifact)]
-    (case (:precision artifact)
+  [holder input output frames sample-rate float-controls int-controls]
+  (let [adapter (:unchecked holder)
+        multi-channel? (:multi-channel? holder)]
+    (case (:precision holder)
       :f32 (if multi-channel?
              (.process ^DspMultiProcess adapter input output (int frames)
                        (float sample-rate) float-controls int-controls)
@@ -707,18 +716,19 @@
   This has the same arguments as `process-unchecked!`, but verifies buffer
   shapes and lengths, control storage, and artifact-owned state before it
   delegates to the unchecked adapter."
-  [artifact input output frames sample-rate float-controls int-controls]
-  (binding [*precision* (:precision artifact)]
-    (let [frames (int frames)
+  [holder input output frames sample-rate float-controls int-controls]
+  (binding [*precision* (:precision holder)]
+    (let [artifact (or (:artifact holder) holder)
+          frames (int frames)
           ir (:process-ir artifact)]
       (when (neg? frames)
         (throw (ex-info "DSP process frame count must not be negative"
                         {:frames frames})))
-      (check-buffer! ir input :input frames)
+      (check-input! ir input frames)
       (check-buffer! ir output :output frames)
-      (check-controls! (:control-layout artifact) float-controls int-controls)
-      (check-state! (:state-layout artifact) (:state artifact))
-      (process-unchecked! artifact input output frames sample-rate
+      (check-controls! (:control-layout holder) float-controls int-controls)
+      (check-state! (:state-layout holder) (:state holder))
+      (process-unchecked! holder input output frames sample-rate
                           float-controls int-controls))))
 
 (defn- kernel-process!
@@ -750,7 +760,7 @@
         (when (neg? frames)
           (throw (ex-info "DSP process frame count must not be negative"
                           {:frames frames})))
-        (check-buffer! ir input :input frames)
+        (check-input! ir input frames)
         (check-buffer! ir output :output frames)
         (check-state! layout state)
         (write-controls! control-layout controls controls-state)
@@ -771,7 +781,7 @@
         (when (neg? frames)
           (throw (ex-info "DSP process frame count must not be negative"
                           {:frames frames})))
-        (check-buffer! ir input :input frames)
+        (check-input! ir input frames)
         (check-buffer! ir output :output frames)
         (check-state! layout state)
         (write-controls! control-layout controls controls-state)
@@ -886,20 +896,42 @@
             class (insn/define type)
             kernel (.newInstance ^Class class)
             real-array (if (f64?) double-array float-array)
-            state {:float (real-array (:float-count state-layout))
-                   :int (int-array (:int-count state-layout))}
             controls-state {:float (real-array (:float-count control-layout))
-                            :int (int-array (:int-count control-layout))}]
-        (reset-state! ir state-layout state)
-        (let [unchecked (unchecked-adapter precision kernel multi-channel? state)]
-          {:class class :class-name (.getName class) :kernel kernel
-           :bytes (insn/get-bytes type) :state state :state-layout state-layout
-           :controls controls-state :control-layout control-layout
-           :process-ir ir :precision precision :multi-channel? multi-channel?
-           :unchecked unchecked
-           :reset #(binding [*precision* precision]
-                     (reset-state! ir state-layout state))
-           :invoke (process-callable precision kernel ir state-layout state
-                                     control-layout controls-state)
-           :invoke-context (process-context-callable precision kernel ir state-layout state
-                                                     control-layout controls-state)})))))
+                            :int (int-array (:int-count control-layout))}
+            ;; One compiled kernel class serves every instance: DSP state lives in
+            ;; the arrays handed to `process`, never in the kernel object, so a
+            ;; fresh instance is a fresh state region and nothing is recompiled.
+            create-instance
+            (fn []
+              (let [state {:float (real-array (:float-count state-layout))
+                           :int (int-array (:int-count state-layout))}]
+                ;; The factory runs long after `compile-process` returns, so it
+                ;; must rebind the precision the layout helpers read.
+                (binding [*precision* precision]
+                  (reset-state! ir state-layout state))
+                {:state state
+                 :state-layout state-layout
+                 :control-layout control-layout
+                 :precision precision
+                 :multi-channel? multi-channel?
+                 :reset #(binding [*precision* precision]
+                           (reset-state! ir state-layout state))
+                 :destroy (fn []
+                            (binding [*precision* precision]
+                              (if (f64?)
+                                (do (java.util.Arrays/fill ^doubles (:float state) 0.0)
+                                    (java.util.Arrays/fill ^ints (:int state) 0))
+                                (do (java.util.Arrays/fill ^floats (:float state) (float 0.0))
+                                    (java.util.Arrays/fill ^ints (:int state) 0)))))
+                 :unchecked (unchecked-adapter precision kernel multi-channel? state)
+                 :invoke (process-callable precision kernel ir state-layout state
+                                           control-layout controls-state)
+                 :invoke-context (process-context-callable precision kernel ir state-layout state
+                                                           control-layout controls-state)}))
+            instance (create-instance)]
+        (merge instance
+               {:class class :class-name (.getName class) :kernel kernel
+                :bytes (insn/get-bytes type)
+                :controls controls-state
+                :process-ir ir
+                :create-instance create-instance})))))

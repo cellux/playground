@@ -313,6 +313,19 @@ and give every target an explicit create/reset/destroy lifecycle.
    because this phase *already* moves the process ABI's argument indices (the
    instance handle), so the descriptor/ABI/adapter rework is paid once.
 
+**Slices.** P8a (done) — the target-neutral instance lifecycle for
+`:interpreter` and `:jvm` (deliverables 1, 2), with differential independence
+tests (deliverable 5). P8b (done) — the ABI describes one create/reset/destroy
+vocabulary on every target (deliverable 4), and the JS kernel gained its
+`destroy` (deliverable 3, the JS half). P8c (done) — the browser suite proves
+JavaScript and Wasm instances are independent, completing deliverable 3; the
+check carries a negative control, which caught that a 1-sample delay flushes
+itself inside a block and therefore could not have detected sharing at all.
+P8d (done) — deliverable 6, **optional input ports** (D23): `:input false` gives
+a process no sample parameter, no input buffer, and no `:read-memory` effect, and
+the process ABI's argument indices are now derived rather than hardcoded. The
+whole library's generators use it. **P8 is complete.**
+
 ---
 
 ## P9 — Sample-accurate automation and event ABI

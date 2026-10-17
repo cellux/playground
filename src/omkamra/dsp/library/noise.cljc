@@ -18,14 +18,14 @@
 ;; where adding or xoring a seed would skew or barely shift the top bits. The
 ;; state must never reach zero, which is xorshift's fixed point, hence `:init 1`.
 (dsp/defn white-noise
-  [sample seed]
+  [seed]
   {:state [{:name x
             :type :int
             :init 1
             :next (let [a (bit-xor x (bit-shift-left x 13))
                         b (bit-xor a (unsigned-bit-shift-right a 17))]
                     (bit-xor b (bit-shift-left b 5)))}]
-   :process {:controls [{:name seed :type :int}]}}
+   :process {:input false :controls [{:name seed :type :int}]}}
   (let [r (bit-and seed 31)
         v (bit-or (bit-shift-left x r)
                   (unsigned-bit-shift-right x (- 32 r)))]
@@ -40,10 +40,10 @@
   [b0 b1 b2 b3 b4 b5 b6])
 
 (dsp/defn pink-noise
-  [sample seed]
+  [seed]
   {:state [{:name s :struct pink-state}]
-   :process {:controls [{:name seed :type :int}]}}
-  (let [white (white-noise sample seed)]
+   :process {:input false :controls [{:name seed :type :int}]}}
+  (let [white (white-noise seed)]
     (do
       (set! (:b0 s) (+ (* 0.99886 (:b0 s)) (* white 0.0555179)))
       (set! (:b1 s) (+ (* 0.99332 (:b1 s)) (* white 0.0750759)))

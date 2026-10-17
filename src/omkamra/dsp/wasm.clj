@@ -871,10 +871,14 @@
     :else 0))
 
 (defn- emit-process
-  [{:keys [channels controls locals frame-body]}]
-  (let [params (concat
-                [(wat-form "param" (wat-symbol "$input") (wat-symbol "i32"))
-                 (wat-form "param" (wat-symbol "$output") (wat-symbol "i32"))
+  [{:keys [channels controls locals frame-body buffers]}]
+  (let [;; A generator (`:input false`, D23) has no input buffer, so it takes no
+        ;; input pointer and the export arity matches the derived indices.
+        input? (boolean (some #(= :input (:direction %)) buffers))
+        params (concat
+                (when input?
+                  [(wat-form "param" (wat-symbol "$input") (wat-symbol "i32"))])
+                [(wat-form "param" (wat-symbol "$output") (wat-symbol "i32"))
                  (wat-form "param" (wat-symbol "$frames") (wat-symbol "i32"))
                  (wat-form "param" (wat-symbol "$sampleRate")
                            (wat-symbol (float-type)))]

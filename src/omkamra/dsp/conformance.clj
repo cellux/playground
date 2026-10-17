@@ -53,21 +53,27 @@
       :-infinity Float/NEGATIVE_INFINITY)))
 
 (defn- process-invocations
-  [case precision blocks]
+  [case precision blocks input?]
   (let [block-invocations
         (mapv (fn [block]
                 (let [frames (nth blocks block)]
-                  {:op :process
-                   :frames frames
-                   :input (acceptance/input-samples precision case block frames)}))
+                  (cond-> {:op :process :frames frames}
+                    input?
+                    (assoc :input (acceptance/input-samples precision case block
+                                                            frames)))))
               (range (count blocks)))
+        ;; NaN/infinity propagation is injected through the input sample, so it
+        ;; is meaningless for a generator, which has no input port.
         special-invocations
-        (mapv (fn [kind]
-                {:op :process :frames 1 :input [(special-value precision kind)]})
-              [:nan :infinity :-infinity])]
+        (if input?
+          (mapv (fn [kind]
+                  {:op :process :frames 1 :input [(special-value precision kind)]})
+                [:nan :infinity :-infinity])
+          [])]
     (into [{:op :reset}]
           (concat block-invocations
-                  [{:op :reset} {:op :process :frames 1 :input [0.0]}]
+                  (when input?
+                    [{:op :reset} {:op :process :frames 1 :input [0.0]}])
                   (mapcat (fn [invocation] [{:op :reset} invocation])
                           special-invocations)))))
 
@@ -93,7 +99,8 @@
        :controls (:controls case)
        :sample-rate acceptance/sample-rate
        :invocations (process-invocations case precision
-                                         (acceptance/case-blocks case))})))
+                                         (acceptance/case-blocks case)
+                                         (boolean (seq (get-in artifact [:abi :inputs]))))})))
 
 (defn- real-array
   [precision values]
@@ -102,14 +109,18 @@
     (float-array values)))
 
 (defn- run-process-once
-  [artifact input controls sample-rate]
+  [artifact input controls sample-rate frames]
   (let [precision (:precision (:ir artifact))
-        out (real-array precision (repeat (count input) 0.0))]
-    (dsp/process! artifact {:input (real-array precision input)
-                            :output out
-                            :frames (count input)
-                            :sample-rate sample-rate
-                            :controls controls})
+        out (real-array precision (repeat frames 0.0))
+        ;; Whether an input is passed is a property of the process, not of the
+        ;; block: a 0-frame invocation still has an (empty) input buffer, while a
+        ;; generator has none at any length.
+        input? (boolean (seq (get-in artifact [:abi :inputs])))]
+    (dsp/process! artifact (cond-> {:output out
+                                    :frames frames
+                                    :sample-rate sample-rate
+                                    :controls controls}
+                             input? (assoc :input (real-array precision (or input [])))))
     (vec out)))
 
 (defn run-function-plan
@@ -119,13 +130,14 @@
 (defn run-process-plan
   [artifact plan]
   (dsp/reset! artifact)
-  (reduce (fn [outputs {:keys [op input]}]
+  (reduce (fn [outputs {:keys [op input frames]}]
             (case op
               :reset (do (dsp/reset! artifact) outputs)
               :process (conj outputs
                              (run-process-once artifact input
                                                (:controls plan)
-                                               (:sample-rate plan)))))
+                                               (:sample-rate plan)
+                                               frames))))
           []
           (:invocations plan)))
 

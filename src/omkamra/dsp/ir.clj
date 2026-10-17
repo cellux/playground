@@ -1516,23 +1516,41 @@
                 :else requirements))]
       (walk initial body))))
 
+(defn- process-input?
+  "True when a definition's process has a sample input port.
+
+  A definition with no `:process` map at all is still an ordinary block
+  processor whose first parameter is the sample. A `:process` map whose `:input`
+  normalized to nil is an explicit `:input false` generator (D23), which has no
+  input parameter, no input buffer, and no input binding."
+  [definition]
+  (let [process (:process definition)]
+    (if (nil? process)
+      true
+      (some? (:input process)))))
+
 (defn- process-buffers
   [definition channels]
-  (let [declared (get-in definition [:process :buffers])]
+  (let [declared (get-in definition [:process :buffers])
+        default (vec (concat (when (process-input? definition)
+                               [{:name :input :direction :input :type :float
+                                 :channels channels}])
+                             [{:name :output :direction :output :type :float
+                               :channels channels}]))]
     (mapv (fn [{:keys [name direction type channels]}]
             {:id name
              :direction direction
              :type type
              :channels channels})
-          (or declared
-              [{:name :input :direction :input :type :float :channels channels}
-               {:name :output :direction :output :type :float :channels channels}]))))
+          (or declared default))))
 
 (defn- process-bindings
   [definition state-bindings channels]
   (let [process (:process definition)
-        sample-name (or (get-in process [:input :name])
-                        (get-in definition [:params 0 :name]))
+        input? (process-input? definition)
+        sample-name (when input?
+                      (or (get-in process [:input :name])
+                          (get-in definition [:params 0 :name])))
         sample-param (some #(when (= sample-name (:name %)) %) (:params definition))
         controls (if process
                    (mapv (fn [{:keys [name type]}]
@@ -1556,13 +1574,13 @@
                            :index index
                            :type :float
                            :effects #{:read-memory}}]
-    (when-not sample-param
+    (when (and input? (not sample-param))
       (fail "a DSP process requires a sample input parameter"
             {:name (:name definition) :input sample-name}))
     (when (some nil? controls)
       (fail "DSP process controls must refer to parameters"
             {:name (:name definition) :controls (:controls process)}))
-    (when-not (= :float (:type sample-param))
+    (when (and input? (not= :float (:type sample-param)))
       (fail "DSP process sample input must have type :float"
             {:name (:name definition) :input sample-name :type (:type sample-param)}))
     {:sample-name sample-name
@@ -1571,10 +1589,12 @@
      :frames frames
      :sample-rate sample-rate
      :bindings (into
-                {sample-name {:name sample-name
-                              :type :float
-                              :kind :buffer
-                              :expression sample-expression}}
+                (if input?
+                  {sample-name {:name sample-name
+                                :type :float
+                                :kind :buffer
+                                :expression sample-expression}}
+                  {})
                 (concat
                  (context-bindings definition)
                  (map (fn [control]

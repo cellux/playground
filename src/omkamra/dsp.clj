@@ -301,27 +301,32 @@
                                                                   :type :channels])
                                              (get-in ir [:memory (:id buffer)])))
                                     buffers)}
-     :bindings {:input {:role :input-buffer
-                        :id :input
-                        :argument-index 0}
-                :output {:role :output-buffer
-                         :id :output
-                         :argument-index 1}
-                :frames (assoc (:frames ir)
-                               :role :frame-count
-                               :argument-index 2)
-                :sample-rate (assoc (:sample-rate ir)
-                                    :role :sample-rate
-                                    :argument-index 3)
-                :channel {:role :channel-index
-                          :type :int
-                          :binding (if (> (:channels ir) 1) :loop :constant)}
-                :controls (mapv (fn [index control]
-                                  (assoc control
-                                         :role :control
-                                         :argument-index (+ 4 index)))
-                                (range)
-                                controls)}
+     ;; Argument indices are derived from the buffer list instead of hardcoded,
+     ;; so a generator (`:input false`, D23) shifts every later argument down by
+     ;; one and the ABI stays self-describing for both shapes.
+     :bindings (let [has-input? (boolean (seq inputs))
+                     base (if has-input? 1 0)]
+                 (cond-> {:output {:role :output-buffer
+                                   :id :output
+                                   :argument-index base}
+                          :frames (assoc (:frames ir)
+                                         :role :frame-count
+                                         :argument-index (inc base))
+                          :sample-rate (assoc (:sample-rate ir)
+                                              :role :sample-rate
+                                              :argument-index (+ base 2))
+                          :channel {:role :channel-index
+                                    :type :int
+                                    :binding (if (> (:channels ir) 1) :loop :constant)}
+                          :controls (mapv (fn [index control]
+                                            (assoc control
+                                                   :role :control
+                                                   :argument-index (+ base 3 index)))
+                                          (range)
+                                          controls)}
+                   has-input? (assoc :input {:role :input-buffer
+                                             :id :input
+                                             :argument-index 0})))
      :frames (:frames ir)
      :sample-rate (:sample-rate ir)
      :controls controls
@@ -353,10 +358,21 @@
      :lifecycle-operations (->> [:init :reset]
                                 (filter #(get (:lifecycle ir) %))
                                 vec)
-     :instance {:ownership :artifact
+     :program {:ownership :artifact
+               :mutable? false
+               :shareable? true}
+     :instance {:ownership :instance
                 :state :persistent
-                :allocation :compile-time
-                :reset :explicit}
+                :allocation :per-instance
+                :factory :create-instance
+                :lifetime :explicit
+                :handle {:kind :state-region
+                         :regions [:state :scratch]
+                         :shared? false}
+                :operations {:create :create-instance
+                             :reset :reset!
+                             :destroy :destroy!}
+                :instances :unbounded}
      :effects (:effects ir)
      :diagnostics (:diagnostics ir)}))
 
@@ -387,6 +403,36 @@
                     {:target target
                      :supported #{:interpreter :jvm :js}}))))
 
+(clojure.core/defn- target-instance
+  "Describe a target's instance lifecycle in the target-neutral vocabulary.
+
+  Every target creates, resets, and releases an instance; only the entry-point
+  names differ. The abstract handle kind is what portable IR sees, so no
+  target-specific object (a JVM class, a JS closure, a Wasm instance) leaks into
+  the IR itself."
+  [target abi]
+  (let [base (:instance abi)]
+    (case target
+      :interpreter base
+      :jvm base
+      :js (assoc base
+                 :factory :createKernel
+                 :handle {:kind :kernel-handle :shared? false}
+                 :operations {:create :createKernel
+                              :reset :reset
+                              :destroy :destroy})
+      :wasm (assoc base
+                   :factory :instantiate
+                   :handle {:kind :wasm-instance
+                            :region :state
+                            :shared? false}
+                   :operations {:create :instantiate
+                                :reset :reset
+                                ;; A Wasm instance owns its linear memory, so
+                                ;; releasing it is dropping the instance.
+                                :destroy :release})
+      base)))
+
 (clojure.core/defn- compile-js-target
   [entry lowered abi options]
   (let [js-ir (js-backend/lower (assoc lowered :options options))]
@@ -394,7 +440,7 @@
      :entry entry
      :ir lowered
      :js-ir js-ir
-     :abi abi
+     :abi (assoc abi :instance (target-instance :js abi))
      :physical-type (physical-type-policy lowered)
      :realtime (ir/validate-runtime-policy! lowered)
      :options options
@@ -408,18 +454,27 @@
   [target lowered options]
   (case target
     :interpreter
-    (let [state (interpreter/create-state lowered)]
+    (let [create-instance
+          (fn []
+            (let [state (interpreter/create-state lowered)]
+              {:state state
+               :reset #(interpreter/reset-state! lowered state)
+               :destroy #(interpreter/reset-state! lowered state)
+               :invoke (fn [input output frames & controls]
+                         (interpreter/process lowered input output frames
+                                              controls state))
+               :invoke-context
+               (fn [context]
+                 (interpreter/process-context lowered
+                                              (assoc context :state state)))}))
+          instance (create-instance)]
       (merge
        (artifact :interpreter :process lowered (process-abi lowered)
-                 (fn [input output frames & controls]
-                   (interpreter/process lowered input output frames controls state))
+                 (:invoke instance)
                  options)
-       {:state state
-        :initialize #(interpreter/reset-state! lowered state)
-        :reset #(interpreter/reset-state! lowered state)
-        :invoke-context (fn [context]
-                          (interpreter/process-context lowered
-                                                       (assoc context :state state)))}))
+       instance
+       {:initialize (:reset instance)
+        :create-instance create-instance}))
 
     :jvm
     (let [{:keys [invoke] :as jvm-artifact}
@@ -433,25 +488,30 @@
 
     :wasm
     (let [artifact (wasm-backend/lower lowered)
-          physical-type (physical-type-policy lowered)]
+          physical-type (physical-type-policy lowered)
+          abi (let [abi (process-abi lowered)]
+                (assoc abi :instance (target-instance :wasm abi)))]
       {:target :wasm
        :entry :process
        :ir lowered
-       :abi (process-abi lowered)
+       :abi abi
        :physical-type physical-type
        :realtime (ir/validate-runtime-policy! lowered)
        :options options
        :module {:format :wat
                 :exports (:exports artifact)
                 :memory (:memory artifact)
-                :abi (assoc (:abi artifact) :physical-type physical-type)}
+                :abi (assoc (:abi artifact) :physical-type physical-type
+                            :instance (:instance abi))}
        :wat (:source artifact)
        :memory (:memory artifact)
-       :metadata {:abi (assoc (:abi artifact) :physical-type physical-type)
+       :metadata {:abi (assoc (:abi artifact) :physical-type physical-type
+                              :instance (:instance abi))
                   :memory (:memory artifact)
                   :physical-type physical-type
                   :exports (:exports artifact)}
-       :wasm-abi (assoc (:abi artifact) :physical-type physical-type)
+       :wasm-abi (assoc (:abi artifact) :physical-type physical-type
+                        :instance (:instance abi))
        :binary {:format :wasm
                 :source :wat
                 :generator :browser-wabt
@@ -525,86 +585,152 @@
                        {:entry entry
                         :supported #{:function :process}}))))))
 
-(clojure.core/defn invoke
-  "Invoke a compiled artifact through its target-specific adapter."
-  [artifact & args]
-  (apply (:invoke artifact) args))
+(clojure.core/defn- check-live!
+  "Reject use of a process instance that has been destroyed."
+  [holder]
+  (when (and (:live? holder) (not (deref (:live? holder))))
+    (throw (ex-info "this DSP process instance has been destroyed"
+                    {:target (:target holder)})))
+  holder)
 
-(clojure.core/defn process!
-  "Execute an interpreter process artifact with its explicit ABI context.
+(clojure.core/defn process-instance?
+  "True when `value` is an independent instance from `create-instance`."
+  [value]
+  (boolean (:dsp/instance value)))
 
-  The context supplies `:input`, `:output`, `:frames`, `:sample-rate`, and a
-  vector of `:controls` in ABI order. The artifact owns persistent state.
-  Interpreter and JVM artifacts expose this checked context adapter; generated
-  JS/Wasm modules expose their target-native process entry points."
-  [artifact context]
+(clojure.core/defn create-instance
+  "Create an independent process instance from a compiled process artifact.
+
+  The artifact is an immutable program shared by every instance; an instance
+  owns its persistent state and its scratch arena. `:interpreter` and `:jvm`
+  artifacts reuse one compiled code object and allocate a fresh state region
+  per instance, so instantiating never recompiles. Call `destroy!` when the
+  instance is no longer needed; the artifact remains usable either way."
+  [artifact]
   (when-not (= :process (:entry artifact))
-    (throw (ex-info "only process artifacts have a process ABI"
+    (throw (ex-info "only process artifacts can be instantiated"
                     {:entry (:entry artifact)})))
-  (if-let [invoke-context (:invoke-context artifact)]
-    (invoke-context context)
-    (throw (ex-info "this DSP target does not expose an explicit process context adapter"
+  (if-let [factory (:create-instance artifact)]
+    (assoc (factory)
+           :dsp/instance true
+           :artifact artifact
+           :target (:target artifact)
+           :live? (atom true))
+    (throw (ex-info "this DSP target does not support explicit process instances"
                     {:target (:target artifact)}))))
 
+(clojure.core/defn destroy!
+  "Release the persistent state owned by a process instance.
+
+  The instance is unusable afterwards and further calls through it throw. A
+  plain artifact owns its state for the artifact's lifetime and cannot be
+  destroyed."
+  [holder]
+  (when-not (process-instance? holder)
+    (throw (ex-info "destroy! expects an instance created by create-instance"
+                    {:target (:target holder)})))
+  (when (deref (:live? holder))
+    (when-let [destroy (:destroy holder)]
+      (destroy))
+    (clojure.core/reset! (:live? holder) false))
+  nil)
+
+(clojure.core/defn invoke
+  "Invoke a compiled artifact or instance through its target-specific adapter."
+  [holder & args]
+  (check-live! holder)
+  (apply (:invoke holder) args))
+
+(clojure.core/defn process!
+  "Execute a process artifact or instance with its explicit ABI context.
+
+  The context supplies `:output`, `:frames`, `:sample-rate`, and a vector of
+  `:controls` in ABI order, plus `:input` when the process declares an input
+  port. Interpreter and JVM artifacts and instances expose this checked context
+  adapter; generated JS/Wasm modules expose their target-native entry points
+  through the same lifecycle vocabulary."
+  [holder context]
+  (let [artifact (or (:artifact holder) holder)]
+    (when-not (= :process (:entry artifact))
+      (throw (ex-info "only process artifacts have a process ABI"
+                      {:entry (:entry artifact)})))
+    (check-live! holder)
+    (if-let [invoke-context (:invoke-context holder)]
+      (invoke-context context)
+      (throw (ex-info "this DSP target does not expose an explicit process context adapter"
+                      {:target (:target artifact)})))))
+
 (clojure.core/defn process-checked!
-  "Execute a JVM process through its checked raw primitive ABI.
+  "Execute a JVM process artifact or instance through its checked raw ABI.
 
   Unlike `process!`, controls are supplied in their physical reusable arrays:
   `float-controls` and `int-controls`. It verifies primitive array classes,
-  buffer shape/length, control storage, and artifact-owned state before
+  buffer shape/length, control storage, and the holder's own state before
   processing."
-  [artifact input output frames sample-rate float-controls int-controls]
-  (when-not (= :process (:entry artifact))
-    (throw (ex-info "only process artifacts have a process ABI"
-                    {:entry (:entry artifact)})))
-  (when-not (= :jvm (:target artifact))
-    (throw (ex-info "the raw checked process ABI is currently JVM-specific"
-                    {:target (:target artifact)})))
-  (jvm/process-checked! artifact input output frames sample-rate
-                        float-controls int-controls))
+  [holder input output frames sample-rate float-controls int-controls]
+  (let [artifact (or (:artifact holder) holder)]
+    (when-not (= :process (:entry artifact))
+      (throw (ex-info "only process artifacts have a process ABI"
+                      {:entry (:entry artifact)})))
+    (when-not (= :jvm (:target artifact))
+      (throw (ex-info "the raw checked process ABI is currently JVM-specific"
+                      {:target (:target artifact)})))
+    (check-live! holder)
+    (jvm/process-checked! holder input output frames sample-rate
+                          float-controls int-controls)))
 
 (clojure.core/defn process-unchecked!
-  "Execute a JVM process through its allocation-free raw primitive ABI.
+  "Execute a JVM process artifact or instance through its raw primitive ABI.
 
   This deliberately performs no validation. Callers must provide buffers and
   physical f32/f64 control arrays matching the artifact ABI. Persistent state
-  is owned by the artifact. Use `process-checked!` at setup/development
-  boundaries; retain `:unchecked` and its matching `Dsp*Process` interface in
-  a real-time host when direct dispatch is required."
-  [artifact input output frames sample-rate float-controls int-controls]
-  (when-not (= :process (:entry artifact))
-    (throw (ex-info "only process artifacts have a process ABI"
-                    {:entry (:entry artifact)})))
-  (when-not (= :jvm (:target artifact))
-    (throw (ex-info "the raw unchecked process ABI is currently JVM-specific"
-                    {:target (:target artifact)})))
-  (jvm/process-unchecked! artifact input output frames sample-rate
-                          float-controls int-controls))
+  is owned by the holder: a plain artifact owns one state region, and each
+  `create-instance` handle owns its own. Use `process-checked!` at
+  setup/development boundaries; retain `:unchecked` and its matching
+  `Dsp*Process` interface in a real-time host when direct dispatch is required."
+  [holder input output frames sample-rate float-controls int-controls]
+  (let [artifact (or (:artifact holder) holder)]
+    (when-not (= :process (:entry artifact))
+      (throw (ex-info "only process artifacts have a process ABI"
+                      {:entry (:entry artifact)})))
+    (when-not (= :jvm (:target artifact))
+      (throw (ex-info "the raw unchecked process ABI is currently JVM-specific"
+                      {:target (:target artifact)})))
+    (check-live! holder)
+    (jvm/process-unchecked! holder input output frames sample-rate
+                            float-controls int-controls)))
 
 (clojure.core/defn initialize!
-  "Initialize a process instance according to its lifecycle ABI."
-  [artifact]
-  (when-not (= :process (:entry artifact))
-    (throw (ex-info "only process artifacts have a process lifecycle"
-                    {:entry (:entry artifact)})))
-  (when-not (get-in artifact [:abi :lifecycle :init])
-    (throw (ex-info "this DSP instance does not support initialization"
-                    {:target (:target artifact)})))
-  (if-let [initialize (:initialize artifact)]
-    (initialize)
-    (throw (ex-info "this DSP target does not expose initialization"
-                    {:target (:target artifact)}))))
+  "Initialize a process artifact or instance according to its lifecycle ABI."
+  [holder]
+  (let [artifact (or (:artifact holder) holder)]
+    (when-not (= :process (:entry artifact))
+      (throw (ex-info "only process artifacts have a process lifecycle"
+                      {:entry (:entry artifact)})))
+    (when-not (get-in artifact [:abi :lifecycle :init])
+      (throw (ex-info "this DSP instance does not support initialization"
+                      {:target (:target artifact)})))
+    (check-live! holder)
+    (if-let [initialize (:initialize holder)]
+      (initialize)
+      (throw (ex-info "this DSP target does not expose initialization"
+                      {:target (:target artifact)})))))
 
 (clojure.core/defn reset!
-  "Reset the persistent state of a process artifact."
-  [artifact]
-  (when-not (= :process (:entry artifact))
-    (throw (ex-info "only process artifacts have persistent state"
-                    {:entry (:entry artifact)})))
-  (when-not (get-in artifact [:abi :lifecycle :reset])
-    (throw (ex-info "this DSP instance does not support reset"
-                    {:target (:target artifact)})))
-  (if-let [reset (:reset artifact)]
-    (reset)
-    (throw (ex-info "this DSP target does not expose reset"
-                    {:target (:target artifact)}))))
+  "Reset the persistent state of a process artifact or instance.
+
+  Each instance resets only its own state; resetting one instance never
+  disturbs another."
+  [holder]
+  (let [artifact (or (:artifact holder) holder)]
+    (when-not (= :process (:entry artifact))
+      (throw (ex-info "only process artifacts have persistent state"
+                      {:entry (:entry artifact)})))
+    (when-not (get-in artifact [:abi :lifecycle :reset])
+      (throw (ex-info "this DSP instance does not support reset"
+                      {:target (:target artifact)})))
+    (check-live! holder)
+    (if-let [reset (:reset holder)]
+      (reset)
+      (throw (ex-info "this DSP target does not expose reset"
+                      {:target (:target artifact)})))))

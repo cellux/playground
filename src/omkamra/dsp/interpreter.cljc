@@ -318,7 +318,10 @@
     (when (neg? frames)
       (throw (ex-info "DSP process frame count must not be negative"
                       {:frames frames :name (:name ir)})))
-    (check-buffer! ir input :input frames)
+    ;; A generator (D23) declares no input buffer, so there is nothing to check
+    ;; and no input value to thread through.
+    (when (some #(= :input (:direction %)) (:buffers ir))
+      (check-buffer! ir input :input frames))
     (check-buffer! ir output :output frames)
     (check-state! ir state)
     frames))

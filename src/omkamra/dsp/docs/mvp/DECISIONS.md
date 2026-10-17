@@ -677,8 +677,15 @@ well-defined sample-serial evaluation order.
 
 ## D23 — A process input port is optional
 
-**Status.** Decided; implementation scheduled with P8, because that phase already
-moves the process ABI's argument indices.
+**Status.** Decided; implemented in P8d. See `DIARY.md` for the record. One
+consequence is amended there: "no input argument in any adapter" holds for every
+host-facing adapter (the conformance context map, the JS `process` export, the
+Wasm `$process` export) and for the derived ABI argument indices, but the JVM's
+generated kernel method keeps its input array parameter and receives `nil` from a
+generator's adapter. Dropping it there would require `DspSourceKernel`-style
+interfaces ×4 (f32/f64 × mono/multi-channel) and duplicate the kernel emission and
+every adapter, because the array never reaches the ABI, the effects, or the frame
+body. The amendment is recorded rather than quietly skipped.
 
 **Decision.** A process may declare `:input false`. It then has no sample
 parameter, no `:input` buffer in `:buffers`/`:bindings`/`:memory`, and no

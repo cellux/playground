@@ -65,7 +65,7 @@ Oscillators.
 
 ### `omkamra.dsp.library.oscillator/lfo`
 
-- **Parameters:** `sample` float, `frequency` float, `shape` int
+- **Parameters:** `frequency` float, `shape` int
 - **Controls:** `frequency`, `shape`
 - **State:** `phase` float
 - **Return:** float
@@ -85,7 +85,7 @@ Two-sample polynomial band-limited step correction for a jump at phase 0. `t` is
 
 Band-limited pulse of width `width` in (0, 1); 0.5 is a square. Two edges per period, so two corrections.
 
-- **Parameters:** `sample` float, `frequency` float, `width` float
+- **Parameters:** `frequency` float, `width` float
 - **Controls:** `frequency`, `width`
 - **State:** `phase` float
 - **Return:** float
@@ -93,9 +93,9 @@ Band-limited pulse of width `width` in (0, 1); 0.5 is a square. Two edges per pe
 
 ### `omkamra.dsp.library.oscillator/saw-oscillator`
 
-Band-limited sawtooth: a rising ramp from -1 to 1, corrected at the wrap. The leading `sample` parameter is ignored — the process shape needs an input port — so as a module it is called `(saw-oscillator 0.0 frequency)`.
+Band-limited sawtooth: a rising ramp from -1 to 1, corrected at the wrap. A generator (`:input false`), so it is called `(saw-oscillator frequency)` rather than carrying an ignored sample argument.
 
-- **Parameters:** `sample` float, `frequency` float
+- **Parameters:** `frequency` float
 - **Controls:** `frequency`
 - **State:** `phase` float
 - **Return:** float
@@ -105,7 +105,7 @@ Band-limited sawtooth: a rising ramp from -1 to 1, corrected at the wrap. The le
 
 Sine oscillator: `phase` advances by `frequency / sample-rate` each sample and wraps at 1.0, so `sin` sees an angle in turns scaled to radians.
 
-- **Parameters:** `sample` float, `frequency` float
+- **Parameters:** `frequency` float
 - **Controls:** `frequency`
 - **State:** `phase` float
 - **Return:** float
@@ -115,7 +115,7 @@ Sine oscillator: `phase` advances by `frequency / sample-rate` each sample and w
 
 A square is the half-width pulse, reached through the ordinary call mechanism, so it needs no state of its own.
 
-- **Parameters:** `sample` float, `frequency` float
+- **Parameters:** `frequency` float
 - **Controls:** `frequency`
 - **State:** none (stateless)
 - **Return:** float
@@ -125,7 +125,7 @@ A square is the half-width pulse, reached through the ordinary call mechanism, s
 
 Hard sync: a slave sawtooth at `frequency * ratio` whose phase restarts every time a master at `frequency` wraps. The restart is placed at the master's sub-sample zero crossing rather than on the sample grid, which removes the timing quantisation that otherwise dominates; the reset step itself is not BLEP-corrected, so this is the one oscillator here that is not band-limited, and it aliases at high `ratio`.
 
-- **Parameters:** `sample` float, `frequency` float, `ratio` float
+- **Parameters:** `frequency` float, `ratio` float
 - **Controls:** `frequency`, `ratio`
 - **State:** `s` float
 - **Return:** float
@@ -135,7 +135,7 @@ Hard sync: a slave sawtooth at `frequency * ratio` whose phase restarts every ti
 
 Band-limited triangle: the integral of the band-limited square. The leaky integrator removes the integral's DC and is scaled to reach +-1; the amplitude is a mild function of frequency (+-1.5% across 50 Hz..2 kHz) and the first cycle has a start-up transient, both documented rather than corrected.
 
-- **Parameters:** `sample` float, `frequency` float
+- **Parameters:** `frequency` float
 - **Controls:** `frequency`
 - **State:** `s` float
 - **Return:** float
@@ -147,7 +147,7 @@ Portable noise sources. Both are deterministic: the white generator is a 32-bit 
 
 ### `omkamra.dsp.library.noise/pink-noise`
 
-- **Parameters:** `sample` float, `seed` int
+- **Parameters:** `seed` int
 - **Controls:** `seed`
 - **State:** `s` float
 - **Return:** float
@@ -155,7 +155,7 @@ Portable noise sources. Both are deterministic: the white generator is a 32-bit 
 
 ### `omkamra.dsp.library.noise/white-noise`
 
-- **Parameters:** `sample` float, `seed` int
+- **Parameters:** `seed` int
 - **Controls:** `seed`
 - **State:** `x` int
 - **Return:** float
