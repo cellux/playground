@@ -26,11 +26,22 @@ docstrings point to lower-level namespaces for details.
   Ring/Shadow server, including route resolution and server configuration.
 - `omkamra.dev.frontend` — discover browser builds, connected runtimes, rebuild
   a running Shadow build, and evaluate ClojureScript.
+- `omkamra.dev.tools` — lint/format files/directories; reload
+  namespaces; create durable namespace aliases
 - `omkamra.vice` — assemble, run, capture, and inspect VICE workflows; follow
   its docstrings into the analysis and capture namespaces.
 - `omkamra.supercollider` — start or wrap SuperCollider sessions, create
   players, define SynthDefs/UGens, and run performances. Use
   `omkamra.supercollider.player` for manipulating an existing player.
+
+When using a feature through `clojure_eval`, first require the
+selected namespace. Then use Clojure's introspection facilities to
+inspect its public API functions and the `:doc`/`:arglists` metadata
+for the namespace and each API function before calling them. For
+example, inspect `(ns-publics 'omkamra.dev.tools)` and the metadata of
+the returned Vars. Treat the entrypoint namespace and its function
+docstrings as the source of truth; only follow implementation
+namespaces when the public documentation directs you to do so.
 
 The `:on-demand-http` system discovers Ring handlers using the URI convention
 implemented by `omkamra.dev.on-demand-http/resolve-handler`; it also starts
