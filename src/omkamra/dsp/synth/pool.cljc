@@ -105,12 +105,20 @@
 ;; The global source bank is indexed by MIDI channel.
 (def ^:private channel-count 16)
 
-(defn- make-longs
+(defn make-longs
+  "A fresh integer-valued array of `length`, portable across hosts.
+
+  The one place the target's array representation is chosen, so a host that keeps
+  its own per-voice state (a modulation layer, say) does not repeat the branch:
+  a JVM `long-array`, a ClojureScript `Float64Array`."
   [length]
   #?(:clj (long-array length)
      :cljs (js/Float64Array. length)))
 
-(defn- make-doubles
+(defn make-doubles
+  "A fresh float-valued array of `length`, portable across hosts.
+
+  A JVM `double-array`, a ClojureScript `Float64Array`; see `make-longs`."
   [length]
   #?(:clj (double-array length)
      :cljs (js/Float64Array. length)))

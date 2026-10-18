@@ -15,7 +15,11 @@
             [omkamra.dsp.synth :as synth]
             [omkamra.dsp.hosts :as host]
             [omkamra.dsp.synth.pool :as pool]
-            [omkamra.dsp.harness.fixtures :refer [allocated-bytes sine-voice-description
+            [omkamra.dsp.harness.fixtures :refer [allocated-bytes
+                                                  containment-loud-description
+                                                  containment-reset-description
+                                                  containment-runaway-description
+                                                  sine-voice-description
                                                   thread-allocation-meter]]))
 
 ;; ---------------------------------------------------------------------------
@@ -685,32 +689,12 @@
   (is (= 0 (long (:special-mask (:runtime (host/compile-synth
                                            no-activity-test-description)))))))
 
-;; P10c: non-finite containment at the kernel seam (D39). A voice that divides a
-;; constant by a closed gate produces an infinity; a voice that multiplies by a
-;; huge constant produces a finite runaway. Both are contained by the default.
-(dsp/defn runaway-voice
-  [gate note]
-  {:process {:input false}}
-  (/ 1.0 gate))
-
-(dsp/defn loud-voice
-  [gate note]
-  {:process {:input false}}
-  (* gate 1.0e9))
-
-(def runaway-test-description
-  {:id :runaway-test :capacity 1 :mode :poly :max-block-frames 64
-   :voice {:definition #'runaway-voice
-           :controls {:gate {:source :gate} :note {:source :note}}}})
-
-(def loud-test-description
-  {:id :loud-test :capacity 1 :mode :poly :max-block-frames 64
-   :voice {:definition #'loud-voice
-           :controls {:gate {:source :gate} :note {:source :note}}}})
-
+;; P10c: non-finite containment at the kernel seam (D39). The runaway and loud
+;; voices live in `omkamra.dsp.harness.fixtures`, shared with the browser
+;; testbed, so both suites exercise the same voices under every policy.
 (deftest a-non-finite-voice-is-contained
   (doseq [target [:interpreter :jvm]]
-    (let [pool (host/synth-pool (host/compile-synth runaway-test-description
+    (let [pool (host/synth-pool (host/compile-synth containment-runaway-description
                                                     {:target target}))
           output (float-array 4)]
       (pool/note-on! pool 60 1.0)
@@ -726,7 +710,7 @@
   ;; Clamping a *finite* runaway is a `:sanitize` behavior; `:reset` only acts on
   ;; non-finite samples.
   (doseq [target [:interpreter :jvm]]
-    (let [pool (host/synth-pool (host/compile-synth loud-test-description
+    (let [pool (host/synth-pool (host/compile-synth containment-loud-description
                                                     {:target target
                                                      :containment :sanitize}))
           output (float-array 2)]
@@ -737,7 +721,7 @@
 
 (deftest containment-can-be-disabled
   (doseq [target [:interpreter :jvm]]
-    (let [pool (host/synth-pool (host/compile-synth runaway-test-description
+    (let [pool (host/synth-pool (host/compile-synth containment-runaway-description
                                                     {:target target
                                                      :containment :off}))
           output (float-array 2)]
@@ -750,21 +734,9 @@
 ;; P10c: the `:reset` policy silences a non-finite block and resets the voice's
 ;; state so it recovers; `:sanitize` only contains the samples and lets state
 ;; advance. The voice's `age` starts at 0 -> 1/0 = infinity, then advances.
-(dsp/defn reset-voice
-  [gate note]
-  {:process {:input false}
-   :state [{:name age :type :int :init 0
-            :next (min 2 (+ age 1))}]}
-  (/ 1.0 (int->float age)))
-
-(def reset-test-description
-  {:id :reset-test :capacity 1 :mode :poly :max-block-frames 64
-   :voice {:definition #'reset-voice
-           :controls {:gate {:source :gate} :note {:source :note}}}})
-
 (deftest a-reset-policy-silences-and-recovers-a-voice
   (doseq [target [:interpreter :jvm]]
-    (let [pool (host/synth-pool (host/compile-synth reset-test-description
+    (let [pool (host/synth-pool (host/compile-synth containment-reset-description
                                                     {:target target
                                                      :containment :reset}))
           output (float-array 1)]
@@ -782,7 +754,7 @@
 
 (deftest a-sanitize-policy-does-not-reset
   (doseq [target [:interpreter :jvm]]
-    (let [pool (host/synth-pool (host/compile-synth reset-test-description
+    (let [pool (host/synth-pool (host/compile-synth containment-reset-description
                                                     {:target target
                                                      :containment :sanitize}))
           output (float-array 1)]
@@ -795,6 +767,15 @@
           (str "without a reset the state advanced on " target))
       (is (zero? (:containment (pool/pool-stats pool)))
           (str "sanitize does not count a containment on " target)))))
+
+(deftest an-unknown-containment-mode-is-refused
+  (doseq [target [:interpreter :jvm]]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"unknown non-finite containment mode"
+         (host/compile-synth containment-runaway-description
+                             {:target target :containment :bogus}))
+        (str "an unknown containment mode fails on " target))))
 
 ;; D40/P10d: a stereo voice renders a *planar* block (two float arrays). The
 ;; pool sums voices plainly; panning is a voice-level concern, not the pool's.

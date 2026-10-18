@@ -115,7 +115,11 @@
 (dsp/defn state-variable-filter
   "Chamberlin state-variable filter: one pass yields lowpass, bandpass, and
   highpass together (a record return), so the three outputs share one history.
-  Stable while the cutoff stays below a sixth of the sample rate."
+
+  Stable while the cutoff stays below a sixth of the sample rate *and* the
+  damping `q` exceeds `f / (2 - f^2/2)`, where `f = 2 sin(pi fc/fs)`. The cutoff
+  bound alone is not sufficient: at `fc = fs/6`, `f` is 1 and `q` must exceed
+  2/3, below which the filter can run away."
   [sample cutoff q]
   {:state [{:name s :struct svf-state}]
    :return-type svf-output}

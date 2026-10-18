@@ -335,8 +335,22 @@
 (defmethod emit-builtin [:abs :int] [e] (wat-unary "i32.abs" e))
 (defmethod emit-builtin [:min :float] [e] (wat-binary (str (float-type) ".min") e))
 (defmethod emit-builtin [:max :float] [e] (wat-binary (str (float-type) ".max") e))
-(defmethod emit-builtin [:min :int] [e] (wat-binary "i32.min_s" e))
-(defmethod emit-builtin [:max :int] [e] (wat-binary "i32.max_s" e))
+
+;; WebAssembly has no integer min/max instruction, so each is a `select` whose
+;; condition compares the same operands. DSP expressions are pure, so the
+;; duplicate emission is safe; a nested pair grows the tree, which is why the
+;; float path above stays a single instruction.
+(defmethod emit-builtin [:min :int]
+  [expression]
+  (let [left (emit-expression (first (:args expression)))
+        right (emit-expression (second (:args expression)))]
+    (wat-form "select" left right (wat-form "i32.lt_s" left right))))
+
+(defmethod emit-builtin [:max :int]
+  [expression]
+  (let [left (emit-expression (first (:args expression)))
+        right (emit-expression (second (:args expression)))]
+    (wat-form "select" left right (wat-form "i32.gt_s" left right))))
 (defmethod emit-builtin [:floor :float] [e] (wat-unary (str (float-type) ".floor") e))
 (defmethod emit-builtin [:ceil :float] [e] (wat-unary (str (float-type) ".ceil") e))
 (defmethod emit-builtin [:trunc :float] [e] (wat-unary (str (float-type) ".trunc") e))

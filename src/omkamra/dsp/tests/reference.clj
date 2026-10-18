@@ -57,9 +57,13 @@
     {:left (vec left) :right (vec right)}))
 
 (defn- render-phrase
-  "Play `events` through a fresh reference instrument on `target`."
+  "Play `events` through a fresh reference instrument on `target`.
+
+  Containment is off: a filter that runs away must surface as a non-finite
+  sample, not be silenced by the `:reset` policy one whole block at a time."
   [target events]
-  (render-live-phrase (ref/reference-synth {:target target}) events))
+  (render-live-phrase (ref/reference-synth {:target target :containment :off})
+                      events))
 
 (defn- audible?
   "True when a channel has any non-zero sample."

@@ -17,6 +17,7 @@
             [omkamra.dsp.hosts.js :as js-host]
             [omkamra.dsp.hosts.wasm :as wasm-host]
             [omkamra.dsp.targets.interpreter :as interpreter]
+            [omkamra.dsp.reference :as reference]
             [omkamra.dsp.schedule :as schedule]
             [omkamra.dsp.synth.pool :as pool]
             ["wabt" :default wabt]))
@@ -1335,6 +1336,103 @@
                    (wasm-host/wasm-kernel module abi (:memory bundle)
                                           {:precision (:precision bundle)}))))))))))
 
+(defn- render-one!
+  "Render one frame through `pool` and return the sample."
+  [pool]
+  (let [output (js/Float32Array. 1)]
+    (pool/render! pool output 1 48000.0)
+    (aget output 0)))
+
+(defn- check-containment-scenarios
+  "Exercise all three containment policies over browser kernels built by
+  `make-kernel` (a function of the mode) and `make-loud-kernel` (the
+  finite-runaway voice). Throws on the first mismatch."
+  [name runtime make-kernel loud-runtime make-loud-kernel]
+  (let [reset-pool (pool/voice-pool runtime (make-kernel :reset))]
+    (pool/note-on! reset-pool 60 1.0)
+    (require! (zero? (render-one! reset-pool))
+              (str name ": :reset should silence the non-finite block"))
+    (require! (= 1 (:containment (pool/pool-stats reset-pool)))
+              (str name ": :reset should count the containment"))
+    (require! (zero? (render-one! reset-pool))
+              (str name ": :reset should reset the voice, not let it advance"))
+    (require! (= 2 (:containment (pool/pool-stats reset-pool)))
+              (str name ": :reset should keep counting")))
+  (let [sanitize-pool (pool/voice-pool runtime (make-kernel :sanitize))]
+    (pool/note-on! sanitize-pool 60 1.0)
+    (require! (zero? (render-one! sanitize-pool))
+              (str name ": :sanitize should contain the non-finite sample"))
+    (require! (zero? (:containment (pool/pool-stats sanitize-pool)))
+              (str name ": :sanitize should not count a containment"))
+    (require! (= 1.0 (render-one! sanitize-pool))
+              (str name ": :sanitize should let the state advance")))
+  (let [loud-pool (pool/voice-pool loud-runtime (make-loud-kernel :sanitize))]
+    (pool/note-on! loud-pool 60 1.0)
+    (require! (= 1.0e6 (render-one! loud-pool))
+              (str name ": :sanitize should clamp a finite runaway to the ceiling")))
+  (let [off-pool (pool/voice-pool runtime (make-kernel :off))]
+    (pool/note-on! off-pool 60 1.0)
+    (require! (not (js/Number.isFinite (render-one! off-pool)))
+              (str name ": :off should let a non-finite sample through")))
+  {:name name
+   :passed? true
+   :detail ":reset silenced and counted, :sanitize contained and advanced and clamped a finite runaway, :off passed non-finite through"})
+
+(defn- javascript-containment-test
+  []
+  (-> (js/Promise.all
+       #js [(fetch-edn "/omkamra/dsp/harness/testbed/containment-bundle")
+            (response-text "/omkamra/dsp/harness/testbed/containment-source")
+            (fetch-edn "/omkamra/dsp/harness/testbed/containment-bundle?case=loud")
+            (response-text "/omkamra/dsp/harness/testbed/containment-source?case=loud")])
+      (.then
+       (clojure.core/fn [[bundle source loud-bundle loud-source]]
+         (let [voice-blob (js/Blob. #js [source] #js {:type "text/javascript"})
+               loud-blob (js/Blob. #js [loud-source] #js {:type "text/javascript"})
+               voice-url (js/URL.createObjectURL voice-blob)
+               loud-url (js/URL.createObjectURL loud-blob)]
+           (-> (js/Promise.all #js [(dynamic-import voice-url)
+                                    (dynamic-import loud-url)])
+               (.then
+                (clojure.core/fn [[module loud-module]]
+                  (check-containment-scenarios
+                   "JavaScript containment"
+                   (:runtime bundle)
+                   (clojure.core/fn [mode]
+                     (js-host/js-kernel (gobj/get module "createKernel") (:abi bundle)
+                                        {:precision (:precision bundle) :containment mode}))
+                   (:runtime loud-bundle)
+                   (clojure.core/fn [mode]
+                     (js-host/js-kernel (gobj/get loud-module "createKernel") (:abi loud-bundle)
+                                        {:precision (:precision loud-bundle) :containment mode})))))
+               (.finally (clojure.core/fn []
+                           (js/URL.revokeObjectURL voice-url)
+                           (js/URL.revokeObjectURL loud-url)))))))))
+
+(defn- wasm-containment-test
+  []
+  (-> (js/Promise.all
+       #js [(fetch-edn "/omkamra/dsp/harness/testbed/containment-bundle?target=wasm")
+            (fetch-edn "/omkamra/dsp/harness/testbed/containment-bundle?case=loud&target=wasm")])
+      (.then
+       (clojure.core/fn [[bundle loud-bundle]]
+         (-> (js/Promise.all #js [(compile-wasm (:wat bundle))
+                                  (compile-wasm (:wat loud-bundle))])
+             (.then
+              (clojure.core/fn [[voice-bytes loud-bytes]]
+                (let [voice-module (js/WebAssembly.Module. voice-bytes)
+                      loud-module (js/WebAssembly.Module. loud-bytes)]
+                  (check-containment-scenarios
+                   "Wasm containment"
+                   (:runtime bundle)
+                   (clojure.core/fn [mode]
+                     (wasm-host/wasm-kernel voice-module (:abi bundle) (:memory bundle)
+                                            {:precision (:precision bundle) :containment mode}))
+                   (:runtime loud-bundle)
+                   (clojure.core/fn [mode]
+                     (wasm-host/wasm-kernel loud-module (:abi loud-bundle) (:memory loud-bundle)
+                                            {:precision (:precision loud-bundle) :containment mode})))))))))))
+
 ;; ---------------------------------------------------------------------------
 ;; The browser instrument host: a voice pool plus a post-mix bus (P11c)
 ;; ---------------------------------------------------------------------------
@@ -1361,64 +1459,149 @@
   (apply mapv (clojure.core/fn [& channels] (vec (apply concat channels)))
          blocks))
 
-(defn- play-instrument
-  "Play one note through `pool`, running `bus-runner` over each channel after
-  every block. Returns the held and released blocks as channel sample vectors."
-  [pool channels bus-runner bus-controls block-sizes]
-  (let [buses (mapv (clojure.core/fn [_] ((:create-bus bus-runner)))
-                    (range channels))
-        render-block
-        (clojure.core/fn [frames]
-          (let [block (planar-block channels frames)]
-            (pool/render! pool block frames 48000.0)
-            (dotimes [channel channels]
-              ((:run-bus! bus-runner) (nth buses channel)
-                                      (aget block channel) (aget block channel)
-                                      frames 48000.0 bus-controls))
-            (mapv (clojure.core/fn [channel]
-                    (vec (array-seq (aget block channel))))
-                  (range channels))))]
-    (pool/note-on! pool 60 1.0)
-    (let [held (mapv render-block block-sizes)]
-      (pool/note-off! pool 60)
-      {:held (channel-concat held)
-       :released (channel-concat [(render-block 1)])})))
+(defn- reference-host
+  "Build the reference synthesizer's portable host over a browser or interpreter
+  kernel, from the served bundle: the runtime plan and the modulation matrix."
+  [bundle kernel]
+  (reference/new-host (pool/voice-pool (:runtime bundle) kernel)
+                      (:control-plan (:runtime bundle))
+                      (:routes bundle)))
 
-(defn- check-instrument-host
-  "Compare an instrument render over a browser pool + bus against the interpreter
-  doing the same, and check block-size invariance.
+(defn- reference-bus-controls
+  "The bus control values for the reference post-mix chain, in the bundle's ABI
+  order. `delay-time` is small so the feedback tail is reached within the phrase,
+  which is what exercises the large-state bus on every backend."
+  [bundle]
+  (let [settings {"chorus-rate" 0.6 "chorus-depth" 12.0 "chorus-mix" 0.35
+                  "drive" 1.5 "delay-time" 8.0 "delay-feedback" 0.45
+                  "delay-mix" 0.35}]
+    (mapv (clojure.core/fn [control] (get settings (name control) 0.0))
+          (:bus-control-names bundle))))
 
-  `voice-kernel` is the browser voice kernel; `bus-runner` the browser bus. The
-  interpreter side uses the IR served in the bundle. The buses are rebuilt for
-  each render, so the comparison starts from a fresh state."
-  [name bundle channels voice-kernel bus-runner]
+(defn- render-reference-block
+  "One block through the reference host: publish the matrix's modulated controls,
+  render the pool, run each channel's bus in place, and return the channel
+  vectors."
+  [host buses channels bus-runner bus-controls frames]
+  (let [block (planar-block channels frames)]
+    (reference/apply-modulation! host)
+    (pool/render! (:pool host) block frames 48000.0)
+    (dotimes [channel channels]
+      ((:run-bus! bus-runner) (nth buses channel)
+                              (aget block channel) (aget block channel)
+                              frames 48000.0 bus-controls))
+    (mapv (clojure.core/fn [channel] (vec (array-seq (aget block channel))))
+          (range channels))))
+
+(defn- play-reference-phrase
+  "Run `events` through a fresh reference host over `kernel`, plus the post-mix
+  bus, and return the concatenated per-channel samples.
+
+  Events: `[:on note velocity]`, `[:off note]`, `[:controller n value]`,
+  `[:pan index value]`, `[:render frames]`."
+  [bundle kernel bus-runner bus-controls events]
+  (let [host (reference-host bundle kernel)
+        channels (long (get-in bundle [:voice-abi :channels :count]))
+        buses (mapv (clojure.core/fn [_] ((:create-bus bus-runner)))
+                    (range channels))]
+    (channel-concat
+     (reduce
+      (clojure.core/fn [blocks [event & args]]
+        (case event
+          :on (do (reference/note-on! host (first args) (second args)) blocks)
+          :off (do (reference/note-off! host (first args)) blocks)
+          :controller (do (reference/set-controller! host (first args) (second args))
+                          blocks)
+          :pan (do (reference/set-pan! host (first args) (second args)) blocks)
+          :render (conj blocks
+                        (render-reference-block host buses channels bus-runner
+                                                bus-controls (first args)))))
+      []
+      events))))
+
+(defn- reference-phrase
+  "The reference acceptance phrase: two controllers, with every render block the
+  same size so a second run can split each block and compare."
+  [block repeats]
+  (vec (concat [[:on 60 0.8] [:controller 1 0.7] [:controller 74 0.5]]
+               (repeat repeats [:render block]))))
+
+(defn- first-mismatch
+  "The first [channel index actual expected] where two channel-vector sequences
+  differ, or nil when they agree."
+  [a b]
+  (some (clojure.core/fn [channel]
+          (let [ca (nth a channel) cb (nth b channel)]
+            (some (clojure.core/fn [index]
+                    (when (not= (nth ca index) (nth cb index))
+                      [channel index (nth ca index) (nth cb index)]))
+                  (range (min (count ca) (count cb))))))
+        (range (min (count a) (count b)))))
+
+(defn- all-finite?
+  "True when every rendered sample is finite. Containment is off in these checks,
+  so a filter that runs away shows up here instead of being silenced by the
+  `:reset` policy one whole block at a time."
+  [channels]
+  (every? (clojure.core/fn [samples]
+            (every? js/Number.isFinite samples))
+          channels))
+
+(defn- max-abs-diff
+  "The largest absolute sample difference between two channel-vector sequences."
+  [a b]
+  (reduce max 0.0
+          (for [channel (range (min (count a) (count b)))
+                index (range (min (count (nth a channel)) (count (nth b channel))))]
+            (Math/abs (- (double (nth (nth a channel) index))
+                         (double (nth (nth b channel) index)))))))
+
+(defn- check-reference-host
+  "Render the reference acceptance phrase over a browser kernel, check that it is
+  finite and block-size invariant, and — when `tolerance` is non-nil — compare it
+  to the in-page interpreter, both with containment off.
+
+  The interpreter differential is exact on JavaScript (both use `Math`). On Wasm
+  the transcendentals are approximated, and a long oscillator run through the
+  resonant voice drifts, so there is no meaningful sample tolerance; per-operation
+  equivalence is covered by the shared process matrix, and this check covers what
+  the host adds — that the whole instrument runs, stays finite, and is invariant."
+  [name bundle browser-kernel bus-runner tolerance]
   (let [voice-ir (reader/read-string (:voice-ir bundle))
         bus-ir (reader/read-string (:bus-ir bundle))
-        controls [0.6 12.0 0.35 6.0 0.4 0.5]
-        render (clojure.core/fn [make-pool block-sizes]
-                 (play-instrument (make-pool) channels bus-runner
-                                  (clj->js controls) block-sizes))
-        browser-pool (clojure.core/fn []
-                       (pool/voice-pool (:runtime bundle) voice-kernel))
-        interpreter-pool (clojure.core/fn []
-                           (pool/voice-pool
-                            (:runtime bundle)
-                            (interpreter-host/interpreter-kernel
-                             voice-ir (:voice-abi bundle))))
-        actual (render browser-pool [4 4])
-        split (render browser-pool [1 1 1 1 1 1 1 1])
-        expected (play-instrument (interpreter-pool) channels
-                                  (interpreter-bus-runner bus-ir controls)
-                                  controls [4 4])]
-    (require! (= actual expected)
-              (str name " drifted from the interpreter: "
-                   (pr-str actual) " vs " (pr-str expected)))
-    (require! (= actual split)
-              (str name " changed when its held blocks were split"))
+        bus-controls (reference-bus-controls bundle)
+        js-controls (clj->js bus-controls)
+        phrase (reference-phrase 64 4)
+        split (reference-phrase 32 8)
+        actual (play-reference-phrase bundle browser-kernel bus-runner
+                                      js-controls phrase)
+        split-actual (play-reference-phrase bundle browser-kernel bus-runner
+                                            js-controls split)
+        expected (when tolerance
+                   (play-reference-phrase
+                    bundle
+                    (interpreter-host/interpreter-kernel
+                     voice-ir (:voice-abi bundle) {:containment :off})
+                    (interpreter-bus-runner bus-ir bus-controls)
+                    bus-controls phrase))]
+    (require! (all-finite? actual)
+              (str name " rendered a non-finite sample"))
+    (when tolerance
+      (require! (<= (max-abs-diff actual expected) tolerance)
+                (str name " drifted from the interpreter: "
+                     (pr-str (first-mismatch actual expected))
+                     " (max absolute difference " (max-abs-diff actual expected) ")")))
+    (require! (= actual split-actual)
+              (str name " changed when its held blocks were split: "
+                   (pr-str (first-mismatch actual split-actual))))
     {:name name
      :passed? true
-     :detail (str "pool + post-mix bus matched the interpreter over "
-                  channels " channels, and was block-size invariant")}))
+     :detail (str "reference synth (voice + matrix + post-mix bus) ran over "
+                  (count (first actual)) " frames across " (count actual)
+                  " channels, finite and block-size invariant"
+                  (when tolerance
+                    (str "; interpreter match (max difference "
+                         (max-abs-diff actual expected) ")")))}))
 
 (defn- javascript-instrument-test
   []
@@ -1437,16 +1620,16 @@
                                     (dynamic-import bus-url)])
                (.then
                 (clojure.core/fn [[voice-module bus-module]]
-                  (let [channels (long (get-in bundle [:voice-abi :channels :count]))
-                        voice-kernel
+                  (let [voice-kernel
                         (js-host/js-kernel (gobj/get voice-module "createKernel")
                                            (:voice-abi bundle)
-                                           {:precision (:precision bundle)})
+                                           {:precision (:precision bundle)
+                                            :containment :off})
                         bus-runner
                         (js-host/js-bus-kernel (gobj/get bus-module "createKernel")
                                                (:bus-abi bundle))]
-                    (check-instrument-host "JavaScript instrument host"
-                                           bundle channels voice-kernel bus-runner))))
+                    (check-reference-host "JavaScript instrument host"
+                                          bundle voice-kernel bus-runner 0.0))))
                (.finally (clojure.core/fn []
                            (js/URL.revokeObjectURL voice-url)
                            (js/URL.revokeObjectURL bus-url)))))))))
@@ -1462,80 +1645,132 @@
               (clojure.core/fn [[voice-bytes bus-bytes]]
                 (let [voice-module (js/WebAssembly.Module. voice-bytes)
                       bus-module (js/WebAssembly.Module. bus-bytes)
-                      channels (long (get-in bundle [:voice-abi :channels :count]))
                       voice-kernel
                       (wasm-host/wasm-kernel voice-module (:voice-abi bundle)
                                              (:voice-memory bundle)
-                                             {:precision (:precision bundle)})
+                                             {:precision (:precision bundle)
+                                              :containment :off})
                       bus-runner
                       (wasm-host/wasm-bus-kernel bus-module (:bus-abi bundle)
                                                  (:bus-memory bundle)
                                                  (:precision bundle))]
-                  (check-instrument-host "Wasm instrument host"
-                                         bundle channels voice-kernel bus-runner)))))))))
+                  (check-reference-host "Wasm instrument host"
+                                        bundle voice-kernel bus-runner nil)))))))))
+
+(defn- selected?
+  "True when check `name` is selected. With no selection (nil or empty),
+  everything runs; otherwise a check runs when some selected needle is a
+  case-insensitive substring of its name — `\"instrument\"` selects both
+  instrument hosts, `\"Wasm pool host\"` selects one."
+  [selection name]
+  (or (nil? selection)
+      (empty? selection)
+      (let [lower (str/lower-case (str name))]
+        (boolean (some (clojure.core/fn [needle]
+                         (str/includes? lower (str/lower-case (str needle))))
+                       selection)))))
 
 (defn- run-suite!
-  [summary results-list]
-  (render-results! summary results-list [])
-  (-> (js/Promise.resolve [])
-      (.then (fn [_] (run-process-matrix!)))
-      (.then (fn [process-results]
-               (-> (run-function-matrix!)
-                   (.then (fn [function-results]
-                            (into process-results function-results))))))
-      (.then (fn [matrix-results]
-               (render-results! summary results-list matrix-results)
-               matrix-results))
-      (.then (fn [matrix-results]
-               (run-promise-sequence
-                summary results-list matrix-results
-                [(fn [] (-> (javascript-pool-test) (.then (fn [r] [r]))))
-                 (fn [] (-> (wasm-pool-test) (.then (fn [r] [r]))))
-                 (fn [] (-> (javascript-instrument-test) (.then (fn [r] [r]))))
-                 (fn [] (-> (wasm-instrument-test) (.then (fn [r] [r]))))
-                 (fn [] (-> (bounded-loop-wasm-test) (.then (fn [r] [r]))))
-                 (fn [] (-> (wasm-table-test) (.then (fn [r] [r]))))
-                 (fn [] (-> (wasm-table-cos-accuracy-test) (.then (fn [r] [r]))))
-                 (fn [] (instance-independence-tests))
-                 (fn [] (schedule-invariance-tests))
-                 (fn [] (-> (audio-worklet-test :f32)
-                            (.then (fn [a]
-                                     (-> (audio-worklet-test :f64)
-                                         (.then (fn [b] [a b])))))))])))
-      (.then #(wasm-worklet-step :f32 %))
-      (.then #(wasm-worklet-step :f64 %))
-      (.then (fn [results]
-               (render-results! summary results-list results)
-               results))
-      (.catch (fn [error]
-                (let [failure {:name "browser suite"
-                               :passed? false
-                               :detail (or (.-message error) (str error))}
-                      results (conj (or @last-results []) failure)]
+  ([summary results-list] (run-suite! summary results-list nil))
+  ([summary results-list selection]
+   (render-results! summary results-list [])
+   (-> (js/Promise.resolve [])
+       (.then (fn [_]
+                (if (selected? selection "shared process matrix")
+                  (run-process-matrix!)
+                  (js/Promise.resolve []))))
+       (.then (fn [process-results]
+                (-> (if (selected? selection "shared function matrix")
+                      (run-function-matrix!)
+                      (js/Promise.resolve []))
+                    (.then (fn [function-results]
+                             (into process-results function-results))))))
+       (.then (fn [matrix-results]
+                (render-results! summary results-list matrix-results)
+                matrix-results))
+       (.then (fn [matrix-results]
+                (run-promise-sequence
+                 summary results-list matrix-results
+                 (filter
+                  identity
+                  [(when (selected? selection "JavaScript pool host")
+                     (fn [] (-> (javascript-pool-test) (.then (fn [r] [r])))))
+                   (when (selected? selection "Wasm pool host")
+                     (fn [] (-> (wasm-pool-test) (.then (fn [r] [r])))))
+                   (when (selected? selection "JavaScript containment")
+                     (fn [] (-> (javascript-containment-test) (.then (fn [r] [r])))))
+                   (when (selected? selection "Wasm containment")
+                     (fn [] (-> (wasm-containment-test) (.then (fn [r] [r])))))
+                   (when (selected? selection "JavaScript instrument host")
+                     (fn [] (-> (javascript-instrument-test) (.then (fn [r] [r])))))
+                   (when (selected? selection "Wasm instrument host")
+                     (fn [] (-> (wasm-instrument-test) (.then (fn [r] [r])))))
+                   (when (selected? selection "WAT bounded-loop module")
+                     (fn [] (-> (bounded-loop-wasm-test) (.then (fn [r] [r])))))
+                   (when (selected? selection "Wasm sin lookup table")
+                     (fn [] (-> (wasm-table-test) (.then (fn [r] [r])))))
+                   (when (selected? selection "Wasm lookup table cos")
+                     (fn [] (-> (wasm-table-cos-accuracy-test) (.then (fn [r] [r])))))
+                   (when (selected? selection "instance independence")
+                     (fn [] (instance-independence-tests)))
+                   (when (selected? selection "sample-accurate scheduling")
+                     (fn [] (schedule-invariance-tests)))
+                   (when (selected? selection "AudioWorklet")
+                     (fn [] (-> (audio-worklet-test :f32)
+                                (.then (fn [a]
+                                         (-> (audio-worklet-test :f64)
+                                             (.then (fn [b] [a b]))))))))]))))
+       (.then (fn [results]
+                (if (selected? selection "AudioWorklet")
+                  (-> (wasm-worklet-step :f32 results)
+                      (.then (clojure.core/fn [r] (wasm-worklet-step :f64 r))))
+                  (js/Promise.resolve results))))
+       (.then (fn [results]
+                (let [results (if (empty? (or selection []))
+                                results
+                                (filterv (clojure.core/fn [result]
+                                           (or (not (:passed? result))
+                                               (selected? selection (:name result))))
+                                         results))]
                   (render-results! summary results-list results)
-                  results)))))
+                  results)))
+       (.catch (fn [error]
+                 (let [failure {:name "browser suite"
+                                :passed? false
+                                :detail (or (.-message error) (str error))}
+                       results (conj (or @last-results []) failure)]
+                   (render-results! summary results-list results)
+                   results))))))
 
 (defn run-conformance!
-  "Run the complete browser conformance suite and resolve a structured result.
+  "Run the browser conformance suite and resolve a structured result.
+
+  With no argument every check runs. An optional `selection`, a collection of
+  name substrings (`\"instrument\"`, `\"Wasm pool host\"`), runs and returns
+  only the checks whose name matches, so a single check can be iterated on
+  without paying for the rest of the suite.
 
   Safe to call from `cljs-eval` or from a Playwright driver such as
   `omkamra.dsp.harness.browser`.  The result is `{:passed? :passed :total :results}`;
   each entry carries `:name`, `:passed?`, `:detail`, and, for the shared
   matrices, `:targets` and a per-case `:cases` breakdown."
-  []
-  (reset! last-results nil)
-  (let [summary (make-element "strong")
-        results-list (make-element "ul")]
-    (-> (run-suite! summary results-list)
-        (.then
-         (fn [results]
-           (clj->js
-            {:passed? (every? :passed? results)
-             :passed (count (filter :passed? results))
-             :total (count results)
-             :results (mapv #(clj->js (select-keys
-                                       % [:name :passed? :detail :targets :cases]))
-                            results)}))))))
+  ([] (run-conformance! nil))
+  ([selection]
+   (reset! last-results nil)
+   (let [selection (when (seq selection) (mapv str (js->clj selection)))
+         summary (make-element "strong")
+         results-list (make-element "ul")]
+     (-> (run-suite! summary results-list selection)
+         (.then
+          (clojure.core/fn [results]
+            (clj->js
+             {:passed? (every? :passed? results)
+              :passed (count (filter :passed? results))
+              :total (count results)
+              :results (mapv (clojure.core/fn [result]
+                               (clj->js (select-keys
+                                         result [:name :passed? :detail :targets :cases])))
+                             results)})))))))
 
 (defn run-function-case-matrix!
   []

@@ -97,12 +97,16 @@
   - `:server?`   start `:on-demand-http` if needed (default true);
   - `:autorun?`  let the page run on load before the programmatic call
                  (default false).  The programmatic result is returned either
-                 way, but leaving this false avoids running the suite twice.
+                 way, but leaving this false avoids running the suite twice;
+  - `:only`      run only the checks whose name contains one of these
+                 strings, e.g. `[\"instrument\"]` for both instrument hosts or
+                 `[\"Wasm instrument host\"]` for one.  The result then contains
+                 only those checks, which is much faster than the full suite.
 
   Returns `{:passed? boolean :passed int :total int :results [...]}` or a spel
   anomaly map if the browser interaction failed."
   ([] (run! {}))
-  ([{:keys [headless timeout server? autorun? executable-path]
+  ([{:keys [headless timeout server? autorun? executable-path only]
      :or {headless true timeout 60000 server? true autorun? false}}]
    (let [base (if server? (ensure-server!) (server-url))
          url (str base testbed-path (when-not autorun? "?autorun=0"))
@@ -116,8 +120,12 @@
          (spel/with-page [p (spel/new-page browser)]
            (page/navigate p url)
            (page/wait-for-function p ready-hook {:timeout timeout})
-           (let [result (page/evaluate
-                         p "() => window.omkamraDspTestbed.runConformance()")]
+           (let [result (if only
+                          (page/evaluate
+                           p "(selection) => window.omkamraDspTestbed.runConformance(selection)"
+                           (into-array String (map str only)))
+                          (page/evaluate
+                           p "() => window.omkamraDspTestbed.runConformance()"))]
              (if (spel/anomaly? result) result (keywordize result)))))))))
 
 (defn passed?

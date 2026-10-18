@@ -35,7 +35,7 @@
             ;; positional controls, and the array is reused on every block.
             :arguments (js/Array. (+ 3 control-count))
             :scratch (mixing/scratch-buffer f64? channels max-block-frames)
-            :reset! (clojure.core/fn [] (.-reset object))}))
+            :reset! (clojure.core/fn [] (.call (.-reset object) object))}))
        (destroy-voice! [_ voice]
          (when-let [destroy (.-destroy (:object voice))]
            (.call destroy (:object voice))))

@@ -2073,6 +2073,61 @@ that `with-effect` accepts either spelling and lowers identically.
 
 ---
 
+## The reference synth on every target, and the SVF stability bound it exposed
+
+**The portable host.** The reference synthesizer's modulation matrix and render
+loop moved into `omkamra.dsp.reference` (`.cljc`), shared by the JVM example
+(`omkamra.dsp.examples.reference-synth`, which keeps the instrument value and the
+JVM constructor) and the browser hosts. The matrix is pure data and the loop
+touches only the pool API, so the same host code now runs on the interpreter, the
+JVM, JavaScript, and Wasm.
+
+**The browser instrument host.** `/instrument-bundle` serves the full reference
+instrument (voice runtime/ABI/IR, the modulation matrix, and the bus
+ABI/IR/control names), and the testbed renders the reference acceptance phrase —
+note, mod wheel, controller 74, four 64-frame blocks and the same split into
+32-frame blocks — through the browser and interpreter kernels with
+`:containment :off`. JavaScript matches the interpreter exactly and is block-size
+invariant; Wasm runs finite and block-size invariant without a sample
+differential, because its approximated `pow`/`sin` drift through the long
+resonant voice and no meaningful sample tolerance exists (per-operation
+equivalence is the shared process matrix's job).
+
+**The bug it found.** With containment off, the reference voice went non-finite
+under a mod-wheel setting (`controller 1 = 0.7`) that raised the cutoff. The
+`state-variable-filter` docstring claimed stability below `fs/6`, but that bound
+is missing the damping condition: for `f = 2 sin(pi fc/fs)` the Chamberlin SVF is
+stable only while `q > f/(2 - f^2/2)`, which at `fc = fs/6` means `q > 2/3`. The
+voice clamped damping only to `0.05`, so a modulated cutoff could cross the
+boundary. `:reset` containment had hidden it: it silences the *whole block*
+containing a non-finite sample, and silence is finite, so
+`the-filter-stays-stable-under-extreme-modulation` had been passing vacuously.
+The voice now clamps the damping above the bound, with margin, and the reference
+tests run with containment off; `build-instrument` threads `:containment`
+through to the pool so a test can select it.
+
+**Selective execution.** `browser/run!` and the page's `runConformance` accept a
+selection of check-name substrings (`{:only ["instrument"]}`), so one check can
+be iterated on without paying for the suite.
+
+**Containment on every target.** The P10c containment fixtures
+(`containment-runaway-voice`, `containment-loud-voice`, `containment-reset-voice`
+and their descriptions) moved into `omkamra.dsp.harness.fixtures`, shared by the
+JVM synth suite and the browser testbed, and the page now exercises `:reset`,
+`:sanitize`, and `:off` over JavaScript and Wasm pools. The browser check paid for
+itself immediately, finding two real bugs: the JavaScript kernel's `:reset!`
+returned `reset` without calling it, so a `:reset` event counted but never reset
+the voice's state; and the Wasm emitter lowered integer `min`/`max` to
+`i32.min_s`/`i32.max_s`, which are not WebAssembly instructions (the float path
+uses the real `f32.min`/`f32.max`). The JavaScript kernel now calls `reset`, and
+Wasm lowers integer min/max to `select` with a comparison. An unknown containment
+mode is refused by a test too.
+
+**Verified.** JVM 155 tests / 1527 assertions; browser 25/25; `clj-kondo`/`cljfmt`
+clean.
+
+---
+
 ## Handoff — current state (rolling entry)
 
 This is the one living entry, as opposed to the completed-phase entries above:
@@ -2144,12 +2199,13 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   stateless CSE) and that argument hoisting is in place.
 - **Removed from the pool:** `:unison`, `unison-detune`, the unison branch; the
   mode set is `{poly, mono, legato, retrigger}`.
-- **Tests.** JVM `(omkamra.dsp.tests.suite/run-all)` — 154 tests / 1525
+- **Tests.** JVM `(omkamra.dsp.tests.suite/run-all)` — 155 tests / 1527
   assertions; browser `(omkamra.dsp.harness.browser/run! {:server? false})` —
-  23/23. The reference voice's stereo stage (`:pan-left`, `:pan-right`) and the
+  25/25. The reference voice's stereo stage (`:pan-left`, `:pan-right`) and the
   pitch conversion (`:pitch->frequency`) are now shared-catalog cases, so they
   run on the interpreter and every backend, browser included, instead of the JVM
-  alone. See `TESTING.md`.
+  alone; the reference instrument and all three containment policies run on the
+  browser hosts too. See `TESTING.md`.
 - **P10d — stereo (D40, in progress).** The compiler model is now *one evaluation
   per frame*, not run-per-channel: the four targets lost their channel loop, the
   implicit `channel` is 0, a `:void` body that writes `:output` (a process, by

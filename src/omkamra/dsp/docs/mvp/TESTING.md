@@ -67,7 +67,7 @@ Evaluate in the dev nREPL:
 ```clojure
 (require 'omkamra.dsp.tests.suite)
 (omkamra.dsp.tests.suite/run-all)
-;; => {:test 154, :pass 1525, :fail 0, :error 0}
+;; => {:test 155, :pass 1527, :fail 0, :error 0}
 ```
 
 With `clojure_eval`, send that whole form as one expression.
@@ -98,7 +98,7 @@ Notable groups:
 - `jvm-unchecked-process-adapter-does-not-allocate-after-warmup` — allocation
   regression guard for the real-time process path.
 
-Expected baseline: **154 tests, 1525 assertions, 0 failures**.
+Expected baseline: **155 tests, 1527 assertions, 0 failures**.
 
 ---
 
@@ -114,7 +114,15 @@ Evaluate in the dev nREPL:
 ```clojure
 (require '[omkamra.dsp.harness.browser :as browser])
 (browser/run!)
-;; => {:passed? true, :passed 23, :total 23, :results [...]}
+;; => {:passed? true, :passed 25, :total 25, :results [...]}
+```
+
+Run one check while iterating — `:only` matches check names, and the result
+contains only the selected checks:
+
+```clojure
+(browser/run! {:only ["instrument"]})
+;; => runs just the two instrument hosts
 ```
 
 The browser suite is a **differential** test: it runs the portable
@@ -205,13 +213,23 @@ automatic run.
 7. the **pool hosts** — `omkamra.dsp.hosts.js` and `omkamra.dsp.hosts.wasm`
    driving `omkamra.dsp.synth.pool`, each compared against the interpreter pool
    over the same events (P10d);
-8. the **instrument hosts** (P11c) — the same two hosts driving a whole
-   instrument: a voice pool plus a post-mix bus (one instance per channel),
-   compared against the interpreter doing the same and checked for block-size
-   invariance.
+8. the **instrument hosts** (P11c) — the same two hosts driving the full
+   reference synthesizer: its voice pool, modulation matrix (the portable
+   `omkamra.dsp.reference` host), and post-mix bus (one instance per channel),
+   checked for finiteness and block-size invariance. JavaScript is also compared
+   sample-for-sample against the interpreter (exact, both use `Math`); Wasm is
+   not, because its approximated `pow`/`sin` drift through the long resonant
+   voice, so per-operation equivalence there is left to the shared process
+   matrix;
+9. the **containment policies** (P10c) — `:reset`, `:sanitize`, and `:off`
+   exercised on JavaScript and Wasm: `:reset` silences a non-finite block,
+   resets the voice, and counts each event; `:sanitize` contains the sample
+   without resetting and clamps a finite runaway to the ceiling; `:off` lets a
+   non-finite sample reach the block.
 
-The pool host checks are the only ones that exercise the sequencing layer rather
-than a single kernel. The page fetches a compiled voice — `/synth-bundle` carries
+The pool and instrument host checks are the ones that exercise the sequencing
+layer rather than a single kernel. The page fetches a compiled voice —
+`/synth-bundle` carries
 its runtime configuration, ABI, and interpreter IR (and, for `?target=wasm`, the
 module's WAT and linear-memory layout), and `/synth-source` its JavaScript module
 — plays one note through a pool over each kernel, and compares the rendered block

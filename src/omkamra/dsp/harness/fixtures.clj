@@ -6,8 +6,6 @@
             ;; are already loaded. A require whose names appear nowhere in code
             ;; is still doing work here.
             [omkamra.dsp.harness.call-fixture]
-            [omkamra.dsp.instrument :as instrument]
-            [omkamra.dsp.library.delay]
             [omkamra.dsp.library.envelope]
             [omkamra.dsp.library.filter :as filter]
             [omkamra.dsp.library.oscillator]
@@ -473,13 +471,45 @@
    :voice {:definition #'browser-stereo-voice
            :controls {:gate {:source :gate}}}})
 
-(def browser-instrument
-  "The browser differential fixture for the instrument host (P11c): the stereo
-  voice plus a post-mix chorus and a feedback delay. The delay makes the check
-  exercise the large-state bus kernel and its tail on every backend; the
-  controls are symbols, so they are global and host-set."
-  (-> (instrument/instrument browser-stereo-description)
-      (instrument/with-effect omkamra.dsp.library.delay/chorus
-        ['chorus-rate 'chorus-depth 'chorus-mix])
-      (instrument/with-effect omkamra.dsp.library.delay/feedback-delay
-        ['delay-time 'delay-feedback 'delay-mix])))
+;; ---------------------------------------------------------------------------
+;; The containment fixtures (P10c)
+;; ---------------------------------------------------------------------------
+;;
+;; Shared by the JVM suite (`omkamra.dsp.tests.synth`) and the browser testbed,
+;; so the containment policies are exercised against the same voices everywhere.
+(dsp/defn containment-runaway-voice
+  "Divides a constant by the gate, so a released voice produces an infinity."
+  [gate note]
+  {:process {:input false}}
+  (/ 1.0 gate))
+
+(dsp/defn containment-loud-voice
+  "Multiplies by a huge constant, so a held voice produces a finite runaway."
+  [gate note]
+  {:process {:input false}}
+  (* gate 1.0e9))
+
+(dsp/defn containment-reset-voice
+  "Divides by an ascending age starting at 0, so the first block is non-finite
+  and later blocks are finite; `:reset` returns the age to 0, `:sanitize` does
+  not."
+  [gate note]
+  {:process {:input false}
+   :state [{:name age :type :int :init 0
+            :next (min 2 (+ age 1))}]}
+  (/ 1.0 (int->float age)))
+
+(def containment-runaway-description
+  {:id :containment-runaway :capacity 1 :mode :poly :max-block-frames 64
+   :voice {:definition #'containment-runaway-voice
+           :controls {:gate {:source :gate} :note {:source :note}}}})
+
+(def containment-loud-description
+  {:id :containment-loud :capacity 1 :mode :poly :max-block-frames 64
+   :voice {:definition #'containment-loud-voice
+           :controls {:gate {:source :gate} :note {:source :note}}}})
+
+(def containment-reset-description
+  {:id :containment-reset :capacity 1 :mode :poly :max-block-frames 64
+   :voice {:definition #'containment-reset-voice
+           :controls {:gate {:source :gate} :note {:source :note}}}})

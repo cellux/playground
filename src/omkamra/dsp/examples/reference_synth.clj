@@ -36,9 +36,10 @@
 
   **The host is portable in shape.** The instrument wraps a live pool and keeps
   only primitive arrays, so the matrix and render loop touch nothing but the
-  pool API; the JVM constructor is the only part that reaches for the compiler.
-  This namespace is `.clj` because P11a builds and checks the instrument on the
-  JVM; P11c extracts the portable half into `.cljc` for the browser hosts."
+  pool API. That portable half — the modulation matrix and the render loop — now
+  lives in `omkamra.dsp.reference` (`.cljc`) and is shared with the browser
+  hosts; this namespace keeps the instrument value and the JVM constructor, which
+  is the only part that reaches for the compiler."
   (:require [omkamra.dsp :as dsp]
             [omkamra.dsp.combinators :as comb]
             [omkamra.dsp.hosts.instrument :as inst-host]
@@ -50,7 +51,7 @@
             [omkamra.dsp.library.noise]
             [omkamra.dsp.library.oscillator]
             [omkamra.dsp.library.pitch]
-            [omkamra.dsp.synth.pool :as pool]))
+            [omkamra.dsp.reference :as reference]))
 
 ;; ---------------------------------------------------------------------------
 ;; The oscillator bank
@@ -100,9 +101,9 @@
   shaped by an amp envelope and a resonant state-variable lowpass whose cutoff
   is opened by a second envelope, then soft-clipped.
 
-  The filter cutoff is clamped below a sixth of the sample rate, which is the
-  Chamberlin SVF's documented stability bound, so a modulated cutoff cannot
-  drive it unstable."
+  The filter cutoff is clamped below a sixth of the sample rate, and the damping
+  is clamped above the Chamberlin SVF's stability bound for the resulting
+  cutoff, so a modulated cutoff cannot drive the filter unstable."
   [gate note bend detune
    osc-mix pulse-width pwm-depth sync-mix sync-ratio
    noise-level
@@ -132,7 +133,15 @@
         signal (* amp (+ osc (* noise-level noise)))
         modulated-cutoff (clamp (* cutoff (+ 1.0 (* filter-amount filter-env)))
                                 20.0 8000.0)
-        damping (max resonance 0.05)
+        ;; The Chamberlin SVF is stable only while its damping exceeds
+        ;; `f / (2 - f^2/2)`, where `f = 2 sin(pi fc/fs)`. The cutoff clamp
+        ;; alone is not enough: at `fc = fs/6`, `f` is 1 and the damping must
+        ;; exceed 2/3, well above this voice's low-resonance settings. Clamp the
+        ;; damping up, with margin, so a modulated cutoff cannot drive the filter
+        ;; unstable and an approximate `sin` cannot sit it on the boundary.
+        filter-f (* 2.0 (sin (* 3.141592653589793 (/ modulated-cutoff sample-rate))))
+        min-damping (* 1.25 (/ filter-f (- 2.0 (* (* 0.5 filter-f) filter-f))))
+        damping (max (max resonance 0.05) min-damping)
         filtered (omkamra.dsp.library.filter/state-variable-filter
                   signal modulated-cutoff damping)]
     (omkamra.dsp.library.effect/distortion (:low filtered) drive)))
@@ -234,61 +243,9 @@
      :vibrato-depth {:constant 5.0}
      :drive {:constant 1.0}}}})
 
-;; ---------------------------------------------------------------------------
-;; The modulation matrix
-;; ---------------------------------------------------------------------------
-
-(def modulation-matrix
-  "The reference instrument's modulation matrix, as pure data.
-
-  Rows are *sources*; each row routes that source to one or more
-  `{:target control :depth amount}` entries, applied as
-  `value = base + depth x source-value`. Sources are the per-voice
-  `:velocity` and `:note` (in octaves from middle C, so a depth is a musical
-  distance), or a global MIDI controller `{:controller n}` in 0..1.
-
-  Pitch (`bend`, `detune`) is deliberately absent: it is a standard source the
-  voice consumes directly (D35), not a route onto another control.
-
-  This is host-side policy, deliberately not core (D34). It is studied at the
-  end of P11 to see whether any of it should be promoted, and in what form."
-  [{:source :velocity
-    :routes [{:target :cutoff :depth 1800.0}
-             {:target :resonance :depth -0.15}
-             {:target :osc-mix :depth 0.25}]}
-   {:source :note
-    :routes [{:target :cutoff :depth 1200.0}
-             {:target :pulse-width :depth 0.15}]}
-   {:source {:controller 1}
-    :routes [{:target :cutoff :depth 3000.0}
-             {:target :resonance :depth -0.25}
-             {:target :pulse-width :depth 0.3}
-             {:target :pan :depth 0.5}]}
-   {:source {:controller 74}
-    :routes [{:target :osc-mix :depth 0.5}
-             {:target :sync-mix :depth 0.4}
-             {:target :noise-level :depth 0.2}]}])
-
-(def ^:private controller-count 128)
-
-(defn- compile-matrix
-  "Flatten the matrix into routes with a resolved control `:position`, once, at
-  construction. A target the voice does not declare is refused here rather than
-  silently dropping modulation."
-  [positions]
-  (into []
-        (mapcat (fn [{:keys [source routes]}]
-                  (mapv (fn [{:keys [target depth]}]
-                          (let [target (name target)]
-                            (when-not (contains? positions target)
-                              (throw (ex-info "the modulation matrix names an unknown target"
-                                              {:target target
-                                               :targets (vec (sort (keys positions)))})))
-                            {:source source
-                             :position (long (get positions target))
-                             :depth (double depth)}))
-                        routes)))
-        modulation-matrix))
+;; The modulation matrix and the loop that applies it live in
+;; `omkamra.dsp.reference`, so the browser hosts run the same host code; see
+;; `reference/modulation-matrix` and `reference/new-host`.
 
 ;; ---------------------------------------------------------------------------
 ;; The instrument
@@ -304,7 +261,7 @@
   by the arguments, so they are global — not per voice — and the host sets them.
   The delay is last, so its feedback tail continues after the voices stop."
   (-> (inst/instrument description)
-      (inst/routes modulation-matrix)
+      (inst/routes reference/modulation-matrix)
       (inst/with-effect omkamra.dsp.library.delay/chorus
         [:chorus-rate :chorus-depth :chorus-mix])
       (inst/with-effect omkamra.dsp.library.effect/distortion
@@ -314,8 +271,8 @@
 
 (defn build-instrument
   "Build a live reference instrument from an `omkamra.dsp.instrument` value:
-  lower it to a program, create the live pool and bus, and add the host-side
-  modulation storage (the reference matrix).
+  lower it to a program, create the live pool and bus, and add the portable
+  matrix host (`omkamra.dsp.reference`).
 
   Exposed so a test can lower a *variant* of the instrument — for example the
   same voice with no post-mix chain — and compare. `compile-options` selects the
@@ -324,32 +281,18 @@
    (build-instrument value {}))
   ([value compile-options]
    (let [program (inst-host/compile-instrument value compile-options)
-         live (inst-host/instrument-pool program)
+         live (inst-host/instrument-pool
+               program (select-keys compile-options [:containment]))
          live-pool (inst-host/pool-of live)
          plan (vec (:control-plan (get-in program [:bundle :runtime])))
-         positions (into {} (map-indexed (fn [index entry]
-                                           [(name (:control entry)) index])
-                                         plan))
-         capacity (long (pool/pool-capacity live-pool))]
+         matrix (or (:routes value) reference/modulation-matrix)]
      (when (seq (:bus-control-names live))
        (doseq [[control value] [['chorus-rate 0.6] ['chorus-depth 12.0]
                                 ['chorus-mix 0.35] ['drive 1.5]
                                 ['delay-time 12000.0] ['delay-feedback 0.45]
                                 ['delay-mix 0.35]]]
          (inst-host/set-bus-control! live control value)))
-     (merge live
-            {:plan plan
-             :positions positions
-             :routes (object-array (compile-matrix positions))
-             :capacity capacity
-             ;; One control scratch, reused for every voice and block: the pool
-             ;; copies. The host-side sources the routes read: gate, note, bend,
-             ;; detune, and pan come from the pool's plan; velocity and the
-             ;; controller bank live here.
-             :values (double-array (pool/control-count live-pool))
-             :notes (long-array capacity)
-             :velocities (double-array capacity)
-             :controllers (double-array controller-count)}))))
+     (merge live (reference/new-host live-pool plan matrix)))))
 
 (defn reference-synth
   "Build the reference instrument (see `reference-instrument`)."
@@ -363,93 +306,55 @@
 ;; ---------------------------------------------------------------------------
 
 (defn note-on!
-  "Start `note` at `velocity`, returning the voice index it took. The host keeps
-  the note and velocity for that index, because the matrix reads them as
-  sources and the pool may have stolen the voice."
-  ([instrument note] (note-on! instrument note 1.0))
-  ([instrument note velocity]
-   (let [index (long (pool/note-on! (:pool instrument) note velocity))]
-     (aset ^longs (:notes instrument) index (long note))
-     (aset ^doubles (:velocities instrument) index (double velocity))
-     index)))
+  "Start `note` at `velocity`, returning the voice index it took."
+  ([instrument note] (reference/note-on! instrument note))
+  ([instrument note velocity] (reference/note-on! instrument note velocity)))
 
 (defn note-off!
   "Release every voice sounding `note`. Returns how many the pool released."
   [instrument note]
-  (pool/note-off! (:pool instrument) note))
+  (reference/note-off! instrument note))
 
 (defn all-notes-off!
   "Release every sounding voice."
   [instrument]
-  (pool/all-notes-off! (:pool instrument)))
+  (reference/all-notes-off! instrument))
 
 (defn set-controller!
   "Set controller `controller` (0..127) to `value` (0..1). Global: it applies to
   every voice on the next block."
   [instrument controller value]
-  (aset ^doubles (:controllers instrument) (long controller) (double value))
-  nil)
+  (reference/set-controller! instrument controller value))
 
 (defn set-pitch-bend!
   "Set channel `channel`'s pitch bend, in -1..1; the pool scales it by the
   description's `:bend-range` and delivers it as `bend` in cents."
   [instrument channel value]
-  (pool/set-pitch-bend! (:pool instrument) channel value))
+  (reference/set-pitch-bend! instrument channel value))
 
 (defn set-pan!
   "Set voice `index`'s pan position in -1..1 (`:pan` is a standard source)."
   [instrument index value]
-  (pool/set-pan! (:pool instrument) index value))
+  (reference/set-pan! instrument index value))
 
 ;; ---------------------------------------------------------------------------
 ;; Routing and rendering
 ;; ---------------------------------------------------------------------------
 
-(defn- modulate!
-  "Apply every matrix route to `values` for voice `index`, in route order.
-
-  The instrument is passed whole rather than decomposed so the fn stays under
-  Clojure's four-argument limit for primitive-hinted parameters; the array
-  lookups it does are per voice, not per sample."
-  [instrument ^doubles values ^long index]
-  (let [^objects routes (:routes instrument)
-        ^longs notes (:notes instrument)
-        ^doubles velocities (:velocities instrument)
-        ^doubles controllers (:controllers instrument)]
-    (dotimes [route-index (alength routes)]
-      (let [route (aget routes route-index)
-            source (:source route)
-            position (long (:position route))
-            source-value (if (keyword? source)
-                           (case source
-                             :velocity (aget velocities index)
-                             :note (/ (- (double (aget notes index)) 60.0) 12.0))
-                           (aget controllers (long (:controller source))))]
-        (aset values position
-              (double (+ (aget values position)
-                         (* (double (:depth route)) source-value)))))))
-  values)
-
 (defn render!
   "Render `frames` samples of the reference instrument into `output`, applying
   the modulation matrix.
 
-  For every voice the pool resolves its plan (gate, note, bend, detune, pan),
-  the matrix adds its per-source deltas, and the result is published back, then
-  the pool mixes every sounding voice into `output`. `output` is a planar block
-  (an array of channel arrays) for the stereo voice. Allocates nothing."
+  The matrix loop is `omkamra.dsp.reference/apply-modulation!`, shared with the
+  browser hosts; the pool and bus render is `inst-host/render!`. `output` is a
+  planar block (an array of channel arrays) for the stereo voice. Allocates
+  nothing."
   ([instrument output frames]
    (render! instrument output frames (:sample-rate instrument)))
   ([instrument output frames sample-rate]
-   (let [pool (:pool instrument)
-         ^doubles values (:values instrument)
-         capacity (long (:capacity instrument))]
-     (dotimes [index capacity]
-       (pool/read-controls! pool index values)
-       (modulate! instrument values index)
-       (pool/set-voice-controls! pool index values))
-     (inst-host/render! instrument output frames sample-rate)
-     nil)))
+   (reference/apply-modulation! instrument)
+   (inst-host/render! instrument output frames sample-rate)
+   nil))
 
 (defn set-effect-control!
   "Set a global post-mix control by name (for example `'chorus-mix`)."

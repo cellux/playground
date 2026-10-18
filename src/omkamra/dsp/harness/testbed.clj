@@ -7,6 +7,7 @@
             [omkamra.dsp.harness.catalog :as catalog]
             [omkamra.dsp.harness.conformance :as conformance]
             [omkamra.dsp.harness.fixtures :as fixtures]
+            [omkamra.dsp.examples.reference-synth :as reference-synth]
             [omkamra.dsp.hosts :as hosts]
             [omkamra.dsp.hosts.instrument :as instrument-host]
             [squint.compiler :as squint]))
@@ -241,32 +242,35 @@
   (keyword (or (request-parameter request "target") "js")))
 
 (defn- browser-synth-bundle
-  [target precision]
-  (hosts/synth-bundle fixtures/browser-stereo-description
-                      {:target target :precision precision}))
+  ([target precision] (browser-synth-bundle target precision fixtures/browser-stereo-description))
+  ([target precision description]
+   (hosts/synth-bundle description {:target target :precision precision})))
 
-(defn synth-bundle
-  "Serve the compiled voice's runtime configuration, ABI, and interpreter IR.
+(defn- bundle-response
+  "Serialize a synth bundle for the page, as EDN.
 
   `:runtime` is the sequencing half and is pure data; `:abi` says what the kernel
   looks like; `:ir` travels as EDN text so the page runs the same reference
   interpreter the JVM suite does. That is what makes the browser check a
   differential test rather than a comparison against shipped vectors. A `:wasm`
   bundle also carries the module's WAT and its linear-memory layout."
+  [target {:keys [runtime artifact]}]
+  {:status 200
+   :headers {"content-type" "application/edn; charset=utf-8"
+             "cache-control" "no-store"}
+   :body (pr-str (cond-> {:runtime runtime
+                          :abi (:abi artifact)
+                          :ir (pr-str (:ir artifact))
+                          :precision (:precision artifact)
+                          :target target}
+                   (= :wasm target)
+                   (assoc :wat (:wat artifact) :memory (:memory artifact))))})
+
+(defn synth-bundle
+  "Serve the compiled voice's runtime configuration, ABI, and interpreter IR."
   [request]
-  (let [target (requested-target request)
-        precision (requested-precision request)
-        {:keys [runtime artifact]} (browser-synth-bundle target precision)]
-    {:status 200
-     :headers {"content-type" "application/edn; charset=utf-8"
-               "cache-control" "no-store"}
-     :body (pr-str (cond-> {:runtime runtime
-                            :abi (:abi artifact)
-                            :ir (pr-str (:ir artifact))
-                            :precision (:precision artifact)
-                            :target target}
-                     (= :wasm target)
-                     (assoc :wat (:wat artifact) :memory (:memory artifact))))}))
+  (let [target (requested-target request)]
+    (bundle-response target (browser-synth-bundle target (requested-precision request)))))
 
 (defn synth-source
   "Serve the compiled voice as a JavaScript ES module."
@@ -274,19 +278,49 @@
   (javascript-response
    (:source (:artifact (browser-synth-bundle :js (requested-precision request))))))
 
+(defn- containment-description
+  "Select one of the shared containment fixtures (P10c) by `?case=`."
+  [request]
+  (case (or (request-parameter request "case") "reset")
+    "runaway" fixtures/containment-runaway-description
+    "loud" fixtures/containment-loud-description
+    fixtures/containment-reset-description))
+
+(defn containment-bundle
+  "Serve a containment fixture's runtime, ABI, interpreter IR, and Wasm layout.
+
+  `?case=` selects the reset-and-recover voice (`reset`, the default), the
+  random runaway (`runaway`), or the finite runaway (`loud`)."
+  [request]
+  (let [target (requested-target request)]
+    (bundle-response target
+                     (browser-synth-bundle target (requested-precision request)
+                                           (containment-description request)))))
+
+(defn containment-source
+  "Serve a containment fixture's JavaScript module as an ES module."
+  [request]
+  (javascript-response
+   (:source (:artifact (browser-synth-bundle :js (requested-precision request)
+                                             (containment-description request))))))
+
 ;; ---------------------------------------------------------------------------
 ;; The instrument host (P11c)
 ;; ---------------------------------------------------------------------------
 
 (defn- browser-instrument-program
   [target precision]
-  (instrument-host/compile-instrument fixtures/browser-instrument
+  ;; The full reference synthesizer, so the browser check is an end-to-end check
+  ;; of the whole system: the same voice, modulation matrix, and post-mix chain
+  ;; the JVM suite renders.
+  (instrument-host/compile-instrument reference-synth/reference-instrument
                                       {:target target :precision precision}))
 
 (defn instrument-bundle
-  "Serve the compiled instrument fixture: the voice's runtime configuration, ABI,
-  and interpreter IR, plus the post-mix bus's ABI and IR. A `:wasm` bundle also
-  carries both modules' WAT and memory layouts."
+  "Serve the compiled reference instrument: the voice's runtime configuration,
+  ABI, and interpreter IR, the modulation matrix, and the post-mix bus's ABI,
+  IR, and control names. A `:wasm` bundle also carries both modules' WAT and
+  memory layouts."
   [request]
   (let [target (requested-target request)
         precision (requested-precision request)
@@ -298,10 +332,16 @@
                "cache-control" "no-store"}
      :body (pr-str
             (cond-> {:runtime (get-in program [:bundle :runtime])
+                     ;; The modulation matrix travels as data; the page compiles
+                     ;; it against the runtime plan with the shared
+                     ;; `omkamra.dsp.reference` host.
+                     :routes (:routes program)
                      :voice-abi (:abi voice)
                      :voice-ir (pr-str (:ir voice))
                      :bus-abi (when bus (:abi bus))
                      :bus-ir (when bus (pr-str (:ir bus)))
+                     :bus-control-names (when bus
+                                          (mapv :name (get-in bus [:abi :controls])))
                      :precision precision
                      :target target}
               (= :wasm target)
@@ -311,8 +351,8 @@
                      :bus-memory (when bus (:memory bus)))))}))
 
 (defn instrument-source
-  "Serve the instrument fixture's JavaScript modules as EDN text: the voice's and
-  the bus's, so the page can import each."
+  "Serve the reference instrument's JavaScript modules as EDN text: the voice's
+  and the bus's, so the page can import each."
   [request]
   (let [program (browser-instrument-program :js (requested-precision request))
         voice (:artifact (:bundle program))
