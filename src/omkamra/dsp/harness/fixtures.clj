@@ -6,6 +6,8 @@
             ;; are already loaded. A require whose names appear nowhere in code
             ;; is still doing work here.
             [omkamra.dsp.harness.call-fixture]
+            [omkamra.dsp.instrument :as instrument]
+            [omkamra.dsp.library.delay]
             [omkamra.dsp.library.envelope]
             [omkamra.dsp.library.filter :as filter]
             [omkamra.dsp.library.oscillator]
@@ -470,3 +472,14 @@
    :max-block-frames 128
    :voice {:definition #'browser-stereo-voice
            :controls {:gate {:source :gate}}}})
+
+(def browser-instrument
+  "The browser differential fixture for the instrument host (P11c): the stereo
+  voice plus a post-mix chorus and a feedback delay. The delay makes the check
+  exercise the large-state bus kernel and its tail on every backend; the
+  controls are symbols, so they are global and host-set."
+  (-> (instrument/instrument browser-stereo-description)
+      (instrument/with-effect omkamra.dsp.library.delay/chorus
+        ['chorus-rate 'chorus-depth 'chorus-mix])
+      (instrument/with-effect omkamra.dsp.library.delay/feedback-delay
+        ['delay-time 'delay-feedback 'delay-mix])))

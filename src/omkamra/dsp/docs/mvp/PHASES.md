@@ -441,6 +441,18 @@ in P10b-ii; 5 across P10c and P10d.
    noise, event-boundary correctness, non-finite containment, and zero
    allocation after initialization.
 
+**Status.** Complete. P11a delivered the reference instrument and its modulation
+matrix (`omkamra.dsp.examples.reference-synth`); P11b the Clojure-level
+instrument graph and a post-mix chain (chorus, distortion, and a musical
+feedback delay), lowered to a program (D42); P11c all-backend offline rendering,
+with a JavaScript/Wasm bus host and an instrument host check in the browser;
+P11d the property battery (filter stability under modulation, zipper-noise
+smoothing, containment, allocation, aliasing, event boundaries). See `DIARY.md`
+for P11a–P11d and `DECISIONS.md` D42. The browser instrument check uses a fixture
+instrument rather than the full reference synth; the bus DSP and the reference
+instrument's own checks cover that gap, and the phase ends with a refinement
+round over D42's graph and D34's matrix.
+
 ---
 
 ## P12 — Complete Wasm artifacts and memory ABI

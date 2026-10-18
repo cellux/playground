@@ -1335,6 +1335,145 @@
                    (wasm-host/wasm-kernel module abi (:memory bundle)
                                           {:precision (:precision bundle)}))))))))))
 
+;; ---------------------------------------------------------------------------
+;; The browser instrument host: a voice pool plus a post-mix bus (P11c)
+;; ---------------------------------------------------------------------------
+
+(defn- interpreter-bus-runner
+  "A bus runner over the in-page interpreter: one state per channel, run with the
+  channel array as both input and output."
+  [bus-ir controls]
+  {:create-bus
+   (clojure.core/fn [] {:state (interpreter/create-state bus-ir)})
+   :run-bus!
+   (clojure.core/fn [bus input output frames sample-rate _controls]
+     (interpreter/process-context
+      bus-ir
+      {:input input :output output :frames frames
+       :sample-rate sample-rate :controls controls :state (:state bus)}))
+   :reset-bus!
+   (clojure.core/fn [bus] (interpreter/reset-state! bus-ir (:state bus)))})
+
+(defn- channel-concat
+  "Concatenate a sequence of per-block channel vectors into one channel vector
+  per channel, so renders with different block sizes are comparable."
+  [blocks]
+  (apply mapv (clojure.core/fn [& channels] (vec (apply concat channels)))
+         blocks))
+
+(defn- play-instrument
+  "Play one note through `pool`, running `bus-runner` over each channel after
+  every block. Returns the held and released blocks as channel sample vectors."
+  [pool channels bus-runner bus-controls block-sizes]
+  (let [buses (mapv (clojure.core/fn [_] ((:create-bus bus-runner)))
+                    (range channels))
+        render-block
+        (clojure.core/fn [frames]
+          (let [block (planar-block channels frames)]
+            (pool/render! pool block frames 48000.0)
+            (dotimes [channel channels]
+              ((:run-bus! bus-runner) (nth buses channel)
+                                      (aget block channel) (aget block channel)
+                                      frames 48000.0 bus-controls))
+            (mapv (clojure.core/fn [channel]
+                    (vec (array-seq (aget block channel))))
+                  (range channels))))]
+    (pool/note-on! pool 60 1.0)
+    (let [held (mapv render-block block-sizes)]
+      (pool/note-off! pool 60)
+      {:held (channel-concat held)
+       :released (channel-concat [(render-block 1)])})))
+
+(defn- check-instrument-host
+  "Compare an instrument render over a browser pool + bus against the interpreter
+  doing the same, and check block-size invariance.
+
+  `voice-kernel` is the browser voice kernel; `bus-runner` the browser bus. The
+  interpreter side uses the IR served in the bundle. The buses are rebuilt for
+  each render, so the comparison starts from a fresh state."
+  [name bundle channels voice-kernel bus-runner]
+  (let [voice-ir (reader/read-string (:voice-ir bundle))
+        bus-ir (reader/read-string (:bus-ir bundle))
+        controls [0.6 12.0 0.35 6.0 0.4 0.5]
+        render (clojure.core/fn [make-pool block-sizes]
+                 (play-instrument (make-pool) channels bus-runner
+                                  (clj->js controls) block-sizes))
+        browser-pool (clojure.core/fn []
+                       (pool/voice-pool (:runtime bundle) voice-kernel))
+        interpreter-pool (clojure.core/fn []
+                           (pool/voice-pool
+                            (:runtime bundle)
+                            (interpreter-host/interpreter-kernel
+                             voice-ir (:voice-abi bundle))))
+        actual (render browser-pool [4 4])
+        split (render browser-pool [1 1 1 1 1 1 1 1])
+        expected (play-instrument (interpreter-pool) channels
+                                  (interpreter-bus-runner bus-ir controls)
+                                  controls [4 4])]
+    (require! (= actual expected)
+              (str name " drifted from the interpreter: "
+                   (pr-str actual) " vs " (pr-str expected)))
+    (require! (= actual split)
+              (str name " changed when its held blocks were split"))
+    {:name name
+     :passed? true
+     :detail (str "pool + post-mix bus matched the interpreter over "
+                  channels " channels, and was block-size invariant")}))
+
+(defn- javascript-instrument-test
+  []
+  (-> (js/Promise.all
+       #js [(fetch-edn "/omkamra/dsp/harness/testbed/instrument-bundle")
+            (fetch-edn "/omkamra/dsp/harness/testbed/instrument-source")])
+      (.then
+       (clojure.core/fn [[bundle sources]]
+         (let [voice-blob (js/Blob. #js [(:voice sources)]
+                                    #js {:type "text/javascript"})
+               bus-blob (js/Blob. #js [(:bus sources)]
+                                  #js {:type "text/javascript"})
+               voice-url (js/URL.createObjectURL voice-blob)
+               bus-url (js/URL.createObjectURL bus-blob)]
+           (-> (js/Promise.all #js [(dynamic-import voice-url)
+                                    (dynamic-import bus-url)])
+               (.then
+                (clojure.core/fn [[voice-module bus-module]]
+                  (let [channels (long (get-in bundle [:voice-abi :channels :count]))
+                        voice-kernel
+                        (js-host/js-kernel (gobj/get voice-module "createKernel")
+                                           (:voice-abi bundle)
+                                           {:precision (:precision bundle)})
+                        bus-runner
+                        (js-host/js-bus-kernel (gobj/get bus-module "createKernel")
+                                               (:bus-abi bundle))]
+                    (check-instrument-host "JavaScript instrument host"
+                                           bundle channels voice-kernel bus-runner))))
+               (.finally (clojure.core/fn []
+                           (js/URL.revokeObjectURL voice-url)
+                           (js/URL.revokeObjectURL bus-url)))))))))
+
+(defn- wasm-instrument-test
+  []
+  (-> (fetch-edn "/omkamra/dsp/harness/testbed/instrument-bundle?target=wasm")
+      (.then
+       (clojure.core/fn [bundle]
+         (-> (js/Promise.all #js [(compile-wasm (:voice-wat bundle))
+                                  (compile-wasm (:bus-wat bundle))])
+             (.then
+              (clojure.core/fn [[voice-bytes bus-bytes]]
+                (let [voice-module (js/WebAssembly.Module. voice-bytes)
+                      bus-module (js/WebAssembly.Module. bus-bytes)
+                      channels (long (get-in bundle [:voice-abi :channels :count]))
+                      voice-kernel
+                      (wasm-host/wasm-kernel voice-module (:voice-abi bundle)
+                                             (:voice-memory bundle)
+                                             {:precision (:precision bundle)})
+                      bus-runner
+                      (wasm-host/wasm-bus-kernel bus-module (:bus-abi bundle)
+                                                 (:bus-memory bundle)
+                                                 (:precision bundle))]
+                  (check-instrument-host "Wasm instrument host"
+                                         bundle channels voice-kernel bus-runner)))))))))
+
 (defn- run-suite!
   [summary results-list]
   (render-results! summary results-list [])
@@ -1352,6 +1491,8 @@
                 summary results-list matrix-results
                 [(fn [] (-> (javascript-pool-test) (.then (fn [r] [r]))))
                  (fn [] (-> (wasm-pool-test) (.then (fn [r] [r]))))
+                 (fn [] (-> (javascript-instrument-test) (.then (fn [r] [r]))))
+                 (fn [] (-> (wasm-instrument-test) (.then (fn [r] [r]))))
                  (fn [] (-> (bounded-loop-wasm-test) (.then (fn [r] [r]))))
                  (fn [] (-> (wasm-table-test) (.then (fn [r] [r]))))
                  (fn [] (-> (wasm-table-cos-accuracy-test) (.then (fn [r] [r]))))

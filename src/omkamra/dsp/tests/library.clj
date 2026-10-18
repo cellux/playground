@@ -248,3 +248,33 @@
             (str "centre right on " target))
         (is (< (Math/abs (- (+ (* left left) (* right right)) 1.0)) 1.0e-5)
             (str "centre keeps power on " target))))))
+
+(deftest feedback-delay-echoes-and-keeps-its-tail
+  ;; `delay-line` is 64 samples; this is the musical-length line. An impulse
+  ;; makes the echo timing exact: mix 1 removes the dry signal, so the output is
+  ;; silence until the tap at `time`, then the feedback repeats, each echo
+  ;; smaller than the last.
+  (let [render (fn [controls target frames]
+                 (let [artifact (dsp/compile #'delay/feedback-delay
+                                             {:target target :entry :process})
+                       input (float-array frames)
+                       output (float-array frames)]
+                   (aset ^floats input 0 (float 1.0))
+                   (dsp/process! artifact {:input input :output output
+                                           :frames frames :sample-rate 48000.0
+                                           :controls controls})
+                   (vec output)))
+        magnitude (fn [samples index] (Math/abs (double (nth samples index))))]
+    (let [single (render [6.0 0.0 1.0] :interpreter 16)]
+      (is (< (magnitude single 0) 1.0e-6)
+          "mix 1 removes the dry signal, so the impulse itself is silent")
+      (is (< (magnitude single 5) 1.0e-6) "nothing reaches the output before `time`")
+      (is (> (magnitude single 6) 0.9) "the echo lands exactly at `time`"))
+    (let [feedback (render [6.0 0.5 1.0] :interpreter 24)]
+      (is (> (magnitude feedback 6) 0.9))
+      (is (> (magnitude feedback 12) 0.4) "the feedback repeats at 2x `time`")
+      (is (> (magnitude feedback 12) (magnitude feedback 18))
+          "each repeat is smaller than the last"))
+    (is (= (render [6.0 0.5 0.5] :interpreter 64)
+           (render [6.0 0.5 0.5] :jvm 64))
+        "interpreter and JVM agree with feedback")))

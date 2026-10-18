@@ -597,33 +597,44 @@
                         "DSP process expects primitive float arrays")
                     {:argument name :value value}))))
 
+(defn- real-array-length
+  "Length of a primitive real array, typed by the current precision.
+
+  Hinted on purpose: an unhinted `alength` compiles to a reflective call at
+  about 24 KB per invocation (D26), and the checked adapter is called by hosts
+  that are not necessarily on the audio path but should not pay that anyway."
+  [value]
+  (if (f64?) (alength ^doubles value) (alength ^floats value)))
+
 (defn- check-buffer!
   [ir value name frames]
   (let [required-length (+ frames (get-in ir [:memory name :max-frame-offset] 0))]
     (if (= 1 (:channels ir))
       (do
         (check-float-array! value name)
-        (when (< (alength value) required-length)
-          (throw (ex-info "DSP buffer is shorter than the frame-access requirement"
-                          {:argument name :frames frames :required-length required-length
-                           :length (alength value)}))))
+        (let [length (real-array-length value)]
+          (when (< length required-length)
+            (throw (ex-info "DSP buffer is shorter than the frame-access requirement"
+                            {:argument name :frames frames :required-length required-length
+                             :length length})))))
       (do
         (when-not (instance? (real-2d-array-class) value)
           (throw (ex-info (if (f64?) "DSP multi-channel process expects double[][] buffers"
                               "DSP multi-channel process expects float[][] buffers")
                           {:argument name :value value})))
-        (when-not (= (:channels ir) (alength value))
+        (when-not (= (:channels ir) (alength ^objects value))
           (throw (ex-info "DSP buffer has the wrong channel count"
                           {:argument name :expected (:channels ir)
-                           :actual (alength value)})))
+                           :actual (alength ^objects value)})))
         (dotimes [channel (:channels ir)]
-          (let [buffer (aget value channel)]
+          (let [buffer (aget ^objects value channel)]
             (check-float-array! buffer [name channel])
-            (when (< (alength buffer) required-length)
-              (throw (ex-info "DSP buffer channel is shorter than the frame-access requirement"
-                              {:argument [name channel] :frames frames
-                               :required-length required-length
-                               :length (alength buffer)})))))))))
+            (let [length (real-array-length buffer)]
+              (when (< length required-length)
+                (throw (ex-info "DSP buffer channel is shorter than the frame-access requirement"
+                                {:argument [name channel] :frames frames
+                                 :required-length required-length
+                                 :length length}))))))))))
 
 (defn- check-state!
   [layout state]
@@ -636,12 +647,13 @@
     (when-not (instance? int-array-class int-state)
       (throw (ex-info "DSP process integer state must be an int array"
                       {:value int-state})))
-    (when-not (= (:float-count layout) (alength float-state))
+    (when-not (= (:float-count layout) (real-array-length float-state))
       (throw (ex-info "DSP process float state has the wrong size"
-                      {:expected (:float-count layout) :actual (alength float-state)})))
-    (when-not (= (:int-count layout) (alength int-state))
+                      {:expected (:float-count layout)
+                       :actual (real-array-length float-state)})))
+    (when-not (= (:int-count layout) (alength ^ints int-state))
       (throw (ex-info "DSP process integer state has the wrong size"
-                      {:expected (:int-count layout) :actual (alength int-state)})))
+                      {:expected (:int-count layout) :actual (alength ^ints int-state)})))
     state))
 
 (defn- reset-state!
@@ -668,14 +680,14 @@
   (when-not (instance? int-array-class int-controls)
     (throw (ex-info "DSP process integer controls must be an int array"
                     {:value int-controls})))
-  (when-not (= (:float-count layout) (alength float-controls))
+  (when-not (= (:float-count layout) (real-array-length float-controls))
     (throw (ex-info "DSP process float controls have the wrong size"
                     {:expected (:float-count layout)
-                     :actual (alength float-controls)})))
-  (when-not (= (:int-count layout) (alength int-controls))
+                     :actual (real-array-length float-controls)})))
+  (when-not (= (:int-count layout) (alength ^ints int-controls))
     (throw (ex-info "DSP process integer controls have the wrong size"
                     {:expected (:int-count layout)
-                     :actual (alength int-controls)}))))
+                     :actual (alength ^ints int-controls)}))))
 
 (defn- unchecked-adapter
   [precision kernel multi-channel? state]

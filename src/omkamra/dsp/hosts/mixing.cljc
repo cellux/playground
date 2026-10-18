@@ -68,9 +68,14 @@
 
 (defn channel-of
   "Channel `channel` of a rendered block: the array itself when mono, else one
-  plane of a planar block."
+  plane of a planar block.
+
+  The `^objects` hint is load-bearing: without it the planar `aget` is
+  reflective, which allocates about 24 KB per channel per block on the JVM
+  (D26). The mono branch never indexes, so the hint is only reached on a planar
+  block, where the buffer really is an object array."
   [channels buffer channel]
-  (if (= 1 channels) buffer (aget buffer channel)))
+  (if (= 1 channels) buffer (aget ^objects buffer (int channel))))
 
 (defn clear-channel!
   ;; `f64?` picks the primitive overload on the JVM; the browser's `fill` is

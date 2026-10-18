@@ -90,3 +90,34 @@
   (let [d (* depth (lfo rate 2))
         wet (delay-line sample d)]
     (+ (* (- 1.0 mix) sample) (* mix wet))))
+
+(dsp/defn feedback-delay
+  "Feedback delay with a wet/dry mix: the library's musical-length line.
+
+  `delay-line` holds 64 samples — a comb span — so a real echo needs its own
+  buffer. This one holds 48000 samples (one second at 48 kHz, wrapping beyond
+  that), with a linearly interpolated fractional tap and a feedback path clamped
+  below unity. Ordering matches `delay-line`: the tap is read first, then the new
+  sample plus the fed-back tap is written, then the cursor advances, so every tap
+  is consistent within a frame.
+
+  `mix` 0 leaves the signal untouched; `feedback` 0 is a single echo, and the
+  line keeps ringing after its input stops — the effect tail.
+"
+  [sample time feedback mix]
+  {:state [{:name line
+            :fields [{:name buffer :type :float :size 48000}
+                     {:name cursor :type :int :init 0}]}]
+   :process {:controls [{:name time} {:name feedback} {:name mix}]}}
+  (let [t (clamp time 0.0 47999.0)
+        cursor (:cursor line)
+        whole (float->int t)
+        frac (- t (int->float whole))
+        x0 (aget line (mod (- cursor whole) 48000))
+        x1 (aget line (mod (- cursor (+ whole 1)) 48000))
+        tap (linear-interpolate x0 x1 frac)
+        fb (clamp feedback 0.0 0.98)]
+    (do
+      (aset line cursor (+ sample (* fb tap)))
+      (set! (:cursor line) (mod (+ cursor 1) 48000))
+      (+ (* (- 1.0 mix) sample) (* mix tap)))))

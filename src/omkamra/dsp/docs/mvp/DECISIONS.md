@@ -1638,3 +1638,59 @@ now differ in authoring style. Because the forms are data, the emitter can becom
 `.cljc`, which is a step toward `PLAN.md` section 4's browser-side compilation.
 
 **Status.** Done. JVM 137 tests / 1437 assertions; browser 19/19.
+
+## D42 — The Clojure instrument graph is a source layer; the compiler lowers it to a program
+
+**Status.** Provisional, first slice (P11b-i). The reference synthesizer uses it
+end to end; the shape is expected to be refined at the end of P11.
+
+**Decision.** An *instrument* is a **Clojure-level value**, not a kernel: a voice
+definition, its polyphony, a post-mix effect chain, and the (provisional)
+modulation matrix, composed with ordinary functions and `->`. The compiler
+**lowers** that value to a **program** — kernels, topology, and controls — and the
+host runs the program. The organization at the Clojure level is deliberately
+**not** mirrored at the kernel level: the lowering may fuse, split, unroll, or
+reorder what it finds. Concretely (P11b-i):
+
+```
+omkamra.dsp.instrument            the value + transforms (instrument, voice,
+                                  routes, with-effect)
+omkamra.dsp.hosts.instrument      lowering: compile-instrument -> program
+                                  {:bundle (voice pool), :bus, :routes}
+                                  + the live host (instrument-pool, render!)
+```
+
+**The first lowering strategy.** The voice goes through the existing P10
+machinery (`synth-bundle`: an artifact plus a runtime configuration), and the
+post-mix chain is folded into **one mono processor definition** (a `chain-effect`
+that extends the interface with each effect's controls), compiled to **one bus
+kernel per output channel**, run after the pool with the unchecked JVM adapter.
+That is a *choice*, not a consequence: a later strategy may compile the whole
+instrument to one polyphonic kernel, keep the effects as separate stages, or
+unroll them, without touching the source layer.
+
+**Per-feature layer assignment** is the working rule. For each feature, decide
+whether it is stated in Clojure (composability), realized by the lowering
+(optimization), or expressed in the kernel (semantics):
+
+| feature | Clojure layer | lowering | kernel |
+|---|---|---|---|
+| polyphony | pool node / `poly` | instances vs poly-kernel vs unroll | N kernels or one loop |
+| post-mix effects | `with-effect` chain | per-channel vs stereo; stage placement | one process per stage |
+| per-voice effects | `with-effect` on a voice | inline into the voice body | in the frame loop |
+| modulation | `routes` data + host policy | resolve/hoist; bake or leave host | controls / DSP |
+| stereo | expressed by the voice body | count and layout | `:channels` |
+
+**Rationale.** The two goals are different and pull apart: easy composition wants
+a small, uniform, inspectable algebra; an ideal kernel wants the opposite of
+whatever shape was convenient to write. Mirroring them would force one to pay for
+the other. Lowering is where the reconciliation happens, and where `PLAN.md` §9's
+optimizations (P15) belong.
+
+**Consequences.** `dsp/compile`'s "one definition → one artifact" remains the
+*kernel* API; instruments compile to a *program* with several artifacts. The
+post-mix controls are **global** (the host sets them), which generalizes "voice"
+to *per-voice controls + global controls + output width* — the pool is the first
+such thing, not a special case. The modulation matrix stays in the reference
+synth (D34) and is not part of the lowering. The Clojure value layer is `.cljc`;
+the lowering and live host are JVM-only until P11c adds the browser hosts.

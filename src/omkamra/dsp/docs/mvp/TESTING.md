@@ -28,6 +28,9 @@ below evaluates in it.
 | `src/omkamra/dsp/hosts.clj` | The assembler: `synth-bundle`, `compile-synth`, and which kernel a target gets. |
 | `src/omkamra/dsp/hosts/*.{clj,cljc,cljs}` | The kernels (`jvm`, `interpreter`, `js`) and the plumbing they share (`mixing`). |
 | `src/omkamra/dsp/tests/synth.clj` | The synth runtime suite: description, pool, modes, lifecycle, allocation. |
+| `src/omkamra/dsp/instrument.cljc` | The Clojure-level instrument graph: voice, polyphony, post-mix chain (D42). |
+| `src/omkamra/dsp/hosts/instrument.clj` | The instrument lowering (value → program) and its live host. |
+| `src/omkamra/dsp/tests/reference.clj` | The P11 reference instrument: matrix, stereo, post-mix chain, allocation. |
 | `src/omkamra/dsp/examples/demo_synth.clj` | The example instrument and one possible host-side modulation wiring (D34). |
 | `src/omkamra/dsp/targets/*.{clj,cljc}` | The four backends; `targets/capability.cljc` declares what each serves. |
 
@@ -64,7 +67,7 @@ Evaluate in the dev nREPL:
 ```clojure
 (require 'omkamra.dsp.tests.suite)
 (omkamra.dsp.tests.suite/run-all)
-;; => {:test 60, :pass 612, :fail 0, :error 0}
+;; => {:test 152, :pass 1493, :fail 0, :error 0}
 ```
 
 With `clojure_eval`, send that whole form as one expression.
@@ -95,7 +98,7 @@ Notable groups:
 - `jvm-unchecked-process-adapter-does-not-allocate-after-warmup` — allocation
   regression guard for the real-time process path.
 
-Expected baseline: **60 tests, 612 assertions, 0 failures**.
+Expected baseline: **152 tests, 1493 assertions, 0 failures**.
 
 ---
 
@@ -201,7 +204,11 @@ automatic run.
    (f32 and f64);
 7. the **pool hosts** — `omkamra.dsp.hosts.js` and `omkamra.dsp.hosts.wasm`
    driving `omkamra.dsp.synth.pool`, each compared against the interpreter pool
-   over the same events (P10d).
+   over the same events (P10d);
+8. the **instrument hosts** (P11c) — the same two hosts driving a whole
+   instrument: a voice pool plus a post-mix bus (one instance per channel),
+   compared against the interpreter doing the same and checked for block-size
+   invariance.
 
 The pool host checks are the only ones that exercise the sequencing layer rather
 than a single kernel. The page fetches a compiled voice — `/synth-bundle` carries

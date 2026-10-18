@@ -64,3 +64,37 @@
            (aset arguments 2 sample-rate)
            (.apply (.-process object) object arguments))
          (mixing/mix-block! containment f64? channels voice output frames))))))
+
+(defn js-bus-kernel
+  "A post-mix bus over a generated JavaScript module.
+
+  A bus is a *processor*, so the generated `process` takes the input array, the
+  output array, frames, sample-rate, and then the positional controls. `create`
+  is the module's exported `createKernel`; `create-bus` makes one independent
+  instance, and the host makes one per output channel.
+
+  Returns `{:create-bus, :run-bus!, :reset-bus!}`. `controls` is a JS array in
+  ABI order, reused across blocks."
+  [create abi]
+  (let [control-count (clojure.core/count (:controls abi))]
+    {:create-bus
+     (clojure.core/fn []
+       (let [object (create)]
+         {:object object
+          :arguments (js/Array. (+ 4 control-count))}))
+     :run-bus!
+     (clojure.core/fn [bus input output frames sample-rate controls]
+       (let [object (:object bus)
+             arguments (:arguments bus)]
+         (aset arguments 0 input)
+         (aset arguments 1 output)
+         (aset arguments 2 frames)
+         (aset arguments 3 sample-rate)
+         (dotimes [position control-count]
+           (aset arguments (+ 4 position) (aget controls position)))
+         (.apply (.-process object) object arguments)))
+     :reset-bus!
+     (clojure.core/fn [bus]
+       (let [object (:object bus)
+             reset (.-reset object)]
+         (when reset (.call reset object))))}))

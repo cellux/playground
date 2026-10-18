@@ -1832,6 +1832,223 @@ P11.
 
 ---
 
+## P11a — the reference instrument (in progress)
+
+The P11 acceptance fixture begins as `omkamra.dsp.examples.reference-synth`: a
+stereo voice assembled from library blocks and combinators (D38) rather than
+written as one voice, plus a host-side modulation matrix.
+
+* **The voice.** `oscillator-bank` (mono, unison-able) blends a band-limited
+  `saw-oscillator` and a band-limited PWM `pulse-oscillator` with a
+  `sync-oscillator`, all driven by one LFO (vibrato in cents and PWM depth);
+  `unison` wraps it with three detuned copies at half gain. `reference-source`
+  adds white noise, an amp ADSR, a filter ADSR opening a resonant
+  `state-variable-filter`, and `distortion`. `reference-voice` pans the result
+  into two output channels with `effect/pan`.
+* **The matrix** is deliberately host-side and lives here, not in core (D34):
+  rows of `{source -> [{:target :depth}]}`, sources `:velocity`, `:note`, and
+  MIDI controllers, applied as `base + depth x source` on top of the pool's
+  plan. It is studied at the end of P11 for promotion.
+* **The host is portable in shape** — `instrument` wraps a live pool and keeps
+  only primitive arrays — but the namespace is `.clj` for now; P11c extracts the
+  portable half for the browser.
+* **Tests** (`omkamra.dsp.tests.reference`, 8 tests): interpreter/JVM
+  bit-identity over a phrase with a controller change, every matrix source
+  changes the render (with an identical-repeat negative twin), stereo panning,
+  block-size invariance, stealing, unison structure, and a zero-allocation
+  guard for the whole host path.
+
+**The allocation guard found a real bug in the P10d stereo mixing path.**
+`omkamra.dsp.hosts.mixing/channel-of` did `(aget buffer channel)` with no type
+hint, so selecting a plane of a planar block was a *reflective* `RT.aget` —
+about 24 KB per channel per block on the JVM. It never showed up because the
+mono path does not index, and no allocation check covered stereo. P11's
+instrument is stereo, so the guard caught it: ~195 KB per block before, ~2 KB
+after.
+
+**Remaining P11.** Post-mix effects and effect tails (P11b, ideally as a
+transform, possibly needing a new `dsp/def*` form), all-backend offline
+rendering (P11c), and the property battery (P11d).
+
+---
+
+## Interpreter allocation pass (P11 prep)
+
+The suite had grown to ~46 s, and the interpreter — the oracle every conformance
+case runs — was the reason. A profile (`clj-async-profiler`, `:event :alloc`, on
+the reference instrument's mono voice) found that *allocation*, not dispatch,
+dominated. The pass cut the reference voice's allocation ~22x in the same
+micro-benchmark and the existing suite from **46 s to ~24 s**, with no change to
+any result.
+
+1. **Reflection (the big one, 88% of samples).** `state-value`,
+   `checked-buffer-index`, `context-buffer`, and `:buffer-load` called
+   `aget`/`alength` on *unhinted* arrays, which Clojure compiled to a reflective
+   `Reflector.invokeStaticMethod` whose `Class.getMethods`/`Method.copy` path
+   allocated ~24 KB per call (the D26 class). State now dispatches on a
+   `*real-state*` flag (bound per process call) to a primitive `aget`, and
+   buffers use precision-typed helpers.
+2. **Mutable locals.** Locals were a persistent map in a `volatile!`, so every
+   `:declare`/`:assign`/`set!` copied a HAMT. They are now one
+   `java.util.HashMap` (JVM) / `js/Map` (CLJS), keyed by the local's *name
+   string* — the IR guarantees names are globally unique
+   (`ir/unique-local-name`), and string keys are required because `js/Map`
+   compares object keys by identity. This also removed the CLJS
+   drop-then-assoc dance for signed zero, since a mutable map always replaces.
+3. **No per-call temporaries.** `evaluate-call` evaluates arguments straight into
+   the callee environment by index, and `seeded-locals` does the same for
+   parameters/controls, so there is no argument vector, lazy seq, or `MapEntry`.
+4. **Builtin dispatch.** `evaluate-builtin` was a multimethod dispatched on
+   `[operator type]` (a vector per call) fed by a `mapv` of arguments (~24% of
+   allocation); it is a plain `case` with positional operands.
+5. **Precision holder.** `f64?` read a dynamic var, and `Var.getThreadBinding`
+   allocated a map entry on every read (~27%). Precision now lives in a
+   `ThreadLocal` (JVM) / `volatile` (CLJS) with an explicit save/restore
+   (`with-dsp-precision`), equivalent to `binding` without the per-read cost.
+
+The full JVM suite and the browser suite (21/21) validate it; the browser run is
+the check that the `.cljc` changes survive ClojureScript. What remains is boxing
+(`Float`/`Double`) and the tree-walk itself; a closure-compiling interpreter
+(compile IR to fns once) is the next real step, not another allocation tweak.
+
+---
+
+## P11b-i — the instrument graph and the post-mix chain (D42)
+
+P11's effects land as a **Clojure-level instrument graph** lowered to a
+**program**, which is the shape the later slices will refine.
+
+**The source layer** (`omkamra.dsp.instrument`, `.cljc`) is a value plus plain
+functions: `instrument` (the description's top-level fields), `voice`,
+`routes`, and `with-effect`. Nothing there knows about kernels or channel
+layout.
+
+**The lowering** (`omkamra.dsp.hosts.instrument`, `.clj`) has one strategy so
+far: the voice goes through `synth-bundle` (the P10 pool), and the post-mix
+chain is folded by `chain-effect` into **one mono processor definition** whose
+interface grows by each effect's controls. That compiles to one artifact and is
+run as **one bus instance per output channel**, after the pool. `compile-instrument`
+returns a *program* (`{:bundle, :bus, :routes, …}`); `instrument-pool` builds the
+live pool + bus; `render!` renders the pool then the bus in place.
+
+**The reference synth uses it.** `reference-instrument` is now a value:
+
+```clojure
+(-> (inst/instrument description)
+    (inst/routes modulation-matrix)
+    (inst/with-effect chorus ['chorus-rate 'chorus-depth 'chorus-mix])
+    (inst/with-effect distortion ['drive]))
+```
+
+so the post-mix chorus and distortion are **global** controls the host sets
+(`set-effect-control!`), deliberately not per-voice routes. The modulation
+matrix stays in the example, as agreed (D34).
+
+**A second reflection bug, found by the bus allocation guard.** The bus first
+exposed `dsp/process!` — the *checked* context adapter — and it allocated
+~100 KB per call: `check-buffer!`, `check-state!`, and `check-controls!` called
+`alength` on unhinted arrays, the same D26 class as the interpreter's. Two fixes:
+the checked adapter now measures with a precision-typed `real-array-length`, and
+the bus's audio path uses `dsp/process-unchecked!` with preallocated physical
+control arrays, exactly as the voice pool does. The bus render went from
+~400 KB/cycle to **178 bytes/render**.
+
+**Tests.** `omkamra.dsp.tests.reference` is 12 tests / 37 assertions: the
+post-mix chain is audible against the same voice without it, a global control
+changes the render (with an identical-repeat twin), there is one bus instance per
+channel, and interpreter/JVM agree with the bus controls set. JVM 149 tests /
+1474 assertions; browser unaffected (the new layers are JVM-only until P11c).
+
+**Gap.** There is no musical delay yet: the library's `delay-line` is a 64-sample
+buffer (a comb/flanger span), used by `chorus`. A post-mix *delay* wants a
+larger line with feedback — a small library addition, and the remaining half of
+deliverable 2's "delay/chorus/distortion".
+
+---
+
+## P11c — all-backend offline rendering
+
+The instrument host now runs on JavaScript and Wasm, so the reference fixture is
+rendered on all four targets and checked for block-size invariance.
+
+**The bus host.** A post-mix bus is a *processor*, so the browser kernels differ
+from the pool's voice kernels: `hosts.js/js-bus-kernel` hands the generated
+`process` the input array, the output array, frames, sample-rate, and the
+controls; `hosts.wasm/wasm-bus-kernel` copies the channel into the module's input
+region, calls `process(input-offset, output-offset, …)`, and copies the output
+region back. One instance runs per output channel, in place, after the pool.
+`hosts.instrument/render!` is the JVM/interpreter side of the same shape.
+
+**The browser check.** `omkamra.dsp.harness.testbed` serves
+`instrument-bundle` (voice runtime/ABI/IR plus bus ABI/IR, and the WaT + memory
+layouts for Wasm) and `instrument-source` (both JavaScript modules). The page
+builds the browser voice pool and one bus per channel, plays a note, and compares
+the result against the in-page interpreter doing the same — then repeats with the
+held block split into single-frame blocks, so **block-size invariance** is
+checked on the browser host too. The fixture
+(`fixtures/browser-instrument`) is the stereo voice plus a **chorus and a
+feedback delay**, so the check exercises the large-state bus and its tail on
+JavaScript and Wasm exactly as it does on the JVM.
+
+**What this covers.** The bus *DSP* is in the shared catalog (`:feedback-delay`)
+and so runs on all four targets through the process matrix; the *host
+composition* (pool + bus, per channel, per block) is now differential-tested on
+JavaScript and Wasm against the interpreter. The full reference instrument's own
+differential and block-size check remain on the JVM and interpreter.
+
+**Verified.** Browser 23/23 (the two instrument hosts among them); JVM 150 tests
+/ 1486 assertions; `clj-kondo`/`cljfmt` clean. `LIBRARY.md` regenerated for
+`feedback-delay`.
+
+---
+
+## P11d — the property battery (P11 complete)
+
+The acceptance properties land, each where it is honestly measured rather than
+only at the instrument level:
+
+* **Filter stability under modulation** — the test
+  `the-filter-stays-stable-under-extreme-modulation` drives every matrix source
+  to its extreme (velocity, note, both controllers, three voices, all released)
+  and asserts no sample is non-finite and none runs away. The voice clamps the
+  SVF cutoff below a sixth of the sample rate and its damping above zero, which
+  is the documented stability bound; this is the end-to-end version of it.
+* **Absence of zipper noise** — the voice now declares `:smooth` (D27) on every
+  continuous control the matrix modulates (`cutoff`, `resonance`, `pulse-width`),
+  with a `:default` so a fresh voice opens at its base settings rather than
+  zero. `the-reference-voice-smoothes-its-modulated-controls` is the structural
+  guard; the per-frame ramp mechanism itself is tested by the automation suite.
+  `pan` is deliberately bare: the pan law is smooth across the field, and a hard
+  pan must reach silence.
+* **Non-finite containment** — the P10c pool tests cover `:reset`, `:sanitize`,
+  and `:off`, and the instrument host passes the policy through to the pool.
+* **Zero allocation after initialization** —
+  `the-reference-instrument-does-not-allocate-in-the-audio-path` (JVM) plus the
+  pool's own guard.
+* **Aliasing** — the library's `band-limited-oscillators` test compares each
+  PolyBLEP oscillator's largest step against a naive sawtooth's, which is the
+  band-limiting property the reference voice inherits.
+* **Event-boundary correctness** — the pool lifecycle tests and P9's
+  sample-accurate scheduling suite.
+
+**A note on the browser check.** The browser instrument host (P11c) renders a
+*fixture* instrument — the stereo voice plus a chorus and the feedback delay —
+rather than the full reference synth, which is heavy (unison, SVF, a 48000-sample
+delay per channel) and would only slow the suite. The bus DSP is covered on all
+four targets through the shared catalog (`:feedback-delay`), and the reference
+instrument's own differential and block-size checks run on the JVM and the
+interpreter. If the refinement round wants the full reference synth in the
+browser, the host and endpoints are already in place; it is a fixture swap.
+
+**Verified.** JVM 152 tests / 1493 assertions; browser 23/23; `clj-kondo`/
+`cljfmt` clean.
+
+**P11 is complete** (P11a–P11d). The refinement round the phase was scoped to
+leave open — D42's instrument graph, the modulation matrix (D34), and the exact
+per-feature layer boundary — is next.
+
+---
+
 ## Handoff — current state (rolling entry)
 
 This is the one living entry, as opposed to the completed-phase entries above:
@@ -1841,9 +2058,12 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
 ### Resume here
 
 - **Where.** `omkamra.dsp` is a DSP compiler (macros → descriptors → typed IR →
-  interpreter/JVM/JS/Wasm) plus a host-side sequencing layer. P0–P10 and the
-  transformer work D33–D41 are done; **P10 is complete**, and the next phase is
-  P11 (the reference synthesizer acceptance fixture).
+  interpreter/JVM/JS/Wasm) plus a host-side sequencing layer. P0–P11 are done:
+  **P11 is complete** (P11a the instrument and matrix, P11b the instrument graph
+  and post-mix chain per D42, P11c all-backend rendering, P11d the property
+  battery), along with an interpreter allocation pass. The phase was scoped to
+  end with a **refinement round** over D42's graph, the modulation matrix (D34),
+  and the per-feature layer boundary; that is the next work.
 - **Pitch domain (D35).** A voice takes `note`/`bend`/`detune` (cents) and
   converts to Hz in the DSP (`omkamra.dsp.library.pitch/pitch->frequency`); the
   pool delivers the standard sources and stays pitch-agnostic.
@@ -1900,9 +2120,9 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   stateless CSE) and that argument hoisting is in place.
 - **Removed from the pool:** `:unison`, `unison-detune`, the unison branch; the
   mode set is `{poly, mono, legato, retrigger}`.
-- **Tests.** JVM `(omkamra.dsp.tests.suite/run-all)` — 137 tests / 1437
+- **Tests.** JVM `(omkamra.dsp.tests.suite/run-all)` — 152 tests / 1493
   assertions; browser `(omkamra.dsp.harness.browser/run! {:server? false})` —
-  21/21. See `TESTING.md`.
+  23/23. See `TESTING.md`.
 - **P10d — stereo (D40, in progress).** The compiler model is now *one evaluation
   per frame*, not run-per-channel: the four targets lost their channel loop, the
   implicit `channel` is 0, a `:void` body that writes `:output` (a process, by

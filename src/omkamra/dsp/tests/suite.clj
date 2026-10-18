@@ -18,6 +18,7 @@
             [omkamra.dsp.tests.linker]
             [omkamra.dsp.tests.memory]
             [omkamra.dsp.tests.process]
+            [omkamra.dsp.tests.reference]
             [omkamra.dsp.tests.synth]
             [omkamra.dsp.tests.wasm]))
 
@@ -37,7 +38,8 @@
     omkamra.dsp.tests.library
     omkamra.dsp.tests.conformance
     omkamra.dsp.tests.automation
-    omkamra.dsp.tests.synth])
+    omkamra.dsp.tests.synth
+    omkamra.dsp.tests.reference])
 
 (defn run-all
   "Run every DSP test namespace and return the `clojure.test` summary."

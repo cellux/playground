@@ -115,3 +115,52 @@
            (aset arguments 2 sample-rate)
            (.apply (:process voice) nil arguments))
          (mixing/mix-block! containment f64? channels voice output frames))))))
+
+(defn wasm-bus-kernel
+  "A post-mix bus over a Wasm module.
+
+  A Wasm kernel writes into its own linear memory, so a bus copies the channel
+  into the module's input region, calls `process(input-offset, output-offset,
+  frames, sample-rate, controls…)`, then copies the output region back. The
+  input and output views are made once per instance.
+
+  `memory-layout` is the artifact's `:memory` map and `precision` its physical
+  precision. Returns the same `{:create-bus, :run-bus!, :reset-bus!}` map as
+  `omkamra.dsp.hosts.js/js-bus-kernel`."
+  [module abi memory-layout precision]
+  (let [f64? (= :f64 precision)
+        frame-capacity (long (:frame-capacity memory-layout))
+        input-offset (long (get-in memory-layout [:regions :input :offset] 0))
+        output-offset (long (get-in memory-layout [:regions :output :offset] 0))
+        control-count (clojure.core/count (:controls abi))]
+    {:create-bus
+     (clojure.core/fn []
+       (let [instance (js/WebAssembly.Instance. module)
+             exports (.-exports instance)
+             memory (gobj/get exports "memory")]
+         {:instance instance
+          :memory memory
+          :process (gobj/get exports "process")
+          :reset (gobj/get exports "reset")
+          :input-view (real-view memory f64? input-offset frame-capacity)
+          :output-view (real-view memory f64? output-offset frame-capacity)
+          :arguments (js/Array. (+ 4 control-count))}))
+     :run-bus!
+     (clojure.core/fn [bus input output frames sample-rate controls]
+       (let [in-view (:input-view bus)
+             out-view (:output-view bus)]
+         (dotimes [index frames]
+           (aset in-view index (aget input index)))
+         (let [arguments (:arguments bus)]
+           (aset arguments 0 input-offset)
+           (aset arguments 1 output-offset)
+           (aset arguments 2 frames)
+           (aset arguments 3 sample-rate)
+           (dotimes [position control-count]
+             (aset arguments (+ 4 position) (aget controls position)))
+           (.apply (:process bus) nil arguments))
+         (dotimes [index frames]
+           (aset output index (aget out-view index)))))
+     :reset-bus!
+     (clojure.core/fn [bus]
+       (when-let [reset (:reset bus)] (.call reset)))}))

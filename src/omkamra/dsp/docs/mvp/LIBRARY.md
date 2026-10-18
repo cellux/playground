@@ -391,6 +391,16 @@ Circular delay line of 64 samples with a linearly interpolated fractional tap. I
 - **Return:** float
 - **Entry:** process entry and callable module
 
+### `omkamra.dsp.library.delay/feedback-delay`
+
+Feedback delay with a wet/dry mix: the library's musical-length line. `delay-line` holds 64 samples — a comb span — so a real echo needs its own buffer. This one holds 48000 samples (one second at 48 kHz, wrapping beyond that), with a linearly interpolated fractional tap and a feedback path clamped below unity. Ordering matches `delay-line`: the tap is read first, then the new sample plus the fed-back tap is written, then the cursor advances, so every tap is consistent within a frame. `mix` 0 leaves the signal untouched; `feedback` 0 is a single echo, and the line keeps ringing after its input stops — the effect tail.
+
+- **Parameters:** `sample` float, `time` float, `feedback` float, `mix` float
+- **Controls:** `time`, `feedback`, `mix`
+- **State:** `line` float
+- **Return:** float
+- **Entry:** process entry and callable module
+
 ## `omkamra.dsp.library.control`
 
 Control-rate helpers: smooth a value, or limit how fast it may change. Both are stateful, so on the first frame the value starts from zero rather than from the target: a compile-time state initialiser cannot depend on a control, and per-instance initialisation belongs to the sequencing layer (P8).

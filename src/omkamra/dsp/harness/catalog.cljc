@@ -53,6 +53,13 @@
                                 :cljs (js/Math.sin (+ frame (* 17 block)))))))
         (range frames)))
 
+(defn impulse-samples
+  "A single non-zero sample at the start of each block; the trace that makes a
+  delay's echo timing legible."
+  [precision _block frames]
+  (mapv (fn [frame] (real precision (if (zero? frame) 1.0 0.0)))
+        (range frames)))
+
 (def ^:private builtin-pattern
   [0.0 -0.0 0.5 -0.5 1.25 -1.25 2.0 -2.0 3.5 -3.5 0.25 -0.25
    #?(:clj Double/NaN :cljs js/NaN)
@@ -504,6 +511,13 @@
                    :definition-var 'omkamra.dsp.library.delay/allpass-delay-line-voice
                    :controls [4.5]
                    :input-samples sine-input-samples})
+    ;; P11b: the library's musical-length feedback delay. An impulse trace makes
+    ;; the echo timing legible: silence, then the echo at `time`, then the
+    ;; feedback repeats.
+    (library-case {:id :feedback-delay
+                   :definition-var 'omkamra.dsp.library.delay/feedback-delay
+                   :controls [6.0 0.5 0.5]
+                   :input-samples impulse-samples})
     ;; P6b: the delay line as a *module*, called twice with different delays, so
     ;; the two buffers must be independent.
     (library-case {:id :delay-line-pair-voice

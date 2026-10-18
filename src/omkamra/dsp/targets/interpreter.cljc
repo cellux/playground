@@ -7,7 +7,42 @@
   `Float32Array`/`Float64Array`), which lets the browser compute expected
   outputs from compiled IR instead of trusting vectors shipped from the JVM.")
 
-(def ^:dynamic *precision* nil)
+;; The current kernel precision, a keyword or nil. It is fixed for a whole
+;; entry-point call, but it used to be a dynamic var, and reading one allocates a
+;; thread-binding map entry on every access -- `f64?` is called constantly, so
+;; that came to dominate the interpreter's allocation. A thread-local (JVM) /
+;; volatile (CLJS) with an explicit save/restore is equivalent to `binding`
+;; without the per-read cost.
+(def ^:private precision-holder
+  #?(:clj (ThreadLocal.)
+     :cljs (volatile! nil)))
+
+;; Whether the instance arena (persistent state plus scratch) is a primitive
+;; real array rather than an object array. Bound once per process call so state
+;; access can use a primitive `aget` instead of an unhinted one, which the
+;; compiler turns into a reflective `RT.aget` at ~24 KB per call (D26).
+(def ^:private ^:dynamic *real-state* true)
+
+(defn- current-precision
+  []
+  #?(:clj (.get ^ThreadLocal precision-holder)
+     :cljs (deref precision-holder)))
+
+(defn- set-precision!
+  [precision]
+  #?(:clj (.set ^ThreadLocal precision-holder precision)
+     :cljs (vreset! precision-holder precision)))
+
+(defn- with-dsp-precision
+  "Run `thunk` with `precision` current, restoring the previous value. The
+  save/restore discipline of `binding`, without the dynamic-var read cost."
+  [precision thunk]
+  (let [previous (current-precision)]
+    (set-precision! precision)
+    (try
+      (thunk)
+      (finally
+        (set-precision! previous)))))
 
 (defn- precision!
   [ir]
@@ -19,11 +54,11 @@
 
 (defn- f64?
   []
-  (case *precision*
+  (case (current-precision)
     :f64 true
     :f32 false
     (throw (ex-info "interpreter precision is not bound"
-                    {:precision *precision*}))))
+                    {:precision (current-precision)}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Platform abstraction: buffers and numeric narrowing
@@ -78,6 +113,23 @@
   #?(:clj (aset ^objects buffer index value)
      :cljs (aset buffer index value)))
 
+;; Buffers (input, output, lanes) are always primitive real arrays at the
+;; kernel's precision, so their type is known and `aget`/`alength` can be
+;; primitive. Without the hint they are reflective too.
+(defn- buffer-value
+  [buffer index]
+  #?(:clj (if (f64?)
+            (aget ^doubles buffer (int index))
+            (aget ^floats buffer (int index)))
+     :cljs (aget buffer index)))
+
+(defn- buffer-length
+  [buffer]
+  #?(:clj (if (f64?)
+            (alength ^doubles buffer)
+            (alength ^floats buffer))
+     :cljs (alength buffer)))
+
 ;; `(float x)` range-checks and throws on infinity, while the f32 contract is
 ;; IEEE-754, so narrowing uses `unchecked-float` on the JVM.
 (defn- logical-real
@@ -118,6 +170,53 @@
     (throw (ex-info "unknown DSP logical type" {:type type :value value}))))
 
 ;; ---------------------------------------------------------------------------
+;; Local environments
+;; ---------------------------------------------------------------------------
+;;
+;; Locals live in one flat mutable map. The IR guarantees that a local's name is
+;; unique across the whole compilation unit (see
+;; `omkamra.dsp.ir/unique-local-name`), so a single map is equivalent to the
+;; persistent map the interpreter used to thread -- without copying a HAMT on
+;; every assignment, which dominated the interpreter's allocation.
+;;
+;; Keys are name *strings*: ClojureScript's `js/Map` compares object keys by
+;; identity, and two `cljs.core/Symbol`s for the same name are not identical, so
+;; symbol keys would silently miss.
+
+(defn- locals-get
+  [locals local-name]
+  #?(:clj (.get ^java.util.HashMap locals (clojure.core/name local-name))
+     :cljs (.get locals (clojure.core/name local-name))))
+
+(defn- locals-put!
+  [locals local-name value]
+  #?(:clj (.put ^java.util.HashMap locals (clojure.core/name local-name) value)
+     :cljs (.set locals (clojure.core/name local-name) value))
+  nil)
+
+#_{:clj-kondo/ignore [:unused-binding]}
+(defn- empty-locals
+  ([]
+   #?(:clj (java.util.HashMap.)
+      :cljs (js/Map.)))
+  ([capacity]
+   ;; `capacity` sizes the JVM `HashMap`; a ClojureScript `js/Map` takes none.
+   #?(:clj (java.util.HashMap. (int (clojure.core/max 4 capacity)))
+      :cljs (js/Map.))))
+
+(defn- seeded-locals
+  "A mutable environment with each `entry` (`{:name ... :type ...}`) bound to
+  the value at the same position in `values`."
+  [entries values]
+  (let [entry-count (clojure.core/count entries)
+        locals (empty-locals entry-count)]
+    (dotimes [index entry-count]
+      (let [entry (nth entries index)]
+        (locals-put! locals (:name entry)
+                     (coerce-value (:type entry) (nth values index)))))
+    locals))
+
+;; ---------------------------------------------------------------------------
 ;; Builtin reference semantics
 ;; ---------------------------------------------------------------------------
 
@@ -155,47 +254,44 @@
   [x]
   (if (neg? x) (math-ceil x) (math-floor x)))
 
-(defmulti ^:private evaluate-builtin
-  "Reference semantics for primitive builtins, dispatched on [operator type]."
-  (fn [operator type _args] [operator type]))
-
-(defmethod evaluate-builtin :default
-  [operator type _args]
-  (throw (ex-info "DSP builtin has no interpreter implementation"
-                  {:operator operator :type type})))
-
-(defmethod evaluate-builtin [:abs :float] [_ _ [x]] (math-abs x))
-(defmethod evaluate-builtin [:abs :int] [_ _ [x]] (math-abs-int x))
-(defmethod evaluate-builtin [:min :float] [_ _ [x y]] (math-min x y))
-(defmethod evaluate-builtin [:min :int] [_ _ [x y]] (math-min-int x y))
-(defmethod evaluate-builtin [:max :float] [_ _ [x y]] (math-max x y))
-(defmethod evaluate-builtin [:max :int] [_ _ [x y]] (math-max-int x y))
-(defmethod evaluate-builtin [:floor :float] [_ _ [x]] (math-floor x))
-(defmethod evaluate-builtin [:ceil :float] [_ _ [x]] (math-ceil x))
-(defmethod evaluate-builtin [:trunc :float] [_ _ [x]] (truncate x))
-(defmethod evaluate-builtin [:sqrt :float] [_ _ [x]] (math-sqrt x))
-(defmethod evaluate-builtin [:exp :float] [_ _ [x]] (math-exp x))
-(defmethod evaluate-builtin [:sin :float] [_ _ [x]] (math-sin x))
-(defmethod evaluate-builtin [:cos :float] [_ _ [x]] (math-cos x))
-(defmethod evaluate-builtin [:tan :float] [_ _ [x]] (math-tan x))
-(defmethod evaluate-builtin [:asin :float] [_ _ [x]] (math-asin x))
-(defmethod evaluate-builtin [:acos :float] [_ _ [x]] (math-acos x))
-(defmethod evaluate-builtin [:atan :float] [_ _ [x]] (math-atan x))
-(defmethod evaluate-builtin [:atan2 :float] [_ _ [y x]] (math-atan2 y x))
-(defmethod evaluate-builtin [:log :float] [_ _ [x]] (math-log x))
-(defmethod evaluate-builtin [:pow :float] [_ _ [x y]] (math-pow x y))
-(defmethod evaluate-builtin [:sinh :float] [_ _ [x]] (math-sinh x))
-(defmethod evaluate-builtin [:cosh :float] [_ _ [x]] (math-cosh x))
-(defmethod evaluate-builtin [:tanh :float] [_ _ [x]] (math-tanh x))
-(defmethod evaluate-builtin [:copysign :float] [_ _ [x y]] (math-copy-sign x y))
-;; `rem` is the truncated remainder on every target.  ClojureScript's
-;; `unchecked-remainder-int` is floored (it uses `mod`), so the reference uses
-;; `rem` and narrows explicitly.
-(defmethod evaluate-builtin [:rem :int]
-  [_ _ [x y]]
-  (if (zero? (logical-int y))
-    0
-    (int32 (rem (logical-int x) (logical-int y)))))
+;; Reference semantics for primitive builtins. This was a multimethod dispatched
+;; on `[operator type]`, but that allocated a dispatch vector and a `mapv` of
+;; arguments on every builtin evaluation -- 24% of the interpreter's allocation
+;; -- so it is a plain `case`. Argument evaluation lives in the caller, which
+;; passes the (already evaluated) operands positionally; the reference emits at
+;; most two, so one `y` covers every primitive.
+(defn- evaluate-builtin
+  [operator type x y]
+  (case operator
+    :abs (if (= type :int) (math-abs-int x) (math-abs x))
+    :min (if (= type :int) (math-min-int x y) (math-min x y))
+    :max (if (= type :int) (math-max-int x y) (math-max x y))
+    :floor (math-floor x)
+    :ceil (math-ceil x)
+    :trunc (truncate x)
+    :sqrt (math-sqrt x)
+    :exp (math-exp x)
+    :sin (math-sin x)
+    :cos (math-cos x)
+    :tan (math-tan x)
+    :asin (math-asin x)
+    :acos (math-acos x)
+    :atan (math-atan x)
+    :atan2 (math-atan2 x y)
+    :log (math-log x)
+    :pow (math-pow x y)
+    :sinh (math-sinh x)
+    :cosh (math-cosh x)
+    :tanh (math-tanh x)
+    :copysign (math-copy-sign x y)
+    ;; `rem` is the truncated remainder on every target.  ClojureScript's
+    ;; `unchecked-remainder-int` is floored (it uses `mod`), so the reference
+    ;; uses `rem` and narrows explicitly.
+    :rem (if (zero? (logical-int y))
+           0
+           (int32 (rem (logical-int x) (logical-int y))))
+    (throw (ex-info "DSP builtin has no interpreter implementation"
+                    {:operator operator :type type}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Validation
@@ -302,12 +398,17 @@
 
 (defn- state-value
   [state index]
-  (aget state index))
+  #?(:clj (if *real-state*
+            (if (f64?)
+              (aget ^doubles state (int index))
+              (aget ^floats state (int index)))
+            (aget ^objects state (int index)))
+     :cljs (aget state index)))
 
 (defn- set-state-value!
   [state index type value]
   (let [value (coerce-value type value)]
-    (if (real-buffer? state)
+    (if *real-state*
       (set-real! state index value)
       (set-object! state index value))
     nil))
@@ -332,38 +433,41 @@
 
 (defn create-state
   [ir]
-  (binding [*precision* (precision! ir)]
-    (if (float-arena? ir)
-      ;; Scratch follows persistent state in one flat arena; its slots start
-      ;; zeroed and retain their contents between frames.
-      (make-real-array
-       (concat (state-elements (:state ir))
-               (mapcat (fn [{:keys [type size]}]
-                         (repeat (or size 1) (coerce-value type 0)))
-                       (:scratch ir))))
-      (make-object-array
-       (concat
-        (mapcat (fn [{:keys [type] :as state}]
-                  (map #(coerce-value type %)
-                       (if (= 1 (state-size state))
-                         [(:init state)]
-                         (:init state))))
-                (:state ir))
-        (mapcat (fn [{:keys [type size]}]
-                  (repeat (or size 1) (coerce-value type 0)))
-                (:scratch ir)))))))
+  (with-dsp-precision (precision! ir)
+    (fn []
+      (if (float-arena? ir)
+        ;; Scratch follows persistent state in one flat arena; its slots start
+        ;; zeroed and retain their contents between frames.
+        (make-real-array
+         (concat (state-elements (:state ir))
+                 (mapcat (fn [{:keys [type size]}]
+                           (repeat (or size 1) (coerce-value type 0)))
+                         (:scratch ir))))
+        (make-object-array
+         (concat
+          (mapcat (fn [{:keys [type] :as state}]
+                    (map #(coerce-value type %)
+                         (if (= 1 (state-size state))
+                           [(:init state)]
+                           (:init state))))
+                  (:state ir))
+          (mapcat (fn [{:keys [type size]}]
+                    (repeat (or size 1) (coerce-value type 0)))
+                  (:scratch ir))))))))
 
 (defn reset-state!
   [ir state]
-  (binding [*precision* (precision! ir)]
-    (check-state! ir state)
-    (doseq [{:keys [index type init] :as state-description} (:state ir)
-            [element-index value] (map-indexed vector
-                                               (if (= 1 (state-size state-description))
-                                                 [init]
-                                                 init))]
-      (set-state-value! state (+ index element-index) type value))
-    nil))
+  (with-dsp-precision (precision! ir)
+    (fn []
+      (binding [*real-state* (float-arena? ir)]
+        (check-state! ir state)
+        (doseq [{:keys [index type init] :as state-description} (:state ir)
+                [element-index value] (map-indexed vector
+                                                   (if (= 1 (state-size state-description))
+                                                     [init]
+                                                     init))]
+          (set-state-value! state (+ index element-index) type value))
+        nil))))
 
 ;; ---------------------------------------------------------------------------
 ;; Evaluation
@@ -416,19 +520,21 @@
 
 (defn- evaluate-bitwise
   [expression locals context]
-  (let [args (mapv #(logical-int (evaluate-expression % locals context))
-                   (:args expression))]
+  (let [args (:args expression)
+        x (logical-int (evaluate-expression (nth args 0) locals context))
+        y (when (> (count args) 1)
+            (logical-int (evaluate-expression (nth args 1) locals context)))]
     (int32
      (case (:operator expression)
-       :bit-and (bit-and (nth args 0) (nth args 1))
-       :bit-or (bit-or (nth args 0) (nth args 1))
-       :bit-xor (bit-xor (nth args 0) (nth args 1))
-       :bit-not (bit-not (nth args 0))
-       :bit-shift-left (bit-shift-left (nth args 0) (shift-distance (nth args 1)))
-       :bit-shift-right (bit-shift-right (nth args 0) (shift-distance (nth args 1)))
+       :bit-and (bit-and x y)
+       :bit-or (bit-or x y)
+       :bit-xor (bit-xor x y)
+       :bit-not (bit-not x)
+       :bit-shift-left (bit-shift-left x (shift-distance y))
+       :bit-shift-right (bit-shift-right x (shift-distance y))
        :unsigned-bit-shift-right (unsigned-bit-shift-right
-                                  (bit-and (nth args 0) 0xffffffff)
-                                  (shift-distance (nth args 1)))))))
+                                  (bit-and x 0xffffffff)
+                                  (shift-distance y))))))
 
 (defn- indexed-element-index
   [expression locals context]
@@ -479,7 +585,7 @@
     ;; subscripted; `:lanes` is the case that matters, since a lane region is
     ;; flat even when the process is not.
     (if (:per-channel? operation)
-      (aget buffer channel)
+      (aget ^objects buffer (int channel))
       buffer)))
 
 (defn- checked-buffer-index
@@ -487,7 +593,7 @@
   (let [buffer (context-buffer operation locals context)
         index (buffer-index (:index operation) locals context)]
     (when (and (= :development (:checks context))
-               (or (neg? index) (>= index (alength buffer))))
+               (or (neg? index) (>= index (buffer-length buffer))))
       (throw (ex-info "DSP buffer index is out of bounds"
                       {:buffer-id (:buffer-id operation) :index index
                        :length (alength buffer) :frame (:frame context)})))
@@ -499,19 +605,25 @@
     (when-not callee
       (throw (ex-info "DSP IR call refers to an unknown function"
                       {:function-id (:function-id expression)})))
-    (let [arguments (mapv #(evaluate-expression % locals context) (:args expression))
-          callee-locals (volatile!
-                         (into {}
-                               (map (fn [{:keys [name type]} value]
-                                      [name (coerce-value type value)])
-                                    (:params callee) arguments)))
-          ;; A stateful callee runs against its own partition: its zero-based
-          ;; state indices are resolved relative to the call-site base (D19).
-          result (execute-statement
-                  (:body callee) callee-locals
-                  (update context :state-base (fnil + 0)
-                          (or (:state-base expression) 0)))]
-      (coerce-value (:return-type callee) (:value result)))))
+    (let [params (:params callee)
+          arg-forms (:args expression)
+          param-count (clojure.core/count params)
+          callee-locals (empty-locals param-count)]
+      ;; Evaluate every argument in order, straight into the callee environment:
+      ;; no argument vector, no lazy seq, no `MapEntry` per parameter.
+      (dotimes [index param-count]
+        (let [param (nth params index)]
+          (locals-put! callee-locals (:name param)
+                       (coerce-value (:type param)
+                                     (evaluate-expression (nth arg-forms index)
+                                                          locals context)))))
+      ;; A stateful callee runs against its own partition: its zero-based state
+      ;; indices are resolved relative to the call-site base (D19).
+      (let [result (execute-statement
+                    (:body callee) callee-locals
+                    (update context :state-base (fnil + 0)
+                            (or (:state-base expression) 0)))]
+        (coerce-value (:return-type callee) (:value result))))))
 
 (defn- evaluate-expression
   [expression locals context]
@@ -521,7 +633,7 @@
     :const (if (= :float (:type expression))
              (logical-real (:value expression))
              (:value expression))
-    :local (get @locals (:name expression))
+    :local (locals-get locals (:name expression))
     :state-load (coerce-value (:type expression)
                               (state-value (:state context)
                                            (indexed-element-index expression locals context)))
@@ -535,7 +647,7 @@
     :frame-plus (buffer-index expression locals context)
     :channel (:channel context)
     :buffer-load (let [[buffer index] (checked-buffer-index expression locals context)]
-                   (aget buffer index))
+                   (buffer-value buffer index))
     :call (evaluate-call expression locals context)
     ;; A record value (multi-output) is a map from leaf path to value, held in an
     ;; ordinary local; a projection reads one leaf.
@@ -563,12 +675,13 @@
                :or (or (evaluate-expression (first (:args expression)) locals context)
                        (evaluate-expression (second (:args expression)) locals context)))
     :bitwise (evaluate-bitwise expression locals context)
-    :builtin (coerce-value
-              (:type expression)
-              (evaluate-builtin
-               (:builtin expression)
-               (:type expression)
-               (mapv #(evaluate-expression % locals context) (:args expression))))
+    :builtin (let [args (:args expression)
+                   x (evaluate-expression (nth args 0) locals context)
+                   y (when (> (count args) 1)
+                       (evaluate-expression (nth args 1) locals context))]
+               (coerce-value (:type expression)
+                             (evaluate-builtin (:builtin expression)
+                                               (:type expression) x y)))
     (throw (ex-info "unknown DSP IR expression" {:expression expression}))))
 
 (defn- control
@@ -576,18 +689,14 @@
   {:control kind :value value})
 
 (defn- set-local!
-  "Associate `value` with `name` in the `locals` volatile.
+  "Associate `value` with `name` in the `locals` mutable map.
 
   ClojureScript's persistent maps short-circuit `assoc` when the new value is
-  `identical?` (JavaScript `===`) to the stored one.  Because JavaScript says
-  `0 === -0`, overwriting a `+0.0` local with `-0.0` (or the reverse) would
-  silently keep the old sign.  Dropping the key first forces a genuine
-  insertion; the JVM has no such fast path, so it keeps the direct `assoc`."
+  `identical?` (JavaScript `===`) to the stored one, and JavaScript says
+  `0 === -0`; a mutable `js/Map` always replaces, so a change of signed zero is
+  kept without the drop-then-assoc dance the persistent version needed."
   [locals name value]
-  (vreset! locals
-           #?(:clj (assoc @locals name value)
-              :cljs (assoc (dissoc @locals name) name value)))
-  nil)
+  (locals-put! locals name value))
 
 (defn- execute-block
   [statements locals context]
@@ -664,19 +773,16 @@
 
 (defn invoke
   [ir args]
-  (binding [*precision* (precision! ir)]
-    (check-arity! ir args)
-    (when (or (seq (:state ir)) (seq (:scratch ir)))
-      (throw (ex-info "stateful or local-array DSP definitions require the :process entry"
-                      {:name (:name ir)})))
-    (let [locals (volatile!
-                  (into {}
-                        (map (fn [{:keys [name type]} value]
-                               [name (coerce-value type value)])
-                             (:params ir) args)))
-          result (execute-statement (:body ir) locals
-                                    {:definitions (:definitions ir)})]
-      (coerce-value (:return-type ir) (:value result)))))
+  (with-dsp-precision (precision! ir)
+    (fn []
+      (check-arity! ir args)
+      (when (or (seq (:state ir)) (seq (:scratch ir)))
+        (throw (ex-info "stateful or local-array DSP definitions require the :process entry"
+                        {:name (:name ir)})))
+      (let [locals (seeded-locals (:params ir) args)
+            result (execute-statement (:body ir) locals
+                                      {:definitions (:definitions ir)})]
+        (coerce-value (:return-type ir) (:value result))))))
 
 (defn process-context
   "Execute a process IR against explicit runtime values.
@@ -687,32 +793,35 @@
   adapters and by the browser conformance runner."
   [ir {:keys [input output lanes frames controls state sample-rate]
        :or {controls [] sample-rate 0.0}}]
-  (binding [*precision* (precision! ir)]
-    (check-control-arity! ir controls)
-    (let [frames (check-block! ir input output frames state)
-          sample-rate (coerce-value :float sample-rate)
-          control-locals (into {}
-                               (map (fn [{:keys [name type]} value]
-                                      [name (coerce-value type value)])
-                                    (:controls ir) controls))]
-      (dotimes [frame frames]
-        (execute-statement
-         (:frame-body ir)
-         (volatile! control-locals)
-         (cond-> {:input input
-                  :output output
-                  :channels (:channels ir)
-                  :channel 0
-                  :frame frame
-                  :frames frames
-                  :sample-rate sample-rate
-                  :checks (get-in ir [:options :checks] :development)
-                  :state state
-                  :definitions (:definitions ir)}
-             ;; Buffers resolve by id, so the lane region needs only to be
-             ;; present under its own name.
-           lanes (assoc :lanes lanes))))
-      nil)))
+  (with-dsp-precision (precision! ir)
+    (fn []
+      (binding [*real-state* (float-arena? ir)]
+        (check-control-arity! ir controls)
+        (let [frames (check-block! ir input output frames state)
+              sample-rate (coerce-value :float sample-rate)
+              ;; One mutable environment for the whole block. Every local the
+              ;; frame body reads is declared earlier in the same body (the IR
+              ;; guarantees it), so reusing the map across frames is safe; the
+              ;; control entries seeded here stay put.
+              control-locals (seeded-locals (:controls ir) controls)]
+          (dotimes [frame frames]
+            (execute-statement
+             (:frame-body ir)
+             control-locals
+             (cond-> {:input input
+                      :output output
+                      :channels (:channels ir)
+                      :channel 0
+                      :frame frame
+                      :frames frames
+                      :sample-rate sample-rate
+                      :checks (get-in ir [:options :checks] :development)
+                      :state state
+                      :definitions (:definitions ir)}
+               ;; Buffers resolve by id, so the lane region needs only to be
+               ;; present under its own name.
+               lanes (assoc :lanes lanes))))
+          nil)))))
 
 (defn process
   [ir input output frames controls state]

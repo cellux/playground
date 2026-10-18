@@ -8,6 +8,7 @@
             [omkamra.dsp.harness.conformance :as conformance]
             [omkamra.dsp.harness.fixtures :as fixtures]
             [omkamra.dsp.hosts :as hosts]
+            [omkamra.dsp.hosts.instrument :as instrument-host]
             [squint.compiler :as squint]))
 
 (def one-pole (:definition (catalog/case-by-id :one-pole)))
@@ -271,3 +272,51 @@
   [request]
   (javascript-response
    (:source (:artifact (browser-synth-bundle :js (requested-precision request))))))
+
+;; ---------------------------------------------------------------------------
+;; The instrument host (P11c)
+;; ---------------------------------------------------------------------------
+
+(defn- browser-instrument-program
+  [target precision]
+  (instrument-host/compile-instrument fixtures/browser-instrument
+                                      {:target target :precision precision}))
+
+(defn instrument-bundle
+  "Serve the compiled instrument fixture: the voice's runtime configuration, ABI,
+  and interpreter IR, plus the post-mix bus's ABI and IR. A `:wasm` bundle also
+  carries both modules' WAT and memory layouts."
+  [request]
+  (let [target (requested-target request)
+        precision (requested-precision request)
+        program (browser-instrument-program target precision)
+        voice (:artifact (:bundle program))
+        bus (:bus program)]
+    {:status 200
+     :headers {"content-type" "application/edn; charset=utf-8"
+               "cache-control" "no-store"}
+     :body (pr-str
+            (cond-> {:runtime (get-in program [:bundle :runtime])
+                     :voice-abi (:abi voice)
+                     :voice-ir (pr-str (:ir voice))
+                     :bus-abi (when bus (:abi bus))
+                     :bus-ir (when bus (pr-str (:ir bus)))
+                     :precision precision
+                     :target target}
+              (= :wasm target)
+              (assoc :voice-wat (:wat voice)
+                     :voice-memory (:memory voice)
+                     :bus-wat (when bus (:wat bus))
+                     :bus-memory (when bus (:memory bus)))))}))
+
+(defn instrument-source
+  "Serve the instrument fixture's JavaScript modules as EDN text: the voice's and
+  the bus's, so the page can import each."
+  [request]
+  (let [program (browser-instrument-program :js (requested-precision request))
+        voice (:artifact (:bundle program))
+        bus (:bus program)]
+    {:status 200
+     :headers {"content-type" "application/edn; charset=utf-8"
+               "cache-control" "no-store"}
+     :body (pr-str {:voice (:source voice) :bus (when bus (:source bus))})}))
