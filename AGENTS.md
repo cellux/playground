@@ -26,8 +26,9 @@ docstrings point to lower-level namespaces for details.
   Ring/Shadow server, including route resolution and server configuration.
 - `omkamra.dev.frontend` — discover browser builds, connected runtimes, rebuild
   a running Shadow build, and evaluate ClojureScript.
-- `omkamra.dev.tools` — lint/format files/directories; reload
-  namespaces; create durable namespace aliases
+- `omkamra.dev.tools` — lint/format files/directories, reload namespaces, and
+  create persistent namespace aliases. See [Reloading](#reloading) for the
+  reload workflow.
 - `omkamra.vice` — assemble, run, capture, and inspect VICE workflows; follow
   its docstrings into the analysis and capture namespaces.
 - `omkamra.supercollider` — start or wrap SuperCollider sessions, create
@@ -47,3 +48,27 @@ The `:on-demand-http` system discovers Ring handlers using the URI convention
 implemented by `omkamra.dev.on-demand-http/resolve-handler`; it also starts
 compatible Shadow watchers automatically when a page or generated asset is
 requested. Do not start a separate watcher process.
+
+## Reloading
+
+Reload namespaces through `omkamra.dev.tools/reload`; do not use
+`clojure.core/require :reload` or clj-reload.
+
+- After editing source, call `(tools/reload)`. It finds what changed by file
+  **content** (never by modification time), reloads each changed namespace and
+  its transitive dependents in dependency order, unloads each namespace first so
+  removed vars disappear and `deftype`/`defrecord` get fresh classes, preserves
+  `defonce` values, and reports **every** failure in one compact, serializable
+  map.
+- A call with nothing to do says `:status :unchanged`; it never silently no-ops.
+- `(tools/reload 'my.ns)`, `(tools/reload '[a b])`, and `(tools/reload :all)`
+  ignore detection and force the named namespaces (and their dependents). Use
+  them when you are unsure whether the baseline saw an edit.
+- `init-reload` is optional: `reload` scopes itself to the classpath source
+  directories. Use it only to scope the scan to specific directories.
+- The tooling's own namespaces are reported under `:deferred` and are not
+  reloaded in process; restart the dev server after editing them.
+- Need an alias that stays usable across reloads? Use `create-persistent-alias!`:
+  `(tools/create-persistent-alias! {:in-ns 'user :alias 'x :target 'some.ns})`.
+
+The implementation and its design rationale live in `omkamra.dev.tools.reload`.
