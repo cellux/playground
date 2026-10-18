@@ -29,6 +29,43 @@
   [definition]
   (mapv #(if (symbol? %) % (:name %)) (:params definition)))
 
+(defn normalize-control-name
+  "A control's name as a symbol, however it is spelled.
+
+  A control name travels through several layers and each spells it a little
+  differently: a definition's parameter list uses symbols, the host and the
+  modulation matrix write keywords, and a normalized synth description keys by
+  string. This is the one place that folds those spellings together, so a
+  surface API can accept any of them. It is idempotent.
+
+  A symbol is returned as-is; a keyword, string, or quoted symbol is converted;
+  a map is read through `:name`. Anything else is a programming error, not a
+  name."
+  [control]
+  (cond
+    (symbol? control) control
+    (keyword? control) (symbol (name control))
+    (string? control) (symbol control)
+    (and (seq? control) (= 'quote (first control)) (= 2 (count control)))
+    (normalize-control-name (second control))
+    (map? control) (normalize-control-name (:name control))
+    :else (throw (ex-info "a control name must be a symbol, a keyword, or a string"
+                          {:control control}))))
+
+(defn normalize-control-argument
+  "A call argument as a form: a control name spelled as a keyword or a string
+  becomes its symbol, and every other form — a symbol, a literal, an expression —
+  is returned unchanged. This is what lets a post-mix chain be written
+  `[:rate :depth :mix]` while the kernel sees `[rate depth mix]`.
+
+  A keyword is never a literal in the DSP language (`ir` lowers only numbers and
+  booleans as constants), so a keyword argument is unambiguously a reference and
+  there is no collision to resolve."
+  [form]
+  (if (or (keyword? form) (string? form))
+    (normalize-control-name form)
+    form))
+
 (defn definition-call
   "A call form to `definition` with `args` (the id is already resolved, so the
   linker does not need the caller's alias context)."

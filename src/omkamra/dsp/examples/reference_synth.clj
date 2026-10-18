@@ -301,16 +301,16 @@
   The chain is Clojure-level. The effects are library definitions; the lowering
   (`omkamra.dsp.hosts.instrument`) decides that they become one mono bus kernel
   per output channel, run once over the summed voices. Their controls are named
-  symbols, so they are global — not per voice — and the host sets them. The delay
-  is last, so its feedback tail continues after the voices stop."
+  by the arguments, so they are global — not per voice — and the host sets them.
+  The delay is last, so its feedback tail continues after the voices stop."
   (-> (inst/instrument description)
       (inst/routes modulation-matrix)
       (inst/with-effect omkamra.dsp.library.delay/chorus
-        ['chorus-rate 'chorus-depth 'chorus-mix])
+        [:chorus-rate :chorus-depth :chorus-mix])
       (inst/with-effect omkamra.dsp.library.effect/distortion
-        ['drive])
+        [:drive])
       (inst/with-effect omkamra.dsp.library.delay/feedback-delay
-        ['delay-time 'delay-feedback 'delay-mix])))
+        [:delay-time :delay-feedback :delay-mix])))
 
 (defn build-instrument
   "Build a live reference instrument from an `omkamra.dsp.instrument` value:

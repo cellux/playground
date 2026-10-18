@@ -12,7 +12,9 @@
             [omkamra.dsp.graph :as graph]
             [omkamra.dsp.harness.fixtures :refer [allocated-bytes
                                                   thread-allocation-meter]]
+            [omkamra.dsp.hosts.instrument :as inst-host]
             [omkamra.dsp.instrument :as inst]
+            [omkamra.dsp.library.effect]
             [omkamra.dsp.synth.pool :as pool]
             [omkamra.dsp.examples.reference-synth :as ref]))
 
@@ -245,6 +247,48 @@
         (is (:smooth control) (str target " declares per-frame smoothing"))))
     (is (nil? (:smooth (first (filter #(= "pan" (name (:name %))) controls))))
         "pan is host-set and left bare, so a hard pan reaches silence")))
+
+(deftest control-names-normalize-to-symbols
+  ;; The spelling question — symbol or keyword? — is answered by accepting both
+  ;; and folding them into the one token the kernel uses: a symbol. The transform
+  ;; is idempotent and accepts every spelling the layers produce.
+  (doseq [spelling ['rate :rate "rate" {:name :rate} (list 'quote 'rate)]]
+    (is (= 'rate (graph/normalize-control-name spelling)))
+    (is (= 'rate (graph/normalize-control-name
+                  (graph/normalize-control-name spelling)))))
+  (is (thrown? clojure.lang.ExceptionInfo
+               (graph/normalize-control-name 42))
+      "a number is not a name")
+  (testing "an argument that is not a name is a literal or an expression, kept"
+    (is (= 'rate (graph/normalize-control-argument :rate)))
+    (is (= 'rate (graph/normalize-control-argument 'rate)))
+    (is (= 0.5 (graph/normalize-control-argument 0.5)))
+    (is (= '(+ rate 1.0) (graph/normalize-control-argument '(+ rate 1.0))))))
+
+(deftest with-effect-accepts-a-keyword-or-a-symbol-alike
+  ;; The surface lets the reader choose; the stored value is canonical either
+  ;; way. Keywords are safe here because the DSP language has no keyword literal
+  ;; (`ir` lowers only numbers and booleans as constants), so a keyword in an
+  ;; argument is unambiguously a control reference.
+  (let [build (fn [argument]
+                (-> (inst/instrument {:id :test})
+                    (inst/with-effect omkamra.dsp.library.effect/distortion
+                      [argument])))
+        keyword-value (build :drive)
+        symbol-value (build 'drive)]
+    (is (= ['drive] (:arguments (first (inst/effects keyword-value))))
+        "with-effect stores the canonical symbol, whatever the spelling")
+    (is (= symbol-value keyword-value)
+        "the two spellings build the same instrument value")
+    (let [bus (inst-host/lower-bus keyword-value)]
+      (is (= '[sample drive] (:params bus)))
+      (is (= '[drive] (mapv :name (get-in bus [:process :controls])))))
+    (testing "and a hand-built value with a keyword is lowered the same way"
+      (let [hand-built (assoc-in (inst/instrument {:id :test})
+                                 [:effects]
+                                 [{:effect omkamra.dsp.library.effect/distortion
+                                   :arguments [:drive]}])]
+        (is (= '[sample drive] (:params (inst-host/lower-bus hand-built))))))))
 
 (deftest the-reference-instrument-does-not-allocate-in-the-audio-path
   ;; The same discipline as the P10 pool check: the bound guards the class of

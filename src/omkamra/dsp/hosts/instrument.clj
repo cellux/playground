@@ -35,7 +35,9 @@
   [bus effect arguments]
   (let [bus-params (vec (graph/parameter-symbols bus))
         effect-params (vec (rest (graph/parameter-symbols effect)))
-        arguments (vec arguments)]
+        ;; The source layer normalizes already; this keeps a hand-built value
+        ;; honest too, and it is idempotent.
+        arguments (mapv graph/normalize-control-argument arguments)]
     (when (empty? bus-params)
       (throw (ex-info "a post-mix chain needs a signal input" {:bus bus})))
     (when-not (= (count effect-params) (count arguments))

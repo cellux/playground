@@ -1694,3 +1694,33 @@ to *per-voice controls + global controls + output width* — the pool is the fir
 such thing, not a special case. The modulation matrix stays in the reference
 synth (D34) and is not part of the lowering. The Clojure value layer is `.cljc`;
 the lowering and live host are JVM-only until P11c adds the browser hosts.
+
+## D43 — A control name's canonical form is a symbol; a surface API accepts any spelling
+
+**Status.** Accepted (post-P11 refinement).
+
+**Decision.** Inside the definition and body layers, a control's name is a
+**symbol** — a definition's parameter list is symbols, the ABI's `:name` is a
+symbol, and the runtime plan keys by `(name control)`. A *surface* API that takes
+names from the user accepts any of the spellings that appear across the layers —
+a symbol, a keyword, a string, a quoted symbol, or a map with `:name` — and folds
+them to the canonical symbol through one helper, `graph/normalize-control-name`.
+A companion, `graph/normalize-control-argument`, applies the same fold to a call
+argument while leaving a literal or an expression untouched. Both are idempotent.
+
+**Why a symbol and not a keyword.** The name it must match is the *definition's
+parameter*, which is a symbol in the source and the ABI; a keyword would be a
+second token type to translate at every boundary. A symbol is also the
+unambiguous marker: the lowering decides "this argument is a control reference"
+versus "this is a literal" by `symbol?`. A keyword is free to accept anyway,
+because the DSP language has **no keyword literal** — `ir` lowers only numbers
+and booleans as constants — so a keyword in an argument position can only be a
+reference, and it collides with nothing.
+
+**Consequences.** `with-effect` (and `comb/through`) may be written
+`[:rate :depth :mix]`; the stored value and the lowered bus are canonical
+symbols regardless of spelling. `combinators/control-name` is now this helper;
+`synth`'s keyword/symbol/string acceptance and `descriptor`'s `process-name` are
+the same fold and may be collapsed onto it later. The host setters
+(`set-bus-control!`, the pool) already compare by `name`, so they accept either
+spelling at no cost.

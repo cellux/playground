@@ -17,14 +17,10 @@
 ;; Control names and modes
 ;; ---------------------------------------------------------------------------
 
-(defn- control-name
-  "A control's name as a symbol, however it is spelled."
-  [control]
-  (cond
-    (symbol? control) control
-    (keyword? control) (symbol (name control))
-    (map? control) (:name control)
-    :else (symbol (str control))))
+(def ^:private control-name
+  "A control's name as a symbol, however it is spelled. See
+  `omkamra.dsp.graph/normalize-control-name`."
+  graph/normalize-control-name)
 
 (defn- control-index
   "The position of the control named `control` in a definition's parameters."
@@ -130,7 +126,8 @@
    (through voice effect nil))
   ([voice effect arguments]
    (let [effect-params (vec (rest (graph/parameter-symbols effect)))
-         arguments (vec (or arguments effect-params))]
+         arguments (mapv graph/normalize-control-argument
+                         (or arguments effect-params))]
      (when-not (= (count effect-params) (count arguments))
        (throw (ex-info "the effect arguments do not match its parameters"
                        {:effect (graph/definition-id effect)

@@ -67,7 +67,7 @@ Evaluate in the dev nREPL:
 ```clojure
 (require 'omkamra.dsp.tests.suite)
 (omkamra.dsp.tests.suite/run-all)
-;; => {:test 152, :pass 1493, :fail 0, :error 0}
+;; => {:test 154, :pass 1513, :fail 0, :error 0}
 ```
 
 With `clojure_eval`, send that whole form as one expression.
@@ -98,7 +98,7 @@ Notable groups:
 - `jvm-unchecked-process-adapter-does-not-allocate-after-warmup` — allocation
   regression guard for the real-time process path.
 
-Expected baseline: **152 tests, 1493 assertions, 0 failures**.
+Expected baseline: **154 tests, 1513 assertions, 0 failures**.
 
 ---
 

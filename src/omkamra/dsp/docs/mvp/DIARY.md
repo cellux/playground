@@ -2049,6 +2049,30 @@ per-feature layer boundary — is next.
 
 ---
 
+## Refinement — a control name is a symbol, however it is spelled (D43)
+
+`with-effect` (and `comb/through`) now accept a keyword or a symbol for the
+controls they introduce. `graph/normalize-control-name` folds a symbol, keyword,
+string, quoted symbol, or `{:name …}` map to the canonical symbol; its companion
+`normalize-control-argument` does the same for a call argument while leaving a
+literal or an expression alone. Both are idempotent, and the lowering normalizes
+too, so a hand-built instrument value is honest.
+
+The lead-in question was whether keywords read better than quoted symbols;
+`'chorus-rate` is source-only syntax that *evaluates* to the symbol `chorus-rate`,
+so the instrument value already held symbols. The reason the surface can take a
+keyword at all is that the DSP language has **no keyword literal** — `ir` lowers
+only numbers and booleans as constants — so a keyword in an argument position is
+unambiguously a reference. The reference synth's chain is now spelled with
+keywords. `combinators/control-name` is the shared helper; `synth` and
+`descriptor` keep their own folds for now (D43 notes them as collapsible).
+
+**Verified.** JVM 154 tests / 1513 assertions; browser 23/23; `clj-kondo`/`cljfmt`
+clean. Two new tests: the normalizer's accepted spellings and idempotence, and
+that `with-effect` accepts either spelling and lowers identically.
+
+---
+
 ## Handoff — current state (rolling entry)
 
 This is the one living entry, as opposed to the completed-phase entries above:
@@ -2120,7 +2144,7 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   stateless CSE) and that argument hoisting is in place.
 - **Removed from the pool:** `:unison`, `unison-detune`, the unison branch; the
   mode set is `{poly, mono, legato, retrigger}`.
-- **Tests.** JVM `(omkamra.dsp.tests.suite/run-all)` — 152 tests / 1493
+- **Tests.** JVM `(omkamra.dsp.tests.suite/run-all)` — 154 tests / 1513
   assertions; browser `(omkamra.dsp.harness.browser/run! {:server? false})` —
   23/23. See `TESTING.md`.
 - **P10d — stereo (D40, in progress).** The compiler model is now *one evaluation
