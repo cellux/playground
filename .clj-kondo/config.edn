@@ -18,6 +18,7 @@
   com.blockether.spel.core/with-browser clojure.core/with-open
   com.blockether.spel.core/with-context clojure.core/with-open
   com.blockether.spel.core/with-page clojure.core/with-open
+  omkamra.dev.playwright/with-page clojure.core/with-open
 
   ;; `dsp/def` binds a value produced by ordinary Clojure (the combinators), so
   ;; lint it as a `def`. Its body has no DSP data, unlike `dsp/defn`/`dsp/fn`.

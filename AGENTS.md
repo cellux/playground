@@ -28,6 +28,9 @@ docstrings point to lower-level namespaces for details.
   Ring/Shadow server, including route resolution and server configuration.
 - `omkamra.dev.frontend` — discover browser builds, connected runtimes, rebuild
   a running Shadow build, and evaluate ClojureScript.
+- `omkamra.dev.playwright` — drive a real browser through a curated subset of
+  spel: launch a headless session, navigate, wait for readiness, evaluate
+  JavaScript, read and interact with elements, and capture screenshots.
 - `omkamra.dev.tools` — reload namespaces and create persistent namespace
   aliases. See [Reloading](#reloading) for the reload workflow. (Linting and
   formatting are the `clj_kondo` and `cljfmt` tools, not this namespace.)
