@@ -395,6 +395,21 @@
      :precisions [:f32 :f64]
      :controls [0.7 8.0]
      :input-samples sine-input-samples}
+    ;; P11: the reference voice's stereo stage. `pan` returns a `stereo-pair`
+    ;; module, so each channel is projected into the single-float process shape
+    ;; the shared catalog carries, exactly as `:stereo-spread` does above. The
+    ;; position rides the *input* trace (the default `builtin-input-samples`),
+    ;; so the sweep crosses -1..1 and beyond, exercising the clamp, instead of
+    ;; pinning it to one control value. Two cases, one per channel, so a swap or
+    ;; a sign error cannot hide in the projection.
+    (process-case {:id :pan-left
+                   :body '(let [pair (omkamra.dsp.library.effect/pan 1.0 position)]
+                            (:left pair))
+                   :params [{:name 'position :type :float}]})
+    (process-case {:id :pan-right
+                   :body '(let [pair (omkamra.dsp.library.effect/pan 1.0 position)]
+                            (:right pair))
+                   :params [{:name 'position :type :float}]})
     ;; P3 done-when: a sine oscillator and an exponential ADSR envelope,
     ;; defined in `omkamra.dsp.library` and only in DSP source.
     (library-case {:id :sine-oscillator
@@ -682,7 +697,20 @@
                  :return-type :int
                  :body ['(unsigned-bit-shift-right a b)]}
     :precisions [:f32]
-    :vectors [[-1 0] [-1 1] [-2147483648 31] [256 33] [-1 -1]]}])
+    :vectors [[-1 0] [-1 1] [-2147483648 31] [256 33] [-1 -1]]}
+   ;; P11/D35: the pitch-domain conversion the reference voice depends on. It
+   ;; was JVM-only (`tests/library.clj`); a function case puts it in the shared
+   ;; catalog, so the interpreter and every backend agree on it, browser
+   ;; included.
+   {:id :pitch->frequency
+    :entry :function
+    :definition-var 'omkamra.dsp.library.pitch/pitch->frequency
+    :precisions [:f32 :f64]
+    :vectors [[69.0 0.0 0.0 440.0 69.0]
+              [60.0 0.0 0.0 440.0 69.0]
+              [69.0 200.0 0.0 440.0 69.0]
+              [69.0 0.0 -100.0 440.0 69.0]
+              [57.0 -50.0 25.0 432.0 69.0]]}])
 
 (def cases process-cases)
 

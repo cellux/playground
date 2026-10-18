@@ -67,7 +67,7 @@ Evaluate in the dev nREPL:
 ```clojure
 (require 'omkamra.dsp.tests.suite)
 (omkamra.dsp.tests.suite/run-all)
-;; => {:test 154, :pass 1513, :fail 0, :error 0}
+;; => {:test 154, :pass 1525, :fail 0, :error 0}
 ```
 
 With `clojure_eval`, send that whole form as one expression.
@@ -98,7 +98,7 @@ Notable groups:
 - `jvm-unchecked-process-adapter-does-not-allocate-after-warmup` — allocation
   regression guard for the real-time process path.
 
-Expected baseline: **154 tests, 1513 assertions, 0 failures**.
+Expected baseline: **154 tests, 1525 assertions, 0 failures**.
 
 ---
 
@@ -114,7 +114,7 @@ Evaluate in the dev nREPL:
 ```clojure
 (require '[omkamra.dsp.harness.browser :as browser])
 (browser/run!)
-;; => {:passed? true, :passed 8, :total 8, :results [...]}
+;; => {:passed? true, :passed 23, :total 23, :results [...]}
 ```
 
 The browser suite is a **differential** test: it runs the portable

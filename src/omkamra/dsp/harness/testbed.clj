@@ -33,10 +33,11 @@
 
 (defn- request-parameter
   [request parameter]
-  (some (fn [entry]
-          (let [[key value] (str/split entry #"=" 2)]
-            (when (= parameter key) value)))
-        (str/split (or (:query-string request) "") #"&")))
+  (let [decode (fn [s] (java.net.URLDecoder/decode (or s "") "UTF-8"))]
+    (some (fn [entry]
+            (let [[key value] (str/split entry #"=" 2)]
+              (when (= parameter (decode key)) (decode value))))
+          (str/split (or (:query-string request) "") #"&"))))
 
 (defn- requested-case
   [request]

@@ -2144,9 +2144,12 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   stateless CSE) and that argument hoisting is in place.
 - **Removed from the pool:** `:unison`, `unison-detune`, the unison branch; the
   mode set is `{poly, mono, legato, retrigger}`.
-- **Tests.** JVM `(omkamra.dsp.tests.suite/run-all)` — 154 tests / 1513
+- **Tests.** JVM `(omkamra.dsp.tests.suite/run-all)` — 154 tests / 1525
   assertions; browser `(omkamra.dsp.harness.browser/run! {:server? false})` —
-  23/23. See `TESTING.md`.
+  23/23. The reference voice's stereo stage (`:pan-left`, `:pan-right`) and the
+  pitch conversion (`:pitch->frequency`) are now shared-catalog cases, so they
+  run on the interpreter and every backend, browser included, instead of the JVM
+  alone. See `TESTING.md`.
 - **P10d — stereo (D40, in progress).** The compiler model is now *one evaluation
   per frame*, not run-per-channel: the four targets lost their channel loop, the
   implicit `channel` is 0, a `:void` body that writes `:output` (a process, by
