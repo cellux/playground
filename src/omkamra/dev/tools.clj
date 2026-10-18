@@ -1,10 +1,9 @@
 (ns omkamra.dev.tools
   "Discoverable development tools for agents using `clojure_eval`.
 
-  Require this namespace, inspect its public Vars and docstrings, and then use
-  the functions below. `lint-files` and `format-files` accept relative or
-  absolute file and directory paths; directory inputs are recursive.
-  `format-string` is the explicit non-writing formatting operation.
+  This namespace is about reloading namespaces. **Linting and formatting are the
+  harness's `clj_kondo` and `cljfmt` tools**, which run without a JVM and so
+  still work when this one is down or the code does not compile; use those.
 
   Reloading is designed to be hard to get wrong:
 
@@ -14,48 +13,11 @@
     targets, which ignore detection entirely.
   * `reload` reports every failure, not just the first, in a compact,
     serializable map. A call with nothing to do says so explicitly.
-  * `init-reload` is optional; `reload` scopes itself to the classpath source
-    directories on first use.
+  * There is no initialization step: `reload` scopes itself to the classpath
+    source directories on first use. Pass a scope map to scan elsewhere.
   * `create-persistent-alias!` registers an alias that stays usable when its
     target namespace is reloaded."
-  (:require [omkamra.dev.tools.core :as core]
-            [omkamra.dev.tools.reload :as reloader]))
-
-(defn lint-files
-  "Lint files or directories with clj-kondo.
-
-  Returns clj-kondo result data with `:status` (`:processed` or `:errors`) and
-  concise per-file `:errors`. Invalid paths throw before processing."
-  [paths]
-  (core/lint-files paths))
-
-(defn format-files
-  "Format files or directories in place with cljfmt.
-
-  Returns `:formatted`, `:unchanged`, and concise per-file `:errors`, together
-  with `:status` (`:processed` or `:errors`). Invalid paths throw before any
-  file is changed."
-  [paths]
-  (core/format-files paths))
-
-(defn format-string
-  "Format source text with cljfmt and return the resulting string.
-
-  Uses the current working directory's cljfmt configuration when available."
-  [source]
-  (core/format-string source))
-
-(defn init-reload
-  "Optionally scope and baseline reloading before the first `reload`.
-
-  With no argument, the classpath source directories are scanned. A path, a
-  collection of paths, or an options map (`:dirs`, `:files`) scopes the scan.
-  Reinitializing resets the content baseline; persistent aliases are unaffected.
-  Calling this is optional: `reload` initializes itself.
-
-  Returns `{:status :initialized :dirs [...] :files n :namespaces n}`."
-  ([] (reloader/init-reload))
-  ([directories] (reloader/init-reload directories)))
+  (:require [omkamra.dev.tools.reload :as reloader]))
 
 (defn reload
   "Reload namespaces and return a compact, serializable report.
@@ -71,12 +33,16 @@
   reload exactly the named namespaces (and their dependents), which is the
   deterministic escape hatch when no baseline can know about an edit.
 
+  A map argument sets the scan scope and then reloads what changed under it, so
+  `(reload {:dirs [\"src\"]})` scans just `src`. The classpath source
+  directories are the default, and the scope persists for later calls.
+
   The result has `:status` (`:reloaded`, `:unchanged`, or `:errors`), `:changed`
   (the roots), `:reloaded` and `:unloaded` (topological order), `:kept`,
   `:failed` (all of them, each with a concise `:message` and location), and
   `:scanned`. No exception objects are returned."
   ([] (reloader/reload))
-  ([target] (reloader/reload target)))
+  ([target-or-options] (reloader/reload target-or-options)))
 
 (defn create-persistent-alias!
   "Create and register a namespace alias that stays usable across reloads.

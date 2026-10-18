@@ -12,7 +12,9 @@ When an active local root points into the sibling checkout, resolve its host pat
 2. If any active local root resolves into the sibling `omkamra` checkout, request/approve a read-only host mount of that checkout at `/omkamra`; otherwise do not mount it.
 3. Use `clojure_start_dev` to start up the Clojure dev server.
 4. Use `clojure_eval` to evaluate forms in the dev server via nREPL.
-5. Use `clj_kondo` and `cljfmt` to lint and format source code.
+5. Use `clj_kondo` and `cljfmt` to lint and format source code. They run without
+   a JVM, so they still work when the dev server is down or the code does not
+   compile; prefer them over any in-JVM lint/format.
 
 ## Feature discovery
 
@@ -26,9 +28,9 @@ docstrings point to lower-level namespaces for details.
   Ring/Shadow server, including route resolution and server configuration.
 - `omkamra.dev.frontend` — discover browser builds, connected runtimes, rebuild
   a running Shadow build, and evaluate ClojureScript.
-- `omkamra.dev.tools` — lint/format files/directories, reload namespaces, and
-  create persistent namespace aliases. See [Reloading](#reloading) for the
-  reload workflow.
+- `omkamra.dev.tools` — reload namespaces and create persistent namespace
+  aliases. See [Reloading](#reloading) for the reload workflow. (Linting and
+  formatting are the `clj_kondo` and `cljfmt` tools, not this namespace.)
 - `omkamra.vice` — assemble, run, capture, and inspect VICE workflows; follow
   its docstrings into the analysis and capture namespaces.
 - `omkamra.supercollider` — start or wrap SuperCollider sessions, create
@@ -64,8 +66,9 @@ Reload namespaces through `omkamra.dev.tools/reload`; do not use
 - `(tools/reload 'my.ns)`, `(tools/reload '[a b])`, and `(tools/reload :all)`
   ignore detection and force the named namespaces (and their dependents). Use
   them when you are unsure whether the baseline saw an edit.
-- `init-reload` is optional: `reload` scopes itself to the classpath source
-  directories. Use it only to scope the scan to specific directories.
+- There is no initialization step: `reload` scopes itself to the classpath
+  source directories. To scan elsewhere, pass a scope map, e.g.
+  `(tools/reload {:dirs ["src"]})`.
 - The tooling's own namespaces are reported under `:deferred` and are not
   reloaded in process; restart the dev server after editing them.
 - Need an alias that stays usable across reloads? Use `create-persistent-alias!`:

@@ -37,8 +37,9 @@
     together with the number of files scanned and a note, so a miss is visible.
   * Stop-at-first-failure. Every namespace is attempted; **all** failures are
     reported, each with a concise message and, when available, a location.
-  * The `init` that must precede the first edit. `init-reload` is explicit and
-    scoped when wanted, but `reload` establishes a baseline by itself.
+  * The `init` that must precede the first edit. `reload` establishes its own
+    baseline; a scope map is only needed to scan somewhere other than the
+    classpath source directories.
 
   ## Reports
 
@@ -83,7 +84,7 @@
 (def ^:private default-file-pattern #".*\.cljc?$")
 
 (def ^:private protected-namespaces
-  #{"omkamra.dev.tools" "omkamra.dev.tools.core" "omkamra.dev.tools.reload"})
+  #{"omkamra.dev.tools" "omkamra.dev.tools.reload"})
 
 ;; ---------------------------------------------------------------------------
 ;; Paths
@@ -511,32 +512,24 @@
 ;; Public API
 ;; ---------------------------------------------------------------------------
 
-(defn init-reload
-  "Establish or replace the reload baseline.
+(defn- configure!
+  "Establish or replace the reload baseline and scan scope.
 
-  With no argument, every classpath source directory is scanned. With a path, a
+  With no argument, every classpath source directory is scanned; with a path, a
   collection of paths, or an options map (`:dirs`, `:files` for a filename
-  pattern), scanning is scoped accordingly. Reinitializing resets the content
-  baseline; persistent aliases are unaffected.
-
-  Returns `{:status :initialized :dirs [...] :files n :namespaces n}`."
-  ([] (init-reload nil))
-  ([directories]
-   (with-lock
-     (let [config (normalize-config directories)]
-       (validate-config! config)
-       (let [known (build-known config)]
-         (swap! state assoc :config config :known known :initialized? true)
-         {:status :initialized
-          :dirs (:dirs config)
-          :files (count known)
-          :namespaces (count (into #{} (mapcat #(get-in % [1 :parsed :namespaces]))
-                                   known))})))))
+  pattern), scanning is scoped accordingly. `reload` calls this itself on first
+  use, so a caller only needs it to scope the scan deliberately."
+  [directories]
+  (let [config (normalize-config directories)]
+    (validate-config! config)
+    (let [known (build-known config)]
+      (swap! state assoc :config config :known known :initialized? true)
+      config)))
 
 (defn- ensure-initialized!
   []
   (when-not (:initialized? @state)
-    (init-reload nil)))
+    (configure! nil)))
 
 (defn- run-reload!
   [explicit]
@@ -649,19 +642,25 @@
   and reload exactly the named namespaces (and their dependents), which is the
   deterministic escape hatch when detection cannot know about an edit.
 
-  Initialization is implicit: the first call scopes to the classpath source
-  directories unless `init-reload` configured something else. Every failure is
-  reported, not just the first."
+  `(reload {:dirs [...]})` sets the scan scope first (the classpath source
+  directories by default; an optional `:files` pattern selects filenames) and
+  then reloads what changed under it; the scope persists for later calls. There
+  is no separate initialization step.
+
+  Every failure is reported, not just the first."
   ([] (with-lock (run-reload! nil)))
-  ([target]
+  ([target-or-options]
    (with-lock
-     (let [explicit (cond
-                      (= :all target) :all
-                      (symbol? target) [target]
-                      (sequential? target) (vec target)
-                      :else (throw (ex-info "reload expects a namespace symbol, a collection, or :all"
-                                            {:target target})))]
-       (run-reload! explicit)))))
+     (if (map? target-or-options)
+       (do (configure! target-or-options)
+           (run-reload! nil))
+       (let [explicit (cond
+                        (= :all target-or-options) :all
+                        (symbol? target-or-options) [target-or-options]
+                        (sequential? target-or-options) (vec target-or-options)
+                        :else (throw (ex-info "reload expects a namespace symbol, a collection, :all, or a scope map"
+                                              {:target target-or-options})))]
+         (run-reload! explicit))))))
 
 (defn create-persistent-alias!
   "Create and register a namespace alias that stays usable across reloads.

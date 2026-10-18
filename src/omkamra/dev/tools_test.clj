@@ -41,73 +41,20 @@
   (var-get (ns-resolve namespace name)))
 
 ;; ---------------------------------------------------------------------------
-;; Lint and format
-;; ---------------------------------------------------------------------------
-
-(deftest lint-files-returns-standard-report
-  (let [result (tools/lint-files "src/omkamra/dev/tools.clj")]
-    (is (= :processed (:status result)))
-    (is (= [] (:errors result)))
-    (is (map? (:summary result)))
-    (is (vector? (:findings result)))))
-
-(deftest lint-reports-error-findings
-  (let [file (java.io.File/createTempFile "omkamra-tools" ".clj")]
-    (try
-      (spit file "(defn broken [x]\n")
-      (let [result (tools/lint-files (.getPath file))]
-        (is (= :errors (:status result)))
-        (is (seq (:errors result)))
-        (is (= (:filename (first (:findings result)))
-               (:filename (first (:errors result)))))
-        (is (= :error (:level (first (:findings result))))))
-      (finally
-        (.delete file)))))
-
-(deftest format-files-reports-changes
-  (let [directory (temp-directory)
-        file (java.io.File. directory "example.clj")]
-    (try
-      (spit file "(defn example[x] (+ x 1))\n")
-      (let [result (tools/format-files (.getPath file))]
-        (is (= :processed (:status result)))
-        (is (= [(.getPath file)] (:formatted result)))
-        (is (= [] (:unchanged result)))
-        (is (= [] (:errors result)))
-        (is (= "(defn example [x] (+ x 1))\n" (slurp file))))
-      (finally
-        (delete-tree! directory)))))
-
-(deftest format-string-is-explicitly-non-writing
-  (is (= "(defn example [x] (+ x 1))"
-         (tools/format-string "(defn example[x] (+ x 1))"))))
-
-(deftest invalid-paths-fail-before-processing
-  (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo
-       #"Path does not exist"
-       (tools/lint-files "/path/that/does/not/exist")))
-  (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo
-       #"Path does not exist"
-       (tools/format-files "/path/that/does/not/exist"))))
-
-;; ---------------------------------------------------------------------------
 ;; Reload
 ;; ---------------------------------------------------------------------------
 
-(deftest init-reload-reports-its-scope
+(deftest reload-with-a-scope-map-scopes-the-scan
   (let [directory (temp-directory)
-        file (io/file directory "fixture_init.clj")]
+        file (io/file directory "fixture_scope.clj")]
     (try
-      (write-file! file "(ns fixture.init)\n(def x 1)\n")
-      (let [result (tools/init-reload [directory])]
-        (is (= :initialized (:status result)))
-        (is (= [(.getCanonicalPath directory)] (:dirs result)))
-        (is (= 1 (:files result)))
-        (is (= 1 (:namespaces result))))
+      (write-file! file "(ns fixture.scope)\n(def x 1)\n")
+      (let [result (tools/reload {:dirs [directory]})]
+        (is (= 1 (:scanned result)) "the map scoped the scan to one file"))
+      (is (= 1 (:scanned (tools/reload)))
+          "the scope persists for later calls")
       (finally
-        (forget! 'fixture.init)
+        (forget! 'fixture.scope)
         (delete-tree! directory)))))
 
 (deftest reload-with-no-changes-is-explicit
@@ -116,7 +63,7 @@
     (try
       (write-file! file "(ns fixture.quiet)\n(def x 1)\n")
       (load-file (.getPath file))
-      (tools/init-reload [directory])
+      (tools/reload {:dirs [directory]})
       (tools/reload)
       (let [result (tools/reload)]
         (is (= :unchanged (:status result)))
@@ -134,7 +81,7 @@
     (try
       (write-file! file "(ns fixture.content)\n(def x 1)\n")
       (load-file (.getPath file))
-      (tools/init-reload [directory])
+      (tools/reload {:dirs [directory]})
       ;; `write-file!` backdates the file, so only a content digest can see this
       (write-file! file "(ns fixture.content)\n(def x 2)\n")
       (let [result (tools/reload)]
@@ -152,7 +99,7 @@
       (write-file! file (str "(ns fixture.state)\n(def x 1)\n(def gone 1)\n"
                              "(defonce counter (atom 0))\n"))
       (load-file (.getPath file))
-      (tools/init-reload [directory])
+      (tools/reload {:dirs [directory]})
       (tools/reload)
       (swap! (fixture-var 'fixture.state 'counter) inc)
       (write-file! file "(ns fixture.state)\n(def x 2)\n(defonce counter (atom 0))\n")
@@ -175,7 +122,7 @@
     (try
       (write-file! base "(ns fixture.base)\n(def x 1)\n")
       (write-file! dep "(ns fixture.dep (:require [fixture.base :as b]))\n(def y (+ b/x 10))\n")
-      (tools/init-reload [directory])
+      (tools/reload {:dirs [directory]})
       ;; `:all` is how a fresh namespace tree gets loaded initially; `load-file`
       ;; alone would leave `fixture.dep` unable to `:require` its source.
       (tools/reload :all)
@@ -195,7 +142,7 @@
   (let [directory (temp-directory)
         file (io/file directory "fixture_lifecycle.clj")]
     (try
-      (tools/init-reload [directory])
+      (tools/reload {:dirs [directory]})
       (write-file! file "(ns fixture.lifecycle)\n(def x 1)\n")
       (let [added (tools/reload)]
         (is (= :reloaded (:status added)))
@@ -216,7 +163,7 @@
         bad-a (io/file directory "fixture_bad_a.clj")
         bad-b (io/file directory "fixture_bad_b.clj")]
     (try
-      (tools/init-reload [directory])
+      (tools/reload {:dirs [directory]})
       (write-file! good "(ns fixture.good)\n(def x 1)\n")
       (write-file! bad-a "(ns fixture.bad-a)\n(defn broken [x]\n")
       (write-file! bad-b "(ns fixture.bad-b)\n(defn broken [x]\n")
@@ -238,7 +185,7 @@
     (try
       (write-file! file "(ns fixture.force)\n(def x 1)\n")
       (load-file (.getPath file))
-      (tools/init-reload [directory])
+      (tools/reload {:dirs [directory]})
       (tools/reload)
       (let [result (tools/reload 'fixture.force)]
         (is (= :reloaded (:status result)))
@@ -253,7 +200,7 @@
     (try
       (write-file! file "(ns fixture.serial)\n(def x 1)\n")
       (load-file (.getPath file))
-      (tools/init-reload [directory])
+      (tools/reload {:dirs [directory]})
       (let [report (tools/reload)
             printed (pr-str report)]
         (is (string? printed))
@@ -298,7 +245,7 @@
         namespace-symbol 'fixture.alias]
     (try
       (write-file! file "(ns fixture.alias)\n(def value 1)\n")
-      (tools/init-reload [directory])
+      (tools/reload {:dirs [directory]})
       (load-file (.getPath file))
       (tools/create-persistent-alias!
        {:in-ns 'user :alias 'reload-fixture :target namespace-symbol})
@@ -319,7 +266,7 @@
         namespace-symbol 'fixture.stub]
     (try
       (write-file! file "(ns fixture.stub)\n(def value 1)\n")
-      (tools/init-reload [directory])
+      (tools/reload {:dirs [directory]})
       (load-file (.getPath file))
       (tools/create-persistent-alias!
        {:in-ns 'user :alias 'stub-fixture :target namespace-symbol})
