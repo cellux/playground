@@ -47,6 +47,27 @@
   #?(:clj (if f64? (double-array (int length)) (float-array (int length)))
      :cljs (if f64? (js/Float64Array. length) (js/Float32Array. length))))
 
+(defn value-length
+  "How many values a host-supplied real sequence holds.
+
+  A host hands over a primitive real array — a typed array on the browser — but
+  a test or a slow host may hand over an ordinary sequence, so both are accepted.
+  `count` and `nth` do not work on a JS typed array, which is why the hosts reach
+  their lane values through this pair rather than directly."
+  [values]
+  #?(:clj (count values)
+     :cljs (if (some? (.-length values))
+             (.-length values)
+             (clojure.core/count values))))
+
+(defn value-at
+  "One value of a host-supplied real sequence, however it is stored."
+  [values index]
+  #?(:clj (nth values index)
+     :cljs (if (some? (.-length values))
+             (aget values index)
+             (nth values index))))
+
 (defn planar-block
   "A planar (`channels` x `length`) block of reals: the array of channel arrays
   an audio callback is handed, which is also what a multi-channel kernel indexes."

@@ -15,6 +15,7 @@
             [omkamra.dsp.hosts.instrument :as inst-host]
             [omkamra.dsp.instrument :as inst]
             [omkamra.dsp.library.effect]
+            [omkamra.dsp.reference :as reference]
             [omkamra.dsp.synth.pool :as pool]
             [omkamra.dsp.examples.reference-synth :as ref]))
 
@@ -172,6 +173,17 @@
     (is (not= with-chain without-chain)
         "the post-mix effects are audible against the same voice without them")))
 
+(deftest a-post-mix-control-is-a-shared-parameter
+  ;; The post-mix chain's controls are instrument-level `:shared` parameters, so
+  ;; setting one is setting the same cell the pool holds for its voices.
+  (let [instrument (ref/reference-synth {:target :interpreter})
+        pool (:pool instrument)]
+    (is (= 0.35 (pool/parameter-value pool :chorus-mix)))
+    (is (= :shared (:scope (pool/parameter-slot pool :chorus-mix))))
+    (ref/set-effect-control! instrument 'chorus-mix 0.9)
+    (is (= 0.9 (pool/parameter-value pool :chorus-mix))
+        "the post-mix control is the pool's shared parameter")))
+
 (deftest a-post-mix-control-changes-the-output
   (let [dry (render-phrase :interpreter
                            [[:on 60 0.8] [:effect 'chorus-mix 0.0]
@@ -195,7 +207,7 @@
 
 (deftest interpreter-and-jvm-agree-with-post-mix-controls
   (let [phrase [[:on 60 0.8]
-                [:effect 'chorus-mix 0.9] [:effect 'drive 3.0]
+                [:effect 'chorus-mix 0.9] [:effect 'post-drive 3.0]
                 [:render 128] [:render 64]
                 [:off 60] [:render 128]]
         expected (render-phrase :interpreter phrase)
@@ -295,46 +307,54 @@
         (is (= '[sample drive] (:params (inst-host/lower-bus hand-built))))))))
 
 (deftest the-reference-instrument-does-not-allocate-in-the-audio-path
-  ;; The same discipline as the P10 pool check: the bound guards the class of
-  ;; reflective and boxing mistakes that cost kilobytes per call, and the
-  ;; negative control shows it has teeth. This one adds the matrix loop on top
-  ;; of the pool, so it is the whole host path.
+  ;; The audio path is the pool plus the bus. The matrix is applied on the
+  ;; control step, off the audio thread, and its state is data (M3), so it is
+  ;; measured separately rather than folded into the audio bound.
   (if-let [meter (thread-allocation-meter)]
     (let [instrument (ref/reference-synth {:target :jvm})
           block (planar-output 128)
           cycle! (fn []
                    (ref/note-on! instrument 60 0.8)
-                   (ref/render! instrument block 128)
+                   (inst-host/render! instrument block 128)
                    (ref/note-off! instrument 60)
-                   (ref/render! instrument block 128))
+                   (inst-host/render! instrument block 128))
           _ (dotimes [_ 2000] (cycle!))
           iterations 1000
           bytes (allocated-bytes meter (fn [] (dotimes [_ iterations] (cycle!))))
-          ;; The whole host path per cycle, measured at ~1.2 KB; the allowance is
+          ;; The audio path per cycle, measured at ~1.2 KB; the allowance is
           ;; deliberately below the class of mistake it guards: the reflective
           ;; planar `aget` this test caught was ~390 KB per cycle.
           allowance (* 4096 iterations)]
       (is (<= bytes allowance)
           (str "allocated " bytes " bytes over " iterations " cycles ("
                (double (/ bytes (double iterations))) " per cycle)"))
+      (testing "the matrix step, data-based and off the audio thread, stays bounded"
+        (let [modulation-bytes (allocated-bytes
+                                meter
+                                (fn [] (dotimes [_ iterations]
+                                         (reference/apply-modulation! instrument))))]
+          (is (<= modulation-bytes (* 262144 iterations))
+              (str "the matrix step allocated " modulation-bytes " bytes over "
+                   iterations " steps ("
+                   (double (/ modulation-bytes (double iterations))) " per step)"))))
       (testing "and the bound has teeth: the interpreter host is far above it"
-        (let [reference (ref/reference-synth {:target :interpreter})
+        (let [interpreter (ref/reference-synth {:target :interpreter})
               ;; The interpreter's IR evaluation allocates gigabytes per cycle,
               ;; so a couple of cycles already dwarf the allowance; running more
               ;; only makes the suite slow.
               _ (dotimes [_ 2]
-                  (ref/note-on! reference 60 0.8)
-                  (ref/render! reference block 128)
-                  (ref/note-off! reference 60)
-                  (ref/render! reference block 128))
+                  (ref/note-on! interpreter 60 0.8)
+                  (inst-host/render! interpreter block 128)
+                  (ref/note-off! interpreter 60)
+                  (inst-host/render! interpreter block 128))
               reference-bytes (allocated-bytes
                                meter
                                (fn []
                                  (dotimes [_ 2]
-                                   (ref/note-on! reference 60 0.8)
-                                   (ref/render! reference block 128)
-                                   (ref/note-off! reference 60)
-                                   (ref/render! reference block 128))))]
+                                   (ref/note-on! interpreter 60 0.8)
+                                   (inst-host/render! interpreter block 128)
+                                   (ref/note-off! interpreter 60)
+                                   (inst-host/render! interpreter block 128))))]
           (is (> reference-bytes allowance)
               (str "the interpreter host allocates " reference-bytes
                    " bytes, which must exceed the " allowance " byte allowance")))))

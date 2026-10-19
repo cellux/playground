@@ -158,6 +158,7 @@
   the pool's counterpart), so a voice can be placed either by the host or by its
   own DSP."
   [gate note bend detune pan
+   velocity mod-wheel brightness
    osc-mix pulse-width pwm-depth sync-mix sync-ratio
    noise-level
    cutoff resonance filter-amount
@@ -173,6 +174,10 @@
              ;; already smooth across the field.
              :controls [{:name gate} {:name note} {:name bend} {:name detune}
                         {:name pan}
+                        ;; Modulation sources the matrix reads (D45/M3): the voice
+                        ;; does not use them in DSP, but a kernel-local source
+                        ;; must be a control.
+                        {:name velocity} {:name mod-wheel} {:name brightness}
                         {:name osc-mix} {:name pulse-width :smooth 0.02 :default 0.5}
                         {:name pwm-depth}
                         {:name sync-mix} {:name sync-ratio}
@@ -213,35 +218,40 @@
    :capacity 8
    :max-block-frames 512
    :bend-range 200.0
-   :voice
-   {:definition #'reference-voice
-    :controls
-    {:gate {:source :gate}
-     :note {:source :note}
-     :bend {:source :bend}
-     :detune {:source :detune}
-     :pan {:source :pan}
-     :osc-mix {:constant 0.5}
-     :pulse-width {:constant 0.5}
-     :pwm-depth {:constant 0.15}
-     :sync-mix {:constant 0.0}
-     :sync-ratio {:constant 2.0}
-     :noise-level {:constant 0.05}
-     :cutoff {:constant 800.0}
-     :resonance {:constant 0.6}
-     :filter-amount {:constant 1.5}
-     :attack {:constant 0.005}
-     :decay {:constant 0.15}
-     :sustain {:constant 0.6}
-     :release {:constant 0.3}
-     :filter-attack {:constant 0.005}
-     :filter-decay {:constant 0.2}
-     :filter-sustain {:constant 0.3}
-     :filter-release {:constant 0.3}
-     :lfo-rate {:constant 5.0}
-     :lfo-shape {:constant 1}
-     :vibrato-depth {:constant 5.0}
-     :drive {:constant 1.0}}}})
+   :parameters
+   {:osc-mix {:default 0.5}
+    :pulse-width {:default 0.5}
+    :pwm-depth {:default 0.15}
+    :sync-mix {:default 0.0}
+    :sync-ratio {:default 2.0}
+    :noise-level {:default 0.05}
+    :cutoff {:default 800.0 :min 20.0 :max 8000.0 :unit :hz :curve :log}
+    :resonance {:default 0.6}
+    :filter-amount {:default 1.5}
+    :attack {:default 0.005}
+    :decay {:default 0.15}
+    :sustain {:default 0.6}
+    :release {:default 0.3}
+    :filter-attack {:default 0.005}
+    :filter-decay {:default 0.2}
+    :filter-sustain {:default 0.3}
+    :filter-release {:default 0.3}
+    :lfo-rate {:default 5.0}
+    :lfo-shape {:enum #{0 1 2 3} :default 1}
+    :vibrato-depth {:default 5.0}
+    :drive {:default 1.0}
+    ;; The matrix's global sources: `:shared`, so every voice reads one cell.
+    :mod-wheel {:scope :shared :default 0.0}
+    :brightness {:scope :shared :default 0.0}
+    ;; The post-mix chain's globals: `:shared`, so the bus binds them.
+    :chorus-rate {:scope :shared :default 0.6}
+    :chorus-depth {:scope :shared :default 12.0}
+    :chorus-mix {:scope :shared :default 0.35}
+    :post-drive {:scope :shared :default 1.5}
+    :delay-time {:scope :shared :default 12000.0}
+    :delay-feedback {:scope :shared :default 0.45}
+    :delay-mix {:scope :shared :default 0.35}}
+   :voice {:definition #'reference-voice}})
 
 ;; The modulation matrix and the loop that applies it live in
 ;; `omkamra.dsp.reference`, so the browser hosts run the same host code; see
@@ -265,7 +275,7 @@
       (inst/with-effect omkamra.dsp.library.delay/chorus
         [:chorus-rate :chorus-depth :chorus-mix])
       (inst/with-effect omkamra.dsp.library.effect/distortion
-        [:drive])
+        [:post-drive])
       (inst/with-effect omkamra.dsp.library.delay/feedback-delay
         [:delay-time :delay-feedback :delay-mix])))
 
@@ -286,12 +296,8 @@
          live-pool (inst-host/pool-of live)
          plan (vec (:control-plan (get-in program [:bundle :runtime])))
          matrix (or (:routes value) reference/modulation-matrix)]
-     (when (seq (:bus-control-names live))
-       (doseq [[control value] [['chorus-rate 0.6] ['chorus-depth 12.0]
-                                ['chorus-mix 0.35] ['drive 1.5]
-                                ['delay-time 12000.0] ['delay-feedback 0.45]
-                                ['delay-mix 0.35]]]
-         (inst-host/set-bus-control! live control value)))
+     ;; The post-mix controls default from the description's `:shared`
+     ;; parameters, which `instrument-pool` wires the bus to.
      (merge live (reference/new-host live-pool plan matrix)))))
 
 (defn reference-synth

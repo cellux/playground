@@ -81,10 +81,38 @@
 
 (defonce ^:private alias-registry (atom {}))
 
+(defonce ^:private session-namespaces
+  ;; Namespaces this session has loaded at least once, whether or not they are
+  ;; loaded now. A reload may only run code that has already run here: loading is
+  ;; what makes it dangerous, and a namespace that ran once has already done
+  ;; whatever it does. Keeping the names *past* an unload is also what lets a
+  ;; reload recover a namespace that a failed reload took out of the image.
+  (atom #{}))
+
 (def ^:private default-file-pattern #".*\.cljc?$")
 
 (def ^:private protected-namespaces
   #{"omkamra.dev.tools" "omkamra.dev.tools.reload"})
+
+(def ^:private wholesale-reload-floor
+  "The size at which a detection-driven reload is held to a share of the scope,
+  and the number of namespaces rebuilding that is already too many.
+
+  Calibrated against ordinary work rather than picked round: reloading everything
+  that depends on `omkamra.dsp` in this repository touches about forty
+  namespaces, so a scope below this floor never earns a refusal."
+  50)
+
+(def ^:private wholesale-reload-share
+  "The share of a scope a detection-driven reload may rebuild and still be taken
+  for an edit. Half: the guard speaks when a reload would touch more of the tree
+  than it leaves."
+  (/ 1 2))
+
+(def ^:private not-loaded-sample-size
+  "How many skipped namespaces a report names when there are more of them: enough
+  to recognise what was left alone, not a list to read."
+  5)
 
 ;; ---------------------------------------------------------------------------
 ;; Paths
@@ -197,11 +225,25 @@
         []))
     (if (symbol? spec) [spec] [])))
 
+(def ^:private require-clause-heads
+  "The `ns` clause heads that name another namespace.
+
+  An `ns` form spells them as **keywords** — `(:require [a.b :as b])` — so a
+  set of bare symbols silently matched nothing: every file's `:requires` came
+  back empty, and the reload graph fell back to the live image alone. That
+  masked itself in the common interactive case (a loaded namespace's aliases are
+  also a live dependency) but lost exactly the case that matters: a namespace
+  that is *not* loaded has no live image to ask, so it could never be pulled
+  back in. The symbol spellings are accepted too, since a `(require ...)` clause
+  written by hand is not a syntax error."
+  #{:require :use 'require 'use})
+
 (defn- ns-requires
   [form]
   (into #{}
         (mapcat (fn [clause]
-                  (when (and (seq? clause) (contains? #{'require 'use} (first clause)))
+                  (when (and (seq? clause)
+                             (contains? require-clause-heads (first clause)))
                     (mapcat prefix-dependencies (rest clause)))))
         (drop 2 form)))
 
@@ -422,6 +464,42 @@
                                   "namespace did not load"))))))))
 
 ;; ---------------------------------------------------------------------------
+;; Aliases left behind by unloading
+;; ---------------------------------------------------------------------------
+
+(defn- stale-alias-entries
+  "Every alias, in every loaded namespace, that still points at an unloaded
+  namespace object, as `[owner alias target]` names.
+
+  `require` stores the namespace object it found. Unloading a namespace removes
+  it from the registry but cannot reach into the namespaces that alias it, and
+  those are usually *outside* the reload scope — `user` above all — so nothing
+  else repairs them. A namespace inside the scope is rebuilt from its own `ns`
+  form and repairs itself, so only genuinely stale entries appear here."
+  []
+  (into []
+        (for [owner (all-ns)
+              [alias target] (ns-aliases owner)
+              :let [live (find-ns (ns-name target))]
+              :when (and live (not (identical? target live)))]
+          [(ns-name owner) alias (ns-name live)])))
+
+(defn- refresh-stale-aliases!
+  "Re-point stale aliases at the live namespace of the same name.
+
+  A stale alias is not merely untidy: it resolves through the dead object to the
+  namespace's *old* vars, so an alias in a REPL namespace would keep running
+  code the reload replaced. Returns the repairs, for the caller to report;
+  `bind-alias!` returns nothing, so the repair itself is the record."
+  []
+  (into []
+        (keep (fn [[owner alias target]]
+                (when (find-ns owner)
+                  (bind-alias! owner alias target)
+                  {:in-ns owner :alias alias :target target})))
+        (stale-alias-entries)))
+
+;; ---------------------------------------------------------------------------
 ;; Planning
 ;; ---------------------------------------------------------------------------
 
@@ -492,25 +570,61 @@
                            (get-in parsed [file :namespaces]))]))
         (:files scan)))
 
-(defn- roots
-  "The namespaces that must be (re)loaded: content changes (which includes brand
-  new files), files that are gone (to unload), or explicitly named namespaces.
+(defn- remember-loaded!
+  "Record every namespace loaded so far and return the whole remembered set."
+  []
+  (swap! session-namespaces into (map ns-name (all-ns))))
 
-  A namespace whose unchanged file simply is not loaded yet is deliberately not
-  a root: on a fresh JVM that would try to load the whole tree. Loading happens
-  by editing, by an explicit target, or with `:all`."
-  [scan file->ns known explicit]
-  (cond
-    (= :all explicit) (set (mapcat val file->ns))
-    (seq explicit) (set explicit)
-    :else
-    (into (set (mapcat file->ns (:changed scan)))
-          (mapcat #(get-in known [% :parsed :namespaces])
-                  (:missing scan)))))
+(defn- select-roots
+  "The namespaces a reload will (re)load, and the ones it was pointed at but will
+  not, because this session has never loaded them.
+
+  A reload refreshes the image; it does not grow it, and it runs no code that has
+  not already run here. Loading is `require`'s job — deliberate, by name — and a
+  file digest is not a reason to run a namespace for the first time: one scanned
+  namespace in this repository ends in `(q/defsketch …)`, which launches a sketch
+  as it loads and takes a headless JVM with it.
+
+  Everything else is a root: a changed or brand new file, a file that is gone (to
+  unload), or a namespace named explicitly or through `:all` — each only if the
+  session has loaded it. That includes a namespace a *failed* reload left
+  unloaded: it has run here, so a reload may bring it back."
+  [scan file->ns known explicit remembered]
+  (let [known? #(contains? remembered %)
+        selected (cond
+                   (= :all explicit) (set (mapcat val file->ns))
+                   (seq explicit) (set explicit)
+                   :else
+                   (into (set (mapcat file->ns (:changed scan)))
+                         (mapcat #(get-in known [% :parsed :namespaces])
+                                 (:missing scan))))]
+    {:root-set (into #{} (filter known?) selected)
+     :not-loaded (into (sorted-set) (remove known?) selected)}))
 
 ;; ---------------------------------------------------------------------------
 ;; Public API
 ;; ---------------------------------------------------------------------------
+
+(defn- wholesale-reload?
+  "True when a detection-driven reload would rebuild the entire session.
+
+  Detection is content-based, so a baseline that no longer describes the tree — a
+  check-out, or anything that corrupted it — makes *every* file look changed, and
+  acting on that verdict unloads and rebuilds every namespace in scope that the
+  session has run. That is never an incremental edit: it is a reload nobody asked
+  for, of everything the session is made of, through an unload-then-load sequence
+  that a single failure leaves half-done. Refusing costs the caller one explicit
+  `:all`.
+
+  The threshold is a share of the session rather than all of it, so a check-out
+  that rewrites most of the tree is caught too, and it is floored because
+  refreshing all of a small session is ordinary — a widely used namespace in a
+  small project really does reach every dependent."
+  [session closure]
+  (let [total (count session)]
+    (and (>= total wholesale-reload-floor)
+         (>= (count closure) (max wholesale-reload-floor
+                                  (* wholesale-reload-share total))))))
 
 (defn- configure!
   "Establish or replace the reload baseline and scan scope.
@@ -540,8 +654,12 @@
         live (live-file-map config)
         file->ns (file->namespaces scan parsed live)
         ns->files (invert file->ns)
-        root-set (roots scan file->ns known explicit)
+        remembered (remember-loaded!)
+        {:keys [root-set not-loaded]} (select-roots scan file->ns known explicit
+                                                    remembered)
         members (set (keys ns->files))
+        ;; The namespaces a reload may touch at all: remembered, and in scope.
+        session (into #{} (filter remembered) members)
         dependencies-of (fn [namespace]
                           (dependency-set namespace ns->files parsed))
         ;; Reload a changed namespace *and everything that depends on it*, so
@@ -553,13 +671,21 @@
                                      (dependencies-of namespace)))
                            {}
                            members)
-        closure (loop [result (set root-set)]
-                  (let [next (into result
-                                   (comp (mapcat #(get dependents % #{}))
-                                         (remove result))
-                                   result)]
-                    (if (= next result) result (recur next))))
-        order (topological-sort closure dependencies-of)
+        ;; Dependents too, and for the same reason: a namespace this session has
+        ;; never loaded has nothing to refresh, and a reload does not load it.
+        closure (into #{}
+                      (filter remembered)
+                      (loop [result (set root-set)]
+                        (let [next (into result
+                                         (comp (mapcat #(get dependents % #{}))
+                                               (remove result))
+                                         result)]
+                          (if (= next result) result (recur next)))))
+        ;; A detection-driven reload that would rebuild the whole session is a
+        ;; baseline that no longer describes the tree, not an edit. An explicit
+        ;; target or `:all` means the caller has already said what they want.
+        wholesale? (and (nil? explicit) (wholesale-reload? session closure))
+        order (if wholesale? [] (topological-sort closure dependencies-of))
         outcome (reduce
                  (fn [result namespace]
                    (cond
@@ -599,35 +725,63 @@
                  order)
         failed (:failed outcome)
         failed-names (set (map :namespace failed))
+        reloaded-names (set (:reloaded outcome))
+        ;; Advance the baseline only for files whose namespaces were actually
+        ;; (re)loaded. A file that was merely *scanned* keeps its old digest, so
+        ;; an edit it carries stays detectable: otherwise any reload, even an
+        ;; explicit one for an unrelated namespace, would silently absorb every
+        ;; pending edit and the next `(reload)` would report `:unchanged`.
         new-known (reduce
                    (fn [known file]
                      (let [namespaces (get file->ns file)]
-                       (if (some failed-names namespaces)
-                         known
+                       (cond
+                         (some failed-names namespaces) known
+                         (some reloaded-names namespaces)
                          (assoc known file {:digest (get-in scan [:digests file])
-                                            :parsed (get parsed file)}))))
+                                            :parsed (get parsed file)})
+                         :else known)))
                    (apply dissoc known (:missing scan))
                    (:files scan))
         kept (vec (sort (keep (fn [[namespace names]]
                                 (when (seq names) namespace))
                               (:kept outcome))))
         status (cond
+                 wholesale? :refused
                  (seq failed) :errors
                  (or (seq (:reloaded outcome)) (seq (:unloaded outcome))) :reloaded
                  :else :unchanged)]
     (swap! state assoc :known new-known)
     (repair-aliases! outcome)
-    (cond-> {:status status
-             :changed (vec (sort root-set))
-             :reloaded (vec (:reloaded outcome))
-             :unloaded (vec (:unloaded outcome))
-             :kept kept
-             :failed (vec failed)
-             :deferred (vec (sort (:deferred outcome)))
-             :scanned (count (:files scan))}
-      (= :unchanged status)
-      (assoc :note (str "no file content changed since the last reload; "
-                        "pass a namespace to reload it explicitly")))))
+    (let [aliases-repaired (refresh-stale-aliases!)]
+      (cond-> {:status status
+               :changed (vec (sort root-set))
+               :reloaded (vec (:reloaded outcome))
+               :unloaded (vec (:unloaded outcome))
+               :kept kept
+               :failed (vec failed)
+               :deferred (vec (sort (:deferred outcome)))
+               :scanned (count (:files scan))}
+        (seq aliases-repaired)
+        (assoc :aliases-repaired aliases-repaired)
+        (seq not-loaded)
+        (assoc :not-loaded {:count (count not-loaded)
+                            :sample (vec (take not-loaded-sample-size not-loaded))}
+               :note (str (count not-loaded) " namespace(s) it was pointed at have "
+                          "never been loaded in this session, so nothing was done "
+                          "for them: a reload refreshes the image, it does not grow "
+                          "it — `require` them instead"))
+        wholesale?
+        (assoc :would-reload (count closure)
+               :note (str "detection says the whole session changed ("
+                          (count closure) " of " (count session) " namespaces this "
+                          "session may touch), which is a replaced or corrupted "
+                          "baseline rather than an edit. Nothing was reloaded or "
+                          "unloaded. If that really is what you want, (reload :all) "
+                          "refreshes all " (count session) " of them; (reload "
+                          "'some.ns) refreshes only the namespaces you name"))
+        (and (= :unchanged status) (empty? not-loaded))
+        (assoc :note (str "no file content changed since the last reload; "
+                          "pass a namespace to reload it explicitly"))))))
 
 (defn reload
   "Reload a namespace set and report compactly.
@@ -638,14 +792,35 @@
   namespaces are unloaded first, so removed vars disappear and `deftype` /
   `defrecord` get fresh classes, while `defonce` values are preserved.
 
+  A reload only concerns namespaces **this session has loaded at least once**,
+  and among those the ones that changed or that depend on one that did, which is
+  what the reload graph was always for. It refreshes the image; it does not grow
+  it. A changed — or brand new — file whose namespace has never been loaded is
+  left alone and summarised under `:not-loaded`: loading code runs it, and
+  `require` is the verb that does that deliberately, by name. A namespace that a
+  *failed* reload left unloaded is still the tool's business, because it has run
+  here.
+
   `(reload 'my.ns)`, `(reload '[a b])`, and `(reload :all)` ignore the baseline
-  and reload exactly the named namespaces (and their dependents), which is the
-  deterministic escape hatch when detection cannot know about an edit.
+  and force the loaded namespaces among those named (and their loaded
+  dependents), which is the deterministic escape hatch when detection cannot know
+  about an edit. A namespace that is not loaded is still left alone.
 
   `(reload {:dirs [...]})` sets the scan scope first (the classpath source
   directories by default; an optional `:files` pattern selects filenames) and
   then reloads what changed under it; the scope persists for later calls. There
   is no separate initialization step.
+
+  An alias that a `require` made outside the scan — in `user`, say — is
+  re-pointed at the reloaded namespace, so it keeps resolving to the current
+  vars; the repairs are reported under `:aliases-repaired`.
+
+  Detection can lose the tree: a baseline that no longer describes it, after a
+  check-out or a corruption, makes *every* file look changed. A reload driven by
+  detection then refuses rather than rebuild the whole live image, reporting
+  `:status :refused`, what it saw in `:changed`, `:would-reload`, and a note
+  naming the way through (`:all`, or the namespaces you want). A change to a
+  widely used namespace still cascades normally.
 
   Every failure is reported, not just the first."
   ([] (with-lock (run-reload! nil)))

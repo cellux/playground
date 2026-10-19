@@ -6,7 +6,8 @@
   (:require [clojure.test :refer [deftest is testing]]
             [omkamra.dsp :as dsp]
             [omkamra.dsp.combinators :as comb]
-            [omkamra.dsp.examples.demo-synth :as demo]))
+            [omkamra.dsp.examples.demo-synth :as demo]
+            [omkamra.dsp.harness.fixtures :as fixtures]))
 
 (deftest a-call-emitting-transform-links-an-anonymous-value
   ;; D37: an anonymous `dsp/fn` value has no Var for the call that `unison`
@@ -181,3 +182,105 @@
     (testing "a control the voice does not have is refused"
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no such control"
                             (comb/smooth plain :cutoff 0.01))))))
+
+(deftest poly-carries-a-voices-control-declarations
+  ;; The interface of a polyphonic voice is the voice's interface with the
+  ;; per-slot controls expanded, so a declaration has to travel with the name: a
+  ;; shared control that arrived as an ordinary scalar, or a default that vanished,
+  ;; would make a fused voice a different voice (D50, D52).
+  (testing "a shared control stays shared, and is never expanded per slot"
+    (let [fused (comb/poly (deref #'fixtures/shared-gain) {:count 2 :per-slot []})]
+      (is (= '[amount] (mapv :name (get-in fused [:process :controls]))))
+      (is (true? (:shared (first (get-in fused [:process :controls])))))
+      (is (thrown? clojure.lang.ExceptionInfo
+                   (comb/poly (deref #'fixtures/shared-gain)
+                              {:count 2 :per-slot [:amount]}))
+          "a shared control is one region for the whole process")))
+  (testing "a lane cannot be polyphonic at all"
+    (is (thrown? clojure.lang.ExceptionInfo
+                 (comb/poly (deref #'fixtures/lane-on-frequency)
+                            {:count 2 :per-slot [:frequency]}))
+        "a lane belongs to the entry process"))
+  (testing "and an undeclared control is still just a name"
+    (let [fused (comb/poly (deref #'fixtures/sine-voice)
+                           {:count 2 :per-slot [:gate :frequency]})]
+      (is (= '[attack decay sustain release gate_0 frequency_0 gate_1 frequency_1]
+             (mapv :name (get-in fused [:process :controls])))))))
+
+;; ---------------------------------------------------------------------------
+;; Per-slot skipping (M6b)
+;; ---------------------------------------------------------------------------
+
+(dsp/defn free-running-voice
+  "A generator whose output is its own oscillator, so whether a call site was
+  evaluated at all is visible even while its gate is shut: a skipped slot
+  contributes nothing where the plain voice keeps advancing (M6b)."
+  [gate frequency]
+  {:process {:input false}}
+  (omkamra.dsp.library.oscillator/sine-oscillator frequency))
+
+(defn- one-slot-artifact [voice target]
+  (dsp/compile (dsp/link (comb/poly voice {:count 1 :per-slot [:gate :frequency]}))
+               {:target target :precision :f32 :entry :process}))
+
+(defn- run-gates [artifact gates]
+  (let [output (float-array 8)]
+    (mapv (fn [gate]
+            (dsp/process! artifact {:output output :frames (int 8)
+                                    :sample-rate 48000.0 :controls [gate 440.0]})
+            (vec output))
+          gates)))
+
+(defn- peak [samples]
+  (reduce max 0.0 (map (fn [x] (Math/abs (double x))) samples)))
+
+(deftest a-guard-skips-a-slot-that-has-never-been-gated
+  ;; The whole point of the guard: a call site whose gate has never opened is not
+  ;; evaluated, so a fused slot a pool has not allocated costs a comparison. The
+  ;; unguarded voice is the negative twin -- it advances with the gate shut. The
+  ;; interpreter is the oracle, so both hosts must agree.
+  (doseq [target [:interpreter :jvm]]
+    (let [plain (one-slot-artifact (deref #'free-running-voice) target)
+          guarded (one-slot-artifact (comb/guard (deref #'free-running-voice)) target)]
+      (when (= :jvm target)
+        (is (= 1 (count (:partitions guarded)))
+            "the guard keeps the slot's own partition, which a reset clears"))
+      (is (pos? (peak (first (run-gates plain [0.0]))))
+          (str (name target) ": the plain voice advances even with its gate shut"))
+      (is (zero? (peak (first (run-gates guarded [0.0]))))
+          (str (name target) ": the guarded voice is not evaluated until gated")))))
+
+(deftest a-guard-latches-through-a-release
+  ;; The latch is the difference between a gate check and a *correct* gate check:
+  ;; a pool closes the gate to release a voice, so a slot that has sounded must
+  ;; keep being evaluated while its tail runs. The unguarded voice is the oracle.
+  (doseq [target [:interpreter :jvm]]
+    (let [plain (one-slot-artifact (deref #'free-running-voice) target)
+          guarded (one-slot-artifact (comb/guard (deref #'free-running-voice)) target)
+          gates (concat (repeat 3 1.0) (repeat 8 0.0))]
+      (is (= (run-gates plain gates) (run-gates guarded gates))
+          (str (name target)
+               ": closing the gate does not clear the latch, so the tail is identical"))
+      (is (pos? (peak (last (run-gates guarded gates))))
+          (str (name target) ": the guarded slot is still evaluated after the gate closes")))))
+
+(deftest a-reset-clears-a-guard
+  ;; Per-call-site ownership is what makes the latch resettable: a stolen or freed
+  ;; slot is reset, so its guard starts closed again and the slot is skippable
+  ;; once more.
+  (doseq [target [:interpreter :jvm]]
+    (let [plain (one-slot-artifact (deref #'free-running-voice) target)
+          guarded (one-slot-artifact (comb/guard (deref #'free-running-voice)) target)]
+      (run-gates guarded [1.0])
+      (dsp/reset! guarded)
+      (run-gates plain [1.0])
+      (dsp/reset! plain)
+      (is (zero? (peak (first (run-gates guarded [0.0]))))
+          (str (name target) ": after a reset the latch is clear and the slot skipped"))
+      (is (pos? (peak (first (run-gates plain [0.0]))))
+          (str (name target) ": where the unguarded voice keeps advancing")))))
+
+(deftest guard-needs-a-gate-control
+  (let [voice (dsp/fn [frequency] {:process {:input false}} frequency)]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"gate control"
+                          (comb/guard voice)))))

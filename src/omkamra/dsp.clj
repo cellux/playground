@@ -108,7 +108,13 @@
                                 (map? (first body)))
                          [(first body) (next body)]
                          [{} body])
-        spec (merge spec options)]
+        spec (merge spec options)
+        ;; A callee asks to be copied into its call sites rather than called,
+        ;; with `^:inline` metadata (on the name for `dsp/defn`, on the form for
+        ;; `dsp/fn`) or an `:inline true` spec key (D47).
+        inline? (boolean (or (:inline spec)
+                             (:inline (meta name))
+                             (:inline (meta form))))]
     (when-not (vector? params)
       (macro-fail (str label " params must be a vector")
                   form [:params] {:name name :params params}))
@@ -140,6 +146,7 @@
                :source source
                :resolution (macro-resolution *ns* body)}
         (some? doc) (assoc :doc doc)
+        inline? (assoc :inline true)
         (contains? spec :process)
         (assoc :process (:process spec))
         (contains? spec :options)
@@ -167,6 +174,12 @@
         :return-type :float}
        sample])
 
+  A definition asks to be **copied into its call sites** rather than called with
+  `^:inline` on its name, or with `:inline true` in the descriptor. Inlining is
+  the exception, not the default (D47), because a target may not be able to call:
+
+    (dsp/defn ^:inline clamp01 [x] (max 0.0 (min 1.0 x)))
+
   Both forms capture source data; DSP bodies are never executed as ordinary
   Clojure expressions during definition or compilation."
   [name & args]
@@ -189,7 +202,15 @@
 
   The descriptor carries a generated internal name and the defining namespace's
   source, so it links directly; `dsp/def` replaces the name when the value is
-  bound to a Var."
+  bound to a Var.
+
+  As in `dsp/defn`, an anonymous definition asks to be copied into its call
+  sites rather than called, with `:inline true` in its descriptor — or with
+  `^:inline` on the whole form:
+
+    (def clipper
+      (-> (dsp/fn [sample] {:inline true} (max -1.0 (min 1.0 sample)))
+          (unison {:count 3})))"
   [& args]
   (list 'quote (capture-definition "dsp/fn" (gensym "dsp-fn-") &form args)))
 
@@ -452,16 +473,38 @@
      ;; by name, and only a host writing memory directly needs the offset.
      :lane-stride (:frame-capacity ir)
      :lanes (mapv (clojure.core/fn [index lane]
-                    (assoc (select-keys lane [:name :type :smooth :slew])
+                    (assoc (select-keys lane [:name :type :smooth :slew :required?])
                            :role :lane
                            :index index
                            :buffer :lanes
                            :offset (* index (:frame-capacity ir))))
                   (range)
                   (:lanes ir))
+     ;; Host-supplied shared controls. Each is one slice of the flat `:shared`
+     ;; region, `:shared-stride` frames apart — the same shape as a lane, but one
+     ;; region for the whole pool rather than one per voice, so a broadcast
+     ;; parameter is written once instead of once per voice (M5).
+     :shared-stride (:frame-capacity ir)
+     :shared (mapv (clojure.core/fn [index control]
+                     (assoc (select-keys control [:name :type :required?])
+                            :role :shared
+                            :index index
+                            :buffer :shared
+                            :offset (* index (:frame-capacity ir))))
+                   (range)
+                   (:shared ir))
      :state state
      :special-mask (long (or (:special-mask ir) 0))
      :special-slots special-slots
+     ;; A callee may publish a special of its own (M6 seam 4). Those are not the
+     ;; entry's contract, so they are not in `:special-slots`; they are recorded
+     ;; against the call site whose partition owns them, in evaluation order -- so
+     ;; a fused host can read one slot's `:activity` and free it. `:index` is the
+     ;; logical arena index, which a target resolves to a physical slot.
+     :call-partitions (mapv (clojure.core/fn [partition]
+                              (select-keys partition [:function-id :base :size
+                                                      :specials :special-mask]))
+                            (:call-partitions ir))
      :state-layout {:ownership :instance
                     :persistent? true
                     :values state-values}
@@ -673,6 +716,40 @@
                        :capabilities problems}))))
   options)
 
+(def ^:private calling-targets
+  "Targets whose backend emits a call instead of copying the callee body (D47).
+
+  A target that is not here needs every definition inlined, which is what
+  `inline-calls` has always done for it. `:interpreter` is not a calling target in
+  this sense either: it is never inlined at all, because it executes the call graph
+  and is the oracle the others are compared against."
+  #{:jvm :js :wasm})
+
+(clojure.core/defn- requested-inline-ids
+  "The definitions that asked to be copied into their call sites (D47)."
+  [lowered]
+  (into #{}
+        (keep (clojure.core/fn [[id definition]] (when (:inline definition) id)))
+        (:definitions lowered)))
+
+(clojure.core/defn- prepare-ir
+  "Prepare lowered IR for `target`, compiling `entry` (D47).
+
+  A process on a target that can call keeps its call sites, copying only the
+  definitions it must: the ones that asked (`^:inline`) plus the ones no method can
+  take. Every other compile gets one flat function, exactly as before.
+
+  A **function** entry stays inlined even on a calling target: its class has no
+  state arrays — a function is a pure scalar expression — so there is no arena for
+  a callee's partition to live in. D19's partitions exist on the process path."
+  [target entry lowered]
+  (if (and (= :process entry) (contains? calling-targets target))
+    (ir/inline-calls lowered (into (ir/uncallable-definition-ids lowered)
+                                   (requested-inline-ids lowered)))
+    (if (= :interpreter target)
+      lowered
+      (ir/inline-calls lowered))))
+
 (clojure.core/defn compile
   "Compile a DSP descriptor for `:interpreter`, `:jvm`, `:js`, or `:wasm`.
 
@@ -739,16 +816,12 @@
      (case entry
        :function (let [lowered (ir/lower-unit unit {:options options})]
                    (compile-function-target target
-                                            (if (= :interpreter target)
-                                              lowered
-                                              (ir/inline-calls lowered))
+                                            (prepare-ir target entry lowered)
                                             options))
        :process (let [lowered (ir/lower-process unit {:channels channels
                                                       :options options})]
                   (compile-process-target target
-                                          (if (= :interpreter target)
-                                            lowered
-                                            (ir/inline-calls lowered))
+                                          (prepare-ir target entry lowered)
                                           options))
        (throw (ex-info "unsupported DSP compilation entry"
                        {:entry entry
@@ -820,9 +893,11 @@
   [artifact context]
   (let [abi (:abi artifact)
         lanes (:lanes abi)]
-    (when (and (seq lanes) (nil? (:lanes context)))
-      ;; A lane process has no valid block without its region, so say that here
-      ;; rather than letting a backend report an unknown buffer.
+    (when (and (some :required? lanes) (nil? (:lanes context)))
+      ;; A process with a mandatory (`:lane`) lane has no valid block without
+      ;; its region, so say that here rather than letting a backend report an
+      ;; unknown buffer. A `:has-lane` lane is optional: an absent region is
+      ;; built zeroed, so it reads as "no automation" and the scalar stands.
       (throw (ex-info "this DSP process declares per-frame lanes"
                       {:lanes (mapv :name lanes)})))
     (if (empty? lanes)
@@ -833,12 +908,12 @@
             region (if f64?
                      (double-array (* stride (count lanes)))
                      (float-array (* stride (count lanes))))]
-        (doseq [{:keys [name offset]} lanes]
+        (doseq [{:keys [name offset required?]} lanes]
           ;; The ABI names a lane with a symbol, as it does a control, but accept
           ;; the keyword spelling too: a key that silently missed would publish
           ;; zeros, which is the worst possible failure for automation.
           (let [values (or (get supplied name) (get supplied (keyword name)))]
-            (when-not values
+            (when (and (nil? values) required?)
               (throw (ex-info "a DSP lane has no values for this block"
                               {:lane name :supplied (vec (keys supplied))})))
             (let [count (min (count values) stride)]
@@ -851,6 +926,53 @@
                     (aset target (int (+ offset index)) (float (nth values index)))))))))
         (assoc context :lanes region)))))
 
+(clojure.core/defn- shared-region
+  "Flatten a `{:shared-name value}` context map into the ABI's `:shared` region.
+
+  A shared control is block-rate, so a bare number is broadcast across its
+  `:shared-stride` slice and a sequence is written as it comes — which is also
+  what a host writing a per-frame *global* curve wants. The region is one for the
+  whole pool, not one per voice (M5), so this is the copy that a real-time host
+  skips by writing the region directly."
+  [artifact context]
+  (let [abi (:abi artifact)
+        shared (:shared abi)]
+    (if (empty? shared)
+      context
+      (let [stride (long (:shared-stride abi))
+            supplied (:shared context)
+            f64? (= :f64 (get-in abi [:precision]))
+            region (if f64?
+                     (double-array (* stride (count shared)))
+                     (float-array (* stride (count shared))))
+            write! (if f64?
+                     (clojure.core/fn [target at value]
+                       (aset ^doubles target (int at) (double value)))
+                     (clojure.core/fn [target at value]
+                       (aset ^floats target (int at) (float value))))]
+        (when (and supplied (not (map? supplied)))
+          (throw (ex-info "a DSP shared region must be a map of control to value"
+                          {:shared supplied})))
+        (doseq [{:keys [name offset required?]} shared]
+          ;; A control name is spelled as a symbol in the ABI; accept the keyword
+          ;; spelling too, since a key that silently missed would publish zeros.
+          (let [value (or (get supplied name) (get supplied (keyword name)))]
+            (cond
+              (nil? value)
+              (when required?
+                (throw (ex-info "a DSP shared control has no value for this block"
+                                {:shared name :supplied (vec (keys supplied))})))
+
+              (number? value)
+              (dotimes [frame stride]
+                (write! region (+ offset frame) value))
+
+              :else
+              (let [count (min (clojure.core/count value) stride)]
+                (dotimes [index count]
+                  (write! region (+ offset index) (nth value index)))))))
+        (assoc context :shared region)))))
+
 (clojure.core/defn process!
   "Execute a process artifact or instance with its explicit ABI context.
 
@@ -858,7 +980,11 @@
   `:controls` in ABI order, plus `:input` when the process declares an input
   port. Interpreter and JVM artifacts and instances expose this checked context
   adapter; generated JS/Wasm modules expose their target-native entry points
-  through the same lifecycle vocabulary."
+  through the same lifecycle vocabulary.
+
+  `:lanes` carries a per-frame automation region (D28); `:shared` carries the
+  pool-wide shared controls (M5). Either may be absent when the process declares
+  none of that kind."
   [holder context]
   (let [artifact (or (:artifact holder) holder)]
     (when-not (= :process (:entry artifact))
@@ -866,7 +992,7 @@
                       {:entry (:entry artifact)})))
     (check-live! holder)
     (if-let [invoke-context (:invoke-context holder)]
-      (invoke-context (lane-region artifact context))
+      (invoke-context (shared-region artifact (lane-region artifact context)))
       (throw (ex-info "this DSP target does not expose an explicit process context adapter"
                       {:target (:target artifact)})))))
 
@@ -881,6 +1007,10 @@
    (process-checked! holder input output frames sample-rate float-controls
                      int-controls nil))
   ([holder input output frames sample-rate float-controls int-controls lanes]
+   (process-checked! holder input output frames sample-rate float-controls
+                     int-controls lanes nil))
+  ([holder input output frames sample-rate float-controls int-controls lanes
+    shared]
    (let [artifact (or (:artifact holder) holder)]
      (when-not (= :process (:entry artifact))
        (throw (ex-info "only process artifacts have a process ABI"
@@ -890,7 +1020,7 @@
                        {:target (:target artifact)})))
      (check-live! holder)
      (jvm/process-checked! holder input output frames sample-rate
-                           float-controls int-controls lanes))))
+                           float-controls int-controls lanes shared))))
 
 (clojure.core/defn process-unchecked!
   "Execute a JVM process artifact or instance through its raw primitive ABI.
@@ -905,6 +1035,10 @@
    (process-unchecked! holder input output frames sample-rate float-controls
                        int-controls nil))
   ([holder input output frames sample-rate float-controls int-controls lanes]
+   (process-unchecked! holder input output frames sample-rate float-controls
+                       int-controls lanes nil))
+  ([holder input output frames sample-rate float-controls int-controls lanes
+    shared]
    (let [artifact (or (:artifact holder) holder)]
      (when-not (= :process (:entry artifact))
        (throw (ex-info "only process artifacts have a process ABI"
@@ -914,7 +1048,7 @@
                        {:target (:target artifact)})))
      (check-live! holder)
      (jvm/process-unchecked! holder input output frames sample-rate
-                             float-controls int-controls lanes))))
+                             float-controls int-controls lanes shared))))
 
 (clojure.core/defn initialize!
   "Initialize a process artifact or instance according to its lifecycle ABI."

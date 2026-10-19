@@ -135,7 +135,19 @@
     ;; process's `:lanes` region, instead of as one block-rate scalar. It is the
     ;; host's mechanism for arbitrary automation curves; `:smooth` and `:slew`
     ;; compose with it, since they only change what the lane's target is.
-    [:lane {:optional true} boolean?]]])
+    [:lane {:optional true} boolean?]
+    ;; `:has-lane` is the *additive* counterpart: the control keeps its
+    ;; block-rate scalar and gains a per-frame lane beside it, which the DSP
+    ;; reads with `(lane control)` and the host may fill. A `:lane` region is
+    ;; mandatory, but a `:has-lane` one is optional — an untouched region reads
+    ;; zero, so a host that never sends automation gets the plain scalar.
+    [:has-lane {:optional true} boolean?]
+    ;; `:shared` is the *global* counterpart of a control: the value is read
+    ;; from the process's `:shared` region, one region per *pool*, instead of
+    ;; from this instance's control storage. The control leaves the scalar
+    ;; list, so its name *is* the region read — a broadcast parameter, written
+    ;; once by the host rather than once per voice (M5).
+    [:shared {:optional true} boolean?]]])
 
 (def ^:private BufferSource
   [:map {:closed true}
@@ -209,6 +221,9 @@
    [:process {:optional true} [:or nil? ProcessSource]]
    [:options {:optional true} [:or nil? CompilerOptions]]
    [:compiler-options {:optional true} [:or nil? CompilerOptions]]
+   ;; The callee asks to be copied into its call sites rather than called
+   ;; (D47). It is a property of the function, not of a call site.
+   [:inline {:optional true} boolean?]
    ;; Definitions carried by a call-emitting transformer (D37), keyed by
    ;; fully-qualified id. They are validated on arrival by the linker, so a
    ;; shallow shape is enough here. `normalize` drops the key; `link` reads it
@@ -537,6 +552,12 @@
         (= op 'continue) (when (empty? args) :void)
         (= op 'while) :void
         (= op 'buffer-load) :float
+        ;; The lane accessor: a per-frame read of a control's lane. It is typed
+        ;; here and resolved to a `:buffer-load` from the process's `:lanes`
+        ;; region by the IR, which is where the region's offsets are known.
+        (= op 'lane)
+        (when (and (= 1 (count args)) (symbol? (first args)))
+          :float)
         (= op 'buffer-store) :void
         ;; Indexed aggregate-state operations are fully type-checked during
         ;; portable IR lowering, where the state size is available.
@@ -656,6 +677,19 @@
     (when (and (map? control) (:lane control) (not= :float type))
       (fail "DSP per-frame lane controls must have type :float"
             source path {:name name :type type}))
+    (when (and (map? control) (:has-lane control) (not= :float type))
+      (fail "DSP lane-carrying controls must have type :float"
+            source path {:name name :type type}))
+    (when (and (map? control) (:lane control) (:has-lane control))
+      (fail "a DSP control cannot be a lane and lane-carrying at once"
+            source path {:name name}))
+    (when (and (map? control) (:shared control) (not= :float type))
+      (fail "DSP shared controls must have type :float"
+            source path {:name name :type type}))
+    (when (and (map? control) (:shared control)
+               (or (:lane control) (:has-lane control)))
+      (fail "a DSP control cannot be a shared variable and a lane at once"
+            source path {:name name}))
     (cond-> {:name name :type type}
       (and (map? control) (contains? control :default))
       (assoc :default
@@ -666,7 +700,9 @@
                                       (conj path :default))))
       (map? control)
       (merge (select-keys control [:smooth :slew])
-             (when (:lane control) {:lane true})))))
+             (when (:lane control) {:lane true})
+             (when (:has-lane control) {:has-lane true})
+             (when (:shared control) {:shared true})))))
 
 (defn- normalize-buffer-name
   [name source path]
@@ -750,13 +786,26 @@
         ;; Lane controls share one flat, host-written region: one slice of
         ;; `:frame-capacity` frames per lane. The slicing is an addressing
         ;; detail of the kernel; the host sees one named lane per control.
-        lane-controls (filterv #(and (map? %) (:lane %)) controls)
+        lane-controls (filterv #(and (map? %) (or (:lane %) (:has-lane %))) controls)
+        ;; Shared controls share one flat, host-written region that the *pool*
+        ;; owns, so every instance of this process reads the same slice (M5). It
+        ;; is deliberately the same shape as the lane region: a shared control
+        ;; reuses the lane addressing and the lane delivery path.
+        shared-controls (filterv #(and (map? %) (:shared %)) controls)
         buffers (if (seq lane-controls)
                   (do
                     (when (some #(= :lanes (:name %)) buffers)
                       (fail "DSP process buffers cannot be named :lanes"
                             source [:process :buffers] {}))
                     (conj buffers {:name :lanes :direction :control
+                                   :channels 1 :type :float}))
+                  buffers)
+        buffers (if (seq shared-controls)
+                  (do
+                    (when (some #(= :shared (:name %)) buffers)
+                      (fail "DSP process buffers cannot be named :shared"
+                            source [:process :buffers] {}))
+                    (conj buffers {:name :shared :direction :control
                                    :channels 1 :type :float}))
                   buffers)]
     (when-not (and (integer? channels) (pos? channels))
@@ -987,19 +1036,21 @@
                              (:next state) (update :next rewrite)))
                          states)
             states (into states (map :state ramps))
-            normalized {:dsp/kind :function
-                        :name (:name definition)
-                        :params params
-                        :return-type return-type
-                        :return-record (:return-record definition)
-                        :doc (:doc definition)
-                        :state states
-                        :process process
-                        :body (vec body)
-                        :source source
-                        :resolution (normalize-resolution (:resolution definition)
-                                                          source)
-                        :options (validate-options (or compiler-options {})
-                                                   source [:options])}]
+            normalized (cond->
+                        {:dsp/kind :function
+                         :name (:name definition)
+                         :params params
+                         :return-type return-type
+                         :return-record (:return-record definition)
+                         :doc (:doc definition)
+                         :state states
+                         :process process
+                         :body (vec body)
+                         :source source
+                         :resolution (normalize-resolution (:resolution definition)
+                                                           source)
+                         :options (validate-options (or compiler-options {})
+                                                    source [:options])}
+                         (:inline definition) (assoc :inline true))]
         (validate-expression-types! (first body) params states return-type source)
         normalized))))

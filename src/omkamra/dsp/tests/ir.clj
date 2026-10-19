@@ -1,11 +1,12 @@
 (ns omkamra.dsp.tests.ir
   (:require [clojure.string :as str]
-            [clojure.test :refer [deftest is]]
+            [clojure.test :refer [deftest is testing]]
             [omkamra.dsp :as dsp]
             [omkamra.dsp.harness.catalog :as catalog]
             [omkamra.dsp.harness.fixtures :refer [add-bias boolean-gate clip gain
                                                   one-pole shifted-buffer stereo-cross
-                                                  stereo-state-ramp sum-count]]))
+                                                  stereo-state-ramp sum-count]]
+            [omkamra.dsp.ir :as ir]))
 
 (deftest interpreter-vertical-slice
   (let [artifact (dsp/compile gain {:target :interpreter})]
@@ -106,6 +107,104 @@
                      :params ['a]
                      :return-type :int
                      :body ['(bit-shift-left a)]}))))
+
+(defn- operator-probe
+  "Compile a one-expression function on `target` and invoke it."
+  [body params return-type target & args]
+  (apply dsp/invoke
+         (dsp/compile {:dsp/kind :function
+                       :name 'operator-probe
+                       :params params
+                       :return-type return-type
+                       :body (vec body)}
+                      {:target target})
+         args))
+
+(defn- operator-probe-refusal
+  "The message and data of lowering a one-expression function that must fail."
+  [body params return-type]
+  (try
+    (dsp/compile {:dsp/kind :function
+                  :name 'operator-probe
+                  :params params
+                  :return-type return-type
+                  :body (vec body)})
+    :accepted
+    (catch clojure.lang.ExceptionInfo e
+      [(.getMessage e) (ex-data e)])))
+
+(def ^:private probe-floats ['x 'y 'z])
+
+(def ^:private probe-ints [{:name 'a :type :int}
+                           {:name 'b :type :int}
+                           {:name 'c :type :int}])
+
+(deftest operators-fold-three-or-more-operands
+  (testing "arithmetic folds left, exactly as the nested form, on both backends"
+    (doseq [target [:interpreter :jvm]]
+      (is (= (float 7.5)
+             (operator-probe ['(+ x y z)] probe-floats :float target 1.5 2.0 4.0)))
+      ;; `(- x y z)` is `((- x y) z)` and `(/ x y z)` is `((/ x y) z)`, which
+      ;; no other grouping reproduces, so this pins the fold direction.
+      (is (= (float -0.84375)
+             (operator-probe ['(* (- x y z) (/ x y z))]
+                             probe-floats :float target 1.5 2.0 4.0)))
+      (is (= (operator-probe ['(+ (+ x y) z)] probe-floats :float target 1.5 2.0 4.0)
+             (operator-probe ['(+ x y z)] probe-floats :float target 1.5 2.0 4.0)))))
+  (testing "`and` folds left, and its value drives a branch"
+    (doseq [target [:interpreter :jvm]]
+      (is (= (float 1.0)
+             (operator-probe ['(if (and (> x y) (< y z) (> z x)) 1.0 0.0)]
+                             probe-floats :float target 2.0 1.0 3.0)))
+      (is (= (float 0.0)
+             (operator-probe ['(if (and (> x y) (< y z) (> z x)) 1.0 0.0)]
+                             probe-floats :float target 1.5 2.0 4.0)))))
+  (testing "the bitwise folders fold left"
+    (doseq [target [:interpreter :jvm]]
+      (is (= 0 (operator-probe ['(bit-and a b c)] probe-ints :int target 1 2 4)))
+      (is (= 7 (operator-probe ['(bit-or a b c)] probe-ints :int target 1 2 4)))
+      (is (= 7 (operator-probe ['(bit-xor a b c)] probe-ints :int target 1 2 4)))))
+  (testing "folding is lowering-only: the IR keeps two-operand nodes"
+    (let [binary-nodes (fn [body params return-type]
+                         (->> (:body (:ir (dsp/compile {:dsp/kind :function
+                                                        :name 'operator-probe
+                                                        :params params
+                                                        :return-type return-type
+                                                        :body (vec body)})))
+                              (tree-seq coll? seq)
+                              (filter #(and (map? %) (= :binary (:op %))))
+                              count))]
+      (is (= 1 (binary-nodes ['(+ x y)] probe-floats :float)))
+      (is (= 2 (binary-nodes ['(+ x y z)] probe-floats :float)))
+      (is (= 3 (binary-nodes ['(+ x y z x)] probe-floats :float))
+          "four operands are three nodes, not one n-ary node"))))
+
+(deftest operators-keep-their-arity-floor
+  (testing "arithmetic and the bitwise/logical folders need two operands"
+    (doseq [[body params return-type operator]
+            [[['(+ x)] probe-floats :float '+]
+             [['(- x)] probe-floats :float '-]
+             [['(and x)] probe-floats :boolean 'and]
+             [['(or x)] probe-floats :boolean 'or]
+             [['(bit-and a)] probe-ints :int 'bit-and]]]
+      (let [[message data] (operator-probe-refusal body params return-type)]
+        (is (str/includes? message "at least two operands") (str body))
+        (is (= operator (:operator data)) (str body))
+        (is (= 1 (:actual data)) (str body)))))
+  (testing "chained comparisons are refused: they would read the middle twice"
+    (doseq [body '[(< x y z) (= x y z) (not= x y z)]]
+      (let [[message _] (operator-probe-refusal [body] probe-floats :boolean)]
+        (is (str/includes? message "exactly two operands") (str body)))))
+  (testing "shifts and `min` stay binary"
+    (is (str/includes? (first (operator-probe-refusal ['(bit-shift-left a b c)]
+                                                      probe-ints :int))
+                       "wrong arity"))
+    (is (str/includes? (first (operator-probe-refusal ['(min x y z)]
+                                                      probe-floats :float))
+                       "wrong number of arguments")))
+  (testing "mixing int and float is still refused rather than promoted"
+    (is (str/includes? (first (operator-probe-refusal ['(+ x 1)] probe-floats :float))
+                       "wrong type"))))
 
 (deftest bitwise-operators-are-emitted-by-js-and-wasm
   (let [definition (:definition (catalog/case-by-id :bitwise-lfsr))
@@ -329,3 +428,48 @@
            (:buffers ir)))
     (is (= #{:read-memory :write-memory :read-state :write-state}
            (:effects ir)))))
+
+;; ---------------------------------------------------------------------------
+;; Inlining (D47)
+;; ---------------------------------------------------------------------------
+
+;; A callee that asks to be copied into its call sites, and one that does not, so
+;; a call site can be told apart by its callee's request.
+(omkamra.dsp/defn ^:inline inlining-helper
+  [sample]
+  (* sample 2.0))
+
+(omkamra.dsp/defn called-helper
+  [sample]
+  (+ sample 1.0))
+
+(omkamra.dsp/defn calls-both-helpers
+  [sample]
+  (+ (inlining-helper sample) (called-helper sample)))
+
+(deftest inlining-is-per-callee
+  (let [calls (fn [ir]
+                (into []
+                      (comp (filter #(and (map? %) (= :call (:op %))))
+                            (map :function-id))
+                      (tree-seq coll? seq ir)))
+        lowered (:ir (dsp/compile #'calls-both-helpers))
+        all (ir/inline-calls lowered)
+        none (ir/inline-calls lowered #{})
+        partial (ir/inline-calls lowered #{'omkamra.dsp.tests.ir/inlining-helper})]
+    (is (true? (:inline inlining-helper))
+        "^:inline on the definition is captured")
+    (is (not (contains? called-helper :inline))
+        "a definition that asks for nothing carries no flag")
+    ;; The one-argument call is the target that cannot call: nothing survives.
+    (is (empty? (:definitions all)))
+    (is (empty? (calls all)))
+    ;; With nothing requested every definition stays a call, the one that asked
+    ;; to be inlined included.
+    (is (= 2 (count (:definitions none))))
+    (is (= 2 (count (calls none))))
+    ;; A subset is copied at its call sites only.
+    (is (= 1 (count (:definitions partial)))
+        "the requested callee is gone, the other stays")
+    (is (= ['omkamra.dsp.tests.ir/called-helper] (calls partial))
+        "and only the unrequested call site survives")))

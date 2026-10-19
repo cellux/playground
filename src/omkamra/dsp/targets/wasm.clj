@@ -13,6 +13,15 @@
 (def ^:dynamic *state-layout* nil)
 (def ^:dynamic *wasm-math* :polynomial)
 (def ^:dynamic *table-offset* 0)
+;; D47: a definition is emitted once per module and serves every call site, so its
+;; state is addressed relative to the partition base it is handed. The entry's arena
+;; starts at zero, which is why an entry's addresses stay plain constants.
+(def ^:dynamic *callee*
+  "The arena base of the function being emitted, or nil for the entry."
+  nil)
+(def ^:dynamic *definitions*
+  "The callable definitions of the module being emitted: ID to `{:name :state-size}`."
+  nil)
 
 (defn- f64?
   []
@@ -61,11 +70,19 @@
   (* alignment (long (Math/ceil (/ (double offset) alignment)))))
 
 (defn- state-memory-layout
+  "Lay a function's state slots out in linear memory, in slot order.
+
+  Every slot is placed at the *block's* element alignment rather than at its own, so
+  an int slot in an f64 block is padded to eight bytes. A definition's slots are
+  addressed relative to the partition base it is handed (D47), so its partition's
+  layout has to be the enclosing layout translated by a constant — and aligning
+  `base + x` equals `base + align(x)` only when the base and every entry offset are
+  multiples of the element size."
   [states start]
   (reduce (fn [{:keys [next entries] :as layout} {:keys [index type size constant]}]
             (let [element-bytes (if (= type :float) (float-bytes) 4)
                   size (or size 1)
-                  offset (align next element-bytes)
+                  offset (align next (float-bytes))
                   entry {:index index
                          :offset offset
                          :type type
@@ -78,6 +95,15 @@
                      :entries (assoc entries index entry))))
           {:next start :entries {}}
           states))
+
+(defn- definition-layout
+  "The layout of one definition's own state, addressed from its partition base.
+
+  A definition is emitted once and serves every call site, so the offsets in its
+  body are relative to the base it is handed — and the enclosing layout, which
+  assigns the whole arena, is not the layout its body is emitted with (D47)."
+  [definition]
+  (:entries (state-memory-layout (:state definition) 0)))
 
 (defn- arena-count
   [slots]
@@ -98,7 +124,13 @@
         lane-count (count (:lanes ir))
         lanes-offset (+ output-offset output-bytes)
         lanes-bytes (* lane-count channel-stride-bytes)
-        state-start (+ lanes-offset lanes-bytes)
+        ;; The pool's shared region: the same shape as the lane region, but one
+        ;; region for the whole pool rather than one per voice (M5). A process
+        ;; with no shared control contributes no bytes.
+        shared-count (count (:shared ir))
+        shared-offset (+ lanes-offset lanes-bytes)
+        shared-bytes (* shared-count channel-stride-bytes)
+        state-start (+ shared-offset shared-bytes)
         state-layout (state-memory-layout (:state ir) state-start)
         scratch-start (:next state-layout)
         scratch-layout (state-memory-layout (:scratch ir) scratch-start)
@@ -126,6 +158,11 @@
                         :channels channels
                         :frame-capacity frame-capacity
                         :bytes output-bytes
+                        :storage :linear-memory}
+               :shared {:offset shared-offset
+                        :channels 1
+                        :frame-capacity frame-capacity
+                        :bytes shared-bytes
                         :storage :linear-memory}
                :lanes {:offset lanes-offset
                        :channels 1
@@ -196,16 +233,73 @@
       (throw (ex-info "Wasm state operation refers to an unknown state slot"
                       {:operation operation :state-layout *state-layout*}))))
 
+(defn- base-local
+  "The parameter a callee receives its partition base in (D47)."
+  []
+  (wat-symbol "$__dsp_base"))
+
+(defn- mangle-id
+  "A WAT-legal fragment for a definition ID, for a function name."
+  [id]
+  (-> (str id)
+      (str/replace #"[^A-Za-z0-9_]" "_")
+      (str/replace #"^[0-9]" "_$0")))
+
+(defn- callee-name
+  "The WAT name of the function emitted for a definition (D47).
+
+  The definition's position in dependency order is part of the name, so two IDs that
+  mangle alike — `a/b` and `a.b` — still name different functions."
+  [id index]
+  (wat-symbol (str "$dsp_fn" index "_" (mangle-id id))))
+
+(defn- base-relative
+  "A byte offset expressed relative to the enclosing function's arena base (D47).
+
+  The entry's arena starts at zero, so its offsets are constants; a callee adds the
+  base it was handed, which is why one function serves every call site."
+  [offset]
+  (let [constant (wat-form "i32.const" offset)]
+    (cond
+      (nil? *callee*) constant
+      (zero? (long offset)) *callee*
+      :else (wat-form "i32.add" *callee* constant))))
+
+(defn- partition-byte-base
+  "The byte offset of the partition `[base, base + size)` within `layout` (D47).
+
+  A call site's `:state-base` is a slot index in the enclosing arena, and a callee
+  addresses its own slots relative to the base it is handed, so the base is the
+  partition's *first* byte: its lowest entry offset. A partition that uses no storage
+  keeps zero, which the callee cannot observe because it never addresses it."
+  [layout base size]
+  (if (nil? base)
+    0
+    (let [base (long base)
+          end (+ base (long size))]
+      (long (or (reduce (fn [resolved entry]
+                          (let [index (long (:index entry))]
+                            (if (and (<= base index) (< index end))
+                              (min (or resolved Long/MAX_VALUE)
+                                   (long (:offset entry)))
+                              resolved)))
+                        nil
+                        (vals layout))
+                0)))))
+
 (defn- emit-state-address
   [operation]
   (let [{:keys [offset element-bytes]} (state-entry operation)
-        element-index (:element-index operation)]
+        element-index (:element-index operation)
+        ;; A callee is one function serving every call site, so its state is
+        ;; addressed relative to the base it was handed (D47). The entry's base is
+        ;; zero, so its addresses are the offsets themselves.
+        address (base-relative offset)]
     (if element-index
-      (wat-form "i32.add"
-                (wat-form "i32.const" offset)
+      (wat-form "i32.add" address
                 (wat-form "i32.mul" (emit-expression element-index)
                           (wat-form "i32.const" element-bytes)))
-      (wat-form "i32.const" offset))))
+      address)))
 
 (defn- emit-expression
   [expression]
@@ -266,6 +360,22 @@
                              (wat-form "else"
                                        (emit-expression (second (:args expression))))))
     :builtin (emit-builtin expression)
+    :call (let [definition (get *definitions* (:function-id expression))]
+            (when-not definition
+              (throw (ex-info "Wasm call site refers to a definition that was not emitted"
+                              {:function-id (:function-id expression)
+                               :emitted (vec (keys *definitions*))})))
+            (apply wat-form "call"
+                   (concat
+                    [(:name definition)
+                     ;; The ABI: the partition base, then the two context values
+                     ;; every definition may reference, then the arguments.
+                     (base-relative (partition-byte-base *state-layout*
+                                                         (:state-base expression)
+                                                         (:state-size definition)))
+                     (wat-form "local.get" (wat-symbol "$frames"))
+                     (wat-form "local.get" (wat-symbol "$sampleRate"))]
+                    (map emit-expression (:args expression)))))
     :bitwise (if (= :bit-not (:operator expression))
                (wat-form "i32.xor" (emit-expression (first (:args expression)))
                          (wat-form "i32.const" -1))
@@ -860,7 +970,11 @@
                              [(apply wat-form "loop" loop-name loop-forms)])))
      :break (wat-form "br" (:break (peek loop-stack)))
      :continue (wat-form "br" (:continue (peek loop-stack)))
-     :return nil
+     ;; A process's per-frame body drops its result — the value reaches the output
+     ;; through buffer stores — but a callee *is* a function, and its result is its
+     ;; return value (D47).
+     :return (when *callee*
+               (wat-form "return" (emit-expression (:value statement))))
      nil)))
 
 (defn- flatten-forms
@@ -928,7 +1042,7 @@
     :else 0))
 
 (defn- emit-process
-  [{:keys [channels controls locals frame-body buffers lanes]}]
+  [{:keys [channels controls locals frame-body buffers lanes shared]}]
   (let [;; A generator (`:input false`, D23) has no input buffer, so it takes no
         ;; input pointer and the export arity matches the derived indices.
         input? (boolean (some #(= :input (:direction %)) buffers))
@@ -947,6 +1061,12 @@
                 ;; addressing: the IR records channel 0 for every lane.
                 (when (seq lanes)
                   [(wat-form "param" (wat-symbol "$lanes")
+                             (wat-symbol "i32"))])
+                ;; The shared region arrives the same way, and for the same
+                ;; reason: its accesses are lane accesses with a different base
+                ;; local.
+                (when (seq shared)
+                  [(wat-form "param" (wat-symbol "$shared")
                              (wat-symbol "i32"))]))
         local-forms (concat
                      (when (> channels 1)
@@ -1028,23 +1148,79 @@
                    statements
                    [result]))))
 
+(defn- callee-form
+  "Emit one definition as a Wasm function (D47).
+
+  The signature carries the ABI first — the partition base, then the two context
+  values every definition may reference — and then the definition's own parameters.
+  Unlike the JVM there is no arena parameter, because a Wasm instance's memory is the
+  module's; unlike JavaScript the base still has to be passed, because a callee's
+  slice of the arena is not a constant."
+  [definition name]
+  (binding [*callee* (wat-form "local.get" (base-local))
+            *state-layout* (definition-layout definition)]
+    (let [params (concat
+                  [(wat-form "param" (base-local) (wat-symbol "i32"))
+                   (wat-form "param" (wat-symbol "$frames") (wat-symbol "i32"))
+                   (wat-form "param" (wat-symbol "$sampleRate")
+                             (wat-symbol (float-type)))]
+                  (map #(wat-form "param" (local-name (:name %))
+                                  (wat-symbol (wasm-type (:type %))))
+                       (:params definition)))
+          locals (concat
+                  (map #(wat-form "local" (loop-counter-name %)
+                                  (wat-symbol "i32"))
+                       (range 1 (inc (bounded-loop-count (:body definition)))))
+                  (map #(wat-form "local" (local-name (:name %))
+                                  (wat-symbol (wasm-type (:type %))))
+                       (:locals definition)))]
+      (apply list
+             (concat [(wat-symbol "func") name]
+                     params
+                     [(wat-form "result"
+                                (wat-symbol (wasm-type (:return-type definition))))]
+                     locals
+                     (flatten-forms (emit-statement (:body definition))))))))
+
+(defn- callee-table
+  "Every callable definition of the module, in dependency order (D47).
+
+  A definition appears in `:definitions` only if the target was asked to call it;
+  everything else was already copied into its call sites, and the entry is emitted as
+  the process. Dependency order means a callee is defined before its callers."
+  [definitions]
+  (into (array-map)
+        (map-indexed (fn [index [id definition]]
+                       [id {:name (callee-name id index)
+                            :state-size (:state-size definition)}]))
+        definitions))
+
 (defn emit-module-form
   [ir]
   (when-not (= :process (:op ir))
     (throw (ex-info "Wasm emission requires process IR" {:ir ir})))
   (let [memory (memory-layout ir)
-        data-form (when (:table? memory) (table-data-form memory))]
+        data-form (when (:table? memory) (table-data-form memory))
+        definitions (:definitions ir)
+        table (callee-table definitions)]
     (binding [*state-layout* (:state-layout memory)
-              *table-offset* (get-in memory [:regions :table :offset] 0)]
+              *table-offset* (get-in memory [:regions :table :offset] 0)
+              *definitions* table
+              *callee* nil]
       (let [emulation-functions (mapv emulation-function-form
                                       (sort-by name (emulated-closure
-                                                     (emulated-operators-in ir))))]
+                                                     (emulated-operators-in ir))))
+            callee-functions (mapv (fn [[id _]]
+                                     (callee-form (get definitions id)
+                                                  (:name (get table id))))
+                                   definitions)]
         (apply list
                (concat [(wat-symbol "module")
                         (wat-form "memory" (wat-form "export" "memory")
                                   (initial-pages memory))]
                        (when data-form [data-form])
                        emulation-functions
+                       callee-functions
                        [(emit-init (:state ir)) (emit-reset) (emit-process ir)]))))))
 
 (defn emit-module [ir]

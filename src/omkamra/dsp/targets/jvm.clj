@@ -8,85 +8,92 @@
   (^void process [^floats input ^floats output ^int frames ^float sample-rate
                   ^floats float-controls ^ints int-controls
                   ^floats float-state ^ints int-state
-                  ^floats lanes]))
+                  ^floats lanes ^floats shared]))
 
 (definterface DspMultiKernel
   (^void process [^"[[F" input ^"[[F" output ^int frames ^float sample-rate
                   ^floats float-controls ^ints int-controls
                   ^floats float-state ^ints int-state
-                  ^floats lanes]))
+                  ^floats lanes ^floats shared]))
 
 (definterface DspKernelD64
   (^void process [^doubles input ^doubles output ^int frames ^double sample-rate
                   ^doubles float-controls ^ints int-controls
                   ^doubles float-state ^ints int-state
-                  ^doubles lanes]))
+                  ^doubles lanes ^doubles shared]))
 
 (definterface DspMultiKernelD64
   (^void process [^"[[D" input ^"[[D" output ^int frames ^double sample-rate
                   ^doubles float-controls ^ints int-controls
                   ^doubles float-state ^ints int-state
-                  ^doubles lanes]))
+                  ^doubles lanes ^doubles shared]))
 
 ;; The final `lanes` argument is the block's flat per-frame automation region,
 ;; or nil when the process declares no lane. All of a process's lanes share it,
 ;; one `:frame-capacity`-frame slice each, so any number of lanes costs one
-;; argument rather than one argument per lane (D28).
+;; argument rather than one argument per lane (D28). The `shared` argument after
+;; it is the same shape, but one region for the whole pool rather than one per
+;; voice, so a broadcast parameter is written once (M5) — nil when the process
+;; declares no shared control.
 (definterface DspProcess
   (^void process [^floats input ^floats output ^int frames ^float sample-rate
                   ^floats float-controls ^ints int-controls
-                  ^floats lanes]))
+                  ^floats lanes ^floats shared]))
 
 (definterface DspMultiProcess
   (^void process [^"[[F" input ^"[[F" output ^int frames ^float sample-rate
                   ^floats float-controls ^ints int-controls
-                  ^floats lanes]))
+                  ^floats lanes ^floats shared]))
 
 (definterface DspProcessD64
   (^void process [^doubles input ^doubles output ^int frames ^double sample-rate
                   ^doubles float-controls ^ints int-controls
-                  ^doubles lanes]))
+                  ^doubles lanes ^doubles shared]))
 
 (definterface DspMultiProcessD64
   (^void process [^"[[D" input ^"[[D" output ^int frames ^double sample-rate
                   ^doubles float-controls ^ints int-controls
-                  ^doubles lanes]))
+                  ^doubles lanes ^doubles shared]))
 
 (deftype ^:private F32ProcessAdapter [^DspKernel kernel
                                       ^floats float-state
                                       ^ints int-state]
   DspProcess
   (^void process [_ ^floats input ^floats output ^int frames ^float sample-rate
-                  ^floats float-controls ^ints int-controls ^floats lanes]
+                  ^floats float-controls ^ints int-controls ^floats lanes
+                  ^floats shared]
     (.process kernel input output frames sample-rate
-              float-controls int-controls float-state int-state lanes)))
+              float-controls int-controls float-state int-state lanes shared)))
 
 (deftype ^:private F32MultiProcessAdapter [^DspMultiKernel kernel
                                            ^floats float-state
                                            ^ints int-state]
   DspMultiProcess
   (^void process [_ ^"[[F" input ^"[[F" output ^int frames ^float sample-rate
-                  ^floats float-controls ^ints int-controls ^floats lanes]
+                  ^floats float-controls ^ints int-controls ^floats lanes
+                  ^floats shared]
     (.process kernel input output frames sample-rate
-              float-controls int-controls float-state int-state lanes)))
+              float-controls int-controls float-state int-state lanes shared)))
 
 (deftype ^:private F64ProcessAdapter [^DspKernelD64 kernel
                                       ^doubles float-state
                                       ^ints int-state]
   DspProcessD64
   (^void process [_ ^doubles input ^doubles output ^int frames ^double sample-rate
-                  ^doubles float-controls ^ints int-controls ^doubles lanes]
+                  ^doubles float-controls ^ints int-controls ^doubles lanes
+                  ^doubles shared]
     (.process kernel input output frames sample-rate
-              float-controls int-controls float-state int-state lanes)))
+              float-controls int-controls float-state int-state lanes shared)))
 
 (deftype ^:private F64MultiProcessAdapter [^DspMultiKernelD64 kernel
                                            ^doubles float-state
                                            ^ints int-state]
   DspMultiProcessD64
   (^void process [_ ^"[[D" input ^"[[D" output ^int frames ^double sample-rate
-                  ^doubles float-controls ^ints int-controls ^doubles lanes]
+                  ^doubles float-controls ^ints int-controls ^doubles lanes
+                  ^doubles shared]
     (.process kernel input output frames sample-rate
-              float-controls int-controls float-state int-state lanes)))
+              float-controls int-controls float-state int-state lanes shared)))
 
 (def ^:private float-array-class (Class/forName "[F"))
 (def ^:private int-array-class (Class/forName "[I"))
@@ -138,7 +145,7 @@
     slot))
 
 (declare expression-instructions statement-instructions condition-instructions
-         builtin-instructions)
+         builtin-instructions state-reference-instructions)
 
 (defn- channel-instructions
   [channel slots labels]
@@ -371,6 +378,127 @@
   (int-division-instructions :rem (first (:args expression))
                              (second (:args expression)) slots labels))
 
+(defn- state-reference-instructions
+  "The array reference a state or scratch access reads or writes through.
+
+  A callee's arena starts at its own runtime base register (D47), so its layout
+  entries carry a `:base-slot` and the constant index becomes `base + index`. The
+  process entry's own base is zero, so its accesses stay `array[index]` and its hot
+  loop does not pay for any of this."
+  [entry element-index slots labels]
+  (let [{:keys [slot index base-slot]} entry]
+    (concat (if base-slot
+              [[:aload slot] [:iload base-slot] [:ldc index] [:iadd]]
+              [[:aload slot] [:ldc index]])
+            (when element-index
+              (concat (expression-instructions element-index slots labels)
+                      [[:iadd]])))))
+
+(defn- partition-ranges
+  "Where each storage of a call site's state partition lives in the arena (D19).
+
+  A call site's `:state-base` is a *logical* index into the enclosing definition's
+  state, and the arena is two physical arrays, so the partition is resolved per
+  storage: the physical index of its first float (resp. int) slot and how many it
+  holds. Relative physical positions are stable under rebasing, so a callee's own
+  zero-based slots add to that base directly -- which is also why each storage's
+  slots are one contiguous run, and why a host can restore exactly one call site's
+  state without touching its neighbours (M6a). A storage the partition does not use
+  is empty, with a zero base the callee never reads."
+  [state-entries base size]
+  (let [storage (fn [entry] (if (= :float (:storage entry)) :float :int))
+        in-range? (fn [entry]
+                    (let [logical (long (:state-index entry))]
+                      (and base
+                           (<= (long base) logical)
+                           (< logical (+ (long base) (long size))))))
+        ;; An entry may own several slots -- a delay line's 64-sample buffer is one
+        ;; entry, not 64 -- so a range is the span of every entry in it, not a set
+        ;; of first indices.
+        slots (fn [entry]
+                (let [index (long (:index entry))]
+                  (range index (+ index (long (or (:size entry) 1))))))
+        indices (reduce (fn [indices entry]
+                          (if (in-range? entry)
+                            (update indices (storage entry) into (slots entry))
+                            indices))
+                        {:float [] :int []}
+                        state-entries)]
+    (reduce-kv
+     (fn [resolved storage index]
+       (let [index (sort index)
+             base (long (or (first index) 0))
+             contiguous? (= index (vec (range base (+ base (count index)))))]
+         (when-not contiguous?
+           (throw (ex-info "DSP call partition state is not contiguous"
+                           {:storage storage :indices index})))
+         (assoc resolved storage {:base base :count (count index)})))
+     {}
+     indices)))
+
+(defn- partition-bases
+  "The physical arena base of each storage in a call site's state partition."
+  [state-layout base size]
+  (let [ranges (partition-ranges (vals state-layout) base size)]
+    {:float (long (:base (:float ranges)))
+     :int (long (:base (:int ranges)))}))
+
+(defn- partition-slots
+  "The physical arena range of every call site that owns a state partition.
+
+  `ir`'s `:call-partitions` is already in evaluation order, so entry `k` here is
+  the `k`-th call site -- for a `(poly S voice)` process, slot `k`. This is what
+  lets one instance hold several slots and still reset one of them (M6a)."
+  [ir state-layout]
+  (mapv (fn [{:keys [base size specials special-mask]}]
+          (let [ranges (partition-ranges (:entries state-layout) base size)]
+            (cond-> {:float-base (long (:base (:float ranges)))
+                     :float-count (long (:count (:float ranges)))
+                     :int-base (long (:base (:int ranges)))
+                     :int-count (long (:count (:int ranges)))}
+              ;; A call site's specials (a fused slot's `:activity`, M6 seam 4),
+              ;; as logical indices the instance resolves to physical slots. The
+              ;; entry's own specials are the ABI's; these are each partition's.
+              (seq specials) (assoc :specials specials
+                                    :special-mask (long special-mask)))))
+        (:call-partitions ir)))
+
+(defn- base-instructions
+  "Push the arena base a call passes for one storage.
+
+  The constant is the partition's physical offset. A callee method adds it to its
+  own base register; the entry, whose base is zero, just loads it."
+  [storage slots constant]
+  (let [base-slot (get (:base-slots slots) storage)]
+    (if base-slot
+      [[:iload base-slot] [:ldc (long constant)] [:iadd]]
+      [[:ldc (long constant)]])))
+
+(defn- call-instructions
+  "Emit a call to a definition that was lowered to a method on this class (D47).
+
+  The ABI's leading parameters come first, in order — the two state arrays, the two
+  bases, then the context values every definition may reference — and then the
+  arguments, which are evaluated left to right."
+  [expression slots labels]
+  (let [{:keys [function-id args state-base]} expression
+        definition (get (:definitions slots) function-id)
+        signature (get (:calls slots) function-id)]
+    (when-not signature
+      (throw (ex-info "JVM call site refers to a definition that was not emitted"
+                      {:function-id function-id
+                       :emitted (vec (keys (:calls slots)))})))
+    (let [bases (partition-bases (:state-layout slots) state-base
+                                 (:state-size definition))]
+      (vec (concat
+            [[:aload (:float-state slots)] [:aload (:int-state slots)]]
+            (base-instructions :float slots (:float bases))
+            (base-instructions :int slots (:int bases))
+            [[:iload (:frames slots)]]
+            [[(real-local-load-op) (:sample-rate slots)]]
+            (mapcat #(expression-instructions % slots labels) args)
+            [[:invokestatic (:class slots) (:method signature) (:desc signature)]])))))
+
 (defn- expression-instructions
   [expression slots labels]
   (case (:op expression)
@@ -381,14 +509,11 @@
     :local (if (= :float (:type expression))
              [[(real-local-load-op) (get slots (:name expression))]]
              [[:iload (get slots (:name expression))]])
-    (:state-load :array-load) (let [{:keys [slot index type]} (get (:state-layout slots)
-                                                                   (:index expression))
-                                    element-index (:element-index expression)]
-                                (vec (concat [[:aload slot] [:ldc index]]
-                                             (when element-index
-                                               (concat (expression-instructions element-index slots labels)
-                                                       [[:iadd]]))
-                                             [[(if (= :float type) (real-load-op) :iaload)]])))
+    (:state-load :array-load) (let [entry (get (:state-layout slots) (:index expression))]
+                                (vec (concat (state-reference-instructions
+                                              entry (:element-index expression) slots labels)
+                                             [[(if (= :float (:type entry))
+                                                 (real-load-op) :iaload)]])))
     :frame [[:iload (:frame slots)]]
     :frames [[:iload (:frames slots)]]
     :sample-rate [[(real-local-load-op) (:sample-rate slots)]]
@@ -415,6 +540,7 @@
                      :* [(if (f64?) :dmul :fmul)]
                      :/ [(if (f64?) :ddiv :fdiv)]))])))
     :builtin (vec (builtin-instructions expression slots labels))
+    :call (call-instructions expression slots labels)
     :compare (boolean-value-instructions expression slots labels)
     :logical (boolean-value-instructions expression slots labels)
     :bitwise (vec
@@ -470,15 +596,12 @@
                         (index-instructions (:index statement) slots labels)
                         (expression-instructions (:value statement) slots labels)
                         [[(real-store-op)]]))
-    (:state-store :array-store) (let [{:keys [slot index type]} (get (:state-layout slots)
-                                                                     (:index statement))
-                                      element-index (:element-index statement)]
-                                  (vec (concat [[:aload slot] [:ldc index]]
-                                               (when element-index
-                                                 (concat (expression-instructions element-index slots labels)
-                                                         [[:iadd]]))
+    (:state-store :array-store) (let [entry (get (:state-layout slots) (:index statement))]
+                                  (vec (concat (state-reference-instructions
+                                                entry (:element-index statement) slots labels)
                                                (expression-instructions (:value statement) slots labels)
-                                               [[(if (= :float type) (real-store-op) :iastore)]])))
+                                               [[(if (= :float (:type entry))
+                                                   (real-store-op) :iastore)]])))
     :if (let [then-label (next-label labels "if-then")
               else-label (next-label labels "if-else")
               done-label (next-label labels "if-done")]
@@ -737,6 +860,32 @@
                            :lane-stride (:frame-capacity ir)}))))))
   lanes)
 
+(defn- check-shared!
+  "Validate the flat shared region against the artifact's shared layout.
+
+  Shared bases are compile-time constants (`i * frame-capacity`), exactly like a
+  lane's, so the region is one `frame-capacity`-frame slice per shared control —
+  allocated once for the whole pool, not once per voice (M5)."
+  [artifact shared]
+  (let [ir (:process-ir artifact)
+        declared (count (:shared ir))]
+    (when (pos? declared)
+      (when (nil? shared)
+        (throw (ex-info "this DSP process declares shared controls"
+                        {:shared (mapv :name (:shared ir))})))
+      (when-not (instance? (real-array-class) shared)
+        (throw (ex-info "DSP shared region has the wrong primitive type"
+                        {:precision (:precision ir)
+                         :actual (class shared)})))
+      (let [required (* declared (long (:frame-capacity ir)))]
+        (when (< (alength shared) required)
+          (throw (ex-info "DSP shared region is shorter than the shared layout"
+                          {:expected required
+                           :actual (alength shared)
+                           :shared-count declared
+                           :shared-stride (:frame-capacity ir)}))))))
+  shared)
+
 (defn process-unchecked!
   "Run a JVM process artifact through its primitive, state-owning ABI.
 
@@ -747,11 +896,16 @@
   by the artifact. Real-time hosts should retain and call `:unchecked`
   directly through its matching `Dsp*Process` interface when possible.
 
-  The optional final argument is the flat per-frame lane region (D28)."
+  The optional final arguments are the flat per-frame lane region (D28) and the
+  pool-wide shared region (M5)."
   ([holder input output frames sample-rate float-controls int-controls]
    (process-unchecked! holder input output frames sample-rate float-controls
-                       int-controls nil))
+                       int-controls nil nil))
   ([holder input output frames sample-rate float-controls int-controls lanes]
+   (process-unchecked! holder input output frames sample-rate float-controls
+                       int-controls lanes nil))
+  ([holder input output frames sample-rate float-controls int-controls lanes
+    shared]
    (let [artifact (or (:artifact holder) holder)
          adapter (:unchecked holder)
          multi-channel? (:multi-channel? holder)]
@@ -759,17 +913,20 @@
      (when (and (:has-lanes? artifact) (nil? lanes))
        (throw (ex-info "this DSP process declares per-frame lanes"
                        {:lanes (mapv :name (:lanes (:process-ir artifact)))})))
+     (when (and (:has-shared? artifact) (nil? shared))
+       (throw (ex-info "this DSP process declares shared controls"
+                       {:shared (mapv :name (:shared (:process-ir artifact)))})))
      (case (:precision holder)
        :f32 (if multi-channel?
               (.process ^DspMultiProcess adapter input output (int frames)
-                        (float sample-rate) float-controls int-controls lanes)
+                        (float sample-rate) float-controls int-controls lanes shared)
               (.process ^DspProcess adapter input output (int frames)
-                        (float sample-rate) float-controls int-controls lanes))
+                        (float sample-rate) float-controls int-controls lanes shared))
        :f64 (if multi-channel?
               (.process ^DspMultiProcessD64 adapter input output (int frames)
-                        (double sample-rate) float-controls int-controls lanes)
+                        (double sample-rate) float-controls int-controls lanes shared)
               (.process ^DspProcessD64 adapter input output (int frames)
-                        (double sample-rate) float-controls int-controls lanes))))))
+                        (double sample-rate) float-controls int-controls lanes shared))))))
 
 (defn process-checked!
   "Validate and run the raw primitive JVM process ABI.
@@ -779,8 +936,12 @@
   artifact-owned state before it delegates to the unchecked adapter."
   ([holder input output frames sample-rate float-controls int-controls]
    (process-checked! holder input output frames sample-rate float-controls
-                     int-controls nil))
+                     int-controls nil nil))
   ([holder input output frames sample-rate float-controls int-controls lanes]
+   (process-checked! holder input output frames sample-rate float-controls
+                     int-controls lanes nil))
+  ([holder input output frames sample-rate float-controls int-controls lanes
+    shared]
    (binding [*precision* (:precision holder)]
      (let [artifact (or (:artifact holder) holder)
            frames (int frames)
@@ -792,31 +953,33 @@
        (check-buffer! ir output :output frames)
        (check-controls! (:control-layout holder) float-controls int-controls)
        (check-lanes! artifact lanes)
+       (check-shared! artifact shared)
        (check-state! (:state-layout holder) (:state holder))
        (process-unchecked! holder input output frames sample-rate
-                           float-controls int-controls lanes)))))
+                           float-controls int-controls lanes shared)))))
 
 (defn- kernel-process!
-  [kernel multi-channel? input output frames sample-rate controls state lanes]
+  [kernel multi-channel? input output frames sample-rate controls state lanes
+   shared]
   (if (f64?)
     (if multi-channel?
       (.process ^DspMultiKernelD64 kernel input output frames sample-rate
                 ^doubles (:float controls) ^ints (:int controls)
                 ^doubles (:float state) ^ints (:int state)
-                ^doubles lanes)
+                ^doubles lanes ^doubles shared)
       (.process ^DspKernelD64 kernel ^doubles input ^doubles output frames sample-rate
                 ^doubles (:float controls) ^ints (:int controls)
                 ^doubles (:float state) ^ints (:int state)
-                ^doubles lanes))
+                ^doubles lanes ^doubles shared))
     (if multi-channel?
       (.process ^DspMultiKernel kernel input output frames sample-rate
                 ^floats (:float controls) ^ints (:int controls)
                 ^floats (:float state) ^ints (:int state)
-                ^floats lanes)
+                ^floats lanes ^floats shared)
       (.process ^DspKernel kernel ^floats input ^floats output frames sample-rate
                 ^floats (:float controls) ^ints (:int controls)
                 ^floats (:float state) ^ints (:int state)
-                ^floats lanes))))
+                ^floats lanes ^floats shared))))
 
 (defn- process-callable
   [precision kernel ir layout state control-layout controls-state]
@@ -835,12 +998,12 @@
         (write-controls! control-layout controls controls-state)
         (kernel-process! kernel (> (:channels ir) 1) input output frames
                          (if (f64?) 0.0 (float 0.0))
-                         controls-state state nil)
+                         controls-state state nil nil)
         nil))))
 
 (defn- process-context-callable
   [precision kernel ir layout state control-layout controls-state]
-  (fn [{:keys [input output frames sample-rate controls lanes]
+  (fn [{:keys [input output frames sample-rate controls lanes shared]
         :or {sample-rate 0.0 controls []}}]
     (binding [*precision* precision]
       (when-not (= (count (:controls ir)) (count controls))
@@ -856,7 +1019,7 @@
         (write-controls! control-layout controls controls-state)
         (kernel-process! kernel (> (:channels ir) 1) input output frames
                          (if (f64?) (double sample-rate) (float sample-rate))
-                         controls-state state lanes)
+                         controls-state state lanes shared)
         nil))))
 
 (defn- slot-layout
@@ -870,8 +1033,85 @@
              (assoc result (:name entry) slot))
       [result slot])))
 
+(defn- mangle-id
+  "A JVM-legal fragment for a definition ID, for a method name."
+  [id]
+  (-> (str id)
+      (str/replace #"[^A-Za-z0-9_$]" "_")
+      (str/replace #"^[0-9]" "_$0")))
+
+(defn- callee-descriptor
+  "The JVM descriptor of a callee method: the ABI, then the definition's params."
+  [definition]
+  (conj (into [(real-array-class) int-array-class :int :int :int (real-type)]
+              (map (comp jvm-type :type) (:params definition)))
+        (jvm-type (:return-type definition))))
+
+(defn- callee-signatures
+  "The method name and descriptor each callable definition is emitted under (D47).
+
+  Every call site reads this one map, so a definition's name does not depend on
+  which site calls it, and a nested call inside a callee needs no ordering."
+  [ir]
+  (into (array-map)
+        (map (fn [[id definition]]
+               [id {:method (str "dsp$call$" (mangle-id id))
+                    :desc (callee-descriptor definition)}]))
+        (:definitions ir)))
+
+(defn- callee-slots
+  "Local slots for one callee method (D47).
+
+  Slots 0..5 are the ABI: two state arrays, two arena bases, `frames`,
+  `sample-rate`. The process method names the same values through its own slots, so
+  a call site reads one map either way. The state layout is the definition's own,
+  addressed relative to the base registers it was handed."
+  [definition layout]
+  (let [[param-slots next-slot] (slot-layout (:params definition)
+                                             (+ 5 (real-param-width)))
+        [local-slots next-slot] (slot-layout (:locals definition) next-slot)]
+    (merge {:float-state 0
+            :int-state 1
+            :base-slots {:float 2 :int 3}
+            :frames 4
+            :sample-rate 5
+            :state-layout (into {}
+                                (map (fn [entry]
+                                       [(:state-index entry)
+                                        (assoc entry
+                                               :slot (if (= :float (:storage entry)) 0 1)
+                                               :base-slot (if (= :float (:storage entry)) 2 3))])
+                                     (:entries layout)))}
+           param-slots
+           local-slots
+           {:next-temp (atom next-slot)})))
+
+(defn- callee-methods
+  "One static method per definition the target was asked to call (D47).
+
+  A method's body is the definition's own IR, emitted with its state addressed
+  relative to the two base registers it was handed — which is why one method serves
+  every call site even though D19 gives each site its own partition."
+  [ir class signatures]
+  (mapv (fn [[id {:keys [method desc]}]]
+          (let [definition (get (:definitions ir) id)
+                slots (assoc (callee-slots definition
+                                           (state-layout (:state definition)))
+                             :definitions (:definitions ir)
+                             :calls signatures
+                             :class class)]
+            {:flags #{:public :static}
+             :name (keyword method)
+             :desc desc
+             :emit (statement-instructions (:body definition) slots (atom 0) [])}))
+        signatures))
+
 (defn compile
   [ir]
+  (when (seq (:definitions ir))
+    (throw (ex-info "JVM function compilation expects flat IR (D47)"
+                    {:definitions (vec (keys (:definitions ir)))
+                     :note "a function entry has no arena; lower it flat"})))
   (binding [*precision* (:precision ir)]
     (let [[param-slots next-slot] (slot-layout (:params ir) 0)
           [local-slots next-slot] (slot-layout (:locals ir) next-slot)
@@ -911,14 +1151,21 @@
             int-control-slot (inc float-control-slot)
             float-state-slot (inc int-control-slot)
             int-state-slot (inc float-state-slot)
-            ;; The lane region is the last array parameter, so adding it shifts
-            ;; no existing slot number.
+            ;; The lane and shared regions are the last array parameters, so
+            ;; adding them shifts no existing slot number.
             lanes-slot (inc int-state-slot)
-            first-local-slot (inc lanes-slot)
+            shared-slot (inc lanes-slot)
+            first-local-slot (inc shared-slot)
             [control-slots next-slot] (slot-layout (:controls ir) first-local-slot)
             [local-slots next-slot] (slot-layout (:locals ir) next-slot)
             channel-slot (when multi-channel? next-slot)
             frame-slot (if multi-channel? (inc channel-slot) next-slot)
+            class-symbol (class-name (symbol (str (name (:name ir)) "_process")))
+            ;; A call site and the method it calls read one map (D47).
+            signatures (callee-signatures ir)
+            ;; The physical state range of every call site that owns a partition,
+            ;; in evaluation order -- slot order for a fused process (M6a).
+            partitions (partition-slots ir state-layout)
             state-slots (into {}
                               (map (fn [entry]
                                      [(:state-index entry)
@@ -927,8 +1174,13 @@
                                    (:entries state-layout)))
             slots (merge {:input 1 :output 2 :frames 3 :sample-rate sample-rate-slot
                           :frame frame-slot :multi-channel? multi-channel?
-                          :state-layout state-slots}
-                         {:lanes lanes-slot}
+                          :state-layout state-slots
+                          :float-state float-state-slot
+                          :int-state int-state-slot
+                          :class class-symbol
+                          :definitions (:definitions ir)
+                          :calls signatures}
+                         {:lanes lanes-slot :shared shared-slot}
                          (when multi-channel? {:channel channel-slot})
                          control-slots local-slots
                          {:next-temp (atom (inc frame-slot))})
@@ -956,16 +1208,18 @@
             interface (if (f64?)
                         (if multi-channel? DspMultiKernelD64 DspKernelD64)
                         (if multi-channel? DspMultiKernel DspKernel))
-            type {:name (class-name (symbol (str (name (:name ir)) "_process")))
+            type {:name class-symbol
                   :flags #{:public :final}
                   :interfaces [interface]
-                  :methods [{:flags #{:public}
-                             :name :process
-                             :desc [input-class input-class :int (real-type)
-                                    (real-array-class) int-array-class
-                                    (real-array-class) int-array-class
-                                    (real-array-class) :void]
-                             :emit (vec (concat control-initializers loops [[:return]]))}]}
+                  :methods (conj (callee-methods ir class-symbol signatures)
+                                 {:flags #{:public}
+                                  :name :process
+                                  :desc [input-class input-class :int (real-type)
+                                         (real-array-class) int-array-class
+                                         (real-array-class) int-array-class
+                                         (real-array-class)
+                                         (real-array-class) :void]
+                                  :emit (vec (concat control-initializers loops [[:return]]))})}
             class (insn/define type)
             kernel (.newInstance ^Class class)
             real-array (if (f64?) double-array float-array)
@@ -998,12 +1252,50 @@
                                     (java.util.Arrays/copyOfRange
                                      ^floats (:float state) 0 state-floats))
                     initial-int (java.util.Arrays/copyOfRange
-                                 ^ints (:int state) 0 state-ints)]
+                                 ^ints (:int state) 0 state-ints)
+                    ;; One slot's initial state, per call partition: an instance
+                    ;; that holds several slots restores exactly one this way,
+                    ;; which is what keeps a reset from disturbing its neighbours.
+                    partition-resets
+                    (mapv (fn [partition]
+                            (let [float-base (long (:float-base partition))
+                                  float-count (long (:float-count partition))
+                                  int-base (long (:int-base partition))
+                                  int-count (long (:int-count partition))]
+                              {:float-base float-base
+                               :int-base int-base
+                               :float (if f64-precision
+                                        (java.util.Arrays/copyOfRange
+                                         ^doubles initial-float
+                                         (int float-base) (int (+ float-base float-count)))
+                                        (java.util.Arrays/copyOfRange
+                                         ^floats initial-float
+                                         (int float-base) (int (+ float-base float-count))))
+                               :int (java.util.Arrays/copyOfRange
+                                     ^ints initial-int
+                                     (int int-base) (int (+ int-base int-count)))}))
+                          partitions)]
                 {:state state
                  :state-layout state-layout
+                 :partitions partitions
                  :control-layout control-layout
                  :precision precision
                  :multi-channel? multi-channel?
+                 :reset-partition
+                 (fn [slot]
+                   (let [partition (nth partition-resets (int slot))
+                         float-slice (:float partition)
+                         int-slice (:int partition)]
+                     (if f64-precision
+                       (System/arraycopy ^doubles float-slice 0 ^doubles (:float state)
+                                         (int (:float-base partition))
+                                         (int (alength ^doubles float-slice)))
+                       (System/arraycopy ^floats float-slice 0 ^floats (:float state)
+                                         (int (:float-base partition))
+                                         (int (alength ^floats float-slice))))
+                     (System/arraycopy ^ints int-slice 0 ^ints (:int state)
+                                       (int (:int-base partition))
+                                       (int (alength ^ints int-slice)))))
                  :reset (fn []
                           (if f64-precision
                             (System/arraycopy ^doubles initial-float 0
@@ -1020,6 +1312,7 @@
                                 (do (java.util.Arrays/fill ^floats (:float state) (float 0.0))
                                     (java.util.Arrays/fill ^ints (:int state) 0)))))
                  :has-lanes? (boolean (seq (:lanes ir)))
+                 :has-shared? (boolean (seq (:shared ir)))
                  :unchecked (unchecked-adapter precision kernel multi-channel? state)
                  :invoke (process-callable precision kernel ir state-layout state
                                            control-layout controls-state)

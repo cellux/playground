@@ -2128,6 +2128,800 @@ clean.
 
 ---
 
+## M1 — Event-driven host (completed)
+
+**Goal.** Drive the voice pool from timestamped events rather than per-block
+polling (M1 of the M workstream; `docs/mvp/MODULATION.md`, D44).
+
+**Delivered (offline).**
+
+- `omkamra.dsp.schedule/render-block!` gained an optional `:dispatch!` hook,
+  called with each segment before `:process!`, so a host that consumes event
+  types other than `:parameter` can act at the segment boundary. The existing
+  single-process path is unchanged.
+- New `omkamra.dsp.sequencer` (`.cljc`): a `Sequencer` over a voice pool
+  and the existing `omkamra.dsp.event`/`omkamra.dsp.schedule`. `submit!` enqueues
+  timestamped events; `render!` cuts the block at every event frame and
+  dispatches due notes (`:note-on`/`:note-off`) to the pool at exactly their
+  frame. Mono in this slice, because `schedule/render-block!` slices one flat
+  output array.
+- `omkamra.dsp.tests.sequencer`: rendering is bit-identical across block sizes
+  512/256/128/64/37/16/7/1/5/100 for a five-event phrase; a note at frame *f* is
+  silent before *f* and sounds from *f*; a one-frame shift moves the onset. The
+  negative twin (no events) is all zeros, so the invariance check is not vacuous.
+
+One sequencing layer, not two: a voice pool already carries its per-pool runtime,
+so the sequencer owns the one timeline and will route to several pools in M2.
+*Performance* is reserved for a future multi-track coordinator.
+
+**Delivered (browser transport).**
+
+- `omkamra.dsp.hosts.worker` (`.cljc`) is the **central** worker-side runtime:
+  it validates a `[frame value]` timeline through `omkamra.dsp.event` and posts
+  timestamped events on a `MessagePort`. The script-to-events logic is portable;
+  only the worker plumbing is ClojureScript. The browser testbed is one consumer.
+- The worklet adapter (`worklet_adapters/js.cljs`) gained a preallocated event
+  ingress queue and sub-block rendering: for a mono kernel it cuts each block at
+  the buffered event frames and applies each control value at its exact frame; a
+  control an event has set persists across blocks. With no events the block is
+  rendered in one kernel call exactly as before.
+- The browser check `worker event transport`: a real Web Worker posts three
+  timestamped events over a `MessageChannel` to an `OfflineAudioContext` worklet
+  running the `follow-amount` kernel; the rendered block steps at frames 17, 40,
+  and 155. (Two adapter bugs it caught: absolute event frames were used as
+  block-relative array indices, and AudioParams reset event-set controls every
+  block.)
+- The Shadow build `:omkamra.dsp.hosts.worker` points `:init-fn` at the runtime
+  (build id and paths mirror the namespace).
+
+**Browser build note.** The worker is a separate, self-contained Shadow build
+(`:devtools {:enabled false}`), not a web-worker module of the page build. The
+documented `:shared`/`:main`/`:web-worker` pattern compiles in development but the
+worker fails at run time: Shadow's dev module loading emits
+`shadow.loader`/`module_loaded` append files that need the `shadow` runtime, which
+a web-worker module never gets (the default module hosts it). Release generation
+is unaffected. The runtime stays a library namespace; only the build is separate.
+
+**Two `omkamra.dev` bugs found and fixed.**
+
+- `frontend.shadow/browser-build` silently dropped any browser build with more
+  than one module — it handled only the single-module case. It now selects the
+  page module by Shadow's own rule (excluding web workers), honours
+  `:omkamra.dev.frontend/module`, and throws on genuine ambiguity instead of
+  hiding the build.
+- `frontend.shadow/page-response` emitted only the page module's script, never the
+  base modules it depends on, so a multi-module page never loaded them. It now
+  emits one script tag per module, dependencies first.
+- Regression tests in `omkamra.dev.frontend-test`.
+
+**Remaining for M2/M3.** Only note events are routed through the sequencer so
+far; `:parameter`/`:control-change` and instrument-defined triggers are the M2
+(parameters/triggers) work, and the matrix generators are M3.
+
+**Verified.** JVM 157 tests / 1543 assertions; `omkamra.dev` 7 tests / 19
+assertions; browser 26/26; `clj-kondo`/`cljfmt` clean.
+
+---
+
+## M2 — Instrument parameters and triggers (in progress)
+
+**Goal.** The parameter layer above the compiler: declared parameters, bindings,
+the API, and the trigger/handler dispatcher, with note-on/off as the built-in
+case; the provenance vocabulary retires (`docs/mvp/MODULATION.md`, D44).
+
+### M2a — the parameter layer (done)
+
+**Schema.** A description declares `:parameters` and, optionally, `:voice
+:bindings`. A control binds to the parameter of the same name unless a binding
+renames it. A parameter is `:per-voice` (default) or `:shared`; the seven runtime
+names (`gate note velocity frequency bend detune pan`) bind without a
+declaration, and a control with no declaration infers a same-named parameter
+whose default is the control's own (the ABI now exposes a control's `:default`,
+as it already did `:smooth`/`:slew`). `:min`/`:max`/`:enum`/`:step`/`:unit`/`:curve`
+are validated or declaration metadata; `:lane` is reserved and orthogonal to
+scope (M4). An unknown name, a wrong scope, or a domain violation is a loud
+error.
+
+**Storage.** The pool allocates one flat per-voice parameter array and one
+shared array. The plan — one entry per ABI control, in ABI order — carries
+`{:parameter … :storage {:kind :runtime|:per-voice|:shared :index n}}`, and
+`resolve-controls!` reads the parameter store instead of switching on a *source*.
+A `:shared` parameter is one cell every voice reads, and the post-mix bus binds
+the same cells (`bus-shared-index`), so one setting reaches the voices and the
+bus at once.
+
+**API.** `set-parameter!`/`parameter-value` for `:shared`;
+`set-voice-parameter!`/`voice-parameter-value` for `:per-voice`. `set-detune!` now
+re-resolves a sounding voice, as `set-pan!` already did, so a host that sets it
+hears it. `set-bus-control!` is now a write to a shared parameter.
+
+**Retired.** `synth/control-sources`, `normalize-control-source`,
+`plan-source-codes`, and the `:source`/`:constant` halves of the runtime plan.
+The reference synth and the demo are declared with `:parameters`; the reference
+instrument's post-mix globals are `:shared` parameters (the bus distortion
+argument was renamed `:post-drive` to avoid colliding with the voice's `drive`).
+
+**Verified.** JVM 163 tests / 1571 assertions; browser 26/26; `clj-kondo`/
+`cljfmt` clean. New tests: a default inherited from the control; an inferred
+parameter; a `:shared` parameter read by three voices; a `:per-voice` parameter
+addressing one voice; a setting reaching a sounding voice; a binding renaming a
+control's parameter; a post-mix control being a shared parameter.
+
+### M2b — the dispatcher and the multi-pool sequencer (done)
+
+**The dispatcher.** The sequencer is keyed by an event's trigger (`:type`): a
+handler is `(fn [definition state event] state')`. The built-ins are `:note-on`
+and `:note-off`, which allocate and release a voice on the pool the event routes
+to, and `:parameter`, which sets a shared parameter on every pool that declares
+it. A host adds or overrides triggers with `:handlers`; a handler sees the whole
+sequencer state and returns a (possibly changed) one, so a trigger can touch any
+pool, parameter, or assignment. `handle!` is the one place an event becomes a
+state change; an event whose type has no handler is ignored.
+
+**Several pools, one clock.** The state carries `:pools` and a `:routing` table
+(channel to pool name, with an optional `:default`). The table is validated at
+construction, so an unrouted channel is a loud error rather than a vanished note.
+Because `synth.pool/render!` clears the block before mixing, the first pool
+renders into the block and the rest render into the sequencer's scratch and are
+added; that scratch is separate from the segment scratch `schedule` uses. One
+scheduler still cuts the block at the union of every event frame.
+
+**Verified.** JVM 169 tests / 1581 assertions; `clj-kondo`/`cljfmt` clean. New
+tests: channel routing sends a note to the right pool; two pools are summed and a
+`:parameter` event reaches both; a handler is handed the whole state and can
+change it; a handler can override a built-in; an unknown event type is ignored;
+the routing table is validated at construction.
+
+---
+
+## M3 — Generators (in progress)
+
+**Goal.** Turn the matrix into executable logic on two axes — a host reducer for
+the sequencer and a kernel transform for the assembler — sharing one route schema
+and one scheduling pass, validated against each other and against the
+hand-written matrix (`docs/mvp/MODULATION.md`, D44).
+
+### M3a — the route schema and the scheduling pass (done)
+
+New `omkamra.dsp.modulation` (`.cljc`): `normalize-matrix` expands the grouped and
+flat forms into canonical routes; `validate-matrix` checks names, depth, and delay
+against the declared names; `matrix-plan` resolves the one thing that is not
+per-step — it builds the dependency graph over the targets (a `:delay 0` route
+from a target is an edge), topologically sorts the `:delay 0` subgraph once, and
+refuses a cycle with no delayed edge, naming the targets it spans. A `:delay n>0`
+route is not an edge, so a feedback loop is well defined. The order is
+deterministic, so a generator never sorts per step.
+
+**Verified.** JVM 173 tests / 1599 assertions. New `omkamra.dsp.tests.modulation`:
+both matrix forms normalise; names, depth, and delay are validated; a chain is
+ordered; a delayed edge breaks a cycle; the order is deterministic.
+
+### M3b — the instrument reducer generator (done)
+
+`instrument-reducer` consumes the matrix and the parameter scopes and returns a
+reducer `(fn [state] state')` that closes over the plan. The instrument state is
+the instrument's parameter values as data — `{:shared {name value} :voices
+[{name value} …]}` — and the reducer returns the same shape with each target set
+to `base + Σ depth × source`, in the plan's topological order, reading sources
+from the in-progress result so a chain is complete. It is immutable data in and
+out, so the host keeps the base and calls the reducer each control step without
+the modulated values compounding; a `:delay n` route reads its source from `n`
+steps earlier (the reducer keeps the earlier results). A `:shared` target with a
+`:per-voice` source is refused.
+
+**Verified.** JVM 178 tests / 1608 assertions. New tests: a chain uses the
+modulated source; a shared source; a shared target (once, not per voice); a depth
+read from a parameter; a delayed source read from an earlier step; a shared
+target with a per-voice source refused.
+
+### M3b' — the publish step and the reference (done)
+
+`omkamra.dsp.modulation` gained two pool-bound generators: `instrument-state`
+(reads a pool's current values for every name the matrix references, precomputing
+the plan and each pool's control positions) and `publisher` (reads each voice's
+base controls, replaces the target controls with the reduced values, publishes).
+
+`reference-voice` now exposes `velocity` and its two controller sources
+(`mod-wheel`, `brightness`) as controls, the description declares the latter two
+`:shared`, and `reference/modulation-matrix` names them instead of
+`{:controller n}`. `new-host` builds the reducer, the state reader, and the
+publisher; `apply-modulation!` reduces the pool's parameter values and publishes;
+`note-on!` no longer tracks note/velocity (they are runtime sources) and
+`set-controller!` sets a shared parameter.
+
+The note routes needed the octaves-from-middle-C mapping to survive, so a route
+now carries an optional **`:offset`** — `base + depth × (source + offset)`; the
+note routes use `:depth 100.0 :offset -60.0` (`0.0125` for pulse width).
+
+**Verified.** JVM 178 tests / 1609 assertions; browser 26/26; `clj-kondo`/
+`cljfmt` clean. The generated modulation reproduces the hand-written matrix: the
+reference tests (interpreter vs JVM, every matrix source changes the render,
+block-size invariance) pass on the generated path.
+
+**Allocation note.** The generated state is data (maps), so it allocates per
+control step (~90 KB here) and belongs off the audio thread; the allocation test
+now measures the pool + bus audio path (which stays ~1.2 KB/cycle) separately
+from the matrix step.
+
+**Also fixed.** `omkamra.dev.tools.reload` advanced its content baseline for
+*every scanned file*, so an explicit `(reload 'some.ns)` silently absorbed
+pending edits in other files and the next `(reload)` reported `:unchanged`. The
+baseline now advances only for files whose namespaces were actually (re)loaded.
+
+### M3c — the kernel reducer generator (done)
+
+`modulation/kernel-reducer` takes the matrix and the declared names, exactly as
+`instrument-reducer` does, and returns `(fn [definition] derived-definition)`. The
+derived definition:
+
+- exposes the voice's controls plus one for every **source** the voice lacks
+  (the two generators take one name universe, validated once by the shared
+  `validate-routes`);
+- computes each target into a fresh `-mod` local in the plan's order, reading an
+  earlier target's `-mod` local so a chain is complete (the language forbids a
+  local shadowing a control, so the substitution happens at the call);
+- turns a `:delay n` route into a chain of scalar state slots `src-z1 … src-zn`,
+  shifted once per frame with `set!` (`src-z2 ← src-z1`, `src-z1 ←` the source's
+  effective value), so slot `n` holds the value `n` frames ago (D22);
+- **requires a target to already be a control of the voice.** A name the voice
+  never reads cannot be modulated; refusing it names the offender instead of
+  silently adding a dead control. The instrument generator requires the same, so
+  the two agree name for name.
+
+`ir`'s `+` is binary, not variadic, so the target expression folds pairwise;
+`derived-definition` records its callee in `:dsp/dependencies`, so the derived
+value must be derived from the *original* voice (not the widened one) or the
+linker resolves the callee with the wrong arity.
+
+**Verified.** JVM 183 tests / 1624 assertions; browser 26/26; `omkamra.dev`
+13/49. New tests in `tests/modulation.clj`: the kernel renders `base + depth x
+source`; a chain reads the *modulated* source; a source the voice lacks becomes a
+control and is read; a delay slot advances one frame per frame; a target the
+voice does not read is refused; and — the acceptance test — the **reference
+matrix** run through the kernel generator renders what the instrument generator
+reduces.
+
+**Two bugs fixed on the way.** `graph/definition-id` bound a local named
+`namespace`, shadowing `clojure.core/namespace`, so a definition value with no
+`:source` crashed instead of yielding an unqualified id. And a
+`omkamra.dev.tools.reload` regression test left the scan scope pointing at a
+deleted temp directory; the test namespace now restores the classpath scope in a
+`use-fixtures :once` teardown.
+
+### M4 — lanes through the pool (in progress)
+
+The M4 design note lives in `MODULATION.md` (with the DAW case and the accessor
+rule), and D46 records the language surface.
+
+**M4-0 — `:has-lane` and the `(lane control)` accessor. Done.** A lane is a
+property of a *control*: `{:name cutoff :has-lane true}` keeps `cutoff` an
+ordinary block-rate scalar in the ABI — the parameter layer, the plan, and the
+pool all work unchanged — and adds an **optional** lane beside it
+(`:required? false`). The DSP reads it with the compile-time accessor
+`(lane cutoff)`, which resolves to an ordinary `:buffer-load` from the flat
+`:lanes` region (no new IR op, D28) and composes it with the scalar itself. The
+accessor is refused in a callee module and for a control with no lane, and
+`:lane` with `:has-lane` is refused. A process whose lanes are all optional is
+valid with no region at all: it is built zeroed, so an untouched lane reads zero
+and the scalar stands.
+
+**M4a — one shared region, JVM and interpreter. Done.** `Kernel` gains exactly
+one method, `write-lane!`: the kernel allocates and owns its flat region — a lane
+belongs to the process, not to a voice — and copies a lane's values into it, so
+the name is validated by the one component that has the ABI, and `mix-voice!`
+keeps its arity and reads that region. `pool/set-lane!` delegates to it, and the
+pool refuses a `:per-voice` lane at construction, because one region is fanned to
+every voice. The runtime config carries `:lanes`/`:lane-stride` so a pool can
+check a lane without the ABI and a browser host rebuilt from a served bundle has
+the layout.
+
+**M4b — the browser. Done.** The JavaScript kernel hands the region to the
+generated process as its last positional argument; the Wasm kernel keeps its own
+region and copies it into each instance's linear memory before running it, since
+a Wasm instance owns its memory. Two new browser checks — one per target —
+compare a lane-driving pool against the interpreter pool, so the delivery is
+*verified* rather than asserted. The browser caught one real bug: `count` and
+`nth` do not work on a JS typed array, so the hosts now reach lane values through
+shared `mixing/value-length` and `value-at` helpers. A post-mix *bus* that
+declares a lane is still refused — once, at construction, not in the audio path.
+
+**M4c — per-voice lanes. Open.** One region per voice, plus `set-voice-lane!`.
+
+**D45 got numbers.** The pool-against-fused question was *measured* rather than
+argued: the same voice lowered both ways, timed on the JVM and on both browser
+hosts (128-frame blocks, 1000 blocks after a warm-up, reproducible within ~2%).
+The table and the conclusion are in D45. The headline: the pool is linear in N
+with no cliff on every target; full fusion cliffs where the engine refuses to
+compile the unrolled function (JVM between N=12 and 14, JavaScript between 16 and
+24); Wasm has no cliff and fusion wins there by about 13%. The harness is the
+testbed's `bench-*`/`fused-*` endpoints plus
+`window.omkamraDspTestbed.benchConcurrency(n)` — deliberately not a conformance
+check, because timing is machine-dependent.
+
+**Also this turn.** `tools/reload`'s `ns-requires` matched the *symbols*
+`'require`/`'use`, but an `ns` form spells them as keywords — so `:requires` was
+empty for every file and the reload graph fell back to the live image alone. That
+held for loaded namespaces and silently lost unloaded ones, which is how a reload
+could report success while the JVM was missing a whole subtree. Fixed, with a
+regression test in `omkamra.dev.tools-test`.
+
+---
+
+## D47 — definitions as functions with calls (stage 1: the mechanism)
+
+**Goal.** Stop copying every `dsp/defn` body into each call site: lower definitions
+as separate functions with real calls, and let a callee ask to be copied with
+`^:inline` (D47). `inline-calls` ran for every compiled target, which is why a
+fused `(poly n voice)` was one *n times larger* method — the cliff measured in
+D45.
+
+**Delivered (the mechanism; no backend switched over yet).**
+
+- `descriptor.clj`: `:inline` is part of a definition's schema and survives
+  `normalize`.
+- `dsp.clj` (`capture-definition`): the request is captured from `^:inline`
+  metadata — on the name for `dsp/defn`, on the form for `dsp/fn` — or from an
+  `:inline true` spec/options key.
+- `ir.clj`: `signatures` carries `:inline`; `lower-call` puts it on the `:call`
+  operation, so a target that *can* call still knows what it was asked to copy.
+- `ir/inline-calls` takes the **set of ids to inline**. A definition outside it
+  keeps being called and stays in `:definitions`, and its body is still scanned
+  because it may call one that *is* inlined. The entry is never retained as a
+  callee: a process IR already excluded it, a function IR did not. The
+  one-argument arity still inlines everything, which is what a target that cannot
+  call needs.
+- `dsp/compile` still passes every definition, so **no artifact changed**.
+
+**Verified.** JVM 186 tests / 1648 assertions (was 185/1640). New
+`omkamra.dsp.tests.ir/inlining-is-per-callee`: the `^:inline` spellings reach the
+descriptor; the one-argument call leaves nothing behind; nothing requested leaves
+every call; a subset copies exactly the requested callee *and* rewrites the call
+sites inside a definition that itself stays a call. The calling convention and
+the per-backend work are in D47.
+
+---
+
+## Reload — an alias held outside the scan scope (regression fix)
+
+`require` stores the namespace *object* it found. `reload` unloads a namespace
+with `remove-ns` and re-creates it, so an alias held **outside the scan scope** —
+`user` at a REPL, which is the common case — keeps pointing at the dead object
+and, with it, at the **old vars**. That is not merely noise:
+`(require '[omkamra.dsp.ir :as ir])` threw "Alias ir already exists …" on every
+reload, and a form that used `ir/foo` would run the code the reload had replaced.
+
+`reload` now sweeps every loaded namespace after a reload and re-points an alias
+whose target object is not the registered one (`stale-alias-entries` /
+`refresh-stale-aliases!`, reusing `bind-alias!`), reporting the repairs under
+`:aliases-repaired`. A namespace inside the scope repairs itself — it is rebuilt
+from its own `ns` form — so only genuinely stale entries appear. `clojure.core/alias`
+returns `nil`, so the repair is the record, not `bind-alias!`'s value.
+
+**Verified.** `omkamra.dev.tools-test` 15 tests / 62 assertions. The new
+`reload-repoints-an-alias-made-outside-the-scan-scope` failed three assertions
+against the old code, including `:second` expected and `:first` actual, which is
+exactly the stale read.
+
+---
+
+## omkamra.dev.tools-test — the facade's test file covers both layers
+
+`omkamra.dev.tools` is a two-delegator facade over `omkamra.dev.tools.reload`, and
+every test in `tools_test.clj` is reload behaviour, so moving the file to
+`tools/reload_test.clj` was considered and rejected. Under `omkamra.dev.*` the
+convention is uniform and deliberate: each facade (`on_demand_http`, `systems`,
+`frontend`, `tools`) is a thin re-export over a `core`/`shadow`/`reload`
+implementation, each has exactly one flat `<facade>_test.clj`, and there is no
+test file inside a dev subdirectory. (The `a/b_test.clj` shape is real, but it is
+`omkamra.vice`'s — a tree with no facade. `frontend_test.clj` shows how this repo
+handles "the logic is in the sub-namespace": it requires **both**.) Moving the
+tests would also leave the namespace AGENTS.md tells an agent to read first
+without a test.
+
+Instead the file now states its two layers, in the code and in its docstring: it
+requires `omkamra.dev.tools.reload` and reads the units a whole reload cannot
+isolate through their vars (`#'reload/stale-alias-entries`,
+`#'reload/refresh-stale-aliases!`, `#'reload/failed-namespace!`,
+`#'reload/initial-digest`). Three unit tests follow the end-to-end ones: the
+sweep finds an alias whose target was unloaded and re-created, ignores one whose
+target is gone entirely (there is nothing to point at), re-points it, and is
+idempotent; the stub is addressable, carries the failure in its metadata, throws
+with the target in its message and `ex-data`, and is stable per target; and the
+digest baseline flags a file written since *this* JVM started, digests an older
+one by content, and gives the same content the same digest. Its boundary is
+`#'reload/jvm-start-ms` read from the var rather than a fixed age, because an
+hour of backdating is not "before startup" on a session that has been up longer
+than that — the trap the end-to-end alias test hit.
+
+**Verified.** `omkamra.dev.tools-test` 18 tests / 79 assertions; stubbing
+`stale-alias-entries` fails three assertions in the sweep unit test alone, and
+stubbing `initial-digest` fails two in the baseline one, so they test units and
+not paths. Bite-check by running a **single test var** (`clojure.test/test-var`),
+not the suite: the suite's `:once` fixture ends with `(tools/reload {})`, so a
+stubbed baseline makes every classpath file look changed, and the resulting
+whole-tree reload takes the nREPL with it.
+
+---
+
+## Reload — refusing to rebuild the whole scope
+
+**The accident.** While verifying the `initial-digest` unit test I stubbed that
+function and then ran the whole `tools-test` suite. The stub corrupted the
+*baseline* (`configure!` rebuilds it from `initial-digest`), the suite's `:once`
+fixture ends with `(tools/reload {})`, and detection therefore reported **275 of
+275** files changed. `reload` believed it: it unloaded and reloaded the whole
+classpath tree — including namespaces that had never been loaded — and the nREPL
+died with no exception to show for it. That is the `:all`-shaped hazard AGENTS.md
+already warns about, reached without asking for `:all`.
+
+**The guard.** `wholesale-reload?` (`reload.clj`): a **detection-driven** reload —
+no explicit target, not `:all` — refuses when it would (re)load at least as many
+namespaces as the scope holds (`>=`, because a mass deletion makes the closure
+larger than the scope), in a scope of at least `wholesale-reload-floor` (8)
+namespaces. The floor is what still allows a small, deliberately scoped reload to
+change wholesale; the rule is *everything* and not a fraction, so a change to a
+widely depended-on namespace keeps cascading to its dozens of dependents.
+
+**What it reports.** `:status :refused`, `:changed` (what it saw), `:would-reload`
+(the closure size), and a `:note` written for the agent that hits it: what
+detection claimed, that nothing was touched, `(reload :all)` **and what that
+costs** (it loads namespaces that have never been loaded, and they may do work
+when they load), and `(reload 'some.ns)` as the narrower way through. The baseline
+is deliberately not advanced, so the refusal repeats until the caller means it or
+the scope is re-established.
+
+**Verified.** `omkamra.dev.tools-test` 20 tests / 95 assertions:
+`wholesale-reload-guard-fires-on-the-whole-scope-only` (the predicate, the floor,
+and the deletion case) and `reload-refuses-to-rebuild-the-whole-scope` (eight
+fixture files all rewritten at once: `:refused`, nothing loaded —
+`(not-any? find-ns …)` — then `:all` loads them and fixes the baseline). End to
+end the original accident now answers `{:status :refused, :would-reload 275,
+:scanned 275}` and the session survives it.
+
+---
+
+## Reload — only namespaces the session has run
+
+**Supersedes** *Reload — refusing to rebuild the whole scope*. That entry put a
+threshold on the symptom (a huge reload) and left the capability in place; this
+one removes the capability: the accident was not that the reload was large, it is
+that it *loaded code that had never run*, and loading code runs it.
+
+**The rule.** `reload` concerns a namespace only if (a) **this session has loaded
+it at least once** and (b) it changed, or depends on one that changed — the
+latter unchanged, which is what the reload graph was always for. Loading is
+`require`'s job: deliberate, by name, and a file digest is no reason to run a
+namespace for the first time. The evidence is in the tree: `src/rb/explores/quil.clj`
+ends in a top-level `(q/defsketch trigonometry …)`, so loading it launches a
+sketch, and a headless JVM dies of it. A namespace this session has run has
+already done whatever it does, which is why (a) is *at least once* rather than
+*currently loaded*: a namespace a **failed** reload unloaded has run here, so a
+reload may bring it back, and `load-file`/`reload` recovery still works.
+
+**Mechanism.** `session-namespaces` (`defonce` set of symbols) is added to — from
+`(all-ns)` — at the start of every reload, so a namespace is remembered before
+anything unloads it. `select-roots` returns `{:root-set … :not-loaded …}`: the
+selection is the old one (changed files, gone files, explicit targets, `:all`),
+and every branch is filtered by the remembered set, as is the dependent closure.
+A changed file whose namespace has never been loaded is *reported* under
+`:not-loaded` with a note naming `require`, so the tool still never silently
+no-ops. `:all` and named targets remain force-paths — they ignore detection — but
+they are still held to (a).
+
+**Removed.** `namespaces-to-load` and the `:would-load` key: nothing loads by
+detection any more, so there is no such count. `wholesale-reload?` stays, as a
+second layer, but now measures the refresh against the namespaces the session may
+touch at all (`(>= (count closure) (max wholesale-reload-floor (share …)))`,
+floor 50, share half) rather than against the whole scan scope.
+
+**Tests.** `omkamra.dev.tools-test` 20 tests / 98 assertions. Five tests encoded
+the old contract and were re-pointed: `reload-loads-new-and-unloads-deleted-namespaces`
+became `reload-refreshes-what-the-session-has-loaded` (a changed, never-loaded
+file is left alone and reported; loaded, it is refreshed; deleted, unloaded),
+`reload-pulls-in-dependents` and `reload-pulls-in-an-unloaded-dependent-from-source`
+load their fixtures with a new `load-fixture!` instead of `(reload :all)` (fixtures
+are outside the classpath, so a fixture that `:require`s another needs both
+`load-file` and the `*loaded-libs*` registration), `reload-reports-every-failure`
+breaks namespaces *after* loading them, and the two alias/refusal tests load
+theirs. `forget!` now also unremembers, so a test is hermetic whatever order it
+runs in.
+
+**Verified.** JVM 186 tests / 1648 assertions, `omkamra.dev.tools-test` 20/98. The
+original accident — `initial-digest` stubbed, then `(tools/reload {})` — now
+answers `{:status :refused, :would-reload 63, :not-loaded [214 namespaces …]}`, and
+that list contains `rb.explores.quil`: the namespace that killed the JVM is named
+as one reload will not run, and the session survives.
+
+---
+
+## Operators fold three or more operands (D48)
+
+**Why.** Writing a three-term sum in the DSL failed: `(+ a b c)` was a lowering
+error, and so were `(and a b c)`, `(bit-or a b c)`. The playground's `pygen` and
+`cgen` already accept the variadic form, so the DSP DSL was the odd one out.
+
+**What changed.** Lowering only, in `ir.clj`. `lower-binary` split into
+`lower-arithmetic` (two or more operands, folded left through the same node
+builder, so the type rules and messages are stated once) and `lower-comparison`
+(exactly two). `lower-logical` and `lower-bitwise` fold two or more for
+`and`/`or`/`bit-and`/`bit-or`/`bit-xor`. `(+ a b c)` lowers as `(+ (+ a b) c)`:
+each operand is lowered once, in source order, and the IR keeps its two-operand
+nodes, so no backend, no ABI, no artifact and no WAT changed. Nothing downstream
+knows this happened — which is the point.
+
+**Tests.** `omkamra.dsp.tests.ir/operators-fold-three-or-more-operands` pins the
+fold *direction* (its `(* (- x y z) (/ x y z))` case is the one no other grouping
+reproduces), that both backends agree, and that a three-operand sum is two binary
+nodes and not one n-ary node. `operators-keep-their-arity-floor` pins what is
+*refused*: one-operand arithmetic, one-operand `and`/`bit-and`, chained
+comparisons ("exactly two operands"), three-operand shifts, three-operand `min`
+("wrong number of arguments" — the builtin table), and mixed int/float ("wrong
+type", i.e. no implicit promotion). Two catalog cases make all four targets
+render a fold, browser included. 188 tests / 1694 assertions, 0 failures.
+
+**Deliberately left out.** Chained comparisons: `(< a b c)` reads `b` twice, and
+reading it once means hoisting it into a local first — a real change to lowering,
+not a fold. Variadic `min`/`max`: a builtin's arity is its signature table entry,
+and a variadic signature has no representation there. Unary `(- x)`/`(/ x)` and
+the identities `(+)`/`(*)`. And int/float promotion, which is a question about the
+value domain rather than arity, and still open.
+
+---
+
+## D47 stage 2 — the JVM calls
+
+**What happened.** A process compiled for `:jvm` no longer copies a callable
+definition into every call site: each retained definition becomes a **static method**
+on the process class, and a call site emits `invokestatic`. The ABI is small because
+a callee can reach nothing but its own params and state — `lower-definitions` builds a
+callee environment with no bindings, and `context-bindings` gives every definition
+only `frames` and `sample-rate`:
+
+    float-state int-state float-base int-base frames sample-rate args…
+
+The two bases are the point: the arena is one logical index space realized as two
+physical arrays, and D19 gives each call site its own partition, so a call passes the
+physical index of that partition's first float and first int slot. One method serves
+every call site, and a callee's own nested call sites add a compile-time constant to
+the base *it* was handed. The **entry's own accesses stay base-free** (its base is 0),
+so the hot loop does not pay for any of this; only a callee method's layout entries
+carry a `:base-slot`.
+
+**What decides.** `dsp.clj`'s `prepare-ir` hands a process on a calling target the set
+`uncallable ∪ requested`: `^:inline` still opts a definition back into being copied,
+and `ir/uncallable-definition-ids` names the ones no method can take — a **record
+return** (a call returns one value) and **scratch arrays** (`lower-process` seeds the
+entry's scratch after the whole state region, but the function path never resets it,
+so a callee's arrays start at 0 and overlap its own state). JavaScript, Wasm and the
+interpreter are untouched; a **function** entry stays flat on every target, since its
+class has no arena for a partition.
+
+**Two things the first attempts got wrong**, both worth remembering for the next two
+backends. A call's **descriptor needs the same ABI prefix as the method's** — a
+descriptor of just the formal parameters leaves the emitted pushes unbalanced, and
+ASM reports that as a frame-merge failure that never mentions the call. And
+`partition-bases` must turn a storage the partition does not use from `nil` into 0.
+
+**What verified it.** 189 tests / 1708 assertions, and a bite-check: stubbing
+`partition-bases` to return zero makes the conformance test fail **14 times**, four of
+those from the two cases added for this (`:call-arena` — two partitions of one
+stateful callee with the entry's own state between them, plus a callee whose state is
+integer, so its float base is a value it cannot observe — and `:call-nested`, where a
+callee passes on a base it derived). Browser 28/28, which also means the two new
+catalogue cases render correctly on JavaScript and Wasm through the still-inlined
+path.
+
+**One accident worth recording.** After `jvm.clj` and `dsp.clj` were edited in the
+same pass, the JVM kept reporting the frame-merge failure for a definition that a
+direct `compile-process` call in the same image compiled fine. `tools/reload` had
+reloaded both namespaces and reported no failure; only a **dev-server restart**
+settled it. Generated-class code paths are worth a restart when a backend and its
+dispatch change together — the reload rule (only namespaces this session has loaded)
+keeps the image *small*, not necessarily *consistent*.
+
+**Not done.** No measurement yet: the testbed bench is browser-side, so it can weigh
+the JavaScript and Wasm flips but not this one. What this flip removes is *method
+size*, which is what the D45 cliff was about, so a JVM timing measurement is owed —
+`harness/fixtures` already has an allocation meter to build it on.
+
+---
+
+## D47 measured — the cliff is inlining's, and leaving it costs 15%
+
+**What was missing.** D45's table had JVM pool/fused columns but no *calls-against-
+inlined* axis, and no committed timing code at all: those numbers came from an ad-hoc
+REPL loop. So the JVM half of D47's justification was unmeasured.
+
+**`harness/bench.clj`** (new) fills it: it compiles the same `(poly N voice)` twice —
+the linked unit, and the same unit with every definition flagged `:inline true`, which
+is what every target did before stage 2 — and times both with criterium, round-robin
+so drift reaches both arms, through `dsp/process!`. The arms' first block is compared
+**bit for bit** (`Arrays/equals`, so NaN is a value and not a fake difference), and
+`:finite?` reports whether that block is finite at all.
+
+| voices | called ms/block | inlined ms/block | called bytes | inlined bytes |
+|---|---|---|---|---|
+| 4 | 0.046 | 0.039 | 1 935 | 17 784 |
+| 8 | 0.085 | 0.072 | 2 073 | 56 692 |
+| 12 | 0.127 | 0.106 | 2 213 | 117 753 |
+| 14 | 0.165 | **3.858** | 2 283 | 156 461 |
+| 16 | 0.166 | 4.057 | 2 353 | 200 569 |
+| 24 | 0.248 | 6.136 | 2 633 | 430 997 |
+| 32 | 0.325 | 8.323 | 2 913 | **747 805** |
+
+**Three findings.** The cliff is *still* between N=12 and N=14 and still 36× at the
+crossing — D47's diagnosis holds, and the called column is linear end to end. Calling
+costs about **15%** while the engine can still inline (0.046 against 0.039 at 4), which
+is the price of a floor: above the crossing the called arm is 23-26× faster and never
+stops scaling. And artifact size is O(code): the called class grows 25 bytes per voice
+while the inlined one reaches **748 KB, 256× larger** — one ~700 KB method. The
+inlined arm is fully inlined at every N (`:definitions` empty), so nothing was
+silently falling back to calls.
+
+**Three bugs in the harness, all instructive.** `:invoke` passes **sample-rate 0**, so
+`(/ frequency 0.0)` made every block NaN — the harness must use `dsp/process!`, and
+that is also why a timing comparison of NaN audio is not a comparison at all. A copy
+of the voice descriptor with `:inline true` was **discarded**: `dsp/link` resolves a
+callee through its Var, so the flag has to go on the *linked unit*, which `dsp/compile`
+takes as-is (and which is also *why* `^:inline` works in real code — the linker reads
+it off the resolved Var). And rewriting a namespace's file mid-session leaves the *old*
+interns behind under plain `require`/`:reload`, which cost a confusing detour until
+`tools/reload` (which removes the namespace first) cleaned it up.
+
+---
+
+## D47 stage 3 — the JavaScript target calls
+
+**What happened.** A process compiled for `:js` now emits one `letfn` binding per
+retained definition and calls it, exactly as the JVM does. The differences from the
+JVM are both in the target's favour: the emitted functions are defined *inside*
+`createKernel`, so they close over the instance's arena and need no array parameters;
+and the JS arena is a single array, so a partition base is its plain offset with no
+per-storage resolution. `dsp.clj`'s `calling-targets` is now `#{:jvm :js}` — Wasm
+still gets one flat function.
+
+**Two traps worth keeping.** A function cannot bind a dynamic var and then emit: my
+`with-module-names` was a function first, so its argument — the form — was built
+*before* the binding, and the call sites saw no callee names. It has to be a *macro*,
+because the emitter resolves a callee while it builds the form. And inside `letfn` a
+binding is `(name [args] body)`, not a `defn` form: emitting `defn` made Squint name
+the entry itself and two collided as `Identifier 'defn_6' has already been declared`.
+The second one is instructive — it is a `SyntaxError` that only a real engine reports,
+and the JVM-side test (which greps the emitted source for a function and a call) could
+not see it. `browser/run!` did, on the first try.
+
+**What verified it.** 191 tests / 1716 assertions on the JVM, browser 28/28 — the
+whole shared catalogue, with the two stateful-call cases from stage 2 included, now
+executing through calls on js. A new test in `tests/js.clj` pins the emitted shape:
+a function per definition, a call passing partition base 1, and a callee addressing
+`__dsp_state_1[(__dsp_base + 0)]`.
+
+**The axis, and what it measured.** The testbed's `fused-bundle`/`fused-source` gained
+`?inline=1` (the pre-D47 lowering, which D45's numbers were taken with), the page now
+times three lowerings per host instead of two, each wrapped so a failure is reported
+as data rather than killing the run, and `harness/browser.clj` gained `bench!` — so
+this measurement is a committed, repeatable driver rather than a REPL session.
+`harness/bench.clj`'s `unit`/`arms` are shared by the JVM bench and the testbed.
+
+| voices | js pool | js called | js inlined |
+|---|---|---|---|
+| 4 | 0.227 | 0.154 | 0.150 |
+| 8 | 0.338 | 0.211 | 0.396 |
+| 12 | 0.484 | 0.331 | 0.619 |
+| 16 | 0.671 | 0.436 | 0.908 |
+| 24 | 1.212 | 0.663 | **4.958** |
+| 32 | 1.595 | 0.846 | *cannot be built* |
+
+Three findings. The **cliff is between N=16 and N=24** (0.908 → 4.958, 5.5×) — exactly
+where D45 put it — and the called column is linear throughout. **Calling is free on
+V8** while it can still optimise (0.154 against 0.150 at N=4, against the JVM's ~15%),
+though the inlined arm is *already* 1.9× slower by N=8: V8 charges for the big function
+gradually. And **at N=32 the inlined lowering cannot be compiled at all** —
+`dsp/compile` overflows Squint's compiler (`StackOverflowError`), the endpoint answers
+500 with an empty body, and importing an empty module gives one with no
+`createKernel`. That last one cost an hour of investigation: the symptom is a *missing
+export*, far from the cause. Wasm is still flat, so its column is the same lowering
+twice and will only mean something at stage 4 — it shows no cliff (1.17 at N=32).
+
+**Not done.** Wasm. `harness/bench.clj`'s per-block control schedule is the voice's own
+descriptions, which is right for the JVM bench; the browser numbers here come from the
+page's own loop and schedule instead, so the two tables are not comparable to each
+other or to D45's.
+
+---
+
+## D47 stage 4 — the Wasm target calls, and every target is measured
+
+**What happened.** A process compiled for `:wasm` now emits one function per retained
+definition and calls it, so `calling-targets` is `#{:jvm :js :wasm}` and D47 is
+finished. Two things are simpler here than on the other targets and one is harder.
+Simpler: a Wasm instance's memory is the module's, so a callee needs no arena parameter
+and the emitted functions close over nothing. Harder: the partition base still has to
+be *passed*, because a callee's slice of the arena is not a constant — a Wasm function
+has no equivalent of the JavaScript closure's captured arena.
+
+**Two bugs.** The first was mine and would have been wrong rather than noisy: the
+callee's body was emitted against `*state-layout*`, which is the *enclosing* arena's
+layout, so every state access was off by the partition base a second time. A callee
+needs its own layout — `state-memory-layout` over the definition's slots starting at
+zero — and `definition-layout` is that. The second was a missing `(result …)` on the
+emitted functions, so a call pushed nothing and every surrounding expression failed to
+validate. My JVM-side test, which greps the emitted text, was perfectly happy; WABT was
+not. That is the third time in two stages that the real engine saw what a text
+assertion could not (the JS `letfn`/`defn` `SyntaxError` was the second, and it cost an
+hour of chasing a *missing export*), and it is the argument for the browser suite being
+the authority on emitted code.
+
+**The invariant only Wasm depends on.** A callee is emitted once and serves every call
+site, so its partition's layout has to be the enclosing layout translated by the base
+it is handed. That is *not* automatic: aligning `base + x` equals `base + align(x)` only
+while the base and every entry offset are multiples of the element size, and in an f64
+block an int slot is four bytes wide — so an int slot before a float partition put the
+callee's float slot four bytes early, reading memory the reset never wrote.
+`state-memory-layout` now places every slot at the *block's* element alignment, which
+costs a little padding and makes the translation hold; in f32 the alignment is 4 either
+way, so nothing there changes. I pinned it with a fixture rather than an argument:
+`call-fixture/mixed-state` (float slot after int slot) called from
+`call-fixture-int-led` (own int slot, so the partition starts four bytes in), with a
+`:call-int-led` catalog case. Reverting the alignment one-liner fails that case — Wasm,
+f64, one wrong sample, f32 untouched — and restoring it passes. 28/28.
+
+**Measured, all three targets.** The bench's two browser arms were already wired in
+stage 3; now `:fused` really calls on Wasm too, so the axis means something on both
+hosts (the testbed's per-arm failure reporting earned its keep here, by turning a
+mysterious "missing `createKernel`" into "the endpoint answered 500").
+
+| voices | js pool | js called | js inlined | wasm pool | wasm called | wasm inlined |
+|---|---|---|---|---|---|---|
+| 4 | 0.222 | 0.148 | 0.199 | 0.142 | 0.128 | 0.117 |
+| 8 | 0.357 | 0.224 | 0.382 | 0.268 | 0.248 | 0.230 |
+| 12 | 0.458 | 0.323 | 0.618 | 0.399 | 0.370 | 0.342 |
+| 16 | 0.668 | 0.441 | 0.963 | 0.562 | 0.493 | 0.458 |
+| 24 | 1.183 | 0.657 | 4.603 | 0.796 | 0.740 | 0.683 |
+| 32 | 1.570 | 0.867 | *cannot be built* | 1.077 | 0.980 | 0.908 |
+
+Wasm: **no cliff, a flat ~7%** for calling (0.128 against 0.117 at N=4; 0.980 against
+0.908 at N=32). JavaScript: the cliff is between N=16 and N=24 (0.963 → 4.603, 4.8×),
+calling is free below it, and at N=32 the inlined lowering cannot be compiled at all —
+`dsp/compile` overflows Squint's compiler, the endpoint answers 500, and importing the
+empty body yields a module with no `createKernel`. The JVM's cliff is N=12→14 and
+calling costs ~15% below it (stage 2). So the three targets tell the same story from
+three distances: the smaller artifact is what calls buy, and speed is a side effect —
+large and negative for the JVM, large and positive for JavaScript, and a flat 7% for
+Wasm, which is why it could safely go last. A user who wants the 7% back writes
+`^:inline`.
+
+---
+
+## Testing: case-level `:only`, and one call that runs both suites
+
+**Why.** Two small things the work above wanted. First, `browser/run!`'s `:only`
+matched *check* names only, so a bite-check that distinguishes one case ("does
+`:call-int-led` still pass on Wasm, f64?") had to run 89 cases × 2 precisions behind
+each name — I ran the full 28-check suite twice for what turned out to be a one-case
+question. Second, the JVM suite and the browser suite are independent and took their
+~50s and ~2 minutes in series.
+
+**Case-level `:only`.** A needle now selects a check by name (as before, running it
+whole) or a catalog case by ID (narrowing the two shared matrices to it);
+`(browser/run! {:only ["call-int-led"]})` runs one case in two precisions, two checks.
+The subtlety is the report filter: a *passing* matrix result whose name no longer
+matches the selection was being dropped, so the run looked empty — a matrix result is
+now kept when any case it ran matches too. And since an empty run is indistinguishable
+from a passing one, a needle that names neither a check nor a case is *reported* as a
+failure ("no check or case matched: …") rather than running nothing.
+
+**`run-everything`.** `tests/suite.clj` gained a runner that starts `run-all` and
+`browser/run!` in two futures and `deref`s both, capturing the JVM half's
+`clojure.test` output so the two reports cannot interleave: 192 tests / 1729 assertions
+and 28/28 checks, **62.3 s total**, with `:only` passed through to the browser half.
+Each half has its own `:timeout` (default 30 minutes) and reports `{:timeout true}`
+rather than hanging. `omkamra.dev.tools-test` is deliberately excluded: it reloads
+namespaces, which would race the tests beside it. `TESTING.md` documents all of it,
+and its baselines now read 192/1729 and 28/28.
+
+---
+
 ## Handoff — current state (rolling entry)
 
 This is the one living entry, as opposed to the completed-phase entries above:
@@ -2136,6 +2930,101 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
 
 ### Resume here
 
+- **M6 is complete; no slice is defined next.** M6a, M6b and M6c are done and
+  the option is real: `{:fusion {:slots S}}` compiles the base artifact for the
+  runtime and `(poly S voice)` for the kernel, `poly` carries a voice's control
+  declarations through, a pool over the option renders bit-for-bit what a pool of
+  separate voices renders, and the bench's fused arm now builds its artifact
+  through the option too — which dropped the realistic sweep's ratio from ~1.9× to
+  1.3–1.7×, because the option expands four controls per slot where `poly`'s
+  default expanded two (D45's re-measured table). **M6b** is done: the `guard`
+  combinator skips a slot whose `gate` has never opened, latched per call site and
+  cleared by the slot's reset (D53). **M6c** is done (D55): the JavaScript and Wasm
+  kernels take a `:mapping` (`fusion/runtime-mapping`, the portable form of the
+  JVM's), share one instance across `slots` handles, apply the partitions the ABI
+  already publishes (a JS arena is indexed by state slot, so `:base`/`:size` *are*
+  the range; a Wasm partition's byte range comes from the served
+  `:state-layout`), map each slot's controls, and read that slot's `:activity` —
+  so a fused pool runs on every host, checked by two new browser arms
+  (`(browser/run! {:only ["fused pool"]})`).
+- **Seams 1–4 are done on every host**: the pool mixes a fused instance once
+  per block (`instance-key`, an *equality* contract the pool numbers itself), the
+  kernel maps the pool's base control plan onto each slot's slice
+  (`hosts/fusion/fused-mapping`, applied by `fused-jvm-kernel` through one
+  precomputed row per slot), a slot resets its own state partition
+  (`:partitions` on the artifact, `:reset-partition` on the instance) — so stealing
+  into one slot leaves its neighbour bit-for-bit alone — and a callee may publish a
+  special, so a fused slot's `:activity` is readable per partition and the pool
+  frees a finished slot exactly as the plain path does (D54). All four are
+  bite-checked on the JVM and the last three on the browser too; seam 4 restored
+  the tail-freedom fusion had given up.
+- **Fusion is an option, `{:fusion {:slots S}}`** (D52): a compile option beside
+  `:target`/`:precision`/`:containment`, lowering a module-shaped voice to
+  `(poly S voice)`; `poly` now carries a voice's control declarations through, so a
+  `:shared` control stays shared and a lane is refused with a reason.
+- **The measurements it rests on** are D45's post-D47 section: the pool is ~2×
+  slower at a full patch on the JVM (1.5–1.8× on JS, ~1.1× on Wasm) and 2–7.5×
+  *faster* at two voices, flat in capacity; on a delay-line voice fusion is ~1.9×
+  at 32 slots. The occupancy knob (`bench/run! {:sounding n}`), the pool arm
+  (`bench/pool-arm`), and `realistic-sweep!` are in place.
+- **M4 is done** (M4c closed it): a lane's scope is its control's storage, one
+  region per voice, `set-lane!`/`set-voice-lane!`. Two bugs fell out of making the
+  browser checks honest (the Wasm lane pointer; the harness's typed-array
+  conversion) — see the M4c entry and D28.
+- **D47 is done: every target calls.** A process on `:jvm` emits one static method per
+  retained definition, on `:js` one `letfn` binding, and on `:wasm` one function — the
+  ABI is `base, frames, sampleRate, args…` in all three cases (`float-state int-state
+  float-base int-base frames sample-rate args…` on the JVM, and on Wasm the base is the
+  only extra parameter, since the memory is the module's), with `base + constant` state
+  addressing inside a callee. `dsp.clj`'s `prepare-ir` decides per target: the calling
+  targets `#{:jvm :js :wasm}` call, copying only `uncallable ∪ requested`, where
+  `uncallable` is a record return or scratch arrays and `requested` is `^:inline`; a
+  **function** entry stays
+  flat everywhere, and the interpreter is untouched (it is the oracle, and the
+  un-optimised shape). One invariant is Wasm's alone: a callee is emitted once, so its
+  partition's layout must be the enclosing layout translated by its base, which is why
+  `state-memory-layout` places every slot at the *block's* element alignment (f64-int
+  case: `call-fixture/mixed-state` + `call-fixture-int-led` + catalog case
+  `:call-int-led`, bite-checked — reverting the alignment fails it on Wasm in f64).
+  Measured (D47): the JVM cliff is N=12→14, calling costs ~15% below it; the JS cliff is
+  N=16→24, calling is free below it, and at N=32 the *inlined* JS lowering cannot be
+  compiled at all (Squint overflows — the endpoint answers 500); Wasm has **no cliff**
+  and a flat ~7%. Verified: **192 tests / 1729 assertions**, browser **28/28**, a
+  bite-check that fails 14 conformance assertions when `partition-bases` is stubbed to
+  zero, and `harness/bench.clj` + `harness/browser.clj`'s `bench!` as repeatable drivers.
+  D47 also records an **open question**: whether the *fused* lowering still earns its
+  keep now that `^:inline` is reachable from the source.
+- **Two ways to test, besides the two suites.** `browser/run!`'s `:only` matches check
+  names *or* catalog case IDs — `(browser/run! {:only ["call-int-led"]})` runs one case
+  in two precisions, and a needle matching neither is reported as a failure rather than
+  running nothing. `omkamra.dsp.tests.suite/run-everything` runs the JVM suite and the
+  browser suite in two futures and reports once (62.3 s total; `:only` is passed to the
+  browser half). Both are documented in `TESTING.md`.
+- **Operators fold three or more operands (D48).** `(+ a b c)`, `(and a b c)`,
+  `(bit-or a b c)` now reshape at lowering into the left-nested form the IR always
+  took; comparisons, shifts and `min`/`max` are deliberately unchanged. DSL
+  fixtures can use the variadic spelling.
+- **Reload only concerns namespaces the session has run.** A namespace is the
+  tool's business only if this session has loaded it at least once *and* it
+  changed or depends on one that did. Loading is `require`'s job: a changed file
+  whose namespace has never been loaded is summarised under `:not-loaded`
+  (`{:count :sample}`, not a list to read), never run — loading code runs it, and
+  `src/rb/explores/quil.clj` ends in a top-level `(q/defsketch …)` that kills a
+  headless JVM. Namespaces a *failed* reload unloaded are still refreshable,
+  because they have run here. A detection-driven reload that would still refresh
+  the whole session (a poisoned baseline, a check-out) returns `:status :refused`
+  with `:would-reload` and a `:note` naming `(reload :all)`; the floor and share
+  are `wholesale-reload-floor` (50) and half. AGENTS.md's *Reloading* section
+  states all of this.
+- **Reload repairs stale aliases.** An alias held outside the scan scope — `user`
+  at a REPL — used to keep pointing at the namespace object a reload threw away,
+  so `(require '[a.b :as b])` threw on every reload and a form using it ran the
+  *old* code. `reload` now re-points such aliases and reports `:aliases-repaired`.
+  Both the end-to-end test and unit tests for the sweep, the diagnostic stub and
+  the digest baseline live in `omkamra.dev.tools-test` (18 tests / 79
+  assertions), which covers the facade **and** its `reload` implementation —
+  deliberately flat: every other `omkamra.dev` facade has one flat
+  `<facade>_test.clj` and none has a test file under a sub-namespace.
 - **Where.** `omkamra.dsp` is a DSP compiler (macros → descriptors → typed IR →
   interpreter/JVM/JS/Wasm) plus a host-side sequencing layer. P0–P11 are done:
   **P11 is complete** (P11a the instrument and matrix, P11b the instrument graph
@@ -2188,7 +3077,8 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   derived value; `->` chains transforms. **Promoted to core:**
   `omkamra.dsp.graph` holds the substrate (`definition-id`, `parameter-symbols`,
   `definition-call`, `derived-definition`), and `omkamra.dsp.combinators` holds
-  `unison`, `mix`, `sum`, `through`, `poly`, `share`, and `smooth`/`slew`.
+  `unison`, `mix`, `sum`, `through`, `poly`, `share`, `guard`, and
+  `smooth`/`slew`.
   `omkamra.dsp.examples.demo-synth` is the instrument that uses them.
 - **Graph model (D38).** Build in Clojure, lower once, link; the fixed expression
   is already a DAG via `let`, so fan-out does not force a new IR. Hoisting is the
@@ -2199,9 +3089,9 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   stateless CSE) and that argument hoisting is in place.
 - **Removed from the pool:** `:unison`, `unison-detune`, the unison branch; the
   mode set is `{poly, mono, legato, retrigger}`.
-- **Tests.** JVM `(omkamra.dsp.tests.suite/run-all)` — 155 tests / 1527
+- **Tests.** JVM `(omkamra.dsp.tests.suite/run-all)` — 173 tests / 1599
   assertions; browser `(omkamra.dsp.harness.browser/run! {:server? false})` —
-  25/25. The reference voice's stereo stage (`:pan-left`, `:pan-right`) and the
+  26/26; `omkamra.dev` 7 tests / 19 assertions. The reference voice's stereo stage (`:pan-left`, `:pan-right`) and the
   pitch conversion (`:pitch->frequency`) are now shared-catalog cases, so they
   run on the interpreter and every backend, browser included, instead of the JVM
   alone; the reference instrument and all three containment policies run on the
@@ -2722,20 +3612,23 @@ See `TESTING.md`. Short version, through `clojure_eval`:
 ;; The edit-reload-test loop: initialize clj-reload BEFORE editing, then reload
 ;; after each edit. Do not substitute `require :reload`: it leaves dependents
 ;; stale, which shows up as stale protocol classes and phantom failures.
-(require '[clj-reload.core :as reload])
-(reload/init {:dirs ["src"] :output :quiet})       ; once, before editing
-(let [r (reload/reload)] (select-keys r [:unloaded :loaded]))
+(require '[omkamra.dev.tools :as tools])            ; the facade, not clj-reload
+(tools/reload)                                     ; content-based, dependents included
+(let [r (tools/reload)] (select-keys r [:unloaded :reloaded :failed]))
 
-;; JVM (99 tests, 1074 assertions)
+;; JVM: the whole suite (namespace list lives in omkamra.dsp.tests.suite)
 (require 'omkamra.dsp.tests.suite)
 (omkamra.dsp.tests.suite/run-all)
 
-;; Browser (JS + Wasm), 19 checks. `:on-demand-http` starts the Shadow watcher;
-;; do not start a second one.
-(require '[omkamra.dev.on-demand-http :as on-demand-http])
-(on-demand-http/start!)
+;; Browser (JS + Wasm). `:on-demand-http` starts the Shadow watcher; do not start
+;; a second one. `run!` recompiles what changed, so give it a moment after an
+;; edit — a request served mid-rebuild runs the previous bundle.
 (require '[omkamra.dsp.harness.browser :as browser])
-(browser/run!)
+(browser/run!)                                     ; or {:only ["lane delivery"]}
+
+;; Both halves at once (JVM in one future, browser in another)
+(require '[omkamra.dsp.tests.suite :as suite])
+(suite/run-everything)
 ```
 
 Two traps worth remembering: reloading a namespace **invalidates REPL aliases**
@@ -2743,3 +3636,587 @@ and class identity, so prefer fully-qualified names in evals and expect
 `instance?` checks against reloaded classes to be meaningless; and a reloaded
 namespace is JIT-cold, so an allocation measurement taken right after one reads
 the compiler, not the code.
+
+### M4c — per-voice lanes, and two bugs the honest check found
+
+M4 closes: a lane now has a *scope*, and the pool delivers it accordingly.
+
+- **The scope is the control's storage.** `pool/voice-pool` no longer refuses a
+  non-`:shared` lane; it computes `lane-scope` per lane from the control plan —
+  `:shared` → shared, `:per-voice` → per voice, a runtime control (`frequency`,
+  `detune`, …) → per voice because the pool resolves those per voice. A lane-only
+  (`:lane`) control leaves the ABI's scalar list and so has no plan entry: its
+  scope comes from its own parameter declaration, and an undeclared one is per
+  voice, matching the inference an unbound ABI control already got. A `:bend` lane
+  is refused at construction: `:bend` is per *channel* and has no per-lane
+  delivery.
+- **One region per voice.** `write-lane!` became `write-voice-lane!` taking the
+  voice handle; each kernel allocates the region in `create-voice`. `set-lane!`
+  (shared) writes the curve into *every* voice's region — including silent ones,
+  so "write now, a voice that starts later still reads it" survives — and
+  `set-voice-lane!` writes one. The cost is `N * lanes * 4096` bytes and `N`
+  copies per shared write, which is small next to a voice's own state; the
+  alternative was a second region in the ABI, and a lane's scope is only known
+  after the artifact is compiled, so the descriptor could not have placed it.
+- **The Wasm ABI passes lanes by address.** The generated Wasm `process` takes a
+  trailing `$lanes i32` pointer into its own linear memory; the direct process
+  path passed it and the pool did not, so **Wasm lane delivery through the pool
+  had never worked** — while the direct path's `:automation-lane` catalog case
+  passed, which is why nobody saw it. The host now passes the instance's own lane
+  region address, set once per voice. JavaScript hands the array itself.
+- **The browser harness was comparing nothing.** `array-seq` does not walk a JS
+  typed array under Squint — it yields an empty sequence — so the lane checks
+  compared `[[null null null null]]` against `[[null null null null]]` and
+  passed. The same `planar-block` was also wrong for a *mono* pool: a mono voice's
+  block *is* the sample array (`mixing/channel-of`), so a one-channel planar block
+  gets written through as if its plane were the samples. Both are fixed
+  (`real->vector`, `render-block`) and every lane check now also pins **literal**
+  numbers, so a shared lane of 1,2,3,4 beside a scalar of 10 must render 11..14
+  and the two-voice case 31..34. The really uncomfortable part: the pool-host and
+  worklet checks used the same conversion, so a comparison there could pass on two
+  blocks of nothing. They pass with real samples now.
+
+Verified: JVM 193 tests / 1744 assertions, browser 30/30 (`run-everything`,
+all green in 63.7 s), and the bite-checks
+behave — stubbing `set-voice-lane!` to always write voice 0 fails the per-voice
+JVM test, and writing the Wasm lane into a throwaway array fails both Wasm lane
+checks.
+
+Next: **M5** (a shared kernel region for scalar broadcast), then **M6** (fused
+lowering as an option, D45).
+
+### M5a — the shared region: language, ABI, and the raw JVM/interpreter path
+
+M5 in three steps (PHASES), of which this is the first. The design is D49.
+
+- **The language**: a control may declare `:shared true`. It leaves the ABI's
+  scalar control list and its *name* becomes a read of the process's `:shared`
+  region — the `:lane` control's trick applied to a global. `:shared` beside
+  `:lane`/`:has-lane`, or on a non-float control, is refused at descriptor time.
+- **The shape**: the region is deliberately the *lane* region's shape — one
+  `:frame-capacity` slice per shared control, `:shared-stride` = `:lane-stride`.
+  That is why this slice needed **no new IR op and no new emitter**: a shared read
+  is a `:frame-offset` `:buffer-load` with a different `:buffer-id`, and the Wasm
+  emitter's base local is already derived from it (`$shared`). It also means a
+  host can write a per-frame *global* curve into the same slice.
+- **The ABI**: `:shared` (name/type/role/index/buffer/offset) and `:shared-stride`,
+  beside `:lanes`/`:lane-stride`. One region for the whole *pool*, which is the
+  point: a broadcast parameter is written once instead of once per voice.
+- **Delivery**: interpreter + JVM take a real region; `process!`'s context gained
+  `:shared {:name value-or-sequence}` (a bare number is broadcast across the
+  slice); the JVM raw ABI gained an optional trailing `shared` array on all eight
+  process interfaces and their adapters, with the 7- and 8-argument arities kept
+  so no existing caller broke. JavaScript takes it as a trailing positional
+  argument and Wasm takes its *address* — the lane region's rule again.
+
+Two mistakes worth remembering, both about wiring rather than design: the lowered
+process IR dropped `:shared` because the assembly destructures an explicit key
+list (`{:keys [bindings controls lanes …]}`), and the JavaScript target builds its
+own private `js-ir` map, so `(:shared ir)` had to be carried across that seam too.
+Both were caught by the first test run — the ABI had no shared entry, and the
+emitted JavaScript had no `shared` argument.
+
+Verified: JVM 196 tests / 1767 assertions, browser 30/30 (the emitter change
+touches both browser targets, so the matrix was run too).
+
+Next: **M5b** (the hosts own and deliver the region: interpreter/JVM kernels, the
+JavaScript argument, the Wasm memory copy, the testbed's direct path), then
+**M5c** (the pool maps a `:shared` parameter to the region, so `set-parameter!`
+stops resolving every voice's controls), then M6.
+
+### M5b/M5c — the shared region reaches the pool, and one write serves every voice
+
+M5 closes. The design (`:shared true`, the lane-shaped region) landed in M5a; this
+is delivery and the pool's use of it.
+
+- **The kernels own one region.** `Kernel/write-shared!` is the only new method:
+  the interpreter and the JVM keep a real array for the whole pool and pass it by
+  reference (the JVM's raw ABI already had the trailing `shared` argument from
+  M5a); JavaScript keeps an array and sets a trailing argument slot; Wasm keeps a
+  host-side *master* and copies it into each instance's own `:shared` region in
+  `mix-voice!` — only the `frames` about to be rendered, since that is all the
+  module can read.
+- **The pool maps a parameter to the region.** `binding-plan` now takes the ABI's
+  shared controls as well: a shared control's parameter is shared whether the
+  description declares it or not (undeclared infers `:scope :shared`), and a
+  `:per-voice` declaration beside a shared control is refused. The runtime config
+  carries both the region's layout (`:shared`/`:shared-stride`) and the
+  parameter-to-control map (`:shared-plan`). The pool seeds the declared defaults
+  into the region at construction, and `set-parameter!` writes it *once* — the
+  per-voice fan-out is skipped entirely, which was the point: `voices × plan` work
+  becomes one region write, independent of how many voices exist. A shared
+  parameter bound to an *ordinary* control still fans out, so declaring the DSP
+  control is what switches a parameter over.
+- **A bus** that declares a lane or a shared control is refused at construction on
+  every host, as it already was for lanes.
+
+Verified: JVM 198 tests / 1781 assertions, browser 32/32 (two new pool checks,
+literal-number pinned), and the bite-check behaves — skipping the Wasm copy makes
+the Wasm check fail while JavaScript still passes.
+
+Next: **M6** (fused voice lowering as an option, D45) — the pool remains the
+default.
+
+### M6-0 — the measurement that gated fusion, and what it overturned
+
+M6's plan said to measure before building, because D47 keeps scratch inlined and
+the worry was that `(poly S voice)` would copy a delay line's body into every slot
+and bring back the pre-D47 cliff. A new fixture, `echo-voice` (a module-shaped
+generator with a real 64-sample delay line), makes that measurable beside
+`sine-voice`:
+
+| voice | S=1 code / arena | S=2 | S=8 | S=32 |
+|---|---|---|---|---|
+| `sine-voice` | 1 841 / 3 | 1 876 / 6 | 2 081 / 24 | 2 921 / 96 |
+| `echo-voice` | 2 875 / 68 | 2 904 / 136 | 3 096 / 544 | 3 864 / 2 176 |
+
+- **Code grows ~30 bytes per slot either way.** What unrolls is the *call site*;
+  the delay line's buffer is data and lives in the arena, and its per-frame code
+  is a handful of operations. The D45 cliff was inlining a whole *voice* per call
+  site, not inlining scratch.
+- **Memory is arena-linear and equals the pool's**: 68 slots per slot is one
+  64-float buffer and a cursor per line, which is what N instances would each own.
+- **`poly` needs module-shaped generators.** It refuses `reference-voice`, which
+  accesses the process's buffers. So M6's option is defined for module-shaped
+  voices; a process-shaped one would need a call-into-scratch wrapper, which is
+  not built.
+
+Consequence for the slice: no artifact cliff to dodge, so **S = capacity is the
+natural first target** and chunking is the escape hatch — and the remaining work
+is the slot-aware host (M6a), skipping (M6b), and the browser hosts (M6c). Nothing
+else was built this turn: the plan's own order was to measure first, and the
+answer changed what M6a should be (no chunking default to design around, and a
+module-shape precondition to state).
+
+### M6a — the realistic voice, timed, and the four seams that remain
+
+M6-0 settled the artifact; this is the other half of the question — whether a
+voice that *does* work is still worth fusing. `bench/realistic-sweep!` weighs a
+pool of N `echo-voice` instances (a generator with a 64-sample delay line, all
+slots sounding) against one `(poly N echo-voice)` process:
+
+| slots | pool ms | fused ms | pool/fused |
+|---|---|---|---|
+| 1 | 0.032 | 0.028 | 1.13 |
+| 2 | 0.065 | 0.048 | 1.35 |
+| 4 | 0.141 | 0.089 | 1.58 |
+| 8 | 0.258 | 0.175 | 1.48 |
+| 16 | 0.360 | 0.188 | 1.92 |
+| 32 | 0.754 | 0.393 | **1.92** |
+
+Fusion pays for a realistic voice too (~1.9× at 32), the pool is linear in slots
+while the fused process is sublinear — the fan-out has moved out of the host — and
+at one voice the two lowerings agree **bit for bit**, delay line included, which
+`tests/jvm.clj` now pins along with the flatness of the pool's artifact size.
+
+The remaining M6a work is the slot-aware host, and writing it down in seams was the
+useful part of the exercise, because two of them are *not* host-side at all:
+
+1. an **instance key** on the protocol, so the pool mixes one fused instance per
+   block and skips an all-silent one — this is what keeps the pool's per-slot view
+   unchanged;
+2. a **base → fused control mapping** in the kernel, which has both ABIs;
+3. **per-slot reset** — the fused state is partitioned per call site (D19), but
+   nothing exposes those ranges, so stealing a slot would otherwise clobber its
+   neighbours;
+4. per-slot **`:activity`** — deferrable, and worth deferring: `poly`'s slots are
+   *callees*, and a callee's special store is rebased into a call partition no host
+   reads (D39), so a fused voice declares no `:activity` and the pool holds its
+   voices until stolen. That is the tail-freedom the pool gives up, not a detail.
+
+Next: seams 1–3, then the instrument option (`{:fusion {:slots S}}`).
+
+### M6a, attempt one: the instance key, backed out
+
+Started seam 1 (the `instance-key` method on `Kernel` plus the pool mixing one
+instance per block) and rolled it back: the first pass left 42 JVM errors and broke
+the *browser* lane check — "(10+1..4) + (10+10) must render 31..34, not
+[[11 12 13 14]]", i.e. the second voice was never mixed, which is what a wrong key
+looks like: two voices sharing one. The lesson worth keeping is not "the key is
+wrong" but that the kernels' keys are a *silent* surface: a duplicate key looks
+like a working pool until a second voice sounds. Next attempt should pin the key
+function itself — one test per kernel, asserting distinct keys for distinct voices
+and that the pool's dedup changes nothing when every key is distinct — before the
+fused kernel is written at all.
+
+The design (four seams, in `PHASES.md`) is unchanged and the tree is green again:
+JVM 199 tests / 1785 assertions, browser 32/32.
+
+### M6a, second attempt: the key surface, landed inert
+
+Following the recorded lesson, this time the *surface* went in before any consumer,
+in steps that each stayed green:
+
+- `Kernel/instance-key` on the protocol — a dense, **positive** key assigned in
+  creation order, with 0 left free to mean "no key yet";
+- the four kernels implement it (JVM, interpreter, JavaScript, Wasm) as the
+  creation counter, which is what a plain one-instance-per-voice kernel means;
+- `every-voice-has-an-instance-key-of-its-own` pins the surface: four voices get
+  four distinct, increasing, positive keys, on the JVM *and* the interpreter — and
+  **nothing calls it yet**, so the pool's behaviour is unchanged and the suite stays
+  green (200 tests / 1791 assertions, browser 32/32).
+
+Then the consumer, which failed twice and is rolled back again — but with real
+information this time. The first attempt's failure (42 errors, a dropped voice in
+the browser) had *two* causes, both now understood: the mark array was indexed by a
+total order that could exceed `capacity` (fixed: one mark per key, so `capacity + 1`
+entries), and the reified kernel lost `write-shared!` to a duplicate when I re-applied
+edits over the *staged* file (`git checkout --` restores the index, not HEAD). The
+second attempt got past the keys and still produced 13 failures and 13 errors, all
+of the same shape: **voices not sounding** — per-voice pan at 0.0, legato and
+retrigger rendering identically, a released voice never freed.
+
+That last shape is the diagnosis: those tests exercise the pool's *voice lifetime*
+(the `:activity` readback and the free/reset path), and restructuring `render!`
+around the mix moved that block. So the next attempt should add the instance mark
+*without* touching the lifetime logic — the guard belongs around the `mix-voice!`
+call alone, with that block left exactly where it is — and it should pin the
+consumer the same way the key is pinned: a two-voice, one-instance-fake-kernel test
+where the mix count is asserted, before any real fused kernel exists.
+
+### M6a, third attempt: seam 1 lands, with three bugs of its own
+
+The pool now mixes a kernel instance once per block (`instance-key` +
+`instance-already-mixed?`, marks cleared per block), and the suite is green:
+202 tests / 1798 assertions, browser 32/32 — including the two tests written for the
+consumer before it existed (`a-pool-mixes-one-instance-once-per-block` and
+`every-voice-is-mixed-when-every-voice-has-its-own-key`).
+
+Getting there cost three bugs, all now understood, all in the *mark* machinery
+rather than the fused design:
+
+1. **The mark array was one short.** Keys start at 1 (0 means "no key"), so an
+   array of `capacity` was indexed 1..capacity and threw. Sized `capacity + 1`.
+2. **The clearing loop was one short** — and this is what broke thirteen existing
+   tests: it cleared `capacity` entries of a `capacity + 1` array, so the *last*
+   key stayed marked and **every voice after the first block was silently
+   skipped**. The symptoms were "voices not sounding" and "a released voice never
+   freed", which look nothing like an off-by-one. It survived the first two
+   attempts because the fake-kernel probe I wrote watched voice 0 only; the
+   strengthened test sounds *every* slot, including the last key, and renders two
+   blocks.
+3. **A kernel-wide key is not a pool-wide index.** `bundles` share a kernel
+   between pools (the lane test builds two pools from one bundle), so the second
+   pool's keys fell outside any array the first pool had sized. The contract is now
+   stated as *equality* — same instance, equal keys — and the pool numbers the
+   instances it created itself, so keys need not be dense or numeric. That also
+   removed the `capacity + 1` shim: marks are one per owner slot, at most one per
+   slot.
+
+The lesson from attempt one ("pin the surface before the consumer") held: the key
+test was in place and passing while all this was wrong, and it was the *consumer*
+tests that found each bug. What it needed in addition was a test that exercises
+*every* key across *two* blocks, and one that says out loud that two pools may
+share a kernel.
+
+### M6a, seam 2: the base -> fused control mapping (JVM)
+
+The pool writes *base* values; a fused instance's interface is `gate_0`, `gate_1`,
+... with the rest hoisted; the kernel is the only component that has both, so the
+mapping lives there (D50). `hosts/fusion/fused-mapping` is pure data — the JVM and,
+in M6c, the browser compute the same answer from the interfaces each holds — and
+`fused-jvm-kernel` applies it through one ABI-position row per slot, precomputed at
+construction, so the write path stays one branchless loop.
+
+**What it proves.** A pool over a fused kernel renders bit-for-bit what a pool over
+the plain kernel renders: slot 0 with its own note, and then — the assertion the
+whole mapping exists for — slot 1 sounding note 72 while its neighbour holds 69 and
+is gated shut, matching note 72's solo block exactly. The bite check is worth
+recording because the failure it produces is so legible: drop the `slot` term from
+`fused-position` and the write for slot 1 lands on slot 0's copy, so gating slot 0
+shut silences the instance and the test sees 128 zeros where the pool has audio.
+Two seams' worth of work is a pool, not a sum of voices.
+
+**Two limits, one new.** Resetting a slot resets the instance until seam 3 exposes
+the per-call-site ranges, so a fused pool must not steal or retrigger a slot while
+its neighbours sound. And `poly` redeclares a voice's controls as `{:name name}`: a
+fused interface loses the voice's declarations -- measured for `:shared`
+(it compiles as an ordinary scalar with an empty shared region) and for a lane
+(refused by the IR outright); `:default` and `:has-lane` read the same way. So the instrument option cannot be a bare
+`(poly S voice)` — either `poly` carries a control's declaration through, or the
+option refuses a voice that declares one. That is a decision for the option slice,
+not for the mapping, which maps names and can only report the interface it was
+handed.
+
+JVM 205 tests / 1813 assertions, browser 32/32.
+
+### M6a, seam 3: one slot's reset, and the entries that own several slots
+
+Seam 2 put a fused instance's *controls* in the right slot; this puts its *state*
+there. D19 already gave every call site a private state partition, but no host
+could see the ranges, so the only reset on offer restored the whole instance -- and
+a steal in one slot restarted its neighbours' envelopes. Now the lowering records
+each call site's partition as it allocates it (evaluation order, which for a
+`(poly S voice)` process is slot order), the JVM target resolves each logical range
+to a physical state range per storage, the instance keeps each partition's initial
+values, and `reset-voice!` is one `arraycopy` into one range (D51).
+
+The bug worth remembering: **a state entry may own several slots**. A delay line's
+buffer is *one* entry with `:size 64`, not 64 entries, so the first version's float
+range came out as `(0 1 65)` and the contiguity check it had just gained fired --
+correctly, because the range was wrong, not because contiguity is optional. That
+check is now part of the slice rather than an accident: a target that publishes
+layout should say when the layout is not the shape it promises.
+
+The bite check: replace the slot's `:reset-partition` with `dsp/reset!` and the new
+test fails with 128 zeros where the plain pool has a sounding note. Stealing into
+slot 0 of a two-slot instance now leaves slot 1's envelope and delay line
+bit-for-bit alone, across the steal, against a plain pool that never stole at all.
+
+JVM 206 tests / 1818 assertions, browser 32/32.
+
+### M6a, the option itself: `{:fusion {:slots S}}`
+
+The option is a compile option beside `:target`/`:precision`/`:containment`, and
+the only one consumed rather than passed on. `synth-bundle` compiles the base
+artifact (the runtime config -- plan, lanes, shared region, declarations -- stays
+base-shaped, D50) and then, when asked, `(poly S voice)`, which is the artifact that
+runs. The runtime carries `{:slots :controls :per-slot}` so a host with only the
+artifact can rebuild the mapping; that is what M6c's browser host will use.
+
+The per-slot set is "what a pool writes per voice": runtime storage and per-voice
+parameters. So `delay`/`mix` are expanded per slot even though they are "just
+parameters" -- each slot keeps its own value rather than the last one written --
+and only a shared control is hoisted, which is what it already means.
+
+`poly` had to learn what D50 measured it was dropping: it carries each control's
+declaration to its expanded name. `shared-gain` now keeps its shared region through
+fusion, and two things are refused with a reason instead of quietly mangled:
+expanding a shared control per slot, and expanding a lane (a lane belongs to the
+entry process).
+
+The end-to-end statement, which is what the whole M6a run was for: a pool over the
+option renders bit-for-bit what a pool of separate voices renders at one sounding
+voice, across three blocks; the fused artifact has one state partition per slot;
+four voices share one instance. JVM 208 tests / 1839 assertions, browser 32/32.
+
+**Next**: the bench's fused arm still builds its `(poly N voice)` directly, with
+`poly`'s default per-slot set, so D45's fused numbers describe a slightly different
+lowering than the option produces -- worth pointing at the option so there is one
+definition of "the fused lowering" and re-running the sweep. Then **M6b** (per-slot
+skipping) and **M6c** (the browser hosts, publishing partitions the way D51 does).
+
+### The bench's fused arm goes through the option, and the number changes
+
+`echo-fused-artifact` used to build `(poly N voice)` itself with `poly`'s default
+per-slot set (`[:gate :note]`). The option expands every control a pool writes per
+voice, so `frequency`, `delay` and `mix` are per slot as well -- four controls read
+per frame per slot instead of two. With the bench pointed at the option (and
+`echo-control-value` taught to strip the `_0` suffix, or the fused arm would have
+been handed `0.0` for the note the pool arm was handed), the realistic sweep's
+ratio drops from ~1.9× to **1.3–1.7×**: the earlier figure was measured on a shape
+no instrument produces. Both surviving conclusions were re-verified: bit-exactness
+at one voice (the test pins it through the option now) and a pool artifact flat at
+2 741 bytes against a fused one that grows 2 875 → 4 608.
+
+### Why seam 4 waited, asked as a question
+
+Small correction while answering it, then the answer.
+
+**The correction.** `synth-bundle` built the runtime config's `:special-mask`/
+`:special-count` from the *base* voice's ABI even when the kernel is the fused
+artifact -- and the pool reads the *kernel* when it asks a releasing voice whether
+it is finished. A readback nothing fills stays at zero, so a fused synth whose
+runtime claimed an activity special would free a releasing voice on its first
+block. It is now sourced from the artifact that runs, which is what the documented
+behaviour always assumed. Chasing whether it was *reachable* answered the question
+properly: `special-mask` is "the specials a definition *writes*" (`used-special-ids`
+of its body), so the two arms can only disagree if a voice writes a special -- and
+such a voice cannot be fused, because the IR refuses a callee's `store-special`
+outright. The mismatch was unreachable; the wiring is still the right one, and the
+option test now pins the runtime's specials so the day a callee *can* write one,
+the line is already there.
+
+**The answer.** Seam 4 is the only one of the four whose absence cannot produce a
+wrong sample. Seams 1–3 are load-bearing: without the key a fused instance is mixed
+once per slot, without the mapping controls land in the wrong slot, without the
+per-slot reset a steal clobbers its neighbours -- all three bite-checked, and the
+third showed up as silence where the pool had audio. Seam 4's failure mode is the
+opposite: the pool holds a finished voice a while longer. That is *already* the
+documented safe default for a voice that declares nothing (D39), so the deferral
+degrades into a supported path rather than a new one. And the work it needs is
+independent: the IR must allow and rebase a callee's special store across every
+calling target, and the artifact must publish a per-slot special map -- the sibling
+of what D51 did for state ranges, but for the special index space.
+
+### M6b — per-slot skipping, and the latch that makes it correct
+
+M6a gave fusion a slot-aware host; M6b stops a fused process from evaluating a slot
+nothing is using. The measurement that opened the slice is worth recording first,
+because it chose the design: on `echo-voice` through the pool at capacity 32, the
+pool is flat in capacity (0.047 ms/block at two voices whether capacity is 8 or
+32), while one `(poly 32 echo-voice)` process costs 0.375 at two voices and a
+`(poly 2 …)` costs 0.035. So a fixed `:slots` cannot serve every occupancy — S=32
+wins at a full patch and S=2 wins at a sparse one — and the thing that would make
+one instance serve both is a **branch per slot**.
+
+**The mechanism: a per-call-site latch, not a gate check.** The obvious lowering,
+`(if (> gate 0) (voice …) 0)`, is wrong, and quietly: a pool closes a voice's gate
+to *release* it, so a bare gate check cuts every release tail and breaks the
+property fusion exists to keep — that it renders what the pool renders, bit for
+bit. The wrapper that ships (`comb/guard`) owns one boolean state slot that latches
+the first time `gate` rises above zero, *stays* set when the gate closes, and is
+cleared only by the slot's reset. Three states fall out: never gated (skip), gated
+and released (evaluate, tail), freed and reset (skip again). Because `poly` calls
+the guarded voice once per slot, the latch lives in that call's state partition
+(D19), which is what lets `reset-voice!` clear one slot without touching its
+neighbours.
+
+**What it did *not* need is the point.** No IR node, no ABI field, no artifact
+change, no kernel change, no `fused-mapping` change, and no backend work: the guard
+is scalar state, a comparison, and a `set!`, all of which the language already had,
+wrapped by a combinator. The fused interface is byte-for-byte the same shape, so
+`fused-mapping` and the per-slot reset ranges (D50/D51) apply unchanged, and M6c's
+JavaScript and Wasm hosts inherit the skip for free. `synth-bundle` applies it when
+fusing (`:guard`, default true) so the option's artifact is the guarded one; the
+runtime configuration is unchanged, because the guard is a compile-time property.
+
+**The numbers** (JVM, f32, 128-frame blocks, criterium best estimate; pool at
+capacity 32 against one fused process at `:slots S`):
+
+| slots | sounding | plain pool | guarded fused | unguarded fused |
+|---|---|---|---|---|
+| 8 | 2 | 0.045 | 0.036 | 0.097 |
+| 32 | 2 | 0.045 | 0.045 | 0.467 |
+| 8 | 8 | 0.235 | 0.108 | 0.104 |
+| 32 | 8 | 0.235 | 0.121 | 0.392 |
+| 8 | 32 | 0.825 | 0.447 | 0.438 |
+| 32 | 32 | 0.825 | 0.482 | 0.371 |
+
+So `:slots 32` at two voices falls from 0.467 to 0.045 — *the pool's own number* —
+and at eight voices from 0.392 to 0.121, half the pool; a guarded single S=N
+instance therefore beats the pool at every occupancy measured (0.045/0.121/0.482
+against 0.045/0.235/0.825). The cost is at a full patch: ~2% at `:slots 8` and
+~30% at `:slots 32`, where the extra branch sits in a larger method — and even
+there the guarded process beats the pool. At one voice the guarded and unguarded
+lowerings are still bit-identical to the pool, delay line included.
+`realistic-row` gained `:sounding` and `:guard` so the comparison is a rerunnable
+driver rather than a REPL session.
+
+**Tests, all behavioral (no timing assertions).** A free-running oscillator voice
+makes the skip visible in the output: a fresh guarded slot renders zeros where the
+unguarded one advances; after its gate has opened and closed it is bit-identical to
+the unguarded voice (the tail is preserved); and after a reset it renders zeros
+again (the latch is clearable). The pool-level test runs a note-on, a note-off and
+24 blocks of tail through a plain pool and a fused one and asserts every block
+equals. JVM 213 tests / 1884 assertions, browser 32/32, all green.
+
+**What is left.** M6c (the browser hosts over the same testbed arms); and the
+fused voice still exposes no per-slot `:activity`, so a used slot is held until it
+is stolen (seam 4, deferred — D45). `:guard false` restores the bare lowering.
+
+### Seam 4 — a callee's special is published per call partition, and a fused slot can finish
+
+M6b's entry ends "a used slot is held until it is stolen, because a fused process
+exposes no per-slot `:activity` (seam 4, deferred)". This closes that seam, so the
+sentence is now history rather than a limit.
+
+**What was in the way.** D39 made `:activity` an entry-process contract and
+rejected a callee's `store-special` outright, because the slot would be rebased
+into a call partition "where no host reads it". That is exactly where a *fused*
+voice's activity has to live: the fused process is S callees, and there is no
+single entry slot that means "slot 3 has finished". So seam 4 was not "read an
+offset we know"; it was "publish the offsets, per slot" (D45).
+
+**The change.** A callee may publish a special. The entry's own
+`:special-mask`/`:special-slots` are unchanged and still describe only the entry;
+each call site that owns a partition now records the specials **inside** it, one
+per bit, the outermost (lowest logical index) winning when a nested module
+declares the same bit. Because a partition covers its whole subtree, an activity
+nested behind the definition the call site names is found there — and for
+`(poly S voice)` call site `k` is slot `k`. The process ABI publishes the vector
+as `:call-partitions`, the JVM target carries it on `:partitions`, and the fused
+JVM kernel resolves each slot's activity to a physical float/int slot **once at
+construction**, so `read-specials!` still reads primitives and touches no map on
+the audio path. `synth-bundle` carries the **base voice's** mask (not the fused
+entry's, which is empty) so the pool's `:activity` position is the same plain or
+fused, and refuses at compile time if any slot's mask differs from the voice's.
+
+**Why it is safe, and why per partition.** The slot is published, not lost: a host
+that does not read it is unaffected, so a non-fused process that calls a module
+with a special now records it per partition instead of failing. And the partition
+is the unit a per-slot reset already restores (D51), so the activity and the reset
+share one address space — the same reset that frees a slot also clears the guard's
+latch (D53), which is why freeing a fused slot makes it immediately skippable
+again.
+
+**Verified.** The fixture `fixtures/activity-voice` is a module-shaped generator
+whose `:activity` follows a linear envelope, so it reports *active* for a few
+blocks after its gate closes. That tail is load-bearing: an activity that dropped
+to 0 the instant the gate closed could not tell a working per-slot readback from
+one that returned nothing, because both would free immediately.
+`a-fused-pool-frees-a-released-slot-from-its-own-activity` runs a note-on, a
+release and the tail through a plain pool and a `:slots 2` fused pool; both hold
+the release tail for a block and then free it at the same block, and a fused
+kernel that could not read its slot's special would free on the first release
+block and fail. `a-fused-slot-publishes-its-own-activity` reads two slots directly
+with a 42.0 sentinel — one held and one released past its tail must read 1.0 and
+0.0 — so a readback that wrote nothing cannot pass. Before this slice the fused
+pool held the released slot forever. JVM 215 tests / 1907 assertions, browser
+32/32, all green.
+
+**What remains.** The JavaScript and Wasm *kernels* do not read a fused slot's
+special yet — that is M6c. The IR and ABI they consume already carry it, and they
+continue to compile a callee's `store-special` as an ordinary state store. D39 is
+amended (not deleted) to point here; D45's seam 4 is closed.
+
+### M6c — the browser fused hosts apply the partitions the ABI already publishes
+
+This closes M6. Seam 4's entry ends "the JavaScript and Wasm *kernels* do not read
+a fused slot's special yet — that is M6c". This is that slice, and it turned out
+to need **no target, IR, ABI, or bundle-schema change**: seam 4 had already put
+each call site's partition on the process ABI as `:call-partitions`, and a
+browser host holds it.
+
+**What the browser hosts were missing.** The guard (M6b) is ordinary DSP, so the
+browser kernels inherited per-slot skipping for free. The other three seams are
+host work: a base → fused control mapping (D50), a per-slot reset (D51), and a
+per-slot `:activity` readback (D54). None existed outside `hosts/jvm.clj`.
+
+**The shape of the fix.** `hosts/fusion.cljc` gained `runtime-mapping`, the
+portable half of what `hosts.clj`'s private `fused-mapping` did, so "the fused
+lowering" is one definition on both sides of the host boundary. `js-kernel` and
+`wasm-kernel` take an optional `:mapping`; with one, `slots` handles are grouped
+behind a single instance (the JVM kernel's `(mod @created slots)` grouping, one
+instance key), `write-voice-controls!` writes through a precomputed per-slot row
+of `fusion/fused-position`, `reset-voice!` restores one call partition, and
+`read-specials!` reads that slot's partition's specials. Without one, every path
+is the identity and the existing nine browser checks are unchanged.
+
+**Resolution is a host loop, not a target output.** On the JVM the *target*
+resolves partitions because the arena is two primitive arrays and a logical index
+is not a physical one (D51). JavaScript's arena is one flat region indexed by
+state slot, so a partition's `:base`/`:size` *are* its range: `create-voice`
+snapshots the arena once and a reset copies the range back. Wasm's state region is
+byte-addressed and its layout is already served as data in `:memory`
+(`:state-layout`, because an int slot in an f64 block is padded to the block's
+alignment), so the host resolves each partition's byte range and copies it from an
+initial snapshot. Adding a `:partitions` artifact key and shipping it would
+duplicate information the browser already has, so — like the ABI's
+`:call-partitions` being enough for JS — the decision is to keep it host-side.
+
+**How it is checked.** `harness/testbed.clj` serves a `fused-pool-bundle` (the
+base artifact's ABI and IR for the interpreter oracle, the fused artifact's ABI,
+the `:fusion` mapping, and, for Wasm, its WAT and memory) and a `fused-pool-source`
+(the fused JavaScript module). The two new browser checks — "JavaScript fused
+pool" and "Wasm fused pool" — drive the fused pool and a plain interpreter pool
+over the *base* voice through the same operations and compare the rendered blocks:
+two slots across a steal (slot 0 gated shut so its contribution is exactly zero,
+which lets the block be compared sample for sample), then a release, asserting the
+tail is held for a block and the voice is then freed. `fixtures/fused-browser-voice`
+is module-shaped, arithmetic (no transcendental, so the differential is exact),
+and carries both a per-voice envelope and a delay line, so a whole-instance reset
+would be noticed; it publishes `:activity` from an envelope with a short tail, so
+a readback that returned nothing would free a block early.
+
+**The checks bite.** With a whole-instance reset stubbed into the JavaScript fused
+kernel the steal check fails (the neighbour's block diverges — the same bug the
+JVM test guards); with one stubbed into the Wasm kernel it fails too. With the
+fused `read-specials!` stubbed to return nothing, the activity check fails
+(`{:held 0}` against the interpreter's `{:held 1}`). A no-op reset only touches
+the slot that is silent by construction, so it is not observable — the same limit
+the JVM test has, and the reason the bite is a whole-instance reset.
+
+**Verified.** JVM 215 tests / 1907 assertions, browser **34/34** (two new arms),
+`clj-kondo` and `cljfmt` clean. D55 records the decision; the pool checks that
+were there stay green, because a kernel with no mapping is unchanged.

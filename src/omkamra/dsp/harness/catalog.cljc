@@ -201,6 +201,36 @@
      :precisions [:f32 :f64]
      :controls [0.5]
      :input-samples sine-input-samples}
+    ;; D47 stage 2: a target that can call emits one method per definition and
+    ;; calls it, so a stateful callee's partition (D19) is addressed through a
+    ;; runtime base. These are the cases a mis-derived base breaks: two sites of
+    ;; one stateful callee with the entry's own state between them, a callee whose
+    ;; state is integer, and a callee that itself calls one. The interpreter is
+    ;; still the oracle for all of it.
+    {:id :call-arena
+     :entry :process
+     :definition-var 'omkamra.dsp.harness.fixtures/call-fixture-arena
+     :precisions [:f32 :f64]
+     :controls []
+     :input-samples sine-input-samples}
+    {:id :call-nested
+     :entry :process
+     :definition-var 'omkamra.dsp.harness.fixtures/call-fixture-nested
+     :precisions [:f32 :f64]
+     :controls []
+     :input-samples sine-input-samples}
+    ;; A callee is emitted once and serves every call site, so its partition's
+    ;; layout has to be the enclosing layout translated by the base it is handed.
+    ;; This entry's own int slot leaves the callee's partition four bytes in — the
+    ;; case that separates a block-aligned layout from a per-slot one — and the
+    ;; callee's float slot follows its int slot, so a wrong base changes the value
+    ;; rather than merely reading a different address.
+    {:id :call-int-led
+     :entry :process
+     :definition-var 'omkamra.dsp.harness.fixtures/call-fixture-int-led
+     :precisions [:f32 :f64]
+     :controls []
+     :input-samples sine-input-samples}
     {:id :bitwise-lfsr
      :entry :process
      :definition {:dsp/kind :function
@@ -710,7 +740,32 @@
               [60.0 0.0 0.0 440.0 69.0]
               [69.0 200.0 0.0 440.0 69.0]
               [69.0 0.0 -100.0 440.0 69.0]
-              [57.0 -50.0 25.0 432.0 69.0]]}])
+              [57.0 -50.0 25.0 432.0 69.0]]}
+   ;; D48: three or more operands fold left at lowering, so the IR stays
+   ;; two-operand and each backend renders the fold it always did. The vectors
+   ;; cover each fold direction: `-` and `/` are the ones a different grouping
+   ;; would get wrong.
+   {:id :variadic-operators
+    :entry :function
+    :definition {:dsp/kind :function
+                 :name 'variadic-operators
+                 :params ['x 'y 'z]
+                 :return-type :float
+                 :body ['(+ (+ x y z) (- x y z) (* x y z) (/ x y z))]}
+    :precisions [:f32 :f64]
+    :vectors [[1.5 2.0 4.0] [-1.0 0.5 2.0] [2.0 -3.0 0.5] [0.25 8.0 -0.5]]}
+   {:id :variadic-logical-and-bitwise
+    :entry :function
+    :definition {:dsp/kind :function
+                 :name 'variadic-logical-and-bitwise
+                 :params [{:name 'a :type :int} {:name 'b :type :int}
+                          {:name 'c :type :int}]
+                 :return-type :int
+                 :body ['(if (and (> a b) (< b c) (> c 8))
+                           (bit-or (bit-and a b) (bit-xor b c))
+                           (bit-and a b c))]}
+    :precisions [:f32]
+    :vectors [[1 2 4] [15 7 3] [255 240 16] [0 0 0] [-1 -2 -3]]}])
 
 (def cases process-cases)
 

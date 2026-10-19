@@ -29,6 +29,59 @@
 
 (def ^:dynamic *precision* nil)
 
+(def ^:dynamic *callee*
+  "The calling context while a definition's body is emitted: `{:base form-or-nil
+  :names {definition-id emitted-name}}`.
+
+  `:base` is the form naming the enclosing definition's arena offset, or nil for
+  the process entry, whose arena starts at zero and therefore pays nothing; every
+  callee adds it to the relative state indices its IR carries (D47). `:names` is one
+  map for the whole module, so a call site finds its callee's emitted name."
+  nil)
+
+(def ^:private arena-base-name
+  "The callee ABI's base parameter. Prefixed like everything else the emitter
+  introduces, so it cannot collide with a control or a lowered local."
+  '__dsp_base)
+
+(defn- arena-base
+  "The form to add to a state index, or nil for the entry."
+  []
+  (:base *callee*))
+
+(defn- based-index
+  "A state or scratch index, offset by the enclosing definition's base."
+  [index]
+  (if-let [base (arena-base)]
+    (list '+ base index)
+    index))
+
+(defn- call-base-form
+  "The arena base a call passes for its callee's partition (D19): the call site's
+  offset, plus the enclosing definition's own base when it is a callee rather than
+  the entry."
+  [partition-base]
+  (let [offset (or partition-base 0)
+        enclosing (arena-base)]
+    (cond
+      (nil? enclosing) offset
+      (zero? offset) enclosing
+      :else (list '+ enclosing offset))))
+
+(defn- callee-name
+  [function-id]
+  (or (get-in *callee* [:names function-id])
+      (throw (ex-info "JS call site refers to a definition that was not emitted"
+                      {:function-id function-id
+                       :emitted (vec (keys (:names *callee*)))}))))
+
+(defn- definition-name
+  "A module-level name for one definition, mangled and indexed so two definitions
+  cannot mangle onto each other."
+  [index id]
+  (symbol (str "__dsp_fn" index "_"
+               (str/replace (str id) #"[^A-Za-z0-9_$]" "_"))))
+
 (defn- f64?
   []
   (case *precision*
@@ -82,6 +135,11 @@
               :args (mapv #(lower-expression % channels) (:args expression))}
     :convert {:op :convert :operator (:operator expression) :type (:type expression)
               :value (lower-expression (:value expression) channels)}
+    :call {:op :call
+           :function-id (:function-id expression)
+           :base (:state-base expression)
+           :args (mapv #(lower-expression % channels) (:args expression))
+           :type (:type expression)}
     (throw (ex-info "unsupported expression in JS lowering"
                     {:expression expression}))))
 
@@ -146,7 +204,15 @@
               :frames (:frames ir)
               :sample-rate (:sample-rate ir)
               :lanes (:lanes ir)
-              :frame-body (lower-statement (:frame-body ir) (:channels ir))}
+              :shared (:shared ir)
+              :frame-body (lower-statement (:frame-body ir) (:channels ir))
+              ;; Definitions this target was asked to call, in emission order; the
+              ;; rest were copied into their call sites (D47).
+              :definitions (into (array-map)
+                                 (map (fn [[id definition]]
+                                        [id {:params (:params definition)
+                                             :body (lower-statement (:body definition) 1)}]))
+                                 (:definitions ir))}
     (throw (ex-info "unsupported IR entry in JS lowering" {:ir ir}))))
 
 ;; ---------------------------------------------------------------------------
@@ -261,9 +327,9 @@
 
 (defn- index-form
   [statement]
-  (if-let [element-index (:element-index statement)]
-    (list '+ (:index statement) (expression-form element-index))
-    (:index statement)))
+  (based-index (if-let [element-index (:element-index statement)]
+                 (list '+ (:index statement) (expression-form element-index))
+                 (:index statement))))
 
 (defn- buffer-form
   [operation]
@@ -376,6 +442,14 @@
                                        (expression-form (first (:args expression)))
                                        (expression-form (second (:args expression))))))
     :builtin (coerce-form (:type expression) (emit-builtin expression))
+    ;; A call to a definition that was lowered to a function of this kernel (D47).
+    ;; The arena is per kernel object and the functions close over it, so neither
+    ;; the arena nor the entry's buffers travel: only the partition base, the two
+    ;; context values every definition may reference, and the arguments.
+    :call (list* (callee-name (:function-id expression))
+                 (call-base-form (:base expression))
+                 'frames 'sampleRate
+                 (map expression-form (:args expression)))
     :convert (case (:operator expression)
                :int->float (coerce-form :float (expression-form (:value expression)))
                :float->int (coerce-form :int
@@ -542,6 +616,36 @@
             body)
       body)))
 
+(defn- callee-form
+  "One `letfn` binding per definition the target was asked to call (D47).
+
+  The four leading parameters are the ABI: the partition base, then the two context
+  values every definition may reference. A callee reaches nothing else — its
+  environment has no bindings — and the arena needs no parameter because these
+  functions are defined inside the kernel and close over it.
+
+  The form is `(name [args] body)`, like every other `letfn` binding here: emitting
+  a `defn` instead makes Squint name the entry itself (`defn_6`), and two of them
+  collide as `Identifier 'defn_6' has already been declared`."
+  [name definition]
+  (binding [*callee* (assoc *callee* :base arena-base-name)]
+    (list name
+          (vec (concat [arena-base-name 'frames 'sampleRate]
+                       (map parameter-symbol (:params definition))))
+          (normalize-booleans (:params definition)
+                              (cons 'do (statement-forms [(:body definition)]))))))
+
+(defmacro with-module-names
+  "Emit `body` with the module's callee names in scope.
+
+  A macro on purpose. The emitter resolves a call site's callee *while it builds* the
+  form, so the binding has to wrap the construction: as a function this took an
+  already-emitted argument, the `binding` came too late, and the result was
+  `*callee*` nil inside a call — which the module's own error message then reported
+  as a definition that was never emitted."
+  [names & body]
+  `(binding [*callee* {:base nil :names ~names}] ~@body))
+
 (defn- process-form
   [js-ir]
   (let [controls (map parameter-symbol (:controls js-ir))
@@ -550,29 +654,44 @@
                             controls
                             ;; Any number of lanes is one flat region, so it is
                             ;; one argument rather than one per lane.
-                            (when (seq (:lanes js-ir)) ['lanes])))
+                            (when (seq (:lanes js-ir)) ['lanes])
+                            ;; The pool's shared region is one more region of the
+                            ;; same shape, one argument rather than one per
+                            ;; shared control (M5).
+                            (when (seq (:shared js-ir)) ['shared])))
+        names (into (array-map)
+                    (map-indexed (fn [index [id _]]
+                                   [id (definition-name index id)]))
+                    (:definitions js-ir))
+        callees (with-module-names names
+                  (mapv (fn [[id definition]]
+                          (callee-form (get names id) definition))
+                        (:definitions js-ir)))
         frame (with-meta frame-counter {:mutable true})
         ;; One evaluation per frame (D40): no channel loop.
-        body (normalize-booleans
-              (:controls js-ir)
-              (list 'let [frame 0]
-                    (list 'while (list '< frame-counter 'frames)
-                          (cons 'do
-                                (concat
-                                 (statement-forms [(:frame-body js-ir)])
-                                 [(list 'set! frame-counter
-                                        (list i32-helper
-                                              (list '+ frame-counter 1)))])))))]
+        body (with-module-names
+               names
+               (normalize-booleans
+                (:controls js-ir)
+                (list 'let [frame 0]
+                      (list 'while (list '< frame-counter 'frames)
+                            (cons 'do
+                                  (concat
+                                   (statement-forms [(:frame-body js-ir)])
+                                   [(list 'set! frame-counter
+                                          (list i32-helper
+                                                (list '+ frame-counter 1)))]))))))]
     (list 'defn (with-meta 'createKernel {:export true}) []
           (list 'let [state-arena (arena-form js-ir)]
-                (list 'letfn [(list init-name [] (cons 'do (init-forms js-ir)))
-                              (list reset-name [] (list init-name))
-                              ;; `destroy` is the release half of the lifecycle
-                              ;; vocabulary: it drops the instance's persistent
-                              ;; state, and the kernel object is then ready to be
-                              ;; collected.
-                              (list destroy-name [] (list '.fill state-arena 0))
-                              (list process-name params body)]
+                (list 'letfn (into [(list init-name [] (cons 'do (init-forms js-ir)))
+                                    (list reset-name [] (list init-name))
+                                    ;; `destroy` is the release half of the lifecycle
+                                    ;; vocabulary: it drops the instance's persistent
+                                    ;; state, and the kernel object is then ready to be
+                                    ;; collected.
+                                    (list destroy-name [] (list '.fill state-arena 0))]
+                                   (conj callees
+                                         (list process-name params body)))
                       (list init-name)
                       ;; The kernel object exposes its arena as well as the
                       ;; lifecycle, so a host can read a voice's special slots

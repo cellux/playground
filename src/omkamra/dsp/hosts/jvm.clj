@@ -10,6 +10,7 @@
   lives in the physical control arrays, and `special-access` where each declared
   special lives in the state arrays (D39)."
   (:require [omkamra.dsp :as dsp]
+            [omkamra.dsp.hosts.fusion :as fusion]
             [omkamra.dsp.hosts.mixing :as mixing]
             [omkamra.dsp.synth.pool :as pool]))
 
@@ -55,18 +56,27 @@
               (aset int-slot position (long index))))))
     {:float-slot float-slot :int-slot int-slot :count count}))
 
-(defn jvm-kernel
-  "A `Kernel` over a JVM process artifact.
+(defn- kernel
+  "A `Kernel` over a JVM process artifact, plain or fused.
 
-  The artifact must be a generator: a voice has no input port (D23). Each voice
-  gets its own instance, its own physical control arrays, and its own mixing
-  scratch of `max-block-frames` samples.
+  `mapping` is nil for a plain voice kernel -- one instance per voice -- and a
+  `fusion/fused-mapping` for a fused one, whose `slots` handles share an instance
+  and one instance key; the mapping is what turns the base control values the pool
+  writes into the slice of the fused interface that *that* slot owns, so the pool
+  never learns that several of its voices live in one process (M6).
 
-  `containment` selects the non-finite policy: `:off` mixes the block untouched,
-  `:sanitize` contains each sample, and `:reset` silences and resets a voice
-  whose block is non-finite."
-  [artifact containment]
+  Everything a fused instance shares, it shares through the handle: the control
+  arrays, the scratch buffer, the lane region, and the shared region are one per
+  instance, because one process call renders all its slots at once."
+  [artifact mapping containment]
   (let [containment (mixing/check-containment containment)
+        slots (long (or (:slots mapping) 1))
+        _ (when (and mapping (not= slots (count (:partitions artifact))))
+            (throw (ex-info (str "a fused voice's slot count must be the number of"
+                                 " call sites the process has, or a slot cannot be"
+                                 " reset on its own")
+                            {:slots slots :partitions (count (:partitions artifact))
+                             :mapping mapping})))
         f64? (= :f64 (:precision artifact))
         channels (long (get-in artifact [:abi :channels :count] 1))
         layout (:control-layout artifact)
@@ -81,54 +91,232 @@
         {^longs special-float :float-slot
          ^longs special-int :int-slot
          special-count :count}
-        (special-access state-slots (:special-slots (:abi artifact)))]
+        (special-access state-slots (:special-slots (:abi artifact)))
+        abi (:abi artifact)
+        ;; A *fused* slot's specials live in its call partition, not the entry's
+        ;; (M6 seam 4): the artifact records each partition's specials, resolved
+        ;; here to physical slots, so `read-specials!` reads the voice the pool
+        ;; asked about. One entry per slot.
+        slot-special-access
+        (when mapping
+          (mapv (clojure.core/fn [partition]
+                  (special-access
+                   state-slots
+                   (into {}
+                         (map (clojure.core/fn [{:keys [special bit index]}]
+                                [special {:bit bit :index index}]))
+                         (:specials partition))))
+                (:partitions artifact)))
+        ;; The lane layout is the process's: lane `i` at `i * lane-stride`, both
+        ;; compile-time constants (D28). The *region* is the voice's — one per
+        ;; voice, allocated with the voice — so a per-voice lane has somewhere of
+        ;; its own to live and a shared one is written once per voice by the
+        ;; pool (M4c).
+        lane-stride (long (or (:lane-stride abi) 0))
+        lane-layout (into {}
+                          (map (clojure.core/fn [lane]
+                                 [(clojure.core/name (:name lane))
+                                  (long (:offset lane))]))
+                          (:lanes abi))
+        lane-count (count lane-layout)
+        ;; One shared region per *kernel*, i.e. per pool: a broadcast parameter is
+        ;; written once and read by every voice (M5). Its slices are the lanes'
+        ;; shape, so one stride and one addressing serve both.
+        shared-stride (long (or (:shared-stride abi) 0))
+        shared-layout (into {}
+                            (map (clojure.core/fn [control]
+                                   [(clojure.core/name (:name control))
+                                    (long (:offset control))]))
+                            (:shared abi))
+        shared-count (count shared-layout)
+        shared-region (when (pos? shared-count)
+                        (mixing/real-array f64? (* shared-stride shared-count)))
+        ;; The base -> fused control table, one row per slot: where each control
+        ;; the pool writes lands in the fused interface. A plain kernel has one
+        ;; identity row, so the write path is the same loop either way (M6).
+        slot-rows
+        (if mapping
+          (let [count (count (:hoisted mapping))]
+            (into-array
+             (map (clojure.core/fn [slot]
+                    (let [row (long-array count)]
+                      (dotimes [position count]
+                        (aset row position
+                              (long (fusion/fused-position mapping slot position))))
+                      row))
+                  (range slots))))
+          (into-array [(long-array (range control-count))]))
+        values-count (alength ^longs (aget ^objects slot-rows 0))
+        ;; A plain kernel gives every voice its own instance, so the key is the
+        ;; order the voices were created in. A fused one makes `slots` handles
+        ;; share an instance, so the key is the *instance's*: every handle of a
+        ;; group answers the same, which is all the pool's per-block mark needs,
+        ;; and `current` is the instance those handles share (M6).
+        created (volatile! 0)
+        current (volatile! nil)]
     (reify pool/Kernel
       (create-voice [_ max-block-frames]
-        (let [instance (dsp/create-instance artifact)]
-          {:instance instance
-           :float-controls (mixing/real-array f64? float-count)
-           :int-controls (int-array (int int-count))
-           :scratch (mixing/scratch-buffer f64? channels max-block-frames)
-           :reset! (clojure.core/fn [] (dsp/reset! instance))}))
+        (if (nil? mapping)
+          (let [instance (dsp/create-instance artifact)]
+            {:instance instance
+             :instance-key (vswap! created inc)
+             :float-controls (mixing/real-array f64? float-count)
+             :int-controls (int-array (int int-count))
+             :lane-region (when (pos? lane-count)
+                            (mixing/real-array f64? (* lane-stride lane-count)))
+             :scratch (mixing/scratch-buffer f64? channels max-block-frames)
+             :reset! (clojure.core/fn [] (dsp/reset! instance))})
+          (let [slot (long (mod (long @created) slots))]
+            (when (zero? slot)
+              (let [instance (dsp/create-instance artifact)]
+                (vreset! current
+                         {:instance instance
+                          :instance-key (inc (quot (long @created) slots))
+                          :float-controls (mixing/real-array f64? float-count)
+                          :int-controls (int-array (int int-count))
+                          :lane-region (when (pos? lane-count)
+                                         (mixing/real-array
+                                          f64? (* lane-stride lane-count)))
+                          :scratch (mixing/scratch-buffer f64? channels max-block-frames)
+                          :refs (volatile! slots)})))
+            (vswap! created inc)
+            (let [instance @current]
+              {:instance (:instance instance)
+               :instance-key (:instance-key instance)
+               :slot slot
+               :refs (:refs instance)
+               :float-controls (:float-controls instance)
+               :int-controls (:int-controls instance)
+               :lane-region (:lane-region instance)
+               :scratch (:scratch instance)
+               :reset! (:reset! instance)}))))
+      (instance-key [_ voice] (:instance-key voice))
       (destroy-voice! [_ voice]
-        (dsp/destroy! (:instance voice)))
+        (if (nil? mapping)
+          (dsp/destroy! (:instance voice))
+          ;; The process outlives the handle: the pool destroys one voice per
+          ;; slot, and there is only one instance to release.
+          (when (zero? (long (vswap! (:refs voice) dec)))
+            (dsp/destroy! (:instance voice)))))
       (reset-voice! [_ voice]
-        (dsp/reset! (:instance voice)))
+        (if (nil? mapping)
+          (dsp/reset! (:instance voice))
+          ;; One slot, one partition: a fused instance's slots do not clobber each
+          ;; other's state, so stealing or retriggering one is its own business
+          ;; (M6a, seam 3).
+          ((:reset-partition (:instance voice)) (long (:slot voice)))))
       (write-voice-controls! [_ voice values]
-        (if f64?
-          (let [^doubles target (:float-controls voice)
-                ^ints ints (:int-controls voice)]
-            (dotimes [position control-count]
-              (let [slot (aget float-slot position)]
-                (if (>= slot 0)
-                  (aset-double target (int slot) (aget ^doubles values position))
-                  (aset-int ints (int (aget int-slot position))
-                            (long (aget ^doubles values position)))))))
-          (let [^floats target (:float-controls voice)
-                ^ints ints (:int-controls voice)]
-            (dotimes [position control-count]
-              (let [slot (aget float-slot position)]
-                (if (>= slot 0)
-                  (aset-float target (int slot)
-                              (float (aget ^doubles values position)))
-                  (aset-int ints (int (aget int-slot position))
-                            (long (aget ^doubles values position)))))))))
+        (let [^longs row (aget ^objects slot-rows (long (or (:slot voice) 0)))
+              ^ints ints (:int-controls voice)]
+          (if f64?
+            (let [^doubles target (:float-controls voice)]
+              (dotimes [position values-count]
+                (let [physical (aget float-slot (long (aget row position)))]
+                  (if (>= physical 0)
+                    (aset-double target (int physical)
+                                 (aget ^doubles values position))
+                    (aset-int ints
+                              (int (aget int-slot (long (aget row position))))
+                              (long (aget ^doubles values position)))))))
+            (let [^floats target (:float-controls voice)]
+              (dotimes [position values-count]
+                (let [physical (aget float-slot (long (aget row position)))]
+                  (if (>= physical 0)
+                    (aset-float target (int physical)
+                                (float (aget ^doubles values position)))
+                    (aset-int ints
+                              (int (aget int-slot (long (aget row position))))
+                              (long (aget ^doubles values position))))))))))
+      (write-voice-lane! [_ voice lane values]
+        (let [key (if (string? lane) lane (clojure.core/name lane))
+              offset (get lane-layout key)]
+          (when-not offset
+            (throw (ex-info "this DSP voice declares no such lane"
+                            {:lane lane :lanes (vec (sort (keys lane-layout)))})))
+          (let [length (min (mixing/value-length values) lane-stride)]
+            (if f64?
+              (let [^doubles target (:lane-region voice)]
+                (dotimes [index length]
+                  (aset target (int (+ offset index))
+                        (double (mixing/value-at values index)))))
+              (let [^floats target (:lane-region voice)]
+                (dotimes [index length]
+                  (aset target (int (+ offset index))
+                        (float (mixing/value-at values index)))))))))
+      (write-shared! [_ control values]
+        (let [key (if (string? control) control (clojure.core/name control))
+              offset (get shared-layout key)]
+          (when-not offset
+            (throw (ex-info "this DSP voice declares no such shared control"
+                            {:control control
+                             :controls (vec (sort (keys shared-layout)))})))
+          (let [length (min (mixing/value-length values) shared-stride)]
+            (if f64?
+              (let [^doubles target shared-region]
+                (dotimes [index length]
+                  (aset target (int (+ offset index))
+                        (double (mixing/value-at values index)))))
+              (let [^floats target shared-region]
+                (dotimes [index length]
+                  (aset target (int (+ offset index))
+                        (float (mixing/value-at values index)))))))))
       (read-specials! [_ voice target]
-        (let [state (:state (:instance voice))
+        (let [{:keys [^longs float-slot ^longs int-slot count]}
+              (if mapping
+                (nth slot-special-access (long (:slot voice)))
+                {:float-slot special-float
+                 :int-slot special-int
+                 :count special-count})
+              state (:state (:instance voice))
               floats (:float state)
               ^ints ints (:int state)]
-          (dotimes [position special-count]
-            (let [slot (aget special-float position)]
+          (dotimes [position (long count)]
+            (let [slot (aget float-slot position)]
               (aset-double target position
                            (if (>= slot 0)
                              (double (if f64?
                                        (aget ^doubles floats (int slot))
                                        (aget ^floats floats (int slot))))
-                             (double (aget ints (int (aget special-int position))))))))))
+                             (double (aget ints (int (aget int-slot position))))))))))
       (clear-output! [_ output frames]
         (mixing/clear-channels! f64? channels output frames))
       (mix-voice! [_ voice output frames sample-rate]
         (dsp/process-unchecked! (:instance voice) nil (:scratch voice) frames
                                 sample-rate (:float-controls voice)
-                                (:int-controls voice) nil)
+                                (:int-controls voice) (:lane-region voice)
+                                shared-region)
         (mixing/mix-block! containment f64? channels voice output frames)))))
+
+(defn jvm-kernel
+  "A `Kernel` over a JVM process artifact: one instance per voice.
+
+  The artifact must be a generator: a voice has no input port (D23). Each voice
+  gets its own instance, its own physical control arrays, and its own mixing
+  scratch of `max-block-frames` samples.
+
+  `containment` selects the non-finite policy: `:off` mixes the block untouched,
+  `:sanitize` contains each sample, and `:reset` silences and resets a voice
+  whose block is non-finite."
+  [artifact containment]
+  (kernel artifact nil containment))
+
+(defn fused-jvm-kernel
+  "A `Kernel` over a *fused* JVM process artifact: `slots` voices per instance.
+
+  `mapping` is an `omkamra.dsp.hosts.fusion/fused-mapping` from the base voice's
+  controls to the fused interface's, and it is what lets a pool stay base-shaped
+  while the process holds several voices (M6).
+
+  Each slot is reset on its own: the target resolves the state range of every call
+  partition (`:partitions` on the artifact, in evaluation order, which for a fused
+  process is slot order), so a steal or a retrigger in one slot does not disturb
+  its neighbours. A `:shared` control, when there is one, is still one region for
+  the whole instance and every slot reads it -- the pool writes it once, which is
+  what it means. A fused slot also publishes the voice's builtin specials from its
+  call partition (M6 seam 4, D54), so `read-specials!` returns that slot's
+  `:activity` and the pool frees a finished voice exactly as it does for a plain
+  voice. `poly` carries a voice's control declarations through (D52), so a
+  `:shared` control stays shared in the fused interface; expanding one per slot,
+  or a lane, is refused with a reason."
+  [artifact mapping containment]
+  (kernel artifact mapping containment))

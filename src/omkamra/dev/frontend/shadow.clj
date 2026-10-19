@@ -13,14 +13,69 @@
     build-or-namespace
     (keyword (str build-or-namespace))))
 
+(defn- page-module
+  "The module whose page the on-demand frontend serves, or nil when the build has
+  no page module.
+
+  An explicit `:omkamra.dev.frontend/module` wins. Otherwise a single module is
+  the page; a module marked `:default true` is; with several, the page is the
+  non-web-worker module with no dependencies (Shadow's own default-module rule,
+  which excludes `:web-worker` modules). Two such candidates are ambiguous and
+  are an error rather than a silently skipped build — that silence is what made a
+  multi-module page 404 with no clue why."
+  [build-id build]
+  (let [modules (:modules build)
+        explicit (:omkamra.dev.frontend/module build)
+        default (some (fn [[id config]] (when (:default config) id)) modules)]
+    (cond
+      explicit
+      (if (contains? modules explicit)
+        explicit
+        (throw (ex-info "the frontend module named by the build does not exist"
+                        {:build-id build-id :module explicit
+                         :modules (vec (keys modules))})))
+
+      (= 1 (count modules))
+      (ffirst modules)
+
+      default
+      default
+
+      :else
+      (let [candidates (->> modules
+                            (remove (fn [[_ config]] (:web-worker config)))
+                            (remove (fn [[_ config]] (seq (:depends-on config))))
+                            (mapv key))]
+        (case (count candidates)
+          0 nil
+          1 (first candidates)
+          (throw (ex-info "the build has several page modules; name one with :omkamra.dev.frontend/module"
+                          {:build-id build-id :candidates candidates})))))))
+
+(defn- module-order
+  "The page module and its transitive dependencies, dependencies first.
+
+  A multi-module browser build needs its base modules loaded before the page
+  module; Shadow names each module's file by its id, so the page emits one script
+  tag per module in this order. A single-module build yields just that module."
+  [modules module]
+  (let [order (volatile! [])
+        seen (volatile! #{})]
+    (letfn [(visit [id]
+              (when-not (contains? @seen id)
+                (vswap! seen conj id)
+                (doseq [dependency (sort (:depends-on (get modules id)))]
+                  (visit dependency))
+                (vswap! order conj id)))]
+      (visit module)
+      @order)))
+
 (defn- browser-build
   [build-or-namespace]
   (let [build-id (build-id build-or-namespace)
         build (get-in (shadow/get-config) [:builds build-id])]
     (when (= :browser (:target build))
-      (let [module (or (:omkamra.dev.frontend/module build)
-                       (when (= 1 (count (:modules build)))
-                         (ffirst (:modules build))))]
+      (let [module (page-module build-id build)]
         (when (and (:output-dir build)
                    (:asset-path build)
                    module)
@@ -28,7 +83,8 @@
            :namespace (symbol (name build-id))
            :output-dir (:output-dir build)
            :asset-path (str/replace (:asset-path build) #"/$" "")
-           :module module})))))
+           :module module
+           :scripts (module-order (:modules build) module)})))))
 
 (defn list-builds
   "Return all registered, compatible browser build descriptors." []
@@ -125,7 +181,7 @@
 (defn page-response
   "Start watching the registered page on its first request and return its HTML."
   [compiler namespace-name]
-  (when-let [{:keys [asset-path module] :as page} (browser-build namespace-name)]
+  (when-let [{:keys [asset-path module scripts] :as page} (browser-build namespace-name)]
     (ensure-watch! compiler page)
     {:status 200
      :headers {"content-type" "text/html; charset=utf-8"
@@ -134,7 +190,9 @@
                 "<html>\n"
                 "  <head><meta charset=\"utf-8\"></head>\n"
                 "  <body>\n"
-                "    <script src=\"" asset-path "/" (name module) ".js\"></script>\n"
+                (apply str
+                       (for [script (or (seq scripts) [module])]
+                         (str "    <script src=\"" asset-path "/" (name script) ".js\"></script>\n")))
                 "  </body>\n"
                 "</html>\n")}))
 

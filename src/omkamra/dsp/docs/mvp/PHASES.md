@@ -574,6 +574,237 @@ locks, unbounded loops, unvalidated memory access — is open, though the IR's
 
 ---
 
+## M — Instrument parameters and modulation
+
+**Goal.** The instrument layer above the compiler: named instrument parameters,
+trigger/event handling, and a modulation matrix lowered by generators into either
+the sequencer (Clojure/ClojureScript) or the kernel. The design is recorded in
+`docs/mvp/MODULATION.md` and `DECISIONS.md` D44.
+
+**Why a letter, not a number.** M is a separate workstream, not part of the P
+spine's dependency order. It builds on the sequencing layer (P9), the voice pool
+(P10), and the reference instrument (P11/D42), but it is a different axis —
+instrument semantics and host topology rather than language or target features.
+Lettering it keeps the P identifiers stable.
+
+**Depends on.** P9 (events/`schedule`), P10 (voice pool), P11 (reference
+instrument, D42). M4 benefits from P12 (instance memory); M5, when built in the
+browser, from P13/P14.
+
+**Deliverables.**
+
+1. An instrument **parameter layer**: declared parameters with a scope
+   (`:instrument` or `:voice`) and, for a voice parameter, an addressing
+   (`:shared` or `:per-voice`); bindings from parameters to controls; and an API
+   to set them.
+2. **Triggers and handlers**: a general trigger event, a dispatcher keyed by
+   trigger, and `note-on`/`note-off` as built-in triggers whose handlers
+   allocate/release a voice and populate `gate`/`note`/`velocity` as ordinary
+   parameters.
+3. The **matrix as a generator input** (never instrument state): an instrument
+   reducer generator and a kernel reducer generator sharing one route schema.
+4. The **edge-scheduling model** (D44): instantaneous edges by default, `:delay`
+   to close a cycle, acyclicity of the instantaneous subgraph validated once at
+   generation time.
+5. **Sequencer placement**: the sequencer off the audio thread, driving the pool
+   through the preallocated event queue and `schedule`, sample-accurate and
+   invariant across block sizes; in the browser, a Web Worker feeding the
+   AudioWorklet's queue.
+6. **Lane delivery through the pool**, so a control can carry a host-supplied
+   per-frame curve (D28) and compose with `:smooth`/`:slew` (D27).
+7. *(Deferred)* a **shared kernel region** for instrument-level parameters, so a
+   broadcast parameter is one state variable every voice reads.
+
+**Slices.**
+
+- **M1 — Event-driven host (transport first). Done.** The sequencer consumes the
+  event queue and drives the existing pool/kernel through `schedule`,
+  sample-accurately, with no new DSP or ABI: the offline core (JVM/interpreter
+  partition invariance) and the browser worker/worklet transport (a Web Worker
+  posting timestamped events over a `MessageChannel` to a worklet that dispatches
+  them at their exact frames). See `DIARY.md`.
+- **M2 — Uniform parameters and triggers. Done.** M2a: parameter declarations
+  (one `:per-voice`/`:shared` scope, optional, defaults inherited from the
+  control), name-matching bindings, the pool's parameter store and API, and the
+  retirement of the provenance half of `synth`/pool. M2b: the sequencer is keyed
+  by an event's trigger (`(fn [definition state event] state')`), drives several
+  channel-routed pools on one timeline, and sums them.
+- **M3 — Generators. Done.** M3a: the route schema (`normalize-matrix`,
+  `validate-matrix`) and the shared scheduling pass (`matrix-plan`). M3b: the
+  instrument reducer generator (a reducer over the instrument's parameter
+  values, `(fn [state] state')`), the state reader and publish step, and the
+  reference re-expressed on them (a per-route `:offset` added for the note
+  mapping). M3c: the kernel reducer generator
+  (`(fn [definition] derived-definition)`) — added source controls, `-mod` locals
+  in topological order, a `:delay` shift register, and a test that the reference
+  matrix run through the kernel generator agrees with the instrument reducer.
+- **M4 — Lanes through the pool. Done.** Deliver per-sample control
+  values to voices. M4-0 done: the language surface — a lane belongs to a control
+  (`:has-lane`) and is read through the compile-time `(lane control)` accessor,
+  so the client composes it. M4a done: one shared region through the pool on the
+  JVM and the interpreter (`Kernel/write-lane!`, `pool/set-lane!`, the layout in
+  the runtime config). M4b done: the JavaScript and Wasm kernels deliver the
+  region too (Wasm copies it into each instance's memory), verified by two
+  browser checks against the interpreter pool. Open: M4c (per-voice lanes).
+- **M5 — Shared kernel region. Done.** Broadcast as one shared variable: a control
+  may declare `:shared true`, which takes it out of the scalar control list, and
+  its name is a read of the process's `:shared` region — one region for the
+  *pool*, so a broadcast parameter is written once instead of once per voice. The
+  region is deliberately the lane region's shape (one `:frame-capacity` slice per
+  control, `:shared-stride` = `:lane-stride`), so it needs no new IR op and no new
+  addressing. M5a: the language surface (with `:shared` refused beside a lane and
+  on a non-float control), the IR binding, the ABI, all four emitters, and the
+  interpreter/JVM raw path. M5b: the kernels own the region — the interpreter and
+  the JVM pass it by reference, JavaScript as a trailing argument, Wasm by
+  address with a copy of the pool's region into each instance's own memory before
+  it runs. M5c: a `:shared` parameter bound to a `:shared` control is written once
+  into that region (the pool seeds the declared defaults at construction and
+  never touches a voice), an undeclared shared control infers a shared parameter,
+  and a `:per-voice` declaration beside a `:shared` control is refused. Browser
+  checks pin literal numbers on both hosts; a post-mix bus that declares a lane or
+  a shared control is still refused at construction.
+- **M6 — Fused voice lowering, as an option. In progress: M6a, M6b and seam 4
+  done, M6c remains.** Compile
+  an instrument's voices into one DSP process per *instance* rather than one
+  instance per voice, so the host crosses the kernel boundary ⌈capacity/slots⌉
+  times per block instead of capacity. **The pool stays the default**, and is the
+  S=1 case: fusion is *requested*, because occupancy is runtime behaviour and the
+  sign of the comparison depends on it (D45's post-D47 measurements: the pool is
+  ~2× slower at a full patch and 2–7.5× *faster* at two voices, flat in capacity).
+
+  **M6-0 (done) — the measurement that gated the rest.** For `(poly S voice)` on
+  the JVM, code grows ~30 bytes per slot even when the body uses scratch, because
+  what unrolls is the call site and the buffer is arena data; memory is
+  arena-linear and equal to the pool's. So there is no artifact cliff to dodge,
+  and `S = capacity` (one instance) is the natural first target — chunking is the
+  escape hatch for a very large capacity or for coarse skipping. One limit found:
+  `poly` stacks *module-shaped* generators only; a process-shaped voice
+  (`reference-voice`) is refused, since a module may not touch the caller's
+  buffers. See D45.
+
+  The sweep is done too (D45): on a voice with a real delay line, all slots
+  sounding, fusion is ~1.9× the pool at 32 slots, the two lowerings are **bit-exact
+  at one voice**, and the pool's artifact stays flat in N while the fused one grows
+  with its slots. What remains of **M6a** is the slot-aware host, which needs four
+  seams, in this order:
+
+  1. an **instance key** on the `Kernel` protocol, so the pool mixes a fused
+     instance *once* per block (its other slots are no-ops for that block) and can
+     skip an instance whose slots are all silent — the pool's own view stays
+     per-slot, which is what keeps the pool path unchanged. **Done**: the key is
+     any value with an *equality* contract, the pool numbers the instances it
+     created itself, and the marks are cleared per block. Pinned by three tests,
+     including one that sounds every slot across two blocks and one that builds two
+     pools over one kernel;
+  2. a **base → fused control mapping**, so `write-voice-controls!` for one slot
+     writes that slot's slice of the fused control array and the shared controls
+     once. The kernel owns it: it is the component that has both ABIs. **Done**
+     for the JVM (D50): `hosts/fusion/fused-mapping` is the pure mapping — the same
+     answer on every host that holds both interfaces — and
+     `hosts/jvm/fused-jvm-kernel` applies it through one precomputed row per slot,
+     so the write path is still a single branchless loop. A fused pool now renders
+     exactly what a plain pool renders, slot by slot, and the routing bites: with
+     the slot term removed the test's fusion is silent where the pool sounds.
+     **Found on the way**: `poly` redeclares a voice's controls as `{:name name}`,
+     so a fused interface loses a voice's declarations — measured for `:shared`
+     (it compiles as an ordinary scalar, with an empty shared region) and for a
+     lane (the IR refuses it outright); `:default`/`:has-lane` follow from the same
+     line. The instrument option therefore needs `poly` to carry a control's
+     declaration through — or must refuse a voice that declares one;
+  3. **per-slot reset**, so stealing or retriggering one slot does not clobber its
+     neighbours. The fused state is partitioned per call site (D19), but nothing
+     exposes those ranges yet. **Done** for the JVM (D51): the lowering records
+     each call site's partition in evaluation order (slot order for a fused
+     process), the target resolves it to physical state ranges on the artifact, the
+     instance keeps each partition's initial values, and the kernel resets one
+     range. Stealing into slot 0 of a two-slot instance leaves slot 1's envelope
+     and delay line bit-for-bit alone, and a whole-instance reset is caught: the
+     fused block collapses to silence where the pool still sounds;
+  4. per-slot **`:activity` readback**. **Done** (D54): a callee may now publish a
+     special, the call site's partition records it — one per bit, covering the
+     whole subtree — the ABI publishes `:call-partitions`, and the JVM fused
+     kernel resolves each slot's activity to a physical slot so
+     `read-specials!` reads the voice the pool asked about. A fused pool now frees
+     a finished voice exactly as a plain pool does, and the free is a partition
+     reset, so it clears the guard's latch too. Originally deferred, with this
+     reasoning recorded as the shape of the slice:
+     a fused process exposed **no specials at all**, so a fused voice declared no
+     `:activity` and the pool kept its voices until they were stolen. Deferring
+     this was cheap because it is the pool's existing safe default (a voice that
+     declares nothing is held until stolen, D39), whereas seams 1–3 are each
+     load-bearing for correctness. **Measured while answering "why deferred"**: the
+     IR refused a callee's `store-special` outright ("store-special is only
+     available in the entry definition", the same shape as a lane), so a voice that
+     reports liveness could not be fused *at all* — seam 4 was not "read an offset
+     we know" but "allow and rebase a callee's special store, and publish the
+     per-slot map", across the targets that call;
+
+  With all four seams — and the instrument option — `{:fusion {:slots S}}`,
+  lowered to `(poly S voice)`, can be turned on
+  for module-shaped voices. **Done** (D52): it is a compile option beside
+  `:target`/`:precision`/`:containment`, `synth-bundle` compiles the base artifact
+  for the runtime and the fused one for the kernel, and a `poly` that carries a
+  voice's control declarations is what makes the fused interface the voice's
+  interface (a `:shared` control stays shared; expanding one per slot, or a lane,
+  is refused with a reason). A pool over the option renders bit-for-bit what a pool
+  of separate voices renders at one sounding voice. The bench's fused arm now builds
+  its artifact *through* the option too, so there is one definition of "the fused
+  lowering" — and the realistic sweep's ratio fell from ~1.9× to **1.3–1.7×**,
+  because the option expands four controls per slot where `poly`'s default expanded
+  two (D45's re-measured table). **M6b — per-slot skipping. Done** (D53): fusion
+  compiles the voice through the `guard` combinator, which owns a per-call-site
+  latch that skips a slot whose `gate` has never opened and is cleared by the
+  slot's reset, so a slot a pool has not allocated costs a comparison while a
+  released slot keeps its tail. It is pure DSP — no ABI, IR, or backend change — so
+  it applies on every target, and M6c's browser hosts get it for free. Measured
+  (criterium, capacity 32), a `:slots 32` instance at two sounding voices falls
+  from 0.467 to 0.045 ms/block — the pool's own 0.045 — and `:slots 8` from 0.097
+  to 0.036, at a full-patch cost that grows with S (~2% at `:slots 8`, ~30% at
+  `:slots 32`, where the guarded process still beats the pool). **M6c — the
+  browser hosts through the same testbed arms. Done** (D55): `fusion/
+  runtime-mapping` is the one portable mapping, the JS and Wasm kernels take a
+  `:mapping` and apply the partitions the ABI already publishes (a JS arena is
+  indexed by state slot, so a partition's `:base`/`:size` *are* its range; a Wasm
+  partition's byte range comes from the served `:state-layout`), and each slot
+  reads its own `:activity`. `testbed` serves a fused pool bundle and the browser
+  suite checks a JavaScript and a Wasm fused pool differentially against the
+  interpreter. Chunking (`:slots` below capacity) remains the other lever; the
+  guard is the per-slot half of "per-slot or per-chunk".
+
+**Done when.** The reference instrument is built from declared parameters and a
+matrix lowered by a generator; its events are dispatched sample-accurately from
+the sequencer; and it renders identically on interpreter/JVM/JavaScript/Wasm under
+arbitrary block sizes, with no allocation after initialization.
+
+**Status.** M1, M2, M3, M4 (M4-0/M4a/M4b/M4c) and M5 (M5a/M5b/M5c) are done: the
+lane feature is complete through the pool on every host, and a broadcast parameter
+is one region the whole pool reads. **M6a is done** — the three load-bearing seams
+(instance key, base→fused control mapping, per-slot reset) and the instrument option
+`{:fusion {:slots S}}`. **M6b is done** — the `guard` combinator skips a slot a
+pool has not gated, per-slot and per-call-site, with no ABI change (D53). **Seam 4
+is done** — a callee may publish a special, each call site records its own, and a
+fused pool frees a finished slot from its slot's `:activity` (D54), so fusion no
+longer gives up tail-freedom. **M6c is done** — the JavaScript and Wasm kernels
+apply the same published partitions, map each slot's controls, reset one call
+partition, and read that slot's `:activity` (D55), so a fused pool runs on every
+host. M6 is complete.
+
+Note what that means for this phase's *Done when*: it is **already met** — the
+reference instrument is built from declared parameters and a matrix lowered by a
+generator, its events are dispatched sample-accurately from the sequencer, and it
+renders identically on interpreter, JVM, JavaScript and Wasm under arbitrary block
+sizes. M6 is opt-in efficiency work layered on top of a complete phase: the pool
+stays the default, and fusion is requested (D45).
+
+**Browser build note.** The worker runtime is the library namespace
+`omkamra.dsp.hosts.worker`; the project runs it as a separate, self-contained
+Shadow build (`:omkamra.dsp.hosts.worker`, `:devtools {:enabled false}`). Shadow's
+documented `:shared`/`:main`/`:web-worker` single-build pattern compiles in
+development but the worker fails at run time (its dev module-append files need
+the `shadow` runtime the worker does not get); release generation is unaffected.
+
+---
+
 ## Dependencies at a glance
 
 ```text
@@ -583,7 +814,10 @@ P2/P3/P4 ───────────────────────�
 P12 + P13 ────────────────────────────────────────────── P14
 P9 + artifacts ───────────────────────────────────────── P15
 P11 + P12 + P14 ──────────────────────────────────────── P16
+P9 + P10 + P11 ──────────────────────────────────────────── M
 ```
 
 P12–P16 are infrastructure/quality phases; their position reflects the point at
-which their inputs and consumers exist, not a required serialization.
+which their inputs and consumers exist, not a required serialization. **M** is a
+separate, lettered workstream (instrument semantics and host topology); see its
+entry above.

@@ -197,17 +197,13 @@
   {:id :demo-synth
    :capacity 8
    :max-block-frames 512
-   :voice {:definition #'demo-voice
-           :controls {:gate {:source :gate}
-                      :note {:source :note}
-                      :bend {:source :bend}
-                      :detune {:source :detune}
-                      :cutoff {:constant 1000.0}
-                      :resonance {:constant 1.5}
-                      :attack {:constant 0.01}
-                      :decay {:constant 0.2}
-                      :sustain {:constant 0.7}
-                      :release {:constant 0.4}}}})
+   :parameters {:cutoff {:default 1000.0}
+                :resonance {:default 1.5}
+                :attack {:default 0.01}
+                :decay {:default 0.2}
+                :sustain {:default 0.7}
+                :release {:default 0.4}}
+   :voice {:definition #'demo-voice}})
 
 (def default-routes
   "One possible *parameter* modulation wiring, as pure data. Velocity and note

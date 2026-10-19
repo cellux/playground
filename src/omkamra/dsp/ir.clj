@@ -33,6 +33,11 @@
 
 (def ^:private unary-bitwise-operators #{:bit-not})
 
+;; The bitwise operators that `clojure.core` takes any number of arguments for.
+;; The shifts are deliberately not here: `(bit-shift-left a b c)` has no
+;; folding meaning, so it stays an arity error rather than becoming left-nested.
+(def ^:private variadic-bitwise-operators #{:bit-and :bit-or :bit-xor})
+
 (def ^:private value-types #{:float :int :boolean})
 (def ^:private numeric-types #{:float :int})
 
@@ -72,6 +77,11 @@
     :call-offset (atom 0)
     :state-more (atom [])
     :records-more (atom [])
+    ;; One entry per call site that owns a partition, in *evaluation* order (a
+    ;; call's arguments are lowered before the call, D19). A target that holds
+    ;; several call sites in one instance needs to know where each one's state
+    ;; begins, or it cannot reset one without disturbing the others (M6a).
+    :call-partitions (atom [])
     :counter (atom 0)}))
 
 (defn- fresh-local!
@@ -234,67 +244,153 @@
     :sample-rate {:op :sample-rate :type :float}
     {:op :local :name (:name binding) :type (:type binding)}))
 
-(defn- lower-binary
-  [form env operator comparison?]
+(defn- lower-binary-node
+  "One two-operand IR node from two lowered operands.
+
+  Shared by the binary comparison path and the left folds below, so the operand
+  type rules are stated once."
+  [form operator comparison? left right]
+  (let [left-value (:value left)
+        right-value (:value right)
+        type (:type left-value)]
+    (when-not (= type (:type right-value))
+      (fail "DSP binary operands have the wrong type"
+            {:form form :left-type type :right-type (:type right-value)}))
+    (when-not (if comparison?
+                (if (#{:= :not=} operator)
+                  (contains? value-types type)
+                  (contains? numeric-types type))
+                (contains? numeric-types type))
+      (fail "DSP binary operator does not support these operand types"
+            {:form form :operator (first form) :type type}))
+    (combine-fragments
+     [left right]
+     {:op (if comparison? :compare :binary)
+      :operator operator
+      :left left-value
+      :right right-value
+      :type (if comparison? :boolean type)})))
+
+(defn- lower-arithmetic
+  "Lower an arithmetic operator form, folding three or more operands left.
+
+  `(+ a b c)` lowers exactly as `(+ (+ a b) c)` — each operand is lowered once,
+  in source order, and the IR keeps its two-operand nodes, so folding costs no
+  backend anything (D48)."
+  [form env operator]
+  (let [operands (vec (rest form))]
+    (when (< (count operands) 2)
+      (fail "DSP arithmetic operators require at least two operands"
+            {:form form :operator (first form) :actual (count operands)}))
+    (reduce (fn [left operand]
+              (lower-binary-node form operator false
+                                 left (lower-value operand env)))
+            (lower-value (first operands) env)
+            (rest operands))))
+
+(defn- lower-comparison
+  "Lower a comparison of exactly two operands.
+
+  Chaining — `(< a b c)`, which `clojure.core` reads as `(and (< a b) (< b c))` —
+  is refused rather than folded: the middle operand appears twice in the nested
+  form, so reading it once would mean hoisting it into a local first (D48)."
+  [form env operator]
   (let [[_ left-form right-form & extra] form]
     (when (or (nil? left-form) (nil? right-form) extra)
-      (fail "DSP binary operators require two operands"
+      (fail "DSP comparison operators require exactly two operands"
             {:form form :operator (first form)}))
-    (let [left (lower-value left-form env)
-          right (lower-value right-form env)
-          left-value (:value left)
-          right-value (:value right)
-          type (:type left-value)]
-      (when-not (= type (:type right-value))
-        (fail "DSP binary operands have the wrong type"
-              {:form form :left-type type :right-type (:type right-value)}))
-      (when-not (if comparison?
-                  (if (#{:= :not=} operator)
-                    (contains? value-types type)
-                    (contains? numeric-types type))
-                  (contains? numeric-types type))
-        (fail "DSP binary operator does not support these operand types"
-              {:form form :operator (first form) :type type}))
-      (combine-fragments
-       [left right]
-       {:op (if comparison? :compare :binary)
-        :operator operator
-        :left left-value
-        :right right-value
-        :type (if comparison? :boolean type)}))))
+    (lower-binary-node form operator true
+                       (lower-value left-form env)
+                       (lower-value right-form env))))
 
 (defn- lower-logical
+  "Lower `not`, and `and`/`or`, which fold three or more operands left."
   [form env operator]
-  (let [forms (vec (rest form))
-        expected (if (= :not operator) 1 2)]
-    (when-not (= expected (count forms))
-      (fail "DSP logical operators have the wrong arity"
-            {:form form :operator (first form)}))
-    (let [args (mapv #(lower-value % env) forms)]
-      (doseq [arg args]
-        (expect-type! :boolean (:value arg) form))
-      (combine-fragments args
-                         {:op :logical
-                          :operator operator
-                          :args (mapv :value args)
-                          :type :boolean}))))
+  (let [operands (vec (rest form))]
+    (if (= :not operator)
+      (do
+        (when-not (= 1 (count operands))
+          (fail "DSP logical operators have the wrong arity"
+                {:form form :operator (first form)
+                 :expected 1 :actual (count operands)}))
+        (let [arg (lower-value (first operands) env)]
+          (expect-type! :boolean (:value arg) form)
+          (combine-fragments [arg]
+                             {:op :logical
+                              :operator operator
+                              :args [(:value arg)]
+                              :type :boolean})))
+      (do
+        (when (< (count operands) 2)
+          (fail "DSP logical operators require at least two operands"
+                {:form form :operator (first form) :actual (count operands)}))
+        (reduce (fn [left operand]
+                  (let [right (lower-value operand env)]
+                    (expect-type! :boolean (:value right) form)
+                    (combine-fragments [left right]
+                                       {:op :logical
+                                        :operator operator
+                                        :args [(:value left) (:value right)]
+                                        :type :boolean})))
+                (let [first-arg (lower-value (first operands) env)]
+                  (expect-type! :boolean (:value first-arg) form)
+                  first-arg)
+                (rest operands))))))
 
 (defn- lower-bitwise
+  "Lower `bit-not`, the shifts, and `bit-and`/`bit-or`/`bit-xor`.
+
+  The last three fold three or more operands left, as `clojure.core` does; the
+  shifts keep exactly two."
   [form env operator]
-  (let [forms (vec (rest form))
-        expected (if (contains? unary-bitwise-operators operator) 1 2)]
-    (when-not (= expected (count forms))
-      (fail "DSP bitwise operators have the wrong arity"
-            {:form form :operator (first form)
-             :expected expected :actual (count forms)}))
-    (let [args (mapv #(lower-value % env) forms)]
-      (doseq [arg args]
-        (expect-type! :int (:value arg) form))
-      (combine-fragments args
-                         {:op :bitwise
-                          :operator operator
-                          :args (mapv :value args)
-                          :type :int}))))
+  (let [operands (vec (rest form))]
+    (cond
+      (contains? unary-bitwise-operators operator)
+      (do
+        (when-not (= 1 (count operands))
+          (fail "DSP bitwise operators have the wrong arity"
+                {:form form :operator (first form)
+                 :expected 1 :actual (count operands)}))
+        (let [arg (lower-value (first operands) env)]
+          (expect-type! :int (:value arg) form)
+          (combine-fragments [arg]
+                             {:op :bitwise
+                              :operator operator
+                              :args [(:value arg)]
+                              :type :int})))
+
+      (contains? variadic-bitwise-operators operator)
+      (do
+        (when (< (count operands) 2)
+          (fail "DSP bitwise operators require at least two operands"
+                {:form form :operator (first form) :actual (count operands)}))
+        (reduce (fn [left operand]
+                  (let [right (lower-value operand env)]
+                    (expect-type! :int (:value right) form)
+                    (combine-fragments [left right]
+                                       {:op :bitwise
+                                        :operator operator
+                                        :args [(:value left) (:value right)]
+                                        :type :int})))
+                (let [first-arg (lower-value (first operands) env)]
+                  (expect-type! :int (:value first-arg) form)
+                  first-arg)
+                (rest operands)))
+
+      :else
+      (do
+        (when-not (= 2 (count operands))
+          (fail "DSP bitwise operators have the wrong arity"
+                {:form form :operator (first form)
+                 :expected 2 :actual (count operands)}))
+        (let [args (mapv #(lower-value % env) operands)]
+          (doseq [arg args]
+            (expect-type! :int (:value arg) form))
+          (combine-fragments args
+                             {:op :bitwise
+                              :operator operator
+                              :args (mapv :value args)
+                              :type :int}))))))
 
 (defn- lower-builtin-primitive
   [form env entry]
@@ -1065,6 +1161,9 @@
             partition-base (when (pos? partition-size)
                              (let [base @(:call-offset env)]
                                (swap! (:call-offset env) + partition-size)
+                               (swap! (:call-partitions env) conj
+                                      {:function-id function-id
+                                       :base base :size partition-size})
                                (swap! (:state-more env) into
                                       (rebase-slots base (:state callee)))
                                (swap! (:records-more env) into
@@ -1103,6 +1202,9 @@
           :record-leaves (when (= :record (:return-type signature))
                            (:return-fields signature))
           :state-base partition-base
+          ;; The callee's inlining request travels with the call site (D47), so
+          ;; a target that can call still copies what it was asked to copy.
+          :inline (boolean (:inline signature))
           :effects (if partition-base
                      #{:call :read-state :write-state}
                      #{:call})})))))
@@ -1117,6 +1219,71 @@
       (fragment (:statements value)
                 {:op :convert :operator operator
                  :value (:value value) :type to-type}))))
+
+(defn- shared-binding
+  "One shared control's read from the process's flat `:shared` region.
+
+  Deliberately the same shape as `lane-binding`: the region has the same
+  compile-time stride, so a shared control is an ordinary `:frame-offset`
+  `:buffer-load` — the only difference is *who* writes the region, and that it is
+  one region for the whole pool rather than one per voice (M5). A shared value is
+  block-rate, so the host broadcasts it across the slice; a host that wants a
+  per-frame global curve can write one, and reads as automation."
+  [name index frame-capacity]
+  {:name name
+   :type :float
+   :kind :buffer
+   :required? true
+   :expression {:op :buffer-load
+                :buffer-id :shared
+                :channel 0
+                :index {:op :frame-offset
+                        :offset (* (long index) (long frame-capacity))
+                        :type :int}
+                :type :float
+                :effects #{:read-memory}}})
+
+(defn- lane-binding
+  "One lane's per-frame read from the process's flat `:lanes` region: lane *i*
+  occupies `[i * frame-capacity, ...)`, a compile-time base (D28)."
+  [name index frame-capacity]
+  {:name name
+   :type :float
+   :kind :buffer
+   :expression {:op :buffer-load
+                :buffer-id :lanes
+                :channel 0
+                :index {:op :frame-offset
+                        :offset (* (long index) (long frame-capacity))
+                        :type :int}
+                :type :float
+                :effects #{:read-memory}}})
+
+(defn- lower-lane
+  "Resolve the `(lane control)` accessor to a per-frame read from the process's
+  flat `:lanes` region.
+
+  The control must be a control of the *entry process* that carries a lane. A
+  callee module has no lane region of its own, so the accessor is available only
+  where the region is; a caller that wants a callee to see automation composes
+  at the call site (`(voice (+ cutoff (lane cutoff)))`)."
+  [form env]
+  (let [[_ control & extra] form]
+    (when (or (not (symbol? control)) extra)
+      (fail "lane requires exactly one control name" {:form form}))
+    (when-not (:lane-frame-capacity env)
+      (fail "lane is only available in the entry process"
+            {:form form :control control}))
+    (let [lanes (:lanes env)
+          index (first (keep-indexed (fn [index lane]
+                                       (when (= control (:name lane)) index))
+                                     lanes))]
+      (when-not index
+        (fail "lane names a control of this process that carries no lane"
+              {:form form :control control
+               :lanes (mapv :name lanes)}))
+      (fragment (get-in (lane-binding control index (:lane-frame-capacity env))
+                        [:expression])))))
 
 (defn- lower-value
   [form env]
@@ -1144,6 +1311,7 @@
         (= 'break op) (lower-loop-control form env :break)
         (= 'continue op) (lower-loop-control form env :continue)
         (= 'buffer-load op) (lower-buffer-load form env)
+        (= 'lane op) (lower-lane form env)
         (= 'buffer-store op) (lower-buffer-store form env)
         (= 'state-load op) (lower-state-load form env)
         (= 'state-store op) (lower-state-store form env)
@@ -1162,9 +1330,9 @@
         (contains? bitwise-operators op)
         (lower-bitwise form env (get bitwise-operators op))
         (contains? arithmetic-operators op)
-        (lower-binary form env (get arithmetic-operators op) false)
+        (lower-arithmetic form env (get arithmetic-operators op))
         (contains? comparison-operators op)
-        (lower-binary form env (get comparison-operators op) true)
+        (lower-comparison form env (get comparison-operators op))
         (builtins/builtin? op)
         (lower-builtin form env op)
         :else (fail "unsupported DSP expression" {:form form :operator op})))
@@ -1224,6 +1392,8 @@
         (map (fn [[id definition]]
                [id {:params (:params definition)
                     :return-type (:return-type definition)
+                    ;; The callee asks to be copied into its call sites (D47).
+                    :inline (boolean (:inline definition))
                     ;; A record return carries its flat field list, so a call site
                     ;; can bind one local per output (multi-output).
                     :return-fields (when-let [record (:return-record definition)]
@@ -1401,6 +1571,47 @@
           (update record :leaves
                   #(mapv (fn [leaf] (update leaf :offset + base)) %)))
         records))
+
+(defn- partition-specials
+  "The builtin special slots a call site's partition contains, one per bit, in
+  ascending-bit order, each with its logical index.
+
+  A partition covers its whole subtree, so a callee's special -- a voice's
+  `:activity` finish signal, say -- is found here even when it is nested behind
+  the definition the call site names. That is what lets a fused host read one
+  slot's special (D39, M6 seam 4): the entry's own `:special-slots` are its
+  contract, and these are each partition's."
+  [state-more base size]
+  (let [in-range (filter (fn [slot]
+                           (let [index (long (:index slot))]
+                             (and (:special slot)
+                                  (>= index (long base))
+                                  (< index (+ (long base) (long size))))))
+                         state-more)]
+    (->> (reduce (fn [by-bit slot]
+                   (let [bit (long (:special-bit slot))]
+                     ;; One slot per bit, the outermost (lowest index) wins: a
+                     ;; partition is a subtree and the contract is per bit.
+                     (if (contains? by-bit bit)
+                       by-bit
+                       (assoc by-bit bit slot))))
+                 {}
+                 (sort-by (fn [slot] (long (:index slot))) in-range))
+         vals
+         (sort-by :special-bit)
+         (mapv (fn [slot]
+                 {:special (:special slot)
+                  :bit (long (:special-bit slot))
+                  :type (:type slot)
+                  :size (long (or (:size slot) 1))
+                  :index (long (:index slot))})))))
+
+(defn- special-mask-of
+  [specials]
+  (reduce (fn [mask {:keys [bit]}]
+            (bit-or (long mask) (bit-shift-left 1 (long bit))))
+          0
+          specials))
 
 (defn- definition-calls
   "Every resolved `dsp/call` form in a descriptor's body and state transitions."
@@ -1597,6 +1808,9 @@
              :params (:params definition)
              :return-type return-type
              :return-record record-return
+             ;; The callee's own request to be copied into its call sites (D47),
+             ;; carried so a target that can call can still honour it.
+             :inline (boolean (:inline definition))
              :locals @(:locals env)
              ;; The arena is this module's own slots followed by one partition
              ;; per call site, all relative to this module's base.
@@ -1606,6 +1820,7 @@
                                 states)
                           @(:state-more env))
              :state-size @(:call-offset env)
+             :call-partitions (vec @(:call-partitions env))
              :special-mask (special-mask definition)
              :special-count (count (special-bits definition))
              :records (vec @(:records-more env))
@@ -1741,33 +1956,50 @@
         ;; occupies `[i * frame-capacity, ...)`, a compile-time base, which is
         ;; why this needs no new IR op.
         lane-controls (if process
-                        (filterv :lane (:controls process))
+                        (filterv #(or (:lane %) (:has-lane %)) (:controls process))
                         [])
-        lane-bindings (mapv (fn [index control]
-                              [(:name control)
-                               {:name (:name control)
-                                :type :float
-                                :kind :buffer
-                                :expression {:op :buffer-load
-                                             :buffer-id :lanes
-                                             :channel 0
-                                             :index {:op :frame-offset
-                                                     :offset (* (long index)
-                                                                (long frame-capacity))
-                                                     :type :int}
-                                             :type :float
-                                             :effects #{:read-memory}}}])
-                            (range) lane-controls)
+        ;; A `:shared` control is read from the pool-wide `:shared` region rather
+        ;; than from this instance's control storage, so it leaves the scalar
+        ;; list the same way a `:lane` control does (M5). `:shared` and a lane
+        ;; are mutually exclusive, so a shared control never has a scalar
+        ;; beside it.
+        shared-controls (if process
+                          (filterv #(:shared %) (:controls process))
+                          [])
+        ;; A `:lane` control leaves the scalar list, so its lane *is* its name
+        ;; and needs a binding. A `:has-lane` control keeps its scalar, so its
+        ;; lane is reachable only through the `(lane control)` accessor, which
+        ;; `lower-lane` resolves from the same lane list and indices.
+        lane-bindings (into []
+                            (keep-indexed
+                             (fn [index control]
+                               (when (:lane control)
+                                 [(:name control)
+                                  (lane-binding (:name control) index
+                                                frame-capacity)])))
+                            lane-controls)
+        ;; A shared control's name *is* a read of the shared region, exactly as a
+        ;; lane-only control's name is a read of the lane region.
+        shared-bindings (into []
+                              (keep-indexed
+                               (fn [index control]
+                                 (when (:shared control)
+                                   [(:name control)
+                                    (shared-binding (:name control) index
+                                                    frame-capacity)])))
+                              shared-controls)
         controls (if process
                    (mapv (fn [{:keys [name type] :as control}]
                            (let [param (some #(when (= name (:name %)) %)
                                              (:params definition))]
-                             (cond-> (merge param (select-keys control [:smooth :slew]))
+                             ;; `:default` is exposed so a host can infer a
+                             ;; parameter's default from the control's.
+                             (cond-> (merge param (select-keys control [:smooth :slew :default]))
                                ;; A control port that declares a non-default type
                                ;; (e.g. :int) types the local, since the shorthand
                                ;; parameter list can only express :float.
                                (and type (not= :float type)) (assoc :type type))))
-                         (remove :lane (:controls process)))
+                         (remove #(or (:lane %) (:shared %)) (:controls process)))
                    (vec (rest (:params definition))))
         frames (or (get-in process [:frames]) {:name 'frames :type :int})
         sample-rate (or (get-in process [:sample-rate])
@@ -1795,9 +2027,17 @@
     {:sample-name sample-name
      :channel channel
      :controls controls
-     :lanes lane-controls
      :frames frames
      :sample-rate sample-rate
+     ;; Only a `:lane` region is mandatory; a `:has-lane` lane the host never
+     ;; fills reads zero, so a process made only of those is valid unlaned. A
+     ;; `:shared` region is mandatory whenever the process declares a shared
+     ;; control: unlike a lane, the region *is* the control's value.
+     :lanes (mapv (fn [control]
+                    (assoc control :required? (boolean (:lane control))))
+                  lane-controls)
+     :shared (mapv (fn [control] (assoc control :required? true))
+                   shared-controls)
      :bindings (into
                 (if input?
                   {sample-name {:name sample-name
@@ -1811,6 +2051,7 @@
                         [(:name control) (assoc control :kind :control)])
                       controls)
                  lane-bindings
+                 shared-bindings
                  state-bindings))}))
 
 (defn- process-diagnostics
@@ -1959,7 +2200,7 @@
          per-channel-buffers (set (keep #(when (> (:channels %) 1) (:id %)) buffers))
          frame-capacity (long (or (:frame-capacity options)
                                   (lane-frame-capacity (get options :precision :f32))))
-         {:keys [bindings controls lanes frames sample-rate]}
+         {:keys [bindings controls lanes shared frames sample-rate]}
          (process-bindings definition (:bindings expanded) frame-capacity)
          ;; Callees are lowered first, in dependency order, so every call site
          ;; can allocate its state partition (D19).
@@ -1968,9 +2209,13 @@
          ;; then local-array scratch. Partition sizes are static, so scratch
          ;; starts after the whole state region.
          total-state (get (module-state-sizes definitions order) entry-id)
-         env (environment bindings (signatures definitions) (or options {})
-                          (into {} (map (juxt :id identity) buffers))
-                          modules)
+         env (-> (environment bindings (signatures definitions) (or options {})
+                              (into {} (map (juxt :id identity) buffers))
+                              modules)
+                 ;; The lane accessor resolves here, where the region's offsets
+                 ;; are known. A callee module has neither key, so `(lane c)` is
+                 ;; refused there rather than reading the wrong region.
+                 (assoc :lanes lanes :lane-frame-capacity frame-capacity))
          _ (reset! (:call-offset env) (state-total states))
          _ (reset! (:records-more env) (vec (:records expanded)))
          _ (reset! (:scratch env) {:next total-state :entries []})
@@ -2027,17 +2272,20 @@
                                                 per-channel-buffers)
          memory (memory-requirements buffers frame-body (:precision options))
          diagnostics (process-diagnostics frame-body memory)
-         ;; A special is a host-facing contract of the entry process only. A
-         ;; callee's special slot would otherwise leak into the entry's state
-         ;; (rebased into a call partition) where no host reads it.
-         own-special-count (count (filter :special states))
-         _ (when-let [stray (seq (filter (fn [slot]
-                                           (and (:special slot)
-                                                (>= (long (:index slot))
-                                                    (long own-special-count))))
-                                         @(:state-more env)))]
-             (fail "store-special is only available in the entry definition"
-                   {:specials (mapv :special stray)}))
+         ;; A callee may publish a special of its own (M6, seam 4): a voice's
+         ;; `:activity` finish signal lives in the call partition the fused slot
+         ;; resets. The partition covers its whole subtree, so the entry records
+         ;; which specials each call site owns, one per bit, and a fused host can
+         ;; read a slot's activity. The entry's own specials stay the entry's
+         ;; contract (`:special-mask`/`:special-count` above).
+         call-partitions
+         (mapv (fn [{:keys [base size] :as partition}]
+                 (let [specials (partition-specials @(:state-more env) base size)]
+                   (cond-> partition
+                     (seq specials) (assoc :specials specials
+                                           :special-mask
+                                           (special-mask-of specials)))))
+               @(:call-partitions env))
          ir {:op :process
              :name (:name definition)
              :id entry-id
@@ -2049,6 +2297,7 @@
              :sample-rate sample-rate
              :controls controls
              :lanes lanes
+             :shared shared
              :frame-capacity frame-capacity
              :locals @(:locals env)
              :state (into (mapv #(select-keys % [:name :type :size :init :index :constant
@@ -2056,6 +2305,7 @@
                                 states)
                           @(:state-more env))
              :state-size @(:call-offset env)
+             :call-partitions call-partitions
              :special-mask (special-mask definition)
              :special-count (count (special-bits definition))
              :records (vec @(:records-more env))
@@ -2167,7 +2417,14 @@
   "Inline every call in an expression, hoisting the side effects it introduces."
   [expr definitions state]
   (case (:op expr)
-    :call (inline-call expr definitions state)
+    :call (if (contains? (:inline-ids @state) (:function-id expr))
+            (inline-call expr definitions state)
+            ;; The callee keeps being called (D47). Its arguments still belong
+            ;; to the caller, so they are inlined like any other expression of
+            ;; the caller's body; the callee receives values.
+            (let [args (mapv #(inline-value % definitions state) (:args expr))]
+              {:statements (vec (mapcat :statements args))
+               :value (assoc expr :args (mapv :value args))}))
     :binary (let [left (inline-value (:left expr) definitions state)
                   right (inline-value (:right expr) definitions state)]
               {:statements (into (:statements left) (:statements right))
@@ -2327,20 +2584,80 @@
     :while (declared-locals (:body statement))
     nil))
 
+(defn- inline-definition
+  "Inline the requested callees inside a definition that stays a function.
+
+  A definition the entry keeps is still emitted, and it may itself call one that
+  was inlined, so its body gets the same treatment (D47). Record bindings are
+  per body: a local name never crosses between definitions."
+  [definition definitions state]
+  (swap! state assoc :records {})
+  (let [body (first (inline-statement (:body definition) definitions state))]
+    (assoc definition
+           :body body
+           :locals (vec (distinct (declared-locals body)))
+           :effects (collect-effects body))))
+
+(defn- uncallable-definition?
+  "Whether the calling convention cannot take this definition (D47).
+
+  A call produces one value, so a **record return** cannot be a call. A
+  definition with **scratch arrays** cannot either: `lower-process` seeds the
+  entry's scratch offsets after the whole state region, but the function path
+  never resets them, so a callee's arrays start at 0 and overlap its own state —
+  and a call partition covers state only. Both stay inlined at every call site."
+  [definition]
+  (or (= :record (:return-type definition))
+      (boolean (seq (:scratch definition)))))
+
+(defn uncallable-definition-ids
+  "The definitions a backend that emits calls must still inline (D47).
+
+  `dsp/compile` adds these to whatever the definitions asked for, so the set a
+  target copies is `requested ∪ uncallable`."
+  [ir]
+  (into #{}
+        (keep (fn [[id definition]]
+                (when (uncallable-definition? definition) id)))
+        (:definitions ir)))
+
 (defn inline-calls
-  "Inline linked callees for the source-emitting backends.
+  "Inline the linked callees named in `inline-ids` for the source-emitting
+  backends.
 
   Pure callees are substituted. A stateful module is expanded with its locals
   renamed and its state rebased into the call site's partition (D19), so the
-  JVM, JavaScript, and Wasm backends share one composition implementation."
-  [ir]
-  (let [definitions (:definitions ir)
-        body-key (if (= :process (:op ir)) :frame-body :body)
-        state (atom {:names 0 :statements 0 :records {}})
-        body (first (inline-statement (get ir body-key) definitions state))
-        ir (assoc ir body-key body :definitions {}
-                  :locals (vec (distinct (declared-locals body))))]
-    (assoc ir :effects (collect-effects body))))
+  JVM, JavaScript, and Wasm backends share one composition implementation.
+
+  A definition outside `inline-ids` keeps being called and stays in
+  `:definitions`, so a target that can call does not copy a definition it was
+  not asked to copy (D47). Its body is still scanned, because it may call a
+  definition that *is* inlined. With one argument every definition is inlined,
+  which is what a target that cannot call needs."
+  ([ir] (inline-calls ir (set (keys (:definitions ir)))))
+  ([ir inline-ids]
+   (let [definitions (:definitions ir)
+         body-key (if (= :process (:op ir)) :frame-body :body)
+         ;; The entry is compiled on its own, so it is never also a callee. A
+         ;; process IR already excludes it; a function IR does not.
+         entry-id (:entry-id ir)
+         inline-ids (set inline-ids)
+         state (atom {:names 0 :statements 0 :records {}
+                      :inline-ids inline-ids})
+         body (first (inline-statement (get ir body-key) definitions state))
+         retained (reduce-kv (fn [kept id definition]
+                               (if (or (contains? inline-ids id)
+                                       (= id entry-id))
+                                 kept
+                                 (assoc kept id (inline-definition definition
+                                                                   definitions
+                                                                   state))))
+                             (array-map)
+                             definitions)
+         ir (assoc ir body-key body
+                   :definitions retained
+                   :locals (vec (distinct (declared-locals body))))]
+     (assoc ir :effects (collect-effects body)))))
 
 (defn validate-runtime-policy!
   "Validate effect annotations and return static real-time policy metadata."

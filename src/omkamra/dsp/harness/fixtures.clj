@@ -23,6 +23,16 @@
   [sample]
   (+ sample 0.25))
 
+(omkamra.dsp/defn follow-amount
+  "Output the `amount` control every frame.
+
+  A generator whose samples *are* the applied control value, so a timestamped
+  control change is directly visible in the rendered output. It is the kernel
+  the worker-to-worklet event-transport check renders."
+  [amount]
+  {:process {:input false :controls [{:name amount}]}}
+  amount)
+
 (def one-pole (:definition (omkamra.dsp.harness.catalog/case-by-id :one-pole)))
 
 ;; A named state-record shape and a definition that uses it, so the linker's
@@ -152,6 +162,38 @@
 (omkamra.dsp/defn call-fixture-chain
   [sample]
   (omkamra.dsp.harness.call-fixture/add-one (call-fixture-twice sample)))
+
+(omkamra.dsp/defn call-fixture-arena
+  "Two partitions of one stateful callee, plus a callee whose state is integer.
+
+  The entry's own state sits between the two `accumulate` partitions, so a base
+  derived from the wrong index reads the *other* site's accumulator rather than
+  merely something wrong, and the two storages are both in play."
+  [sample]
+  {:state [{:name own :type :float :init 1.0 :next own}]}
+  (+ (+ own (omkamra.dsp.harness.call-fixture/accumulate sample))
+     (+ (omkamra.dsp.harness.call-fixture/accumulate (* sample 0.5))
+        (omkamra.dsp.harness.call-fixture/counting-bias sample))))
+
+(omkamra.dsp/defn call-fixture-nested
+  "A callee that calls a stateful callee, so a method passes on a derived base."
+  [sample]
+  {:state [{:name own :type :float :init 0.5 :next own}]}
+  (+ own (omkamra.dsp.harness.call-fixture/accumulate-twice sample)))
+
+(omkamra.dsp/defn call-fixture-int-led
+  "An entry whose own int slot leaves the callee's partition four bytes into an f64
+  arena (D47). `call-fixture/mixed-state` explains what that is for."
+  [sample]
+  {:state [{:name ticks :type :int :init 0 :next (+ ticks 1)}]}
+  (+ (omkamra.dsp.harness.call-fixture/mixed-state sample 0.5)
+     (int->float ticks)))
+
+(omkamra.dsp/defn call-fixture-inlined
+  "A call site of an `^:inline` callee, which stays copied on every target."
+  [sample]
+  {:state [{:name own :type :float :init 0.0 :next own}]}
+  (+ own (omkamra.dsp.harness.call-fixture/inlined-gain sample 2.0)))
 
 (omkamra.dsp/defn naive-saw
   [sample frequency]
@@ -385,6 +427,102 @@
   {:process {:controls [{:name a :lane true} {:name b :lane true}]}}
   (* sample (+ a b)))
 
+(omkamra.dsp/defn lane-carried-control
+  "A control the host sets block-rate, with an *optional* per-frame lane beside
+  it that the kernel composes through the `(lane control)` accessor. With no
+  lane data the lane reads zero, so the scalar stands unchanged."
+  [amount]
+  {:process {:input false :controls [{:name amount :has-lane true}]}}
+  (+ amount (lane amount)))
+
+(omkamra.dsp/defn lane-on-frequency
+  "A lane beside a *runtime* control: the pool resolves `frequency` per voice, so
+  its lane is per voice too (M4c)."
+  [frequency]
+  {:process {:input false :controls [{:name frequency :has-lane true}]}}
+  (+ frequency (lane frequency)))
+
+(omkamra.dsp/defn lane-on-bend
+  "A lane beside a per-channel runtime control, which has no per-lane delivery
+  yet: a pool over this refuses it at construction rather than fanning channels
+  into voices."
+  [bend]
+  {:process {:input false :controls [{:name bend :has-lane true}]}}
+  (+ bend (lane bend)))
+
+(omkamra.dsp/defn shared-gain
+  "A control read from the process's *shared* region: one value for every
+  instance of the process, written once by the host rather than once per voice
+  (M5). The region has the same shape as a lane region, so a host may also write
+  a per-frame global curve."
+  [amount]
+  {:process {:input false :controls [{:name amount :shared true}]}}
+  (+ amount 1.0))
+
+(omkamra.dsp/defn lane-only-automation
+  "A control that exists *only* as a lane: the ABI reports it under `:lanes` and
+  not among the scalar controls, so a host's parameter declaration is the only
+  thing that says whose curve it is."
+  [amount]
+  {:process {:input false :controls [{:name amount :lane true}]}}
+  (* 2.0 amount))
+
+(omkamra.dsp/defn lane-in-callee
+  "A callee that reaches for a lane. A callee module has no lane region of its
+  own, so `(lane amount)` is refused there rather than reading the wrong
+  region."
+  [amount]
+  {:process {:input false}}
+  (+ amount (lane amount)))
+
+(omkamra.dsp/defn lane-carrying-caller
+  "Calls `lane-in-callee`, so the accessor has to lower inside a callee module."
+  [amount]
+  {:process {:input false :controls [{:name amount :has-lane true}]}}
+  (lane-in-callee amount))
+
+(def lane-voice-description
+  "A synth description over `lane-carried-control`. `amount` is *shared*, which
+  is one curve every voice reads (M4a); `assoc` in `:per-voice` for the per-voice
+  case (M4c)."
+  {:id :lane-voice
+   :capacity 2
+   :max-block-frames 8
+   :parameters {:amount {:scope :shared :default 10.0}}
+   :voice {:definition #'lane-carried-control}})
+
+(def shared-voice-description
+  "A synth description over `shared-gain`: `amount` is read from the pool-wide
+  shared region rather than from a voice's control storage, so a host writes it
+  once for the whole pool (M5)."
+  {:id :shared-voice
+   :capacity 2
+   :max-block-frames 8
+   :parameters {:amount {:scope :shared :default 0.0}}
+   :voice {:definition #'shared-gain}})
+
+(def lane-frequency-description
+  "A synth description over `lane-on-frequency`: `frequency` is a runtime control
+  the pool resolves per voice, so its lane is per voice with no declaration."
+  {:id :lane-frequency
+   :capacity 2
+   :max-block-frames 8
+   :voice {:definition #'lane-on-frequency}})
+
+(def lane-bend-description
+  "A synth description over `lane-on-bend`, whose lane is per channel."
+  {:id :lane-bend
+   :capacity 1
+   :max-block-frames 8
+   :voice {:definition #'lane-on-bend}})
+
+(def lane-only-description
+  "A synth description over `lane-only-automation`, whose only control is a lane."
+  {:id :lane-only
+   :capacity 1
+   :max-block-frames 8
+   :voice {:definition #'lane-only-automation}})
+
 (defn render-lane
   [definition-var lanes frames]
   (let [artifact (omkamra.dsp/compile definition-var {:target :interpreter :entry :process})
@@ -430,6 +568,30 @@
   (* (omkamra.dsp.library.envelope/exponential-adsr gate attack decay sustain release)
      (omkamra.dsp.library.oscillator/sine-oscillator frequency)))
 
+(omkamra.dsp/defn echo-voice
+  "A *realistic* voice, for the fusion question: a generator with a delay line in
+  it. The line's buffer is a record field — scratch — and D47 keeps scratch
+  inlined, so `poly` has to copy the whole line into every slot. This is the voice
+  the pool's `sine-voice` measurement cannot stand in for (M6, D45)."
+  [gate frequency delay mix]
+  {:process {:input false}}
+  (let [dry (omkamra.dsp.library.oscillator/sine-oscillator frequency)
+        wet (omkamra.dsp.library.delay/delay-line dry delay)]
+    (* (omkamra.dsp.library.envelope/exponential-adsr gate 0.005 0.1 0.7 0.2)
+       (+ (* (- 1.0 mix) dry) (* mix wet)))))
+
+(def echo-voice-description
+  "A synth description over `echo-voice`: the *realistic* profile for the fusion
+  question (M6, D45). The two effect parameters default to the values the fused
+  arms are handed, so a pool of these voices and one `(poly S echo-voice)` process
+  are driven with identical numbers and can be compared sample for sample."
+  {:id :echo-voice
+   :capacity 4
+   :max-block-frames 128
+   :parameters {:delay {:default 4.5}
+                :mix {:default 0.5}}
+   :voice {:definition #'echo-voice}})
+
 (def sine-voice-description
   "A synth description over `sine-voice`. The definition is a Var here because
   that is convenient in a test; normalisation turns it into the symbol that
@@ -437,13 +599,34 @@
   {:id :sine-voice
    :capacity 4
    :max-block-frames 128
-   :voice {:definition #'sine-voice
-           :controls {:gate {:source :gate}
-                      :frequency {:source :frequency}
-                      :attack {:constant 0.005}
-                      :decay {:constant 0.1}
-                      :sustain {:constant 0.7}
-                      :release {:constant 0.2}}}})
+   :parameters {:attack {:default 0.005}
+                :decay {:default 0.1}
+                :sustain {:default 0.7}
+                :release {:default 0.2}}
+   :voice {:definition #'sine-voice}})
+
+(dsp/defn activity-voice
+  "A module-shaped generator that publishes `:activity`, derived from a linear
+  envelope: active while the envelope sounds, finished once it has reached zero.
+  The release tail (~0.01 s here, a few blocks) is load-bearing for the test — an
+  activity that dropped to 0 the instant the gate closed could not tell a working
+  per-slot readback from a readback that returned nothing (both read 0). `poly`
+  can stack it because it returns a signal rather than writing the process's
+  buffers."
+  [gate frequency]
+  {:process {:input false}}
+  (let [env (omkamra.dsp.library.envelope/linear-adsr gate 0.005 0.1 0.7 0.01)]
+    (do
+      (store-special :activity (if (<= env 0.0) 0 1))
+      (* env (omkamra.dsp.library.oscillator/sine-oscillator frequency)))))
+
+(def activity-voice-description
+  "A synth description over `activity-voice`: the fixture for a fused pool that
+  frees a released slot from its own `:activity` (M6 seam 4)."
+  {:id :activity-voice
+   :capacity 2
+   :max-block-frames 128
+   :voice {:definition #'activity-voice}})
 
 ;; ---------------------------------------------------------------------------
 ;; The browser host (P10d)
@@ -468,8 +651,36 @@
    :capacity 2
    :mode :poly
    :max-block-frames 128
-   :voice {:definition #'browser-stereo-voice
-           :controls {:gate {:source :gate}}}})
+   :voice {:definition #'browser-stereo-voice}})
+
+(dsp/defn fused-browser-voice
+  "A *module-shaped* voice for the browser fused arms (M6c): it returns a signal
+  rather than writing the caller's buffers, so `poly` can stack it, and it has
+  both a per-voice envelope (state) and a delay line (scratch), so a per-slot
+  reset has something to restore and a whole-instance reset would be noticed. It
+  is arithmetic — no transcendental — so the differential check against the
+  interpreter is exact. Like the JVM fixture it publishes `:activity` from an
+  envelope with a short tail, so a readback that returned nothing would free the
+  released slot a block early."
+  [gate frequency delay mix]
+  {:process {:input false}}
+  (let [envelope (omkamra.dsp.library.envelope/linear-adsr gate 0.005 0.1 0.7 0.01)
+        dry (* gate frequency)
+        wet (omkamra.dsp.library.delay/delay-line dry delay)]
+    (do
+      (store-special :activity (if (<= envelope 0.0) 0 1))
+      (* envelope (+ (* (- 1.0 mix) dry) (* mix wet))))))
+
+(def fused-browser-description
+  "A synth description over `fused-browser-voice`: the browser fused arms render a
+  pool of these against one `(poly slots voice)` process (M6c)."
+  {:id :fused-browser
+   :capacity 2
+   :max-block-frames 128
+   :stealing :oldest
+   :parameters {:delay {:default 4.5}
+                :mix {:default 0.5}}
+   :voice {:definition #'fused-browser-voice}})
 
 ;; ---------------------------------------------------------------------------
 ;; The containment fixtures (P10c)
@@ -501,15 +712,12 @@
 
 (def containment-runaway-description
   {:id :containment-runaway :capacity 1 :mode :poly :max-block-frames 64
-   :voice {:definition #'containment-runaway-voice
-           :controls {:gate {:source :gate} :note {:source :note}}}})
+   :voice {:definition #'containment-runaway-voice}})
 
 (def containment-loud-description
   {:id :containment-loud :capacity 1 :mode :poly :max-block-frames 64
-   :voice {:definition #'containment-loud-voice
-           :controls {:gate {:source :gate} :note {:source :note}}}})
+   :voice {:definition #'containment-loud-voice}})
 
 (def containment-reset-description
   {:id :containment-reset :capacity 1 :mode :poly :max-block-frames 64
-   :voice {:definition #'containment-reset-voice
-           :controls {:gate {:source :gate} :note {:source :note}}}})
+   :voice {:definition #'containment-reset-voice}})

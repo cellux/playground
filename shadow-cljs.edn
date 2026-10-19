@@ -42,4 +42,21 @@
                  :file "src/omkamra/dsp/wabt-fs-stub.js"}}}
    :modules
    {:main
-    {:init-fn omkamra.dsp.harness.testbed/init}}}}}
+    {:init-fn omkamra.dsp.harness.testbed/init}}}
+
+  ;; The off-audio-thread event producer (M1). A separate, self-contained build
+  ;; rather than a module of the page build: in development Shadow's web-worker
+  ;; module loading emits `shadow.loader`/`module_loaded` append files that need
+  ;; a `shadow` runtime a web-worker module never gets (the default module hosts
+  ;; it). With devtools off and no shared base, `worker/main.js` is a plain
+  ;; script that runs `init`. The runtime itself stays a library namespace
+  ;; (`omkamra.dsp.hosts.worker`); this build is one consumer of it.
+  :omkamra.dsp.hosts.worker
+  {:target :browser
+   :output-dir ".dev/cljs/omkamra/dsp/hosts/worker"
+   :asset-path "/omkamra/dsp/hosts/worker"
+   :devtools {:enabled false}
+   :modules
+   {:main
+    {:init-fn omkamra.dsp.hosts.worker/init
+     :web-worker true}}}}}

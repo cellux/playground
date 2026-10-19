@@ -118,6 +118,28 @@
 ;; The live instrument
 ;; ---------------------------------------------------------------------------
 
+(defn- bus-shared-index
+  "Per bus ABI control, the index of the `:shared` parameter it reads.
+
+  A post-mix control binds to the parameter of the same name. The chain is
+  instrument-level, so only a `:shared` parameter may drive it; a control with no
+  such parameter is refused."
+  [runtime abi-controls]
+  (let [shared (vec (:shared-parameters runtime))
+        by-name (into {} (map-indexed (fn [index parameter]
+                                        [(name parameter) index])
+                                      shared))]
+    (mapv (fn [control]
+            (let [control-name (name (:name control))]
+              (if-let [index (get by-name control-name)]
+                (long index)
+                (throw (ex-info "a post-mix control has no shared parameter"
+                                {:control control-name
+                                 :parameters (vec (sort (keys by-name)))})))))
+          abi-controls)))
+
+(declare write-bus-controls!)
+
 (defn instrument-pool
   "Build the live instrument from a program: the voice pool plus one bus
   instance per output channel.
@@ -127,37 +149,50 @@
   ([program] (instrument-pool program {}))
   ([program {:keys [containment] :or {containment :reset}}]
    (let [bundle (:bundle program)
+         runtime (:runtime bundle)
          kernel (hosts/host-kernel (:artifact bundle) {:containment containment})
-         live-pool (pool/voice-pool (:runtime bundle) kernel)
-         channels (long (get-in bundle [:runtime :channels]))
+         live-pool (pool/voice-pool runtime kernel)
+         shared (pool/shared-parameter-values live-pool)
+         channels (long (:channels runtime))
          bus (:bus program)
          abi-controls (if bus (vec (get-in bus [:abi :controls])) [])
          control-names (mapv :name abi-controls)
-         control-values (double-array
-                         (map (fn [control] (double (or (:default control) 0.0)))
-                              abi-controls))
+         shared-index (when bus (long-array (bus-shared-index runtime abi-controls)))
+         control-values (double-array (count abi-controls))
          target (when bus (:target bus))
          layout (:control-layout bus)
          f64? (= :f64 (get-in bus [:physical-type :precision]))
          slots (when (and bus (= :jvm target)) (control-slots layout))]
-     (cond->
-      {:program program
-       :pool live-pool
-       :channels channels
-       :buses (when bus
-                (mapv (fn [_] (dsp/create-instance bus)) (range channels)))
-       :bus-target target
-       :bus-f64? f64?
-       :bus-control-names control-names
-       :bus-control-values control-values
-       :bus-controls (volatile! (vec control-values))
-       :sample-rate 48000.0}
-       slots
-       (assoc :bus-slots slots
-              :bus-float-controls (if f64?
-                                    (double-array (long (:float-count layout)))
-                                    (float-array (long (:float-count layout))))
-              :bus-int-controls (int-array (long (:int-count layout))))))))
+     ;; A bus control's initial value is its shared parameter's default.
+     (when bus
+       (dotimes [position (count abi-controls)]
+         (aset control-values position
+               (aget ^doubles shared (aget ^longs shared-index position)))))
+     (let [live (cond->
+                 {:program program
+                  :pool live-pool
+                  :channels channels
+                  :buses (when bus
+                           (mapv (fn [_] (dsp/create-instance bus)) (range channels)))
+                  :bus-target target
+                  :bus-f64? f64?
+                  :bus-control-names control-names
+                  :bus-control-values control-values
+                  :bus-controls (volatile! (vec control-values))
+                  :bus-shared shared
+                  :bus-shared-index shared-index
+                  :sample-rate 48000.0}
+                  slots
+                  (assoc :bus-slots slots
+                         :bus-float-controls (if f64?
+                                               (double-array (long (:float-count layout)))
+                                               (float-array (long (:float-count layout))))
+                         :bus-int-controls (int-array (long (:int-count layout)))))]
+       ;; The JVM bus reads its own physical arrays, so seed them from the
+       ;; shared parameters' defaults before the first render.
+       (when (:bus-slots live)
+         (write-bus-controls! live))
+       live))))
 
 (defn pool-of
   "The voice pool, for a host that publishes its own control values."
@@ -187,8 +222,42 @@
                     (long (aget values position)))))))
   nil)
 
+(defn- refresh-bus-values!
+  "Re-read every bus control from its shared parameter, and refresh the vector
+  the portable (interpreter) bus runner reads."
+  [live]
+  (when-let [^longs indices (:bus-shared-index live)]
+    (let [^doubles shared (:bus-shared live)
+          ^doubles values (:bus-control-values live)]
+      (dotimes [position (alength indices)]
+        (aset values position (aget shared (aget indices position))))
+      (vreset! (:bus-controls live) (vec values))))
+  nil)
+
+(defn set-parameter!
+  "Set a `:shared` parameter. Every sounding voice and the post-mix bus follow
+  it; takes effect on the next `render!`."
+  [live name value]
+  (pool/set-parameter! (:pool live) name value)
+  (refresh-bus-values! live)
+  (when (:bus-slots live)
+    (write-bus-controls! live))
+  nil)
+
+(defn set-voice-parameter!
+  "Set a `:per-voice` parameter for voice `index`. Takes effect on that voice's
+  next render."
+  [live index name value]
+  (pool/set-voice-parameter! (:pool live) index name value))
+
+(defn parameter-value
+  "The current value of a `:shared` parameter."
+  [live name]
+  (pool/parameter-value (:pool live) name))
+
 (defn set-bus-control!
-  "Set a global post-mix control by name. Takes effect on the next `render!`."
+  "Set a global post-mix control by name. It is a `:shared` parameter, so the
+  voices read the same value. Takes effect on the next `render!`."
   [live control value]
   (let [names (:bus-control-names live)
         index (first (keep-indexed (fn [position name]
@@ -199,11 +268,7 @@
     (when-not index
       (throw (ex-info "the post-mix chain has no such control"
                       {:control control :controls names})))
-    (aset ^doubles (:bus-control-values live) (long index) (double value))
-    (vreset! (:bus-controls live) (vec (:bus-control-values live)))
-    (when (:bus-slots live)
-      (write-bus-controls! live))
-    nil))
+    (set-parameter! live (keyword (clojure.core/name control)) value)))
 
 (defn- run-bus!
   "Run one channel's bus instance over `buffer`, in place.

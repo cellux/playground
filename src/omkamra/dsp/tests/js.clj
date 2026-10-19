@@ -12,7 +12,8 @@
             [omkamra.dsp :as dsp]
             [omkamra.dsp.harness.catalog :as catalog]
             [omkamra.dsp.harness.conformance :as conformance]
-            [omkamra.dsp.harness.fixtures :refer [clip one-pole shifted-buffer
+            [omkamra.dsp.harness.fixtures :refer [call-fixture-arena clip one-pole
+                                                  shared-gain shifted-buffer
                                                   stereo-cross]]))
 
 (defn- standalone?
@@ -22,6 +23,21 @@
   [source]
   (and (not (str/includes? source "squint_core"))
        (not (str/includes? source "import"))))
+
+(deftest javascript-backend-calls-definitions-instead-of-copying-them
+  ;; D47 stage 3. The IR keeps a call graph for this target now, and the module
+  ;; emits one function per retained definition — inside `createKernel`, so they
+  ;; close over the instance's arena — and calls it with the partition base, the
+  ;; two context values, and the arguments.
+  (let [artifact (dsp/compile (var-get #'call-fixture-arena)
+                              {:target :js :entry :process :precision :f32})
+        source (:source artifact)]
+    (is (= 2 (count (:definitions (:js-ir artifact)))))
+    (is (str/includes? source "__dsp_fn0_"))
+    (is (re-find #"__dsp_fn0_[A-Za-z0-9_]*\(1, frames, sampleRate, " source)
+        "the first `accumulate` site passes its partition base")
+    (is (re-find #"__dsp_state_1\[\(__dsp_base \+ 0\)\]" source)
+        "a callee addresses state relative to the base it was handed")))
 
 (deftest javascript-backend-emits-standalone-es-module
   (let [{:keys [source module] :as artifact}
@@ -119,3 +135,18 @@
     (is (standalone? (:source javascript)))
     (is (= false (get-in javascript [:realtime :allocations?])))
     (is (= false (get-in wasm [:realtime :allocations?])))))
+
+(deftest javascript-backend-reports-the-shared-region
+  ;; A shared control is not a scalar control: it leaves the control list and
+  ;; appears in the ABI's `:shared` region instead, which the host fills once for
+  ;; the whole pool (M5). The exact JavaScript spelling is Squint's, so this pins
+  ;; the ABI a host reads rather than the text — except that the module still has
+  ;; to stand alone.
+  (let [{:keys [source abi]} (dsp/compile shared-gain {:target :js
+                                                       :entry :process})]
+    (is (= [] (mapv :name (:controls abi))))
+    (is (= '[amount] (mapv :name (:shared abi))))
+    (is (= 1024 (:shared-stride abi)))
+    (is (= (:lane-stride abi) (:shared-stride abi))
+        "the shared region has the lane region's shape, so one addressing")
+    (is (standalone? source))))

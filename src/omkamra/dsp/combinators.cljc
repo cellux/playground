@@ -74,6 +74,44 @@
   [voice control amount]
   (control-with-mode voice control :slew amount))
 
+(defn guard
+  "Return `voice` wrapped so a call site that has never been gated is skipped.
+
+  `(guard voice)` is the combinator form of a per-call-site gate check. The
+  wrapper owns one boolean state slot that *latches* the first time `gate` rises
+  above zero and is cleared by a reset; the wrapped voice is evaluated only while
+  the latch is set. A slot that has never sounded therefore costs a comparison
+  instead of a whole voice's work, while one that has sounded keeps being
+  evaluated through its release tail, because closing the gate does not clear the
+  latch.
+
+  The latch is per *call site*, not per definition, because it lives in the
+  call's state partition (D19) and so is reset with the slot's own state. That is
+  what makes a fused `(poly S voice)` cheap when only some of its slots sound:
+  `poly` calls the guarded voice once per slot, the slots a host has not gated are
+  skipped, and the mix is unchanged. `poly` cannot fold this in itself — a shared
+  latch would never be clearable per slot.
+
+  `gate` names the control whose crossing of zero opens the latch (default
+  `gate`); it must be one of `voice`'s controls."
+  ([voice] (guard voice {}))
+  ([voice {:keys [gate] :or {gate 'gate}}]
+   (when-not (and (map? voice) (= :function (:dsp/kind voice)))
+     (throw (ex-info "guard expects a DSP definition value" {:voice voice})))
+   (let [gate (control-name gate)
+         index (control-index voice gate)]
+     (when-not index
+       (throw (ex-info "guard needs a gate control to latch on"
+                       {:voice (graph/definition-id voice)
+                        :gate gate
+                        :params (graph/parameter-symbols voice)})))
+     (let [params (graph/parameter-symbols voice)
+           live (gensym "live")
+           open (list 'or live (list '> gate 0.0))
+           body (list 'if open (graph/definition-call voice params) 0.0)]
+       (assoc (graph/derived-definition voice body)
+              :state [{:name live :type :boolean :init false :next open}])))))
+
 ;; ---------------------------------------------------------------------------
 ;; Replication, summing, chaining, sharing
 ;; ---------------------------------------------------------------------------
@@ -187,6 +225,29 @@
           params (graph/parameter-symbols voice)
           shared (vec (remove per-slot params))
           slot-params (vec (filter per-slot params))
+          ;; The voice's control *declarations* -- `:shared`, a lane, a default --
+          ;; travel with the names, or a fused interface is not the voice's
+          ;; interface: a shared control would arrive as an ordinary scalar and a
+          ;; declared default would be lost (D50).
+          declarations (into {}
+                             (map (fn [control] [(control-name control) control]))
+                             (get-in voice [:process :controls]))
+          declaration (fn [param] (get declarations param))
+          _ (doseq [param slot-params]
+              (let [declared (declaration param)]
+                (when (:shared declared)
+                  (throw (ex-info (str "poly cannot expand a shared control per"
+                                       " slot: it is one region for the whole"
+                                       " process")
+                                  {:control param :per-slot (vec (sort per-slot))})))
+                (when (or (:lane declared) (:has-lane declared))
+                  (throw (ex-info (str "poly cannot expand a lane per slot: a lane"
+                                       " belongs to the entry process")
+                                  {:control param :per-slot (vec (sort per-slot))})))))
+          declared-control (fn [param name]
+                             (if-let [declared (declaration param)]
+                               (assoc declared :name name)
+                               {:name name}))
           slots (mapv (fn [slot]
                         (mapv (fn [param]
                                 (if (per-slot param)
@@ -204,7 +265,13 @@
        voice
        body
        {:params names
-        :controls (mapv (fn [name] {:name name}) names)}))))
+        :controls (vec (concat (mapv (fn [param] (declared-control param param)) shared)
+                               (mapcat (fn [slot]
+                                         (mapv (fn [param]
+                                                 (declared-control
+                                                  param (symbol (str (name param) "_" slot))))
+                                               slot-params))
+                                       (range count))))}))))
 
 (defn share
   "Return `voice` with its output evaluated once and bound to a fresh local;

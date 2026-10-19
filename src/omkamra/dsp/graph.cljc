@@ -19,10 +19,13 @@
   already qualified."
   [definition]
   (let [name (:name definition)
-        namespace (get-in definition [:source :namespace])]
+        ;; Not `namespace`: the local would shadow `clojure.core/namespace`, and
+        ;; a definition value with no `:source` would then crash on the call
+        ;; below instead of yielding an unqualified id.
+        ns-name (get-in definition [:source :namespace])]
     (if (namespace name)
       name
-      (symbol (str namespace) (str name)))))
+      (symbol (str ns-name) (str name)))))
 
 (defn parameter-symbols
   "The parameter names of a definition, as symbols."

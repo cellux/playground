@@ -17,12 +17,12 @@ below evaluates in it.
 | `src/omkamra/dsp/harness/catalog.cljc` | Shared semantic catalog (pure data). Both testbeds read it. |
 | `src/omkamra/dsp/harness/conformance.clj` | Builds target-neutral plans; JVM differential driver; plan serialization. |
 | `src/omkamra/dsp/targets/interpreter.cljc` | Portable reference interpreter (the oracle), runs on JVM and in the browser. |
-| `src/omkamra/dsp_test.clj` | Interpreter/JVM suite plus compiler-internal checks (descriptor, linker, ABI, allocation). |
+| `src/omkamra/dsp_test.clj` | The original monolith, since split into `omkamra.dsp.tests.*` (see `DIARY.md`); kept for reference, and no longer part of the suite. |
 | `src/omkamra/dsp/harness/testbed.cljs` | Browser differential suite; runs the in-page interpreter against JavaScript/Wasm kernels. |
 | `src/omkamra/dsp/harness/testbed.clj` | On-demand HTTP endpoints: `source`, `wasm-source`, `wasm-metadata`, and `plan`. |
 | `src/omkamra/dsp/harness/browser.clj` | Clojure-side browser driver (spel + `:on-demand-http`). |
 | `src/omkamra/dsp/harness/fixtures.clj` | Shared `dsp/defn` fixtures and measuring helpers the tests use. |
-| `src/omkamra/dsp/tests/suite.clj` | Requires every test namespace; `run-all` runs the whole language suite. |
+| `src/omkamra/dsp/tests/suite.clj` | Requires every test namespace; `run-all` runs the language suite, `run-everything` runs it and the browser suite together. |
 | `src/omkamra/dsp/synth.cljc` | The synth description and the pure-data runtime configuration (P10). |
 | `src/omkamra/dsp/synth/pool.cljc` | Preallocated voices, allocation/stealing, the note lifecycle, block rendering. |
 | `src/omkamra/dsp/hosts.clj` | The assembler: `synth-bundle`, `compile-synth`, and which kernel a target gets. |
@@ -55,6 +55,42 @@ with the `:executable-path` option if needed.
 
 ---
 
+## Everything at once
+
+The JVM suite and the browser suite are independent — one needs no browser, the
+other no test image — so `run-everything` starts each in its own future and reports
+once both are done:
+
+```clojure
+(require '[omkamra.dsp.tests.suite :as suite])
+(suite/run-everything)
+;; prints the JVM suite's own report under a header, then:
+;;   === browser: 34/34 checks passed (63.5s total) ===
+;;   === all green ===
+;; => {:jvm {:test 208, :pass 1840, :fail 0, :error 0, :passed? true}
+;;     :browser {:passed? true, :passed 32, :total 32, :failed []}
+;;     :seconds 63.4, :passed? true}
+```
+
+Use it before a commit, or after a change that touches both a target and the
+harness. The two halves overlap, so `:seconds` is the slower half's wall clock rather
+than the sum; the JVM half's output is captured and printed after both finish, so the
+two reports never interleave. `:timeout` (ms, default 30 minutes) bounds the wait for
+*each* half — a half that never finishes appears as `{:timeout true}` rather than
+hanging the call.
+
+`:only` is passed to the browser half, so a single case can be checked there while
+the whole JVM suite still runs:
+
+```clojure
+(suite/run-everything {:only ["call-int-led"]})
+```
+
+The tooling suite (`omkamra.dev.tools-test`) is deliberately *not* part of this: it
+reloads namespaces, which would race the DSP tests running beside it.
+
+---
+
 ## JVM / interpreter tests
 
 The suite is split by subject under `omkamra.dsp.tests.*`; `omkamra.dsp.tests.suite` requires them all and is the
@@ -67,7 +103,7 @@ Evaluate in the dev nREPL:
 ```clojure
 (require 'omkamra.dsp.tests.suite)
 (omkamra.dsp.tests.suite/run-all)
-;; => {:test 155, :pass 1527, :fail 0, :error 0}
+;; => {:test 208, :pass 1840, :fail 0, :error 0}
 ```
 
 With `clojure_eval`, send that whole form as one expression.
@@ -98,7 +134,7 @@ Notable groups:
 - `jvm-unchecked-process-adapter-does-not-allocate-after-warmup` — allocation
   regression guard for the real-time process path.
 
-Expected baseline: **155 tests, 1527 assertions, 0 failures**.
+Expected baseline: **208 tests, 1840 assertions, 0 failures**.
 
 ---
 
@@ -114,7 +150,7 @@ Evaluate in the dev nREPL:
 ```clojure
 (require '[omkamra.dsp.harness.browser :as browser])
 (browser/run!)
-;; => {:passed? true, :passed 25, :total 25, :results [...]}
+;; => {:passed? true, :passed 32, :total 32, :results [...]}
 ```
 
 Run one check while iterating — `:only` matches check names, and the result
@@ -123,6 +159,25 @@ contains only the selected checks:
 ```clojure
 (browser/run! {:only ["instrument"]})
 ;; => runs just the two instrument hosts
+```
+
+It also matches **catalog case IDs**, which narrows the two shared matrices to those
+cases — the fast loop for one semantic case's *behaviour* (its *shape* belongs in the
+JVM suite, beside the emitter it concerns):
+
+```clojure
+(browser/run! {:only ["call-int-led"]})
+;; => {:passed? true, :passed 2, :total 2, ...}  ; one case, two precisions
+```
+
+A needle that names neither a check nor a case is reported as a failure rather than
+running nothing, because an empty run is indistinguishable from a passing one:
+
+```clojure
+(browser/run! {:only ["no-such-check"]})
+;; => {:passed? false, :total 1,
+;;     :results [{:name "selection", :passed? false,
+;;                :detail "no check or case matched: [\"no-such-check\"]"}]}
 ```
 
 The browser suite is a **differential** test: it runs the portable
@@ -167,7 +222,8 @@ is process-only:
 
 `run!` options: `:headless` (default `true`), `:timeout` (ms, default
 `60000`), `:server?` (start `:on-demand-http` if needed, default `true`),
-`:autorun?` (default `false`), and `:executable-path` (explicit browser binary).
+`:autorun?` (default `false`), `:only` (see above), and `:executable-path`
+(explicit browser binary).
 The first run also compiles the Shadow build and can take longer than later
 runs; raise `:timeout` on a cold cache.
 
@@ -212,7 +268,9 @@ automatic run.
    (f32 and f64);
 7. the **pool hosts** — `omkamra.dsp.hosts.js` and `omkamra.dsp.hosts.wasm`
    driving `omkamra.dsp.synth.pool`, each compared against the interpreter pool
-   over the same events (P10d);
+   over the same events (P10d), including a **fused** pool (`{:fusion {:slots
+   S}}`, M6c) whose `slots` voices live in one process — checked across a steal
+   and a release/free;
 8. the **instrument hosts** (P11c) — the same two hosts driving the full
    reference synthesizer: its voice pool, modulation matrix (the portable
    `omkamra.dsp.reference` host), and post-mix bus (one instance per channel),
@@ -226,6 +284,25 @@ automatic run.
    resets the voice, and counts each event; `:sanitize` contains the sample
    without resetting and clamps a finite runaway to the ceiling; `:off` lets a
    non-finite sample reach the block.
+
+10. the **worker → worklet event transport** (M1) — a real Web Worker
+    (`omkamra.dsp.hosts.worker`, served from the separate `:omkamra.dsp.hosts.worker`
+    build) posts timestamped events over a `MessageChannel` to an
+    `OfflineAudioContext` worklet running the `follow-amount` kernel; the
+    rendered block is a step function at the exact event frames;
+11. **lane delivery** (M4) — a *shared* lane and a *per-voice* lane through the
+    pool on both browser hosts, each compared against the interpreter pool **and**
+    against literal numbers: a shared lane of 1,2,3,4 beside a scalar of 10 must
+    render 11..14, and a shared 1,2,3,4 lane on one voice beside a 10 lane on the
+    other must render 31..34. The literal half matters, because a differential
+    check passes when both sides are equally wrong — which is exactly how the
+    Wasm pool's missing lane *pointer* stayed invisible while this check compared
+    two blocks of nothing (`array-seq` does not walk a JS typed array under
+    Squint; the harness converts with `real->vector` instead).
+12. **shared parameters** (M5) — a parameter bound to a `:shared` control, written
+    once into the pool-wide region on both browser hosts, compared against the
+    interpreter pool and against literal numbers (two voices of `0.5 + 1.0` must
+    render `3.0`), with the declared default checked before the write.
 
 The pool and instrument host checks are the ones that exercise the sequencing
 layer rather than a single kernel. The page fetches a compiled voice —
@@ -284,8 +361,8 @@ diagnostics, ABI shape, allocation) and `testbed.cljs` for browser-only checks
 ## Linting and formatting
 
 ```bash
-clj-kondo --lint src/omkamra/dsp src/omkamra/dsp.clj src/omkamra/dsp_test.clj
-cljfmt check src/omkamra/dsp src/omkamra/dsp.clj src/omkamra/dsp_test.clj
+clj-kondo --lint src/omkamra/dsp src/omkamra/dsp.clj src/omkamra/dsp/tests
+cljfmt check src/omkamra/dsp src/omkamra/dsp.clj src/omkamra/dsp/tests
 ```
 
 Both should report no errors. `.clj-kondo/config.edn` mirrors spel's
@@ -379,7 +456,10 @@ clojure -M:dev:linux -e "
   automatically; if the layout differs, pass `:executable-path` explicitly.
 - **The browser build does not pick up an edit:** recompile synchronously with
   `(omkamra.dev.frontend/recompile! :omkamra.dsp.testbed)`. The on-demand HTTP
-  server starts the watcher on the first compatible asset/page request.
+  server starts the watcher on the first compatible asset/page request. A run
+  issued immediately after an edit can be served the *previous* bundle — the
+  watcher rebuilds asynchronously — so give it a moment, or check the dev log for
+  the `Build completed` line, before believing a surprising pass.
 - **`No implementation of method: :put! ... ManyToManyChannel` after a
   `:reload-all`:** reloading every transitive dependency can reload
   `clojure.core.async` and break the running Shadow server. Reload only the

@@ -78,18 +78,33 @@
    :lowest-note "the voice sounding the lowest note"
    :highest-note "the voice sounding the highest note"})
 
-(def control-sources
-  "What a declared control is driven from. The set is closed: a mistyped source
-  is a validation error rather than a control that quietly stays at zero.
+(def parameter-scopes
+  "How many storage cells a parameter has, and so who shares it.
 
-  `:gate`, `:note`, `:velocity`, `:bend`, `:detune`, and `:pan` are the
-  **standard performance sources** the runtime produces from note events and the
-  per-voice/per-channel source banks; `:frequency` is the host-computed legacy
-  form (`note` to Hz); `:constant` is a fixed value. A pitch-domain voice takes
-  `:note` plus `:bend` and `:detune` and converts them in DSP (`DECISIONS.md`
-  D35); a stereo voice takes `:pan` (a per-voice position, `set-pan!`) and maps
-  it to its channels, or pans inside its own DSP if it does not bind one."
-  #{:gate :note :frequency :velocity :bend :detune :pan :constant})
+  `:per-voice` gives every voice its own value; `:shared` is one value for the
+  whole instrument, read by every voice and/or the post-mix bus. The scope is
+  about the *value*, not about who reads it: an instrument-level parameter is
+  just a `:shared` one the bus binds. A third axis, the per-frame lane, is
+  orthogonal and declared separately (`:lane`)."
+  #{:per-voice :shared})
+
+(def parameter-curves
+  "How a UI position maps to a parameter's value: linearly, logarithmically, or
+  exponentially. Declaration metadata; the DSP path reads the value, not the
+  curve, so a physical value is stored."
+  #{:linear :log :exp})
+
+(def runtime-parameters
+  "The names the runtime itself supplies (`DECISIONS.md` D35), each with the
+  primitive code the pool's resolution switches on. They may be used without
+  declaration, and a control of one of these names binds to it automatically.
+  `:bend` is per channel rather than per voice, which is why it resolves from the
+  channel bank rather than a per-voice cell."
+  {:gate 0 :note 1 :velocity 2 :frequency 3 :bend 4 :detune 5 :pan 6})
+
+(def runtime-parameter-names
+  "The `runtime-parameters` names, as a set."
+  (set (keys runtime-parameters)))
 
 (def default-tuning
   "Equal temperament with A4 = 440 Hz, which is what a MIDI note number means
@@ -168,27 +183,88 @@
             (assoc context :reference-note (:reference-note tuning))))
     tuning))
 
-(defn- normalize-control-source
-  [entry context]
-  (when-not (map? entry)
-    (fail "a synth control mapping must be a map"
-          (assoc context :value entry)))
-  (let [source (or (:source entry) (when (contains? entry :constant) :constant))]
-    (when-not (contains? control-sources source)
-      (fail "a synth control source is not in the supported set"
-            (assoc context :source source :supported (vec (sort control-sources)))))
-    (case source
-      :constant (do (closed-keys! entry #{:source :constant} context)
-                    (when-not (number? (:constant entry))
-                      (fail "a synth constant control must be a number"
-                            (assoc context :constant (:constant entry))))
-                    {:source :constant :constant (double (:constant entry))})
-      (do (closed-keys! entry #{:source} context)
-          {:source source}))))
+(defn- parameter-name
+  "The canonical name of a parameter spelling: a keyword, namespaced if the
+  spelling was."
+  [x]
+  (cond
+    (keyword? x) x
+    (symbol? x) (if-let [ns (namespace x)] (keyword ns (name x)) (keyword (name x)))
+    (string? x) (keyword x)
+    :else nil))
+
+(defn- normalize-parameter
+  "Validate one parameter declaration and fill in its defaults.
+
+  `name` is a keyword; `declaration` is the user's map, or nil for an inferred
+  parameter. The stored value is the parameter's own domain value, not a
+  normalized position: `:curve` describes how a UI maps a position to it."
+  [name declaration context]
+  (when (runtime-parameter-names name)
+    (fail "a synth parameter name is reserved by the runtime"
+          (assoc context :parameter name)))
+  (when-not (or (nil? declaration) (map? declaration))
+    (fail "a synth parameter declaration must be a map"
+          (assoc context :value declaration)))
+  (let [declaration (or declaration {})]
+    ;; `:name` and `:lane?` are the keys of an already-normalised parameter, so
+    ;; normalising twice changes nothing (`runtime-config` normalises too).
+    (closed-keys! declaration
+                  #{:name :scope :default :min :max :enum :step :unit :curve
+                    :lane :lane?}
+                  context)
+    (let [scope (or (:scope declaration) :per-voice)
+          _ (when-not (contains? parameter-scopes scope)
+              (fail "a synth parameter scope is not supported"
+                    (assoc context :scope scope
+                           :supported (vec (sort parameter-scopes)))))
+          curve (or (:curve declaration) :linear)
+          _ (when-not (contains? parameter-curves curve)
+              (fail "a synth parameter curve is not supported"
+                    (assoc context :curve curve
+                           :supported (vec (sort parameter-curves)))))
+          minimum (when (contains? declaration :min) (double (:min declaration)))
+          maximum (when (contains? declaration :max) (double (:max declaration)))
+          _ (when (and minimum maximum (> minimum maximum))
+              (fail "a synth parameter minimum exceeds its maximum"
+                    (assoc context :min minimum :max maximum)))
+          enum (when (contains? declaration :enum)
+                 (let [values (:enum declaration)]
+                   (when-not (and (set? values) (seq values) (every? number? values))
+                     (fail "a synth parameter enum must be a non-empty set of numbers"
+                           (assoc context :enum values)))
+                   (set (map double values))))
+          default (cond
+                    (contains? declaration :default) (double (:default declaration))
+                    enum (reduce clojure.core/min enum)
+                    :else 0.0)
+          _ (when-not (number? default)
+              (fail "a synth parameter default must be a number"
+                    (assoc context :default (:default declaration))))
+          _ (when (and enum (not (contains? enum default)))
+              (fail "a synth parameter default is outside its enum"
+                    (assoc context :default default :enum enum)))
+          _ (when (and (nil? enum) minimum (< default minimum))
+              (fail "a synth parameter default is below its minimum"
+                    (assoc context :default default :min minimum)))
+          _ (when (and (nil? enum) maximum (> default maximum))
+              (fail "a synth parameter default is above its maximum"
+                    (assoc context :default default :max maximum)))
+          step (when (contains? declaration :step) (double (:step declaration)))
+          _ (when (and step (not (pos? step)))
+              (fail "a synth parameter step must be positive"
+                    (assoc context :step (:step declaration))))]
+      (cond-> {:name name :scope scope :default default :curve curve
+               :lane? (boolean (or (:lane? declaration) (:lane declaration)))}
+        minimum (assoc :min minimum)
+        maximum (assoc :max maximum)
+        enum (assoc :enum enum)
+        step (assoc :step step)
+        (contains? declaration :unit) (assoc :unit (:unit declaration))))))
 
 (defn- normalize-voice
   [voice context]
-  (closed-keys! voice #{:definition :controls} context)
+  (closed-keys! voice #{:definition :bindings} context)
   (let [definition (:definition voice)
         definition (cond
                      (nil? definition)
@@ -206,29 +282,29 @@
         _ (when-not (symbol? definition)
             (fail "a synth voice definition must be a Var or a qualified symbol"
                   (assoc context :definition (:definition voice))))
-        controls (:controls voice)
-        _ (when-not (map? controls)
-            (fail "a synth voice must map its controls to sources"
-                  (assoc context :controls controls)))
-        controls (reduce-kv
-                  (fn [result control entry]
+        bindings (:bindings voice)
+        _ (when-not (or (nil? bindings) (map? bindings))
+            (fail "a synth voice's bindings must be a map"
+                  (assoc context :bindings bindings)))
+        bindings (reduce-kv
+                  (fn [result control parameter]
                     ;; Strings are accepted as well as keywords and symbols, which
                     ;; is what makes normalisation idempotent: the normalised form
-                    ;; keys its controls by the ABI's own string name, and
+                    ;; keys its bindings by the ABI's own string name, and
                     ;; `runtime-config` normalises again.
                     (when-not (or (keyword? control) (symbol? control)
                                   (string? control))
                       (fail "a synth control name must be a keyword, a symbol, or a string"
                             (assoc context :control control)))
-                    ;; `(str :amount)` is not `(name :amount)`: a leading colon
-                    ;; reaching the ABI would name a control that does not exist
-                    ;; and read as zero.
-                    (assoc result (name control)
-                           (normalize-control-source entry (assoc context :control control))))
+                    (let [parameter (parameter-name parameter)]
+                      (when-not parameter
+                        (fail "a synth binding must name a parameter"
+                              (assoc context :control control :parameter parameter)))
+                      (assoc result (name control) parameter)))
                   {}
-                  controls)]
+                  (or bindings {}))]
     {:definition definition
-     :controls controls}))
+     :bindings bindings}))
 
 (defn normalize-description
   "Validate a synth description and fill in its defaults.
@@ -238,7 +314,7 @@
   [description]
   (closed-keys! description
                 #{:id :capacity :mode :stealing :tuning :max-block-frames
-                  :channels :held-notes :bend-range :voice}
+                  :channels :held-notes :bend-range :parameters :voice}
                 {})
   (let [capacity (or (:capacity description) 8)
         _ (when-not (and (positive-integer? capacity) (<= capacity max-capacity))
@@ -270,8 +346,23 @@
         channels (or (:channels description) 1)
         _ (when-not (contains? #{1 2} channels)
             (fail "synth output channels must be 1 or 2"
-                  {:channels channels :supported [1 2]}))]
+                  {:channels channels :supported [1 2]}))
+        parameters (:parameters description)
+        _ (when-not (or (nil? parameters) (map? parameters))
+            (fail "synth parameters must be a map" {:parameters parameters}))
+        parameters (reduce-kv
+                    (fn [result name declaration]
+                      (let [name (parameter-name name)]
+                        (when-not name
+                          (fail "a synth parameter name must be a keyword, a symbol, or a string"
+                                {:parameter name}))
+                        (assoc result name
+                               (normalize-parameter name declaration
+                                                    {:path [:parameters name]}))))
+                    {}
+                    (or parameters {}))]
     {:id (:id description)
+     :parameters parameters
      :capacity capacity
      :mode mode
      :held-notes held-notes
@@ -290,57 +381,154 @@
 ;; parallel primitive arrays at construction, so the audio path never walks a
 ;; map: see `omkamra.dsp.synth.pool/voice-pool`.
 
-(def plan-source-codes
-  "The primitive encoding of a plan entry's source, in the order the pool's
-  switch expects."
-  {:gate 0 :note 1 :frequency 2 :velocity 3 :constant 4 :bend 5 :detune 6
-   :pan 7})
+(def storage-kinds
+  "The primitive encoding of a plan entry's storage, in the order the pool's
+  resolution expects."
+  {:runtime 0 :per-voice 1 :shared 2})
+
+(defn binding-plan
+  "Resolve `description`'s parameters and bindings against the ABI's `controls`.
+
+  Returns `{:parameters {name declaration}, :per-voice-parameters [name],
+  :shared-parameters [name], :plan [entry]}`. A control binds to
+  `(get bindings control-name (keyword control-name))`: the runtime's seven names
+  resolve to runtime storage, a declared parameter to its own value, and a
+  same-named control with no declaration is inferred as a per-voice parameter
+  defaulting to the control's own `:default`. A binding that names an undeclared
+  parameter, or a control the voice does not have, is refused.
+
+  Indices are assigned in name order, so a plan and its parameter arrays are
+  deterministic."
+  ([description controls] (binding-plan description controls nil))
+  ([description controls shared-controls]
+   (let [declared (:parameters description)
+         bindings (get-in description [:voice :bindings])
+         abi-names (into (mapv (comp name :name) controls)
+                         (map (comp name :name) shared-controls))
+         unknown (remove (set abi-names) (keys bindings))]
+     (when (seq unknown)
+       (fail "synth description binds a parameter to a control the voice does not have"
+             {:unknown (vec (sort unknown)) :controls (vec abi-names)}))
+     (let [resolved
+           (mapv (fn [control]
+                   (let [control-name (name (:name control))
+                         parameter (get bindings control-name (keyword control-name))]
+                     (cond
+                       (contains? runtime-parameter-names parameter)
+                       {:control control-name :type (:type control) :parameter parameter
+                        :storage {:kind :runtime
+                                  :index (long (runtime-parameters parameter))}
+                        :inferred nil}
+
+                       (contains? declared parameter)
+                       {:control control-name :type (:type control) :parameter parameter
+                        :storage nil :inferred nil}
+
+                       (= parameter (keyword control-name))
+                       {:control control-name :type (:type control) :parameter parameter
+                        :storage nil
+                        :inferred {:name parameter :scope :per-voice :curve :linear
+                                   :lane? false
+                                   :default (double (or (:default control) 0.0))}}
+
+                       :else
+                       (fail "a synth binding names a parameter the description does not declare"
+                             {:control control-name :parameter parameter
+                              :parameters (vec (sort (keys declared)))}))))
+                 controls)
+          ;; The shared controls bind the same way, but their scope is the kernel's:
+          ;; the parameter of a shared control is shared, whether the description
+          ;; says so or not, and a `:per-voice` declaration is a contradiction
+          ;; worth failing on.
+           shared-resolved
+           (mapv (fn [control]
+                   (let [control-name (name (:name control))
+                         parameter (get bindings control-name (keyword control-name))
+                         declaration (get declared parameter)]
+                     (cond
+                       (and declaration (= :per-voice (:scope declaration)))
+                       (fail (str "a DSP shared control must bind to a :shared"
+                                  " parameter")
+                             {:control control-name :parameter parameter})
+
+                       declaration
+                       {:control control-name :parameter parameter}
+
+                       :else
+                       {:control control-name :parameter parameter
+                        :inferred {:name parameter :scope :shared :curve :linear
+                                   :lane? false :default 0.0}})))
+                 shared-controls)
+           parameters (reduce (fn [acc {:keys [parameter inferred]}]
+                                (if inferred (assoc acc parameter inferred) acc))
+                              declared
+                              (concat resolved shared-resolved))
+           per-voice-parameters (vec (sort (filter #(= :per-voice (:scope (parameters %)))
+                                                   (keys parameters))))
+           shared-parameters (vec (sort (filter #(= :shared (:scope (parameters %)))
+                                                (keys parameters))))
+           pv-index (zipmap per-voice-parameters (range))
+           sh-index (zipmap shared-parameters (range))
+           plan (mapv (fn [entry]
+                        (let [parameter (:parameter entry)]
+                          (assoc entry :storage
+                                 (or (:storage entry)
+                                     (case (:scope (parameters parameter))
+                                       :per-voice {:kind :per-voice
+                                                   :index (long (get pv-index parameter))}
+                                       :shared {:kind :shared
+                                                :index (long (get sh-index parameter))})))))
+                      resolved)]
+       {:parameters parameters
+        :per-voice-parameters per-voice-parameters
+        :shared-parameters shared-parameters
+        :plan plan
+        :shared-plan (mapv (fn [entry]
+                             (assoc entry
+                                    :storage
+                                    {:kind :shared
+                                     :index (long (get sh-index
+                                                       (:parameter entry)))}))
+                           shared-resolved)}))))
 
 (defn control-plan
   "The ordered control plan for `description`, given the ABI's `controls`.
 
-  `controls` is the artifact's control list, as `{:name ... :type ...}` maps in
-  ABI order. The result is one entry per ABI control, in that order, so that a
-  plan index *is* an ABI index.
-
-  Every ABI control must be mapped. A declared control that the description does
-  not mention is refused rather than defaulted, because a default of zero is
-  indistinguishable from a control the author meant to set — and a silent zero is
-  the worst failure an automation path can have. Use an explicit `:constant`."
-  [description controls]
-  (let [declared (:controls (:voice description))
-        names (mapv (comp name :name) controls)
-        unmapped (remove #(contains? declared %) names)
-        unknown (remove (set names) (keys declared))]
-    (when (seq unmapped)
-      (fail "synth description does not map every voice control"
-            {:unmapped (vec (sort unmapped)) :controls names}))
-    (when (seq unknown)
-      (fail "synth description maps a control the voice does not declare"
-            {:unknown (vec (sort unknown)) :controls names}))
-    (mapv (fn [control]
-            (let [entry (get declared (name (:name control)))]
-              (assoc entry :control (:name control) :type (:type control))))
-          controls)))
+  One entry per ABI *scalar* control, in that order, so a plan index *is* an ABI
+  index. Each entry is `{:control name :type type :parameter name :storage {:kind
+  k :index i}}`. A shared control has no scalar entry; it is in `:shared-plan`."
+  ([description controls] (control-plan description controls nil))
+  ([description controls shared-controls]
+   (:plan (binding-plan description controls shared-controls))))
 
 (defn runtime-config
   "The serialisable sequencing configuration for a description and a voice ABI.
 
   This is the half of a compiled synth that is *not* a kernel: capacities,
-  policies, tuning, and the control plan. It contains only keywords, numbers,
-  strings, and nil, so it can be written to a file or sent to a browser and
-  rebuilt there without a compiler."
-  [description controls]
+  policies, tuning, the parameter declarations, and the control plan. It contains
+  only keywords, numbers, strings, sets, and nil, so it can be written to a file
+  or sent to a browser and rebuilt there without a compiler."
+  ([description controls] (runtime-config description controls nil))
+  ([description controls shared-controls]
   ;; Normalising is idempotent, so an already-normalised description is fine.
-  (let [description (normalize-description description)]
-    {:id (:id description)
-     :capacity (:capacity description)
-     :mode (:mode description)
-     :held-notes (:held-notes description)
-     :bend-range (:bend-range description)
-     :stealing (:stealing description)
-     :tuning (:tuning description)
-     :max-block-frames (:max-block-frames description)
-     :channels (:channels description)
-     :voice-definition (get-in description [:voice :definition])
-     :control-plan (control-plan description controls)}))
+   (let [description (normalize-description description)
+         {:keys [parameters per-voice-parameters shared-parameters plan
+                 shared-plan]}
+         (binding-plan description controls shared-controls)]
+     {:id (:id description)
+      :capacity (:capacity description)
+      :mode (:mode description)
+      :held-notes (:held-notes description)
+      :bend-range (:bend-range description)
+      :stealing (:stealing description)
+      :tuning (:tuning description)
+      :max-block-frames (:max-block-frames description)
+      :channels (:channels description)
+      :voice-definition (get-in description [:voice :definition])
+      :parameters parameters
+      :per-voice-parameters per-voice-parameters
+      :shared-parameters shared-parameters
+      :control-plan plan
+     ;; A shared control's parameter, and where its slice starts in the pool-wide
+     ;; `:shared` region the kernel owns (M5).
+      :shared-plan shared-plan})))

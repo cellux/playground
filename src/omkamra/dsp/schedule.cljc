@@ -189,10 +189,14 @@
   any target dependency: the JVM host passes `omkamra.dsp/process!`, and the
   browser passes whatever drives its kernel.
 
+  `:dispatch!`, when supplied, is called with each segment before `:process!`, so
+  a host that consumes event types other than `:parameter` — a note pool, say —
+  can act at the segment boundary.
+
   Returns `{:segments n :controls controls}`; the returned controls carry the
   parameter changes into the following block, as a host expects."
   [scheduler context]
-  (let [{:keys [input output frames controls control-index
+  (let [{:keys [input output frames controls control-index dispatch!
                 input-scratch output-scratch process!]} context
         controls (or controls [])
         target (or output-scratch output)]
@@ -202,6 +206,7 @@
       (if-let [segment (next-segment! scheduler)]
         (let [offset (long (segment-offset segment))
               segment-frames (long (segment-frames segment))
+              _ (when dispatch! (dispatch! segment))
               controls (apply-parameter-events! segment controls control-index)]
           (when (pos? segment-frames)
             (let [;; A segment starting at 0 renders straight into the block's

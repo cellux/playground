@@ -51,12 +51,40 @@
   without leaking them into portable IR\"."
   (create-voice [kernel max-block-frames]
     "Allocate one voice handle, with its control storage and mixing scratch.")
+  (instance-key [kernel voice]
+    "Any value identifying the kernel *instance* a voice handle lives in.
+
+    The whole contract is equality: two handles of one instance return equal keys,
+    and handles of different instances return different ones. A plain kernel gives
+    every voice its own instance; a *fused* kernel gives S voice handles one
+    instance and one key, which is what lets a pool mix that instance once per
+    block instead of once per slot (M6).
+
+    Keys need not be dense or numeric, because a pool numbers the instances *it*
+    created from them: two pools may share one kernel, so a kernel-wide counter
+    would leave the second pool's keys outside any array it sized for itself.")
   (destroy-voice! [kernel voice]
     "Release a voice handle.")
   (reset-voice! [kernel voice]
     "Return a voice to its initial state (a fresh envelope, zeroed history).")
   (write-voice-controls! [kernel voice values]
     "Publish `values`, a double array in ABI order, as the voice's controls.")
+  (write-voice-lane! [kernel voice lane values]
+    "Publish `values` — one real per frame of the next block — as `lane` of
+    `voice`'s own lane region (D28).
+
+    Every voice has its own region, so a `:shared` parameter's lane is written
+    once per voice by `pool/set-lane!`, while a `:per-voice` one is written for
+    a single voice by `pool/set-voice-lane!`. `lane` may be spelled as a symbol,
+    a keyword, or a string; a name the process does not declare is an error.")
+  (write-shared! [kernel control values]
+    "Publish `values` — one real per frame of the next block — as shared
+    `control`, the pool-wide region every voice reads (M5).
+
+    This is not a voice's storage: the region belongs to the *kernel*, so one
+    call serves the whole pool, and a value a broadcasting host writes once is
+    read by every instance. `control` may be spelled as a symbol, a keyword, or
+    a string; a name the process does not declare is an error.")
   (clear-output! [kernel output frames]
     "Zero `frames` samples of the output block.")
   (mix-voice! [kernel voice output frames sample-rate]
@@ -91,6 +119,21 @@
 (def ^:private mode-mono 1)
 (def ^:private mode-legato 2)
 (def ^:private mode-retrigger 3)
+
+;; Storage kinds, mirroring `omkamra.dsp.synth/storage-kinds`. The pool reads a
+;; plan once, at construction, and the audio path compares numbers.
+(def ^:private storage-runtime 0)
+(def ^:private storage-per-voice 1)
+(def ^:private storage-shared 2)
+
+;; Runtime storage codes, mirroring `omkamra.dsp.synth/runtime-parameters`.
+(def ^:private runtime-gate 0)
+(def ^:private runtime-note 1)
+(def ^:private runtime-velocity 2)
+(def ^:private runtime-frequency 3)
+(def ^:private runtime-bend 4)
+(def ^:private runtime-detune 5)
+(def ^:private runtime-pan 6)
 
 (def ^:private stat-note-ons 0)
 (def ^:private stat-note-offs 1)
@@ -155,9 +198,55 @@
 
 (deftype VoicePool
          [config kernel capacity max-block-frames handles states notes channels ages
-          velocities frequencies sources constants values stats mode
+          velocities frequencies kinds indices values stats mode
+          per-voice-params pv-count shared-params parameter-slots lane-scopes
+          shared-controls shared-buffer slot-owner instance-mixed
           held-notes held-channels held-depth
           detunes bends pans bend-range special-mask activity-position special-values live?])
+
+(defn- fill-broadcast!
+  "Fill a shared region's broadcast buffer with one value.
+
+  A shared control is block-rate, but its region has the lane region's shape, so
+  the value has to sit in every frame of the slice — then any block length reads
+  it (M5)."
+  [^doubles buffer value]
+  (dotimes [index (alength buffer)]
+    (aset buffer index (double value)))
+  buffer)
+
+(defn- lane-scope
+  "The delivery scope of one lane: `:shared` (one curve every voice reads) or
+  `:per-voice` (a curve per voice).
+
+  A lane belongs to a *control* (D46), and the control's storage decides whose
+  values those are: a `:shared` parameter's lane is shared, a `:per-voice` one is
+  per voice. A runtime control is resolved per voice, so its lane is per voice
+  too — except `:bend`, which is per channel and has no per-lane delivery yet.
+
+  A lane-only (`:lane`) control leaves the ABI's scalar list, so it has no plan
+  entry at all; its scope comes from its own parameter declaration, and an
+  undeclared one is per voice — the same inference an unbound ABI control gets.
+  A lane-only parameter has no scalar cell, so declaring one does not allocate
+  storage, it only says whose curve a host is writing."
+  [config lane]
+  (let [name (:name lane)
+        entry (some (fn [entry] (when (= (:control entry) name) entry))
+                    (:control-plan config))]
+    (cond
+      (nil? entry)
+      (if (= :shared (:scope (get (:parameters config) (keyword name))))
+        :shared
+        :per-voice)
+
+      (= :runtime (:kind (:storage entry)))
+      (if (= :bend (:parameter entry))
+        (synth/fail "a lane on a per-channel control has no per-lane delivery yet"
+                    {:lane name :parameter :bend})
+        :per-voice)
+
+      (= :shared (:kind (:storage entry))) :shared
+      :else :per-voice)))
 
 (defn voice-pool
   "Build a pool of `capacity` voices for a runtime configuration and a kernel.
@@ -178,11 +267,43 @@
         held-capacity (long (or (:held-notes config) 1))
         bend-range (double (or (:bend-range config) synth/default-bend-range))
         plan (vec (:control-plan config))
+        ;; Every voice has its own lane region, so a lane's *scope* decides how a
+        ;; host writes it: a `:shared` one is one curve every voice reads, a
+        ;; `:per-voice` one is a curve per voice. Both are delivery, so the pool
+        ;; resolves the scope here rather than refusing either (M4c).
+        lane-scopes (into {}
+                          (map (fn [lane] [(:name lane) (lane-scope config lane)]))
+                          (:lanes config))
+        ;; A `:shared` control reads the pool-wide region the kernel owns, so the
+        ;; pool remembers which *parameter* fills which control, and keeps one
+        ;; buffer for writing a broadcast value into the whole slice (M5).
+        shared-plan (vec (:shared-plan config))
+        shared-controls (into {}
+                              (map (fn [entry]
+                                     [(:parameter entry) (:control entry)]))
+                              shared-plan)
+        shared-buffer (make-doubles (max 1 (long (or (:shared-stride config) 0))))
+        slot-owner (make-longs capacity)
         controls (count plan)
+        parameters (or (:parameters config) {})
+        pv-names (vec (or (:per-voice-parameters config) []))
+        sh-names (vec (or (:shared-parameters config) []))
+        pv-count (long (count pv-names))
+        sh-count (long (count sh-names))
         states (make-longs capacity)
         values (make-doubles controls)
-        sources (make-longs controls)
-        constants (make-doubles controls)
+        kinds (make-longs controls)
+        indices (make-longs controls)
+        per-voice-params (make-doubles (* capacity (max 1 pv-count)))
+        shared-params (make-doubles (max 1 sh-count))
+        parameter-slots (into {}
+                              (concat
+                               (map-indexed (fn [index name]
+                                              [name {:scope :per-voice :index (long index)}])
+                                            pv-names)
+                               (map-indexed (fn [index name]
+                                              [name {:scope :shared :index (long index)}])
+                                            sh-names)))
         handles (make-handles capacity)
         special-mask (long (or (:special-mask config) 0))
         ;; `:activity` is bit 0, the lowest special, so when it is declared it is
@@ -193,19 +314,52 @@
     ;; a kernel instance, a control array, or a mixing buffer.
     (dotimes [index capacity]
       (aset ^objects handles index (create-voice kernel max-block-frames)))
+    ;; A kernel says which of *its* voices share an instance; the pool turns that
+    ;; into a dense owner per slot, so a mark can be one small array of its own —
+    ;; independent of how many voices the kernel has ever made, and correct when
+    ;; two pools share one kernel (M6).
+    (let [key-of (clojure.core/fn [index]
+                   (instance-key kernel (aget ^objects handles (long index))))]
+      (dotimes [index capacity]
+        (let [key (key-of index)
+              twin (first (keep (clojure.core/fn [earlier]
+                                  (when (= key (key-of earlier)) earlier))
+                                (range index)))]
+          (aset ^longs slot-owner index (long (or twin index))))))
     (doseq [[index entry] (map-indexed vector plan)]
-      (let [code (get synth/plan-source-codes (:source entry))]
-        (when-not code
-          (synth/fail "a synth control plan entry has no encodable source"
-                      {:entry entry :supported (vec (sort (keys synth/plan-source-codes)))}))
-        (aset ^longs sources (long index) (long code))
-        (aset ^doubles constants (long index) (double (or (:constant entry) 0.0)))))
+      (let [storage (:storage entry)
+            kind (get synth/storage-kinds (:kind storage))]
+        (when-not kind
+          (synth/fail "a synth control plan entry has no encodable storage"
+                      {:entry entry :supported (vec (sort (keys synth/storage-kinds)))}))
+        (aset ^longs kinds (long index) (long kind))
+        (aset ^longs indices (long index) (long (or (:index storage) 0)))))
+    ;; Every parameter starts at its declared default. A per-voice parameter is
+    ;; replicated to every voice slot and persists across notes; a shared one is
+    ;; a single cell every voice reads.
+    (dotimes [position pv-count]
+      (let [default (double (:default (get parameters (nth pv-names position)) 0.0))]
+        (dotimes [voice capacity]
+          (aset ^doubles per-voice-params (+ (* voice pv-count) position) default))))
+    (dotimes [position sh-count]
+      (aset ^doubles shared-params position
+            (double (:default (get parameters (nth sh-names position)) 0.0))))
+    ;; A voice never writes a shared control: the pool writes the kernel's region
+    ;; once, so the declared defaults have to be there before the first block.
+    (doseq [[parameter control] shared-controls]
+      (write-shared! kernel control
+                     (fill-broadcast! shared-buffer
+                                      (double (:default (get parameters parameter) 0.0)))))
     (VoicePool. config kernel capacity max-block-frames
                 handles
                 states (make-longs capacity) (make-longs capacity) (make-longs capacity)
                 (make-doubles capacity) (make-doubles capacity)
-                sources constants values (make-longs stat-count)
+                kinds indices values (make-longs stat-count)
                 (long mode)
+                per-voice-params pv-count shared-params parameter-slots lane-scopes
+                shared-controls shared-buffer slot-owner
+                ;; One "already mixed this block" mark per *owner slot*.
+                (make-longs capacity)
                 (make-longs held-capacity) (make-longs held-capacity) (make-longs 1)
                 (make-doubles capacity) (make-doubles channel-count) (make-doubles capacity)
                 bend-range
@@ -298,8 +452,8 @@
   The one place a plan becomes numbers. `write-controls!` publishes the result to
   the kernel; `read-controls!` hands it back to a host."
   [^VoicePool pool index ^double gate ^doubles values]
-  (let [^longs sources (.-sources pool)
-        ^doubles constants (.-constants pool)
+  (let [^longs kinds (.-kinds pool)
+        ^longs indices (.-indices pool)
         ^longs notes (.-notes pool)
         ^longs channels (.-channels pool)
         ^doubles velocities (.-velocities pool)
@@ -307,11 +461,15 @@
         ^doubles detunes (.-detunes pool)
         ^doubles bends (.-bends pool)
         ^doubles pans (.-pans pool)
+        ^doubles per-voice-params (.-per-voice-params pool)
+        ^doubles shared-params (.-shared-params pool)
+        base (long (* index (long (.-pv-count pool))))
         bend-range (.-bend-range pool)
         controls (alength values)]
     (loop [position 0]
       (when (< position controls)
-        (let [source (aget sources position)
+        (let [kind (aget kinds position)
+              slot (aget indices position)
               ;; The `double` is load-bearing, not decoration: it is what makes
               ;; the compiler infer a primitive here. Without it `aset` is a
               ;; *reflective* `RT.aset` call -- about 24 KB each, once per
@@ -319,14 +477,19 @@
               ;; warnings are on.
               value (double
                      (cond
-                       (== source 0) gate
-                       (== source 1) (double (aget notes index))
-                       (== source 2) (aget frequencies index)
-                       (== source 3) (aget velocities index)
-                       (== source 4) (aget constants position)
-                       (== source 5) (* bend-range (aget bends (aget channels index)))
-                       (== source 6) (aget detunes index)
-                       :else (aget pans index)))]
+                       (== kind storage-runtime)
+                       (cond
+                         (== slot runtime-gate) gate
+                         (== slot runtime-note) (double (aget notes index))
+                         (== slot runtime-velocity) (aget velocities index)
+                         (== slot runtime-frequency) (aget frequencies index)
+                         (== slot runtime-bend) (* bend-range (aget bends (aget channels index)))
+                         (== slot runtime-detune) (aget detunes index)
+                         (== slot runtime-pan) (aget pans index)
+                         :else 0.0)
+                       (== kind storage-per-voice) (aget per-voice-params (+ base (long slot)))
+                       (== kind storage-shared) (aget shared-params (long slot))
+                       :else 0.0))]
           (aset values position value)
           (recur (inc position)))))
     values))
@@ -416,7 +579,11 @@
     (when-not (and (>= index 0) (< index (.-capacity pool)))
       (synth/fail "a voice pool has no voice at that index"
                   {:index index :capacity (.-capacity pool)}))
-    (aset ^doubles (.-detunes pool) index (double value)))
+    (aset ^doubles (.-detunes pool) index (double value))
+    (let [state (aget ^longs (.-states pool) index)]
+      (when-not (zero? state)
+        (write-controls! pool index
+                         (if (== state voice-active) 1.0 0.0)))))
   nil)
 
 (defn set-pan!
@@ -442,6 +609,115 @@
         (write-controls! pool index
                          (if (== state voice-active) 1.0 0.0)))))
   nil)
+
+;; ---------------------------------------------------------------------------
+;; Host parameter delivery
+;; ---------------------------------------------------------------------------
+
+(defn- parameter-name
+  [x]
+  (cond
+    (keyword? x) x
+    (symbol? x) (if-let [ns (namespace x)]
+                  (keyword ns (name x))
+                  (keyword (name x)))
+    (string? x) (keyword x)
+    :else x))
+
+(defn- parameter-slot!
+  [^VoicePool pool name]
+  (check-live! pool)
+  (let [name (parameter-name name)
+        slot (get (.-parameter-slots pool) name)]
+    (or slot
+        (synth/fail "this voice pool has no such parameter"
+                    {:parameter name
+                     :parameters (vec (sort (keys (.-parameter-slots pool))))}))))
+
+(defn parameter-slot
+  "The storage slot for parameter `name`: `{:scope :per-voice|:shared :index n}`,
+  or nil. A host that runs a post-mix bus reads a shared parameter's slot to wire
+  its own control."
+  [^VoicePool pool name]
+  (get (.-parameter-slots pool) (parameter-name name)))
+
+(defn shared-parameter-values
+  "The pool's shared parameter array, one cell per `:shared` parameter, indexed
+  by `:index` in `parameter-slot`. A host that runs a bus reads it."
+  [^VoicePool pool]
+  (.-shared-params pool))
+
+(defn set-voice-parameter!
+  "Set a `:per-voice` parameter for voice `index`.
+
+  A voice that is sounding re-resolves its controls immediately, so the change
+  reaches the kernel on the next render. A `:shared` parameter belongs to
+  `set-parameter!`."
+  [^VoicePool pool index name value]
+  (let [slot (parameter-slot! pool name)
+        scope (:scope slot)
+        voice (long index)
+        storage (long (:index slot))]
+    (when-not (= :per-voice scope)
+      (synth/fail "this parameter is not per voice"
+                  {:parameter name :scope scope}))
+    (when-not (and (>= voice 0) (< voice (.-capacity pool)))
+      (synth/fail "a voice pool has no voice at that index"
+                  {:index voice :capacity (.-capacity pool)}))
+    (aset ^doubles (.-per-voice-params pool)
+          (+ (* voice (long (.-pv-count pool))) storage)
+          (double value))
+    (let [state (aget ^longs (.-states pool) voice)]
+      (when-not (zero? state)
+        (write-controls! pool voice (if (== state voice-active) 1.0 0.0)))))
+  nil)
+
+(defn set-parameter!
+  "Set a `:shared` parameter: one value every voice reads.
+
+  A parameter bound to a `:shared` *control* is written once into the pool-wide
+  region the kernel owns, and no voice is touched at all — that is the point of
+  the region (M5). A shared parameter bound to an ordinary control still fans out:
+  every sounding voice re-resolves its controls immediately, and a host that also
+  drives a post-mix bus refreshes its own controls from
+  `shared-parameter-values`. A `:per-voice` parameter belongs to
+  `set-voice-parameter!`."
+  [^VoicePool pool name value]
+  (let [slot (parameter-slot! pool name)
+        scope (:scope slot)]
+    (when-not (= :shared scope)
+      (synth/fail "this parameter is not shared"
+                  {:parameter name :scope scope}))
+    (aset ^doubles (.-shared-params pool) (long (:index slot)) (double value))
+    (if-let [control (get (.-shared-controls pool) (parameter-name name))]
+      (write-shared! (.-kernel pool) control
+                     (fill-broadcast! ^doubles (.-shared-buffer pool) value))
+      (let [^longs states (.-states pool)
+            capacity (.-capacity pool)]
+        (dotimes [index capacity]
+          (when-not (zero? (aget states index))
+            (write-controls! pool index
+                             (if (== voice-active (aget states index)) 1.0 0.0))))))
+    nil))
+
+(defn voice-parameter-value
+  "The current value of a `:per-voice` parameter for voice `index`."
+  [^VoicePool pool index name]
+  (let [slot (parameter-slot! pool name)]
+    (when-not (= :per-voice (:scope slot))
+      (synth/fail "this parameter is not per voice"
+                  {:parameter name :scope (:scope slot)}))
+    (aget ^doubles (.-per-voice-params pool)
+          (+ (* (long index) (long (.-pv-count pool))) (long (:index slot))))))
+
+(defn parameter-value
+  "The current value of a `:shared` parameter."
+  [^VoicePool pool name]
+  (let [slot (parameter-slot! pool name)]
+    (when-not (= :shared (:scope slot))
+      (synth/fail "this parameter is not shared"
+                  {:parameter name :scope (:scope slot)}))
+    (aget ^doubles (.-shared-params pool) (long (:index slot)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Starting and stopping one voice
@@ -783,6 +1059,80 @@
 ;; Rendering
 ;; ---------------------------------------------------------------------------
 
+(defn- lane-scope!
+  "The declared scope of `lane`, or a failure.
+
+  A name the pool does not declare is refused here rather than publishing
+  silence, the same way the kernel refuses it — but here the pool can also say
+  whose values the lane wants, which is what the two setters disagree about."
+  [^VoicePool pool lane]
+  (let [key (if (string? lane) lane (clojure.core/name lane))
+        scopes (.-lane-scopes pool)
+        scope (get scopes key)]
+    (or scope
+        (synth/fail "this voice pool declares no such lane"
+                    {:lane lane :lanes (vec (sort (keys scopes)))}))))
+
+(defn set-lane!
+  "Publish `values`, one real per frame of the next block, as the pool's `lane`.
+
+  This is for a `:shared` lane: one curve every voice reads. Every voice has its
+  own lane region (M4c), so the curve is written into each voice's region — a
+  voice that is silent now and starts later still reads it, which is the property
+  one shared region used to give for free.
+
+  `values` is a primitive real array or any sequence of the block's frames; a
+  real-time host writes the region directly instead (M4). A name the process does
+  not declare, or a `:per-voice` one, is refused here: the latter belongs to
+  `set-voice-lane!`."
+  [^VoicePool pool lane values]
+  (check-live! pool)
+  (let [scope (lane-scope! pool lane)]
+    (when-not (= :shared scope)
+      (synth/fail "this lane is not shared: write it per voice"
+                  {:lane lane :scope scope}))
+    (let [kernel (.-kernel pool)
+          capacity (long (.-capacity pool))
+          ^objects handles (.-handles pool)]
+      (dotimes [index capacity]
+        (write-voice-lane! kernel (aget handles index) lane values))))
+  nil)
+
+(defn set-voice-lane!
+  "Publish `values`, one real per frame of the next block, as voice `index`'s
+  `lane`.
+
+  `:per-voice` is the scope a control has by default, so this is the setter for
+  most lanes: each voice gets its own curve, and an unsounding voice keeps the
+  values it was given until it sounds. A `:shared` lane belongs to `set-lane!`."
+  [^VoicePool pool index lane values]
+  (check-live! pool)
+  (let [scope (lane-scope! pool lane)
+        voice (long index)]
+    (when-not (= :per-voice scope)
+      (synth/fail "this lane is shared: write it for the whole pool"
+                  {:lane lane :scope scope}))
+    (when-not (and (>= voice 0) (< voice (long (.-capacity pool))))
+      (synth/fail "a voice pool has no voice at that index"
+                  {:index index :capacity (.-capacity pool)}))
+    (write-voice-lane! (.-kernel pool)
+                       (aget ^objects (.-handles pool) voice) lane values))
+  nil)
+
+(defn- instance-already-mixed?
+  "True when this block has already mixed `voice`'s kernel instance, marking it.
+
+  A fused instance holds S slots and must run once per block, so the first sounding
+  slot of an instance mixes it and the rest of its slots are no-ops. With one
+  instance per voice — every kernel today — the answer is always false and this
+  costs a mark (M6)."
+  [^VoicePool pool index]
+  (let [owner (long (aget ^longs (.-slot-owner pool) (long index)))
+        ^longs mixed (.-instance-mixed pool)]
+    (if (zero? (aget mixed owner))
+      (do (aset mixed owner 1) false)
+      true)))
+
 (defn render!
   "Render `frames` samples of every sounding voice, mixed, into `output`.
 
@@ -806,10 +1156,17 @@
             activity-position (long (.-activity-position pool))
             ^doubles special-values (.-special-values pool)]
         (clear-output! kernel output frames)
+        ;; This block's instance marks (M6). Clearing them is what makes them per
+        ;; block; with one instance per voice they never suppress a mix.
+        (let [^longs mixed (.-instance-mixed pool)]
+          (dotimes [index (alength mixed)]
+            (aset mixed index 0)))
         (loop [index 0]
           (when (< index capacity)
             (when-not (zero? (aget states index))
-              (when (mix-voice! kernel (aget handles index) output frames sample-rate)
+              (when (and (not (instance-already-mixed? pool index))
+                         (mix-voice! kernel (aget handles index) output frames
+                                     sample-rate))
                 (stat-add! (.-stats pool) stat-containment 1))
               ;; A released voice that declares its activity is freed as soon as
               ;; the voice says it is finished (D39). No declaration keeps it

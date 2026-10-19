@@ -6,7 +6,7 @@
             [omkamra.dsp.event :as event]
             [omkamra.dsp.schedule :as schedule]
             #_{:clj-kondo/ignore [:unused-referred-var]}
-            [omkamra.dsp.harness.fixtures :refer [abi-controls allocated-bytes first-difference lane-gain lane-smoothed-gain one-pole one-pole-samples render-automation render-gain render-lane render-manual-split render-on render-single-parameter-event render-timeline smoothed-targets thread-allocation-meter two-lane-mix]]))
+            [omkamra.dsp.harness.fixtures :refer [abi-controls allocated-bytes first-difference lane-carried-control lane-carrying-caller lane-gain lane-smoothed-gain one-pole one-pole-samples render-automation render-gain render-lane render-manual-split render-on render-single-parameter-event render-timeline shared-gain smoothed-targets thread-allocation-meter two-lane-mix]]))
 
 (deftest event-vocabulary-and-ingress-queue
   (testing "the v1 event set accepts valid payloads"
@@ -196,7 +196,8 @@
     (let [abi (:abi (dsp/compile #'lane-gain {:target :interpreter :entry :process}))]
       ;; A lane is not a block-rate scalar, so it leaves `:controls` entirely.
       (is (= [] (:controls abi)))
-      (is (= [{:name 'amount :type :float :role :lane :index 0 :buffer :lanes :offset 0}]
+      (is (= [{:name 'amount :type :float :required? true :role :lane :index 0
+               :buffer :lanes :offset 0}]
              (:lanes abi)))
       (is (= 1024 (:lane-stride abi)))
       (is (some #{:lanes} (mapv :id (:buffers abi))))))
@@ -239,7 +240,8 @@
   (testing "every target describes the same lane region"
     (doseq [target [:interpreter :jvm :js :wasm]]
       (let [abi (:abi (dsp/compile #'lane-gain {:target target :entry :process}))]
-        (is (= [{:name 'amount :type :float :role :lane :index 0 :buffer :lanes :offset 0}]
+        (is (= [{:name 'amount :type :float :required? true :role :lane :index 0
+                 :buffer :lanes :offset 0}]
                (:lanes abi))
             (name target))
         (is (some #{:lanes} (mapv :id (:buffers abi))) (name target)))))
@@ -310,3 +312,115 @@
       (is (thrown-with-msg? clojure.lang.ExceptionInfo #"declares per-frame lanes"
                             (dsp/process-unchecked! artifact (float-array 2) (float-array 2) 2
                                                     48000.0 (float-array 0) (int-array 0)))))))
+
+(deftest a-control-carries-an-optional-lane-beside-its-scalar
+  ;; `:has-lane` is the additive counterpart of `:lane`: the control keeps its
+  ;; block-rate scalar, gains a per-frame lane beside it in the ABI, and the DSP
+  ;; composes the two itself through the `(lane control)` accessor. Because the
+  ;; region is optional, a host that never sends automation gets the scalar.
+  (let [render (fn [target controls lanes frames]
+                 (let [artifact (dsp/compile #'lane-carried-control
+                                             {:target target :entry :process})
+                       output (float-array frames)]
+                   (dsp/process! artifact
+                                 (cond-> {:output output :frames frames
+                                          :sample-rate 48000.0 :controls controls}
+                                   (seq lanes) (assoc :lanes lanes)))
+                   (mapv double (vec output))))]
+    (testing "the control keeps its scalar and gains an optional lane"
+      (let [abi (:abi (dsp/compile #'lane-carried-control {:target :interpreter
+                                                           :entry :process}))]
+        (is (= [{:name 'amount :type :float}] (:controls abi))
+            "the scalar control is unchanged")
+        (is (= [{:name 'amount :type :float :required? false :role :lane :index 0
+                 :buffer :lanes :offset 0}]
+               (:lanes abi))
+            "and the lane beside it is optional, not mandatory")))
+    (testing "the accessor composes the lane with the scalar"
+      (doseq [target [:interpreter :jvm]]
+        (is (= [11.0 12.0 13.0]
+               (render target [10.0] {'amount (float-array [1.0 2.0 3.0])} 3))
+            (name target))))
+    (testing "with no lane data the scalar stands, because an absent lane reads zero"
+      (doseq [target [:interpreter :jvm]]
+        (is (= [10.0 10.0 10.0] (render target [10.0] nil 3)) (name target))))
+    (testing "a mandatory lane still has to be supplied"
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"declares per-frame lanes"
+                            (render-lane #'lane-gain nil 2))))
+    (testing "an accessor with no lane is refused"
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"carries no lane"
+           (dsp/compile {:dsp/kind :function
+                         :name 'no-lane
+                         :params '[sample amount]
+                         :process {:controls [{:name 'amount}]}
+                         :body '[(lane amount)]}
+                        {:target :interpreter :entry :process}))))
+    (testing "an accessor inside a callee is refused"
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"only available in the entry process"
+           (dsp/compile #'lane-carrying-caller {:target :interpreter :entry :process}))))
+    (testing "a control cannot be a lane and lane-carrying at once"
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"cannot be a lane and lane-carrying"
+           (descriptor/normalize {:dsp/kind :function
+                                  :name 'both
+                                  :params '[amount]
+                                  :process {:input false
+                                            :controls [{:name 'amount
+                                                        :lane true
+                                                        :has-lane true}]}
+                                  :body [1.0]}))))))
+
+(deftest a-shared-control-is-read-from-the-pool-wide-region
+  ;; A shared control leaves the scalar control list and is read from the
+  ;; process's `:shared` region instead — one region for the whole pool, so a
+  ;; broadcast parameter is written once rather than once per voice (M5). The
+  ;; region has the same shape as a lane region, so it reuses the lane address
+  ;; and a host with a per-frame global curve can write one.
+  (let [render (fn [target shared]
+                 (let [artifact (dsp/compile #'shared-gain {:target target
+                                                            :entry :process})
+                       output (if (= :f64 (:precision artifact))
+                                (double-array 4) (float-array 4))]
+                   (dsp/process! artifact {:output output :frames 4
+                                           :sample-rate 48000.0
+                                           :controls [] :shared shared})
+                   (mapv double (vec output))))]
+    (testing "the region's value is the control"
+      (is (= [1.5 1.5 1.5 1.5] (render :interpreter {:amount 0.5})))
+      (is (= [1.5 1.5 1.5 1.5] (render :jvm {:amount 0.5})) "the two hosts agree"))
+    (testing "a value the host writes reads for every frame of the block"
+      (is (= [1.0 1.0 1.0 1.0] (render :jvm {:amount 0.0}))))
+    (testing "a sequence is a per-frame global curve"
+      (is (= [1.0 2.0 3.0 4.0] (render :jvm {:amount (list 0.0 1.0 2.0 3.0)}))))
+    (testing "a shared control is a region, not a scalar control"
+      (let [abi (:abi (dsp/compile #'shared-gain {:target :interpreter
+                                                  :entry :process}))]
+        (is (= [] (mapv :name (:controls abi))))
+        (is (= '[amount] (mapv :name (:shared abi))))
+        (is (= (:lane-stride abi) (:shared-stride abi))
+            "the shared and lane regions have one stride, so one addressing")))
+    (testing "a missing shared region is refused rather than read as zeros"
+      (let [artifact (dsp/compile #'shared-gain {:target :jvm :entry :process})]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"shared control has no value"
+                              (dsp/process! artifact {:output (float-array 4)
+                                                      :frames 4
+                                                      :sample-rate 48000.0
+                                                      :controls []
+                                                      :shared {}})))))
+    (testing "a control cannot be shared and a lane at once"
+      (is (thrown-with-msg?
+           clojure.lang.ExceptionInfo
+           #"cannot be a shared variable and a lane"
+           (descriptor/normalize {:dsp/kind :function
+                                  :name 'both
+                                  :params '[amount]
+                                  :process {:input false
+                                            :controls [{:name 'amount
+                                                        :shared true
+                                                        :lane true}]}
+                                  :body [1.0]}))))))

@@ -65,10 +65,17 @@ Reload namespaces through `omkamra.dev.tools/reload`; do not use
   removed vars disappear and `deftype`/`defrecord` get fresh classes, preserves
   `defonce` values, and reports **every** failure in one compact, serializable
   map.
+- It only concerns namespaces **this session has already loaded at least once**:
+  reload refreshes the image, it does not grow it. A changed file whose namespace
+  was never loaded is left alone and summarised under `:not-loaded`; load it with
+  `require`, which is the verb for bringing code in.
 - A call with nothing to do says `:status :unchanged`; it never silently no-ops.
 - `(tools/reload 'my.ns)`, `(tools/reload '[a b])`, and `(tools/reload :all)`
-  ignore detection and force the named namespaces (and their dependents). Use
-  them when you are unsure whether the baseline saw an edit.
+  ignore detection and force the **loaded** named namespaces (and their loaded
+  dependents). Use them when you are unsure whether the baseline saw an edit.
+- A detection-driven reload that would refresh the whole session — a poisoned
+  baseline, or a check-out that rewrites the tree — refuses with
+  `:status :refused` rather than doing it; its `:note` says how to mean it.
 - There is no initialization step: `reload` scopes itself to the classpath
   source directories. To scan elsewhere, pass a scope map, e.g.
   `(tools/reload {:dirs ["src"]})`.

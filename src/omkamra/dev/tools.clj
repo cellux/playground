@@ -11,8 +11,17 @@
     each changed namespace and its transitive dependents, unloads before
     loading, and preserves `defonce` values. It also accepts explicit namespace
     targets, which ignore detection entirely.
+  * `reload` only concerns namespaces **this session has loaded at least once**,
+    and among those the ones that changed or that depend on one that did: it
+    refreshes the image, it does not grow it. Loading is `require`'s job, and a
+    changed file whose namespace has never been loaded is reported under
+    `:not-loaded`. A namespace a *failed* reload left unloaded is still the
+    tool's business, because it has run here.
   * `reload` reports every failure, not just the first, in a compact,
     serializable map. A call with nothing to do says so explicitly.
+  * A detection-driven reload that would rebuild the **whole** live image
+    refuses and says so, rather than act on a baseline that no longer describes
+    the tree; `:all`, or naming namespaces, is how to mean it.
   * There is no initialization step: `reload` scopes itself to the classpath
     source directories on first use. Pass a scope map to scan elsewhere.
   * `create-persistent-alias!` registers an alias that stays usable when its
@@ -30,17 +39,28 @@
   fresh classes while `defonce` values are preserved.
 
   `(reload 'my.ns)`, `(reload '[a b])`, and `(reload :all)` ignore detection and
-  reload exactly the named namespaces (and their dependents), which is the
-  deterministic escape hatch when no baseline can know about an edit.
+  force the loaded namespaces among those named (and their loaded dependents),
+  which is the deterministic escape hatch when no baseline can know about an
+  edit. A namespace that is not loaded is still left alone: a reload refreshes
+  the image, it does not grow it, and `require` is what brings code in.
 
   A map argument sets the scan scope and then reloads what changed under it, so
   `(reload {:dirs [\"src\"]})` scans just `src`. The classpath source
   directories are the default, and the scope persists for later calls.
 
-  The result has `:status` (`:reloaded`, `:unchanged`, or `:errors`), `:changed`
-  (the roots), `:reloaded` and `:unloaded` (topological order), `:kept`,
-  `:failed` (all of them, each with a concise `:message` and location), and
-  `:scanned`. No exception objects are returned."
+  The result has `:status` (`:reloaded`, `:unchanged`, `:errors`, or `:refused`),
+  `:changed` (the roots), `:reloaded` and `:unloaded` (topological order),
+  `:kept`, `:failed` (all of them, each with a concise `:message` and location),
+  `:scanned`, `:not-loaded` as a `{:count :sample}` summary of the namespaces a
+  reload declined to load, and `:would-reload` when a reload was refused. No
+  exception objects are returned.
+
+  Detection can lose the tree — a baseline that no longer describes it, after a
+  check-out or a corruption, makes *every* file look changed — so a
+  detection-driven reload that would rebuild the **whole** live image refuses
+  instead: `:status` is `:refused`, `:would-reload` says what it would have
+  done, and `:note` names the way through. A change to a widely used namespace
+  still cascades normally."
   ([] (reloader/reload))
   ([target-or-options] (reloader/reload target-or-options)))
 

@@ -4,6 +4,7 @@
             [clojure.string :as str]
             [cheshire.core :as json]
             [omkamra.dsp :as dsp]
+            [omkamra.dsp.harness.bench :as bench]
             [omkamra.dsp.harness.catalog :as catalog]
             [omkamra.dsp.harness.conformance :as conformance]
             [omkamra.dsp.harness.fixtures :as fixtures]
@@ -234,6 +235,38 @@
         (worklet-source wasm-worklet-source "omkamra-dsp-wasm-kernel" {}))))
 
 ;; ---------------------------------------------------------------------------
+;; The worker-to-worklet event transport (M1)
+;; ---------------------------------------------------------------------------
+
+(defn follow-amount-source
+  "The `follow-amount` kernel as a standalone JavaScript module."
+  [_request]
+  (javascript-response
+   (:source (dsp/compile fixtures/follow-amount
+                         {:target :js :entry :process :precision :f32}))))
+
+(defn- transport-metadata
+  []
+  (let [abi (:abi (dsp/compile fixtures/follow-amount
+                               {:target :js :entry :process :precision :f32}))]
+    {:kernel-url "/omkamra/dsp/harness/testbed/follow-amount-source"
+     :channels (long (get-in abi [:channels :count] 1))
+     :input-channels (count (:inputs abi))
+     :control-names [(name (:name (first (:controls abi))))]
+     :event-capacity 256}))
+
+(defn transport-worklet
+  "The JavaScript adapter serving the `follow-amount` kernel, with an event
+  ingress queue, for the worker-to-worklet transport check."
+  [_request]
+  (let [metadata (transport-metadata)]
+    (javascript-response
+     (str "import * as squint_core from '/omkamra/dsp/harness/testbed/squint-core';\n"
+          "import { createKernel } from '" (:kernel-url metadata) "';\n"
+          (worklet-source javascript-worklet-source "omkamra-dsp-transport"
+                          metadata)))))
+
+;; ---------------------------------------------------------------------------
 ;; The browser pool host (P10d)
 ;; ---------------------------------------------------------------------------
 
@@ -277,6 +310,169 @@
   [request]
   (javascript-response
    (:source (:artifact (browser-synth-bundle :js (requested-precision request))))))
+
+;; A fused pool: `slots` handles behind one `(poly slots voice)` process (M6c).
+;; The page renders this pool and the interpreter pool over the *base* voice side
+;; by side -- the base artifact is the oracle, so the check is differential, and
+;; the fused artifact is the kernel the browser hosts run.
+
+(defn- requested-slots
+  [request]
+  (or (some-> (request-parameter request "slots") parse-long) 2))
+
+(defn- browser-fused-pair
+  "The shipping fused lowering (D52): the base bundle for the interpreter oracle,
+  and a bundle compiled with `:fusion {:slots n}` for the kernel. Both describe
+  the same voice, so the pool is base-shaped either way."
+  [target precision slots]
+  (let [description (assoc fixtures/fused-browser-description
+                           :capacity slots :max-block-frames 128)]
+    {:base (hosts/synth-bundle description {:target target :precision precision})
+     :fused (hosts/synth-bundle description {:target target :precision precision
+                                             :fusion {:slots slots}})}))
+
+(defn fused-pool-bundle
+  "Serve what the browser fused pool host needs: the base artifact's ABI and IR
+  (the interpreter oracle), the fused artifact's ABI, the `:fusion` mapping, and,
+  for a Wasm target, the fused module's WAT and memory layout. The JavaScript
+  kernel module is served as text by `fused-pool-source`."
+  [request]
+  (let [target (requested-target request)
+        precision (requested-precision request)
+        {:keys [base fused]} (browser-fused-pair target precision
+                                                 (requested-slots request))
+        base-artifact (:artifact base)
+        fused-artifact (:artifact fused)]
+    {:status 200
+     :headers {"content-type" "application/edn; charset=utf-8"
+               "cache-control" "no-store"}
+     :body (pr-str (cond-> {:runtime (:runtime base)
+                            :fusion (:fusion (:runtime fused))
+                            :base-abi (:abi base-artifact)
+                            :base-ir (pr-str (:ir base-artifact))
+                            :abi (:abi fused-artifact)
+                            :precision precision
+                            :target target}
+                     (= :wasm target)
+                     (assoc :wat (:wat fused-artifact)
+                            :memory (:memory fused-artifact))))}))
+
+(defn fused-pool-source
+  "Serve the shipping fused lowering as a JavaScript ES module: the kernel the
+  page imports for the fused pool."
+  [request]
+  (javascript-response
+   (:source (:artifact (:fused (browser-fused-pair
+                                :js (requested-precision request)
+                                (requested-slots request)))))))
+
+;; A pool of N independent kernel instances, against one `(poly N voice)`. The
+;; same voice either way, so the page can time them against each other and D45
+;; gets data instead of reasoning.
+
+(defn- requested-voices
+  [request]
+  (or (some-> (request-parameter request "voices") parse-long) 8))
+(defn- requested-arm
+  "`?inline=1` asks for the lowering every target had before D47: every definition
+  copied into its call sites. D45's pool-against-fused numbers were taken with it, so
+  it is the other arm of a called-against-inlined comparison."
+  [request]
+  (if (= "1" (request-parameter request "inline")) :inlined :called))
+
+(defn- bench-description
+  "The benchmarked voice as a *pool* description of `?voices=` voices."
+  [request]
+  (assoc fixtures/sine-voice-description :capacity (requested-voices request)))
+
+(defn- bench-fused-artifact
+  "The same voice lowered as one `(poly n voice)` process, in the requested arm."
+  [request target precision]
+  (dsp/compile (bench/unit (requested-arm request)
+                           (var-get #'fixtures/sine-voice)
+                           (requested-voices request))
+               {:target target :entry :process :precision precision}))
+
+(defn bench-bundle
+  "Serve the benchmark voice as a synth bundle: the *pool* side."
+  [request]
+  (let [target (requested-target request)]
+    (bundle-response target
+                     (browser-synth-bundle target (requested-precision request)
+                                           (bench-description request)))))
+
+(defn bench-source
+  "Serve the benchmark voice as a JavaScript ES module: the *pool* side."
+  [request]
+  (javascript-response
+   (:source (:artifact (browser-synth-bundle :js (requested-precision request)
+                                             (bench-description request))))))
+
+(defn fused-bundle
+  "Serve `(poly n voice)` as one artifact: the *fused* side."
+  [request]
+  (let [target (requested-target request)]
+    (bundle-response target
+                     {:artifact (bench-fused-artifact request target
+                                                      (requested-precision request))})))
+
+(defn fused-source
+  "Serve `(poly n voice)` as a JavaScript ES module: the *fused* side."
+  [request]
+  (javascript-response
+   (:source (bench-fused-artifact request :js (requested-precision request)))))
+
+(defn lane-bundle
+  "Serve the automation-lane voice's runtime, ABI, interpreter IR, and Wasm
+  layout, so the browser pool hosts can be checked on lane delivery (M4b)."
+  [request]
+  (let [target (requested-target request)]
+    (bundle-response target
+                     (browser-synth-bundle target (requested-precision request)
+                                           fixtures/lane-voice-description))))
+
+(defn lane-source
+  "Serve the automation-lane voice as a JavaScript ES module."
+  [request]
+  (javascript-response
+   (:source (:artifact (browser-synth-bundle :js (requested-precision request)
+                                             fixtures/lane-voice-description)))))
+
+(defn voice-lane-bundle
+  "Serve the automation-lane voice with a *per-voice* lane, so the browser pool
+  hosts can be checked on per-voice delivery (M4c)."
+  [request]
+  (let [target (requested-target request)]
+    (bundle-response target
+                     (browser-synth-bundle
+                      target (requested-precision request)
+                      (assoc-in fixtures/lane-voice-description
+                                [:parameters :amount :scope] :per-voice)))))
+
+(defn voice-lane-source
+  "Serve the per-voice-lane voice as a JavaScript ES module."
+  [request]
+  (javascript-response
+   (:source (:artifact (browser-synth-bundle
+                        :js (requested-precision request)
+                        (assoc-in fixtures/lane-voice-description
+                                  [:parameters :amount :scope] :per-voice))))))
+
+(defn shared-voice-bundle
+  "Serve a voice with a *shared* control, so the browser pool hosts can be checked
+  on the pool-wide shared region (M5)."
+  [request]
+  (let [target (requested-target request)]
+    (bundle-response target
+                     (browser-synth-bundle target (requested-precision request)
+                                           fixtures/shared-voice-description))))
+
+(defn shared-voice-source
+  "Serve the shared-control voice as a JavaScript ES module."
+  [request]
+  (javascript-response
+   (:source (:artifact (browser-synth-bundle :js (requested-precision request)
+                                             fixtures/shared-voice-description)))))
 
 (defn- containment-description
   "Select one of the shared containment fixtures (P10c) by `?case=`."

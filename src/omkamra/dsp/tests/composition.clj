@@ -275,9 +275,10 @@
         (is (= 1 (long mask))
             (str "the ABI exposes the special mask on " target))))))
 
-;; A special is the entry process's host-facing contract. A callee that writes
-;; one would have its slot buried in a call partition, so lowering refuses it
-;; rather than silently exposing a slot no host reads.
+;; A callee may publish a special of its own (M6 seam 4). It is not the entry's
+;; contract, so it does not appear in the ABI's `:special-slots`; instead the call
+;; site's partition records it, so a fused host can read one slot's activity and
+;; free it. The slot is buried in the partition, but it is published, not lost.
 (omkamra.dsp/defn special-callee
   [x]
   (do (store-special :activity 1)
@@ -288,11 +289,16 @@
   {:process {:input false :controls []}}
   (special-callee 0.5))
 
-(deftest a-callee-cannot-publish-a-special
-  (let [error (try
-                (dsp/compile #'special-caller {:target :interpreter :entry :process})
-                nil
-                (catch clojure.lang.ExceptionInfo e e))]
-    (is (some? error) "lowering refuses a callee that publishes a special")
-    (is (re-find #"store-special is only available in the entry definition"
-                 (ex-message error)))))
+(deftest a-callee-special-is-published-per-partition
+  (doseq [target [:interpreter :jvm]]
+    (let [artifact (dsp/compile #'special-caller {:target target :entry :process})
+          partition (first (:call-partitions (:ir artifact)))]
+      (is (= 1 (count (:call-partitions (:ir artifact))))
+          (str (name target) ": the callee owns one partition"))
+      (is (= [{:special :activity :bit 0 :type :int :size 1 :index 0}]
+             (:specials partition))
+          (str (name target) ": its activity slot is recorded against the call site"))
+      (is (= 1 (long (:special-mask partition))))
+      (is (= 0 (long (get-in artifact [:abi :special-mask])))
+          (str (name target) ": it is still not the entry's own contract"))
+      (is (= {} (get-in artifact [:abi :special-slots]))))))

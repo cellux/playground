@@ -791,7 +791,7 @@
   callable does not pass it. `:controls` is a vector in process-signature
   order. This function is the reference implementation used by richer host
   adapters and by the browser conformance runner."
-  [ir {:keys [input output lanes frames controls state sample-rate]
+  [ir {:keys [input output lanes shared frames controls state sample-rate]
        :or {controls [] sample-rate 0.0}}]
   (with-dsp-precision (precision! ir)
     (fn []
@@ -818,9 +818,10 @@
                       :checks (get-in ir [:options :checks] :development)
                       :state state
                       :definitions (:definitions ir)}
-               ;; Buffers resolve by id, so the lane region needs only to be
-               ;; present under its own name.
-               lanes (assoc :lanes lanes))))
+               ;; Buffers resolve by id, so the lane and shared regions need
+               ;; only to be present under their own names.
+               lanes (assoc :lanes lanes)
+               shared (assoc :shared shared))))
           nil)))))
 
 (defn process

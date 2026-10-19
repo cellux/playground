@@ -9,7 +9,7 @@
             [omkamra.dsp.descriptor :as descriptor]))
 
 (def ^:private language-forms
-  (into '#{if let do set! while break continue buffer-load buffer-store
+  (into '#{if let do set! while break continue buffer-load buffer-store lane
            state-load state-store store-special array array-load array-store aget aset
            field set-field! int->float float->int
            + - * / = not= < <= > >= and or not

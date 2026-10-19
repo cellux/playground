@@ -13,6 +13,7 @@
             [goog.object :as gobj]
             [omkamra.dsp.harness.catalog :as catalog]
             [omkamra.dsp.event :as event]
+            [omkamra.dsp.hosts.fusion :as fusion]
             [omkamra.dsp.hosts.interpreter :as interpreter-host]
             [omkamra.dsp.hosts.js :as js-host]
             [omkamra.dsp.hosts.wasm :as wasm-host]
@@ -416,16 +417,16 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- run-process-matrix-precision!
-  [precision]
+  [precision cases]
   (letfn [(run [remaining results]
             (if-let [c (first remaining)]
               (-> (run-process-case! c precision)
                   (.then #(run (next remaining) (conj results %))))
               (js/Promise.resolve results)))]
-    (run (filter process-case? catalog/cases) [])))
+    (run cases [])))
 
 (defn- run-function-matrix-precision!
-  [precision]
+  [precision cases]
   (letfn [(run [remaining results]
             (if-let [c (first remaining)]
               (-> (run-function-case! c precision)
@@ -435,10 +436,7 @@
                                                      :javascript
                                                      (not (false? (:passed? result)))))))))
               (js/Promise.resolve results)))]
-    (run (filter #(and (catalog/function-case? %)
-                       (some #{precision} (:precisions %)))
-                 catalog/all-cases)
-         [])))
+    (run (filterv #(some #{precision} (:precisions %)) cases) [])))
 
 (defn- matrix-result
   [label targets cases]
@@ -457,19 +455,19 @@
                 cases)})
 
 (defn- run-process-matrix!
-  []
-  (-> (run-process-matrix-precision! :f32)
+  [cases]
+  (-> (run-process-matrix-precision! :f32 cases)
       (.then (fn [f32]
-               (-> (run-process-matrix-precision! :f64)
+               (-> (run-process-matrix-precision! :f64 cases)
                    (.then (fn [f64]
                             [(matrix-result "shared process matrix f32" [:js :wasm] f32)
                              (matrix-result "shared process matrix f64" [:js :wasm] f64)])))))))
 
 (defn- run-function-matrix!
-  []
-  (-> (run-function-matrix-precision! :f32)
+  [cases]
+  (-> (run-function-matrix-precision! :f32 cases)
       (.then (fn [f32]
-               (-> (run-function-matrix-precision! :f64)
+               (-> (run-function-matrix-precision! :f64 cases)
                    (.then (fn [f64]
                             [(matrix-result "shared function matrix f32" [:js] f32)
                              (matrix-result "shared function matrix f64" [:js] f64)])))))))
@@ -563,6 +561,69 @@
                    (js/clearTimeout timeout)
                    (resolve)))))
        (.postMessage (.-port node) #js {:type "reset"})))))
+
+(defn- transport-test
+  "M1's browser transport: a Web Worker posts timestamped events on a
+  `MessageChannel` to the AudioWorklet, which buffers them and applies each at
+  its exact frame.
+
+  The kernel is `follow-amount`, a generator whose samples equal the `amount`
+  control, so the rendered block is a step function of the events: silence until
+  frame 17, then 0.5, 0.9, and 0.6 at 17, 40, and 155."
+  []
+  (let [context (js/OfflineAudioContext. 1 256 44100)
+        timeline #js [#js [17 0.5] #js [40 0.9] #js [155 0.6]]]
+    (-> (.addModule (.-audioWorklet context)
+                    (str "/omkamra/dsp/harness/testbed/transport-worklet?v="
+                         (js/Date.now)))
+        (.then
+         (fn [_]
+           (let [node (js/AudioWorkletNode.
+                       context "omkamra-dsp-transport"
+                       #js {:numberOfInputs 0
+                            :numberOfOutputs 1
+                            :channelCount 1
+                            :channelCountMode "explicit"
+                            :outputChannelCount #js [1]
+                            :processorOptions #js {:kernelUrl "/omkamra/dsp/harness/testbed/follow-amount-source"
+                                                   :inputChannels 0
+                                                   :channels 1
+                                                   :eventCapacity 256
+                                                   :controlNames #js ["amount"]
+                                                   :controlDefaults #js [0.0]}})
+                 worker (js/Worker. "/omkamra/dsp/hosts/worker/main.js")
+                 channel (js/MessageChannel.)
+                 ready (js/Promise.
+                        (fn [resolve reject]
+                          (let [timeout (js/setTimeout
+                                         #(reject (js/Error. "events did not reach the worklet"))
+                                         5000)]
+                            (set! (.-onmessage (.-port node))
+                                  (fn [event]
+                                    (when (= "events-ready" (.-type (.-data event)))
+                                      (js/clearTimeout timeout)
+                                      (resolve)))))))]
+             (.connect node (.-destination context))
+             ;; One end of the channel to the worklet, the other to the worker:
+             ;; the worker produces, the worklet consumes at its own timeline.
+             (.postMessage (.-port node) #js {:type "connect"}
+                           #js [(.-port2 channel)])
+             (.postMessage worker #js {:control "amount" :timeline timeline}
+                           #js [(.-port1 channel)])
+             (.then ready (fn [_] (.startRendering context))))))
+        (.then
+         (fn [buffer]
+           (let [data (.getChannelData buffer 0)
+                 close? (fn [expected index]
+                          (< (js/Math.abs (- (aget data index) expected)) 1.0e-6))
+                 at (fn [expected from to]
+                      (every? (fn [index] (close? expected index)) (range from to)))]
+             (require! (and (at 0.0 0 17) (at 0.5 17 40)
+                            (at 0.9 40 155) (at 0.6 155 256))
+                       "the worklet did not apply the worker's events at their exact frames")
+             {:name "worker event transport"
+              :passed? true
+              :detail "worker posted 3 events; the worklet stepped the control at frames 17, 40, and 155"}))))))
 
 (defn- audio-worklet-test
   ([] (audio-worklet-test :f32))
@@ -1252,13 +1313,42 @@
       (aset block channel (js/Float32Array. frames)))
     block))
 
+(defn- real->vector
+  "A JS typed array as a vector of reals.
+
+  `array-seq` does not walk a typed array under the Squint compiler — it yields
+  nothing — so every sample comparison in this harness goes through an explicit
+  index loop. A check that compares two blocks of nothing passes, which is the
+  one failure mode the harness must not have."
+  [values]
+  (mapv (clojure.core/fn [index] (aget values index))
+        (range (.-length values))))
+
+(defn- render-block
+  "The output buffer `pool/render!` wants for `channels` and `frames`.
+
+  A mono voice's block *is* the sample array, which is what `mixing/channel-of`
+  means; only a multi-channel one is planar. A planar block handed to a mono
+  runtime is written through as if it were the samples themselves."
+  [channels frames]
+  (if (= 1 channels)
+    (js/Float32Array. frames)
+    (planar-block channels frames)))
+
+(defn- block->vectors
+  "A rendered block as a vector of per-channel sample vectors."
+  [block channels]
+  (if (= 1 channels)
+    [(real->vector block)]
+    (mapv (clojure.core/fn [channel] (real->vector (aget block channel)))
+          (range channels))))
+
 (defn- render-pool
   "Render `frames` through `pool`, as a vector of channel sample vectors."
   [pool channels frames]
-  (let [block (planar-block channels frames)]
+  (let [block (render-block channels frames)]
     (pool/render! pool block frames 48000.0)
-    (mapv (clojure.core/fn [channel] (vec (array-seq (aget block channel))))
-          (range channels))))
+    (block->vectors block channels)))
 
 (defn- play-note
   "Play one note through `pool`: a held block, then the block after release.
@@ -1335,6 +1425,565 @@
                    (get-in abi [:channels :count])
                    (wasm-host/wasm-kernel module abi (:memory bundle)
                                           {:precision (:precision bundle)}))))))))))
+
+(defn- check-lane-pool
+  "Compare a pool's lane delivery on a browser kernel against the interpreter
+  pool: the same shared lane, the same note, the same block.
+
+  The JavaScript host hands the region to the generated process; the Wasm host
+  copies it into each instance's linear memory. Both must render what the
+  interpreter pool renders (M4b)."
+  [name runtime abi ir channels kernel]
+  (let [lane (js/Float32Array. #js [1.0 2.0 3.0 4.0])
+        play (clojure.core/fn [k]
+               (let [p (pool/voice-pool runtime k)
+                     block (render-block channels 4)]
+                 (pool/set-lane! p "amount" lane)
+                 (pool/note-on! p 60 1.0)
+                 (pool/render! p block 4 48000.0)
+                 (block->vectors block channels)))
+        actual (play kernel)
+        expected (play (interpreter-host/interpreter-kernel ir abi))]
+    (require! (= actual expected)
+              (str name " drifted from the interpreter: "
+                   (pr-str actual) " vs " (pr-str expected)))
+    (require! (= expected [[11.0 12.0 13.0 14.0]])
+              (str name ": a lane of 1,2,3,4 beside a scalar of 10 must render"
+                   " 11..14, not " (pr-str expected)))
+    {:name name
+     :passed? true
+     :detail (str "a shared lane rendered " (count (first actual))
+                  " frames across " channels " channels, matching the interpreter")}))
+
+(defn- javascript-lane-test
+  "The JavaScript host: the region is handed to the generated process."
+  []
+  (-> (js/Promise.all
+       #js [(fetch-edn "/omkamra/dsp/harness/testbed/lane-bundle")
+            (response-text "/omkamra/dsp/harness/testbed/lane-source")])
+      (.then
+       (clojure.core/fn [[bundle source]]
+         (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
+               url (js/URL.createObjectURL blob)]
+           (-> (dynamic-import url)
+               (.then
+                (clojure.core/fn [module]
+                  (let [abi (:abi bundle)]
+                    (check-lane-pool
+                     "JavaScript lane delivery"
+                     (:runtime bundle) abi (reader/read-string (:ir bundle))
+                     (or (get-in abi [:channels :count]) 1)
+                     (js-host/js-kernel (gobj/get module "createKernel") abi
+                                        {:precision (:precision bundle)})))))
+               (.finally (clojure.core/fn [] (js/URL.revokeObjectURL url)))))))))
+
+(defn- wasm-lane-test
+  "The Wasm host: the region is copied into each instance's linear memory."
+  []
+  (-> (fetch-edn "/omkamra/dsp/harness/testbed/lane-bundle?target=wasm")
+      (.then
+       (clojure.core/fn [bundle]
+         (-> (compile-wasm (:wat bundle))
+             (.then
+              (clojure.core/fn [bytes]
+                (let [module (js/WebAssembly.Module. bytes)
+                      abi (:abi bundle)]
+                  (check-lane-pool
+                   "Wasm lane delivery"
+                   (:runtime bundle) abi (reader/read-string (:ir bundle))
+                   (or (get-in abi [:channels :count]) 1)
+                   (wasm-host/wasm-kernel module abi (:memory bundle)
+                                          {:precision (:precision bundle)}))))))))))
+
+(defn- check-voice-lane-pool
+  "Compare a pool's *per-voice* lane delivery on a browser kernel against the
+  interpreter pool: two voices, two different curves, one block.
+
+  A per-voice lane needs a region per voice, which the JavaScript host hands to
+  each kernel and the Wasm host writes straight into each instance's own memory
+  (M4c). The values are the ones `omkamra.dsp.tests.synth` uses on the JVM, so
+  the two sides of the project pin the same numbers."
+  [name runtime abi ir channels kernel]
+  (let [first-lane (js/Float32Array. #js [1.0 2.0 3.0 4.0])
+        second-lane (js/Float32Array. #js [10.0 10.0 10.0 10.0])
+        play (clojure.core/fn [k]
+               (let [p (pool/voice-pool runtime k)
+                     block (render-block channels 4)]
+                 (pool/set-voice-lane! p 0 "amount" first-lane)
+                 (pool/set-voice-lane! p 1 "amount" second-lane)
+                 (pool/note-on! p 60 1.0)
+                 (pool/note-on! p 64 1.0)
+                 (pool/render! p block 4 48000.0)
+                 (block->vectors block channels)))
+        actual (play kernel)
+        expected (play (interpreter-host/interpreter-kernel ir abi))]
+    (require! (= actual expected)
+              (str name " drifted from the interpreter: "
+                   (pr-str actual) " vs " (pr-str expected)))
+    (require! (= expected [[31.0 32.0 33.0 34.0]])
+              (str name ": (10+1..4) + (10+10) must render 31..34, not "
+                   (pr-str expected)))
+    {:name name
+     :passed? true
+     :detail (str "two voices, each with its own lane, matched the interpreter"
+                  " over " (* (count actual) 4) " frames")}))
+
+(defn- check-shared-pool
+  "Compare a pool's shared-region delivery on a browser kernel against the
+  interpreter pool: one parameter, two voices, one block.
+
+  A shared control is not a voice's storage — the kernel owns one region for the
+  whole pool — so one `set-parameter!` reaches both voices, including a voice that
+  starts after it (M5). The numbers are literal as well as differential, so a
+  comparison of two blocks of nothing cannot pass.
+  "
+  [name runtime abi ir channels kernel]
+  (let [play (clojure.core/fn [k]
+               (let [p (pool/voice-pool runtime k)
+                     default-block (render-block channels 4)
+                     block (render-block channels 4)]
+                 (pool/note-on! p 60 1.0)
+                 (pool/note-on! p 64 1.0)
+                 (pool/render! p default-block 4 48000.0)
+                 (pool/set-parameter! p "amount" 0.5)
+                 (pool/render! p block 4 48000.0)
+                 [(block->vectors default-block channels)
+                  (block->vectors block channels)]))
+        [default-actual actual] (play kernel)
+        [default-expected expected] (play (interpreter-host/interpreter-kernel ir abi))]
+    (require! (= default-actual default-expected)
+              (str name " drifted from the interpreter on the default: "
+                   (pr-str default-actual) " vs " (pr-str default-expected)))
+    (require! (= actual expected)
+              (str name " drifted from the interpreter: "
+                   (pr-str actual) " vs " (pr-str expected)))
+    (require! (= expected [[3.0 3.0 3.0 3.0]])
+              (str name ": one write of 0.5 must drive two voices of 0.5 + 1.0"
+                   " to 3.0, not " (pr-str expected)))
+    {:name name
+     :passed? true
+     :detail (str "the declared default, then one shared write, drove "
+                  (count (first actual)) " frames of two voices")}))
+
+(defn- javascript-shared-test
+  "The JavaScript host: the shared region is a trailing argument, one per pool."
+  []
+  (-> (js/Promise.all
+       #js [(fetch-edn "/omkamra/dsp/harness/testbed/shared-voice-bundle")
+            (response-text "/omkamra/dsp/harness/testbed/shared-voice-source")])
+      (.then
+       (clojure.core/fn [[bundle source]]
+         (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
+               url (js/URL.createObjectURL blob)]
+           (-> (dynamic-import url)
+               (.then
+                (clojure.core/fn [module]
+                  (let [abi (:abi bundle)]
+                    (check-shared-pool
+                     "JavaScript shared parameter"
+                     (:runtime bundle) abi (reader/read-string (:ir bundle))
+                     (or (get-in abi [:channels :count]) 1)
+                     (js-host/js-kernel (gobj/get module "createKernel") abi
+                                        {:precision (:precision bundle)})))))
+               (.finally (clojure.core/fn [] (js/URL.revokeObjectURL url)))))))))
+
+(defn- wasm-shared-test
+  "The Wasm host: the pool's region is copied into each instance's memory."
+  []
+  (-> (fetch-edn "/omkamra/dsp/harness/testbed/shared-voice-bundle?target=wasm")
+      (.then
+       (clojure.core/fn [bundle]
+         (-> (compile-wasm (:wat bundle))
+             (.then
+              (clojure.core/fn [bytes]
+                (let [module (js/WebAssembly.Module. bytes)
+                      abi (:abi bundle)]
+                  (check-shared-pool
+                   "Wasm shared parameter"
+                   (:runtime bundle) abi (reader/read-string (:ir bundle))
+                   (or (get-in abi [:channels :count]) 1)
+                   (wasm-host/wasm-kernel module abi (:memory bundle)
+                                          {:precision (:precision bundle)}))))))))))
+
+(defn- javascript-voice-lane-test
+  "The JavaScript host: one region per voice, handed to each generated process."
+  []
+  (-> (js/Promise.all
+       #js [(fetch-edn "/omkamra/dsp/harness/testbed/voice-lane-bundle")
+            (response-text "/omkamra/dsp/harness/testbed/voice-lane-source")])
+      (.then
+       (clojure.core/fn [[bundle source]]
+         (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
+               url (js/URL.createObjectURL blob)]
+           (-> (dynamic-import url)
+               (.then
+                (clojure.core/fn [module]
+                  (let [abi (:abi bundle)]
+                    (check-voice-lane-pool
+                     "JavaScript voice lane delivery"
+                     (:runtime bundle) abi (reader/read-string (:ir bundle))
+                     (or (get-in abi [:channels :count]) 1)
+                     (js-host/js-kernel (gobj/get module "createKernel") abi
+                                        {:precision (:precision bundle)})))))
+               (.finally (clojure.core/fn [] (js/URL.revokeObjectURL url)))))))))
+
+(defn- wasm-voice-lane-test
+  "The Wasm host: the region is each instance's own, in its own memory."
+  []
+  (-> (fetch-edn "/omkamra/dsp/harness/testbed/voice-lane-bundle?target=wasm")
+      (.then
+       (clojure.core/fn [bundle]
+         (-> (compile-wasm (:wat bundle))
+             (.then
+              (clojure.core/fn [bytes]
+                (let [module (js/WebAssembly.Module. bytes)
+                      abi (:abi bundle)]
+                  (check-voice-lane-pool
+                   "Wasm voice lane delivery"
+                   (:runtime bundle) abi (reader/read-string (:ir bundle))
+                   (or (get-in abi [:channels :count]) 1)
+                   (wasm-host/wasm-kernel module abi (:memory bundle)
+                                          {:precision (:precision bundle)}))))))))))
+
+;; ---------------------------------------------------------------------------
+;; A fused pool: one process, slots voices (M6c)
+;; ---------------------------------------------------------------------------
+;;
+;; A fused bundle is `slots` copies of a voice compiled as one `(poly slots
+;; voice)` process (D52), which the host is handed as a `fusion/fused-mapping`.
+;; The pool stays base-shaped, so these checks drive the fused pool and a plain
+;; interpreter pool over the *base* voice with the same operations and compare
+;; what they render -- the differential the JVM suite runs, now on the browser
+;; kernels. Two seams are visible here: a steal resets one slot's call partition
+;; (M6a, seam 3), and a released voice is freed from its own slot's `:activity`
+;; (M6 seam 4).
+
+(defn- shut-gate
+  "Write gate 0 for voice `index`, leaving its other controls alone."
+  [p index control-count]
+  (let [values (js/Float32Array. control-count)]
+    (pool/read-controls! p index values)
+    (aset values 0 0.0)
+    (pool/set-voice-controls! p index values)))
+
+(defn- audible?
+  "True when a rendered block (a vector of channel vectors) has any non-zero
+  sample -- so a comparison cannot pass on two blocks of nothing."
+  [block]
+  (boolean (some (clojure.core/fn [channel]
+                   (some (clojure.core/fn [sample] (not (zero? sample))) channel))
+                 block)))
+
+(defn- fused-steal
+  "Render a two-slot pool through a steal: gate slot 0 shut, sound slot 1 over two
+  blocks, steal the oldest (slot 0), sound on. Returns the rendered blocks.
+
+  Slot 0 is silent, so a fused kernel that reset the whole instance instead of
+  slot 0's call partition would restart slot 1's envelope and delay line, and the
+  third block -- the one after the steal -- would differ."
+  [runtime kernel channels control-count]
+  (let [p (pool/voice-pool runtime kernel)
+        render (clojure.core/fn []
+                 (let [block (render-block channels 128)]
+                   (pool/render! p block 128 48000.0)
+                   (block->vectors block channels)))]
+    (pool/note-on! p 72 1.0)
+    (pool/note-on! p 69 1.0)
+    (shut-gate p 0 control-count)
+    (let [first-block (render)
+          second-block (render)
+          stolen (pool/note-on! p 60 1.0)
+          _ (shut-gate p 0 control-count)
+          after (render)]
+      {:stolen stolen
+       :blocks [first-block second-block after]})))
+
+(defn- fused-activity
+  "Render a pool through a release, reporting whether the voice is held for its
+  tail and then freed from its own `:activity`.
+
+  The voice reports active for a few blocks after its gate closes, so a fused
+  kernel that could not read its slot's special (and saw a stale zero) would free
+  on the first release block; a pool that never read activity would hold it
+  forever. Both differ from the interpreter pool."
+  [runtime kernel channels]
+  (let [p (pool/voice-pool runtime kernel)
+        render (clojure.core/fn []
+                 (pool/render! p (render-block channels 128) 128 48000.0))]
+    (pool/note-on! p 69 1.0)
+    (render)
+    (pool/note-off! p 69)
+    (render)
+    (let [held (count (pool/voice-snapshot p))]
+      (dotimes [_ 4] (render))
+      {:held held
+       :freed (count (pool/voice-snapshot p))
+       :released (:released (pool/pool-stats p))})))
+
+(defn- check-fused-pool
+  "Compare a fused pool on a browser kernel against the interpreter pool over the
+  base voice: the same runtime, the same operations, block for block."
+  [name runtime base-abi base-ir channels kernel]
+  (let [control-count (clojure.core/count (:controls base-abi))
+        oracle (interpreter-host/interpreter-kernel base-ir base-abi)
+        actual-steal (fused-steal runtime kernel channels control-count)
+        expected-steal (fused-steal runtime oracle channels control-count)]
+    (require! (= actual-steal expected-steal)
+              (str name " drifted from the interpreter through a steal: "
+                   (pr-str actual-steal) " vs " (pr-str expected-steal)))
+    (require! (= 0 (:stolen actual-steal))
+              (str name ": the oldest slot should be the one stolen"))
+    (require! (audible? (last (:blocks actual-steal)))
+              (str name ": the pool should render sound, not silence"))
+    (let [actual (fused-activity runtime kernel channels)
+          expected (fused-activity runtime oracle channels)]
+      (require! (= actual expected)
+                (str name " freed differently from the interpreter: "
+                     (pr-str actual) " vs " (pr-str expected)))
+      (require! (= 1 (:held actual))
+                (str name ": the release tail should be held for a block"))
+      (require! (zero? (:freed actual))
+                (str name ": the voice should be freed once the envelope ends")))
+    {:name name
+     :passed? true
+     :detail (str "two slots matched the interpreter across a steal, and a released"
+                  " voice held its tail then freed from its own :activity")}))
+
+(defn- javascript-fused-pool-test
+  "The JavaScript host: the fused instance is the generated kernel object, and its
+  arena is the state a per-slot reset restores."
+  []
+  (-> (js/Promise.all
+       #js [(fetch-edn "/omkamra/dsp/harness/testbed/fused-pool-bundle")
+            (response-text "/omkamra/dsp/harness/testbed/fused-pool-source")])
+      (.then
+       (clojure.core/fn [[bundle source]]
+         (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
+               url (js/URL.createObjectURL blob)
+               run (clojure.core/fn [module]
+                     (let [abi (:abi bundle)
+                           kernel (js-host/js-kernel
+                                   (gobj/get module "createKernel") abi
+                                   {:precision (:precision bundle)
+                                    :mapping (fusion/runtime-mapping
+                                              (:controls abi) (:fusion bundle))})]
+                       (check-fused-pool
+                        "JavaScript fused pool"
+                        (:runtime bundle) (:base-abi bundle)
+                        (reader/read-string (:base-ir bundle))
+                        (or (get-in abi [:channels :count]) 1)
+                        kernel)))]
+           (-> (dynamic-import url)
+               (.then run)
+               (.finally (clojure.core/fn [] (js/URL.revokeObjectURL url)))))))))
+
+(defn- wasm-fused-pool-test
+  "The Wasm host: the fused instance is one module instance, and a per-slot reset
+  copies that slot's call partition back from the instance's initial state."
+  []
+  (-> (fetch-edn "/omkamra/dsp/harness/testbed/fused-pool-bundle?target=wasm")
+      (.then
+       (clojure.core/fn [bundle]
+         (-> (compile-wasm (:wat bundle))
+             (.then
+              (clojure.core/fn [bytes]
+                (let [module (js/WebAssembly.Module. bytes)
+                      abi (:abi bundle)
+                      kernel (wasm-host/wasm-kernel
+                              module abi (:memory bundle)
+                              {:precision (:precision bundle)
+                               :mapping (fusion/runtime-mapping
+                                         (:controls abi) (:fusion bundle))})]
+                  (check-fused-pool
+                   "Wasm fused pool"
+                   (:runtime bundle) (:base-abi bundle)
+                   (reader/read-string (:base-ir bundle))
+                   (or (get-in abi [:channels :count]) 1)
+                   kernel)))))))))
+
+;; ---------------------------------------------------------------------------
+;; A pool of N against one fused process (D45)
+;; ---------------------------------------------------------------------------
+;;
+;; The same voice, lowered two ways, timed in the page: `voices` independent
+;; kernel instances mixed by the pool, against one `(poly voices voice)` process.
+;; This is what D45's "would one fused process be faster?" needs as data rather
+;; than as reasoning. It is deliberately *not* a conformance check: timing is
+;; machine-dependent, so it reports numbers instead of passing or failing.
+
+(def ^:private bench-frames 128)
+(def ^:private bench-blocks 1000)
+
+(defn- bench-ms
+  "Milliseconds per block for `run`, after a warmup."
+  [run]
+  (dotimes [_ 200] (run))
+  (let [t0 (.now js/performance)]
+    (dotimes [_ bench-blocks] (run))
+    (/ (- (.now js/performance) t0) bench-blocks)))
+
+(defn- bench-controls
+  "The fused artifact's controls: every slot sounding, shared controls sane."
+  [abi]
+  (mapv (clojure.core/fn [control]
+          (let [name (clojure.core/name (:name control))]
+            (cond (re-find #"^gate" name) 1.0
+                  (= name "frequency") 220.0
+                  (= name "attack") 0.005
+                  (= name "decay") 0.1
+                  (= name "sustain") 0.7
+                  (= name "release") 0.2
+                  :else 0.0)))
+        (:controls abi)))
+
+(defn- bench-pool-ms
+  "The pool side: `voices` independent kernel instances, mixed by the pool."
+  [bundle kernel voices]
+  (let [pool (pool/voice-pool (:runtime bundle) kernel)
+        block (planar-block (or (get-in (:abi bundle) [:channels :count]) 1)
+                            bench-frames)]
+    (dotimes [index voices]
+      (pool/note-on! pool (+ 60 index) 1.0))
+    (bench-ms (clojure.core/fn []
+                (pool/render! pool block bench-frames 48000.0)))))
+
+(defn- bench-fused-js-ms
+  "The fused side on JavaScript: one kernel object for all `voices`."
+  [module bundle]
+  (let [kernel ((gobj/get module "createKernel"))
+        controls (bench-controls (:abi bundle))
+        output (js/Float32Array. bench-frames)
+        arguments (js/Array. (+ 3 (count controls)))]
+    (aset arguments 0 output)
+    (aset arguments 1 bench-frames)
+    (aset arguments 2 48000.0)
+    (dotimes [index (count controls)]
+      (aset arguments (+ 3 index) (nth controls index)))
+    (bench-ms (clojure.core/fn []
+                (.apply (.-process kernel) kernel arguments)))))
+
+(defn- bench-fused-wasm-ms
+  "The fused side on Wasm: one instance for all `voices`."
+  [module bundle]
+  (let [instance (js/WebAssembly.Instance. module)
+        process (gobj/get (.-exports instance) "process")
+        controls (bench-controls (:abi bundle))
+        output-offset (long (get-in (:memory bundle) [:regions :output :offset] 0))
+        arguments (js/Array. (+ 3 (count controls)))]
+    (aset arguments 0 output-offset)
+    (aset arguments 1 bench-frames)
+    (aset arguments 2 48000.0)
+    (dotimes [index (count controls)]
+      (aset arguments (+ 3 index) (nth controls index)))
+    (bench-ms (clojure.core/fn [] (.apply process nil arguments)))))
+
+(defn- attempt
+  "Run `f`, turning a failure into data.
+
+  A measurement that cannot run is a result, not a crash: the driver has to be able
+  to say *which* lowering failed and why, and a bare exception out of a promise chain
+  cannot."
+  [f]
+  (try
+    (f)
+    (catch :default error {:error (str error)})))
+
+(defn- bench-js
+  "Time the three lowerings on the JavaScript host.
+
+  The pool is D45's other axis. `:fused` is the fused process as it compiles now —
+  one function per definition, called — and `:fused-inlined` is the same process
+  with every definition copied into its call sites (`?inline=1`), which is what
+  every target did before D47 and what D45 measured."
+  [voices]
+  (-> (js/Promise.all
+       #js [(fetch-edn (str "/omkamra/dsp/harness/testbed/bench-bundle?voices=" voices))
+            (response-text (str "/omkamra/dsp/harness/testbed/bench-source?voices=" voices))
+            (fetch-edn (str "/omkamra/dsp/harness/testbed/fused-bundle?voices=" voices))
+            (response-text (str "/omkamra/dsp/harness/testbed/fused-source?voices=" voices))
+            (fetch-edn (str "/omkamra/dsp/harness/testbed/fused-bundle?voices=" voices
+                            "&inline=1"))
+            (response-text (str "/omkamra/dsp/harness/testbed/fused-source?voices=" voices
+                                "&inline=1"))])
+      (.then
+       (clojure.core/fn [[pool-bundle pool-source fused-bundle fused-source
+                          inlined-bundle inlined-source]]
+         (let [pool-url (js/URL.createObjectURL
+                         (js/Blob. #js [pool-source] #js {:type "text/javascript"}))
+               fused-url (js/URL.createObjectURL
+                          (js/Blob. #js [fused-source] #js {:type "text/javascript"}))
+               inlined-url (js/URL.createObjectURL
+                            (js/Blob. #js [inlined-source]
+                                      #js {:type "text/javascript"}))]
+           (-> (js/Promise.all #js [(dynamic-import pool-url)
+                                    (dynamic-import fused-url)
+                                    (dynamic-import inlined-url)])
+               (.then
+                (clojure.core/fn [[pool-module fused-module inlined-module]]
+                  {:pool (attempt
+                          (clojure.core/fn []
+                            (bench-pool-ms
+                             pool-bundle
+                             (js-host/js-kernel (gobj/get pool-module "createKernel")
+                                                (:abi pool-bundle)
+                                                {:precision (:precision pool-bundle)})
+                             voices)))
+                   :fused (attempt (clojure.core/fn []
+                                     (bench-fused-js-ms fused-module fused-bundle)))
+                   :fused-inlined (attempt
+                                   (clojure.core/fn []
+                                     (bench-fused-js-ms inlined-module inlined-bundle)))}))
+               (.finally (clojure.core/fn []
+                           (js/URL.revokeObjectURL pool-url)
+                           (js/URL.revokeObjectURL fused-url)
+                           (js/URL.revokeObjectURL inlined-url)))))))))
+
+(defn- bench-wasm
+  "Time the three lowerings on the Wasm host."
+  [voices]
+  (-> (js/Promise.all
+       #js [(fetch-edn (str "/omkamra/dsp/harness/testbed/bench-bundle?target=wasm&voices=" voices))
+            (fetch-edn (str "/omkamra/dsp/harness/testbed/fused-bundle?target=wasm&voices=" voices))
+            (fetch-edn (str "/omkamra/dsp/harness/testbed/fused-bundle?target=wasm&voices=" voices
+                            "&inline=1"))])
+      (.then
+       (clojure.core/fn [[pool-bundle fused-bundle inlined-bundle]]
+         (-> (js/Promise.all #js [(compile-wasm (:wat pool-bundle))
+                                  (compile-wasm (:wat fused-bundle))
+                                  (compile-wasm (:wat inlined-bundle))])
+             (.then
+              (clojure.core/fn [[pool-bytes fused-bytes inlined-bytes]]
+                {:pool (attempt
+                        (clojure.core/fn []
+                          (bench-pool-ms
+                           pool-bundle
+                           (wasm-host/wasm-kernel (js/WebAssembly.Module. pool-bytes)
+                                                  (:abi pool-bundle)
+                                                  (:memory pool-bundle)
+                                                  {:precision (:precision pool-bundle)})
+                           voices)))
+                 :fused (attempt
+                         (clojure.core/fn []
+                           (bench-fused-wasm-ms (js/WebAssembly.Module. fused-bytes)
+                                                fused-bundle)))
+                 :fused-inlined
+                 (attempt
+                  (clojure.core/fn []
+                    (bench-fused-wasm-ms (js/WebAssembly.Module. inlined-bytes)
+                                         inlined-bundle)))})))))))
+
+(defn- bench-concurrency
+  "Time a pool of `voices` against one `(poly voices voice)` on both browser
+  hosts. Returns a promise of milliseconds per 128-frame block for each."
+  [voices]
+  (let [voices (long voices)]
+    (-> (bench-js voices)
+        (.then
+         (clojure.core/fn [js-result]
+           (-> (bench-wasm voices)
+               (.then
+                (clojure.core/fn [wasm-result]
+                  (clj->js {:js js-result :wasm wasm-result})))))))))
 
 (defn- render-one!
   "Render one frame through `pool` and return the sample."
@@ -1670,21 +2319,66 @@
                          (str/includes? lower (str/lower-case (str needle))))
                        selection)))))
 
+(defn- matrix-cases
+  "The catalog cases one matrix covers for a selection.
+
+  A needle that names the check runs its whole matrix; a needle that names a case ID
+  narrows the matrix to the matching cases. Both, so `:only [\"shared process
+  matrix\"]` still runs every case while `:only [\"call-int-led\"]` runs one — and a
+  selection that names neither runs nothing, which `unmatched-needles` then reports."
+  [selection check-name cases]
+  (if (selected? selection check-name)
+    cases
+    (filterv (clojure.core/fn [c] (selected? selection (str (:id c)))) cases)))
+
+(defn- unmatched-needles
+  "Selection needles that named neither a check nor a catalog case.
+
+  A selection that quietly ran nothing looks exactly like a passing suite, so a typo
+  has to be loud. A needle is used when it is a substring — as `selected?` has it — of
+  the name of a check that produced a result, or of a catalog case ID."
+  [selection results]
+  (let [names (mapv (clojure.core/fn [result] (str/lower-case (str (:name result))))
+                    results)
+        ids (mapv (clojure.core/fn [c] (str/lower-case (str (:id c)))) catalog/all-cases)
+        substring? (clojure.core/fn [haystacks needle]
+                     (boolean (some (clojure.core/fn [haystack]
+                                      (str/includes? haystack (str/lower-case (str needle))))
+                                    haystacks)))]
+    (into []
+          (remove #(or (substring? names %) (substring? ids %)))
+          (or selection []))))
+
+(defn- selected-result?
+  "True when a check's result should be reported for `selection`.
+
+  A check is selected by its own name, or — for a matrix — by any case it ran: `:only
+  [\"call-int-led\"]` names a case, and the result is still the whole matrix."
+  [selection result]
+  (or (selected? selection (:name result))
+      (boolean (some (clojure.core/fn [c] (selected? selection (str (:case c))))
+                     (:cases result)))))
+
 (defn- run-suite!
   ([summary results-list] (run-suite! summary results-list nil))
   ([summary results-list selection]
    (render-results! summary results-list [])
    (-> (js/Promise.resolve [])
        (.then (fn [_]
-                (if (selected? selection "shared process matrix")
-                  (run-process-matrix!)
-                  (js/Promise.resolve []))))
+                (let [cases (matrix-cases selection "shared process matrix"
+                                          (filterv process-case? catalog/cases))]
+                  (if (seq cases)
+                    (run-process-matrix! cases)
+                    (js/Promise.resolve [])))))
        (.then (fn [process-results]
-                (-> (if (selected? selection "shared function matrix")
-                      (run-function-matrix!)
-                      (js/Promise.resolve []))
-                    (.then (fn [function-results]
-                             (into process-results function-results))))))
+                (let [cases (matrix-cases selection "shared function matrix"
+                                          (filterv catalog/function-case?
+                                                   catalog/all-cases))]
+                  (-> (if (seq cases)
+                        (run-function-matrix! cases)
+                        (js/Promise.resolve []))
+                      (.then (fn [function-results]
+                               (into process-results function-results)))))))
        (.then (fn [matrix-results]
                 (render-results! summary results-list matrix-results)
                 matrix-results))
@@ -1697,6 +2391,28 @@
                      (fn [] (-> (javascript-pool-test) (.then (fn [r] [r])))))
                    (when (selected? selection "Wasm pool host")
                      (fn [] (-> (wasm-pool-test) (.then (fn [r] [r])))))
+                   (when (selected? selection "JavaScript lane delivery")
+                     (fn [] (-> (javascript-lane-test) (.then (fn [r] [r])))))
+                   (when (selected? selection "Wasm lane delivery")
+                     (fn [] (-> (wasm-lane-test) (.then (fn [r] [r])))))
+                   (when (selected? selection "JavaScript voice lane delivery")
+                     (fn [] (-> (javascript-voice-lane-test)
+                                (.then (fn [r] [r])))))
+                   (when (selected? selection "Wasm voice lane delivery")
+                     (fn [] (-> (wasm-voice-lane-test)
+                                (.then (fn [r] [r])))))
+                   (when (selected? selection "JavaScript fused pool")
+                     (fn [] (-> (javascript-fused-pool-test)
+                                (.then (fn [r] [r])))))
+                   (when (selected? selection "Wasm fused pool")
+                     (fn [] (-> (wasm-fused-pool-test)
+                                (.then (fn [r] [r])))))
+                   (when (selected? selection "JavaScript shared parameter")
+                     (fn [] (-> (javascript-shared-test)
+                                (.then (fn [r] [r])))))
+                   (when (selected? selection "Wasm shared parameter")
+                     (fn [] (-> (wasm-shared-test)
+                                (.then (fn [r] [r])))))
                    (when (selected? selection "JavaScript containment")
                      (fn [] (-> (javascript-containment-test) (.then (fn [r] [r])))))
                    (when (selected? selection "Wasm containment")
@@ -1715,6 +2431,8 @@
                      (fn [] (instance-independence-tests)))
                    (when (selected? selection "sample-accurate scheduling")
                      (fn [] (schedule-invariance-tests)))
+                   (when (selected? selection "worker event transport")
+                     (fn [] (-> (transport-test) (.then (fn [r] [r])))))
                    (when (selected? selection "AudioWorklet")
                      (fn [] (-> (audio-worklet-test :f32)
                                 (.then (fn [a]
@@ -1730,10 +2448,15 @@
                                 results
                                 (filterv (clojure.core/fn [result]
                                            (or (not (:passed? result))
-                                               (selected? selection (:name result))))
-                                         results))]
+                                               (selected-result? selection result)))
+                                         results))
+                      unmatched (unmatched-needles selection results)]
                   (render-results! summary results-list results)
-                  results)))
+                  (cond-> results
+                    (seq unmatched)
+                    (conj {:name "selection"
+                           :passed? false
+                           :detail (str "no check or case matched: " (pr-str unmatched))})))))
        (.catch (fn [error]
                  (let [failure {:name "browser suite"
                                 :passed? false
@@ -1773,8 +2496,9 @@
                              results)})))))))
 
 (defn run-function-case-matrix!
+  "Every function case, both precisions — a devtool entry point."
   []
-  (-> (run-function-matrix!)
+  (-> (run-function-matrix! (filterv catalog/function-case? catalog/all-cases))
       (.then (fn [results]
                (clj->js {:passed? (every? :passed? results)
                          :results (mapv clj->js results)})))))
@@ -1808,6 +2532,7 @@
     (set! (.-omkamraDspTestbed js/window)
           #js {:runConformance run-conformance!
                :runFunctionCaseMatrix run-function-case-matrix!
+               :benchConcurrency bench-concurrency
                :caseIds (clj->js (mapv :id catalog/all-cases))})
     (reset! app-state {:summary summary :results-list results-list})
     (when-not (str/includes? (or (.-search (.-location js/window)) "") "autorun=0")
