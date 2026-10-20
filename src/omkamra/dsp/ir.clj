@@ -82,6 +82,12 @@
     ;; several call sites in one instance needs to know where each one's state
     ;; begins, or it cannot reset one without disturbing the others (M6a).
     :call-partitions (atom [])
+    ;; The per-call-site regions a `with-buffers` form introduces (F2, D57):
+    ;; caller region name -> the call partition state slot that backs it. A region
+    ;; is *state*, not a buffer, so it is addressed like any other partition slot;
+    ;; this cell exists because `with-buffers` runs during body lowering and a
+    ;; later `buffer-load` of a region name must see the binding.
+    :region-aliases (atom {})
     :counter (atom 0)}))
 
 (defn- fresh-local!
@@ -146,7 +152,9 @@
 
 (declare lower-value lower-form lower-forms array-form? array-declaration
          lower-place-store! reject-constant-store! rebase-slots rebase-records
-         record-leaves lower-record-value)
+         record-leaves lower-record-value
+         process-buffers process-input? audio-channels-in annotate-buffer-channeling
+         lane-frame-capacity)
 
 (defn- frame-index
   "Lower a source buffer offset to an absolute per-frame index.
@@ -698,24 +706,78 @@
           {:form form :operator operator}))
   {:statements [{:op operator}] :value nil :type :never})
 
+(defn- int-binary
+  [operator left right]
+  {:op :binary :operator operator :type :int :left left :right right})
+
+(defn- const-int
+  [value]
+  {:op :const :type :int :value (long value)})
+
+(defn- region-element-index
+  "The flat index of one sample inside a region: `channel*stride + frame + offset`.
+
+  A region is a call-partition state slot (D57), so its addressing is state
+  addressing with a channel stride and the current frame — the same shape the lane
+  and shared regions use, but per call site. `channel` and `offset` are IR int
+  nodes or raw constants; a constant channel (the usual case) is one."
+  [channel offset stride]
+  (let [int-value (fn [x] (if (map? x) x (const-int x)))]
+    (int-binary :+ (int-binary :+ (int-binary :* (int-value channel) (const-int stride))
+                               (int-value offset))
+                {:op :frame :type :int})))
+
+(defn- region-slot
+  "The region backing a buffer id at this point in lowering, or nil.
+
+  A process-shaped module's own buffers are regions (F2), recorded among its
+  lowered buffers; a `with-buffers` region name is recorded in `:region-aliases`.
+  Both resolve to the same thing: a call-partition state slot with a channel
+  stride."
+  [env buffer-id]
+  (or (get @(:region-aliases env) buffer-id)
+      (let [buffer (get-in env [:buffers buffer-id])]
+        (when (:region buffer) buffer))))
+
+(defn- lower-int
+  [form value env]
+  (let [lowered (lower-value value env)]
+    (expect-type! :int (:value lowered) form)
+    lowered))
+
 (defn- lower-buffer-load
   [form env]
   (let [[_ buffer-id & args] form
-        [channel offset] (channel-and-offset form args)
-        buffer (buffer-access! form env buffer-id #{:input :output})
-        channel (channel-expression form channel env buffer)
-        index (frame-index form offset env)]
-    (when-not (= :float (:type buffer))
-      (fail "DSP buffer-load currently requires a :float buffer"
-            {:form form :buffer-id buffer-id :type (:type buffer)}))
-    (combine-fragments
-     [channel index]
-     {:op :buffer-load
-      :buffer-id buffer-id
-      :channel (:value channel)
-      :index (:value index)
-      :type :float
-      :effects #{:read-memory}})))
+        [channel offset] (channel-and-offset form args)]
+    (if-let [region (region-slot env buffer-id)]
+      ;; A region's samples live in a call-partition state slot, so a region read
+      ;; is a state read with the channel folded into the index (F2, D57).
+      (let [channel (channel-expression form channel env region)
+            offset (lower-int form offset env)]
+        (combine-fragments
+         [channel offset]
+         {:op :state-load
+          :state-id (:state-id region)
+          :index (:index region)
+          :element-index (region-element-index (:value channel) (:value offset)
+                                               (:stride region))
+          :size (:size region)
+          :type :float
+          :effects #{:read-state}}))
+      (let [buffer (buffer-access! form env buffer-id #{:input :output})
+            channel (channel-expression form channel env buffer)
+            index (frame-index form offset env)]
+        (when-not (= :float (:type buffer))
+          (fail "DSP buffer-load currently requires a :float buffer"
+                {:form form :buffer-id buffer-id :type (:type buffer)}))
+        (combine-fragments
+         [channel index]
+         {:op :buffer-load
+          :buffer-id buffer-id
+          :channel (:value channel)
+          :index (:value index)
+          :type :float
+          :effects #{:read-memory}})))))
 
 (defn- lower-buffer-store
   [form env]
@@ -725,25 +787,139 @@
           2 [0 (first args) (second args)]
           3 [(first args) (second args) (nth args 2)]
           (fail "DSP buffer-store requires offset, value, or channel, offset, value"
-                {:form form}))
-        buffer (buffer-access! form env buffer-id #{:output})
-        channel (channel-expression form channel env buffer)
-        index (frame-index form offset env)
-        value (lower-value value-form env)]
-    (when-not (= :float (:type buffer))
-      (fail "DSP buffer-store currently requires a :float buffer"
-            {:form form :buffer-id buffer-id :type (:type buffer)}))
-    (expect-type! :float (:value value) form)
-    (void-fragment
-     (concat (:statements channel)
-             (:statements index)
-             (:statements value)
-             [{:op :buffer-store
-               :buffer-id buffer-id
-               :channel (:value channel)
-               :index (:value index)
-               :value (:value value)
-               :effects #{:write-memory}}]))))
+                {:form form}))]
+    (if-let [region (region-slot env buffer-id)]
+      (let [channel (channel-expression form channel env region)
+            offset (lower-int form offset env)
+            value (lower-value value-form env)]
+        (expect-type! :float (:value value) form)
+        (void-fragment
+         (concat (:statements channel)
+                 (:statements offset)
+                 (:statements value)
+                 [{:op :state-store
+                   :state-id (:state-id region)
+                   :index (:index region)
+                   :element-index (region-element-index (:value channel)
+                                                        (:value offset)
+                                                        (:stride region))
+                   :size (:size region)
+                   :type :float
+                   :value (:value value)
+                   :effects #{:write-state}}])))
+      (let [buffer (buffer-access! form env buffer-id #{:output})
+            channel (channel-expression form channel env buffer)
+            index (frame-index form offset env)
+            value (lower-value value-form env)]
+        (when-not (= :float (:type buffer))
+          (fail "DSP buffer-store currently requires a :float buffer"
+                {:form form :buffer-id buffer-id :type (:type buffer)}))
+        (expect-type! :float (:value value) form)
+        (void-fragment
+         (concat (:statements channel)
+                 (:statements index)
+                 (:statements value)
+                 [{:op :buffer-store
+                   :buffer-id buffer-id
+                   :channel (:value channel)
+                   :index (:value index)
+                   :value (:value value)
+                   :effects #{:write-memory}}]))))))
+
+(defn- buffer-access-form?
+  "True when a body form is, or contains, a process-buffer access."
+  [form]
+  (cond
+    (seq? form) (or (contains? #{'buffer-load 'buffer-store} (first form))
+                    (some buffer-access-form? form))
+    (vector? form) (some buffer-access-form? form)
+    (map? form) (some buffer-access-form? (vals form))
+    (set? form) (some buffer-access-form? form)
+    :else false))
+
+(defn- lane-access-form?
+  "True when a body form reads the lane region: with the `(lane control)`
+  accessor, or by naming a control that exists only as a lane, whose name *is*
+  the read.
+
+  A definition that does this needs the lane region handed to it: its own body
+  has no such region, and the offsets in it belong to the artifact's entry
+  process (F3, F4). The scan is on the *source* body because the region is an ABI
+  parameter of the definition, so it has to be known before lowering the body
+  that would discover it."
+  [form lane-names]
+  (cond
+    (seq? form) (or (= 'lane (first form)) (some #(lane-access-form? % lane-names) form))
+    (vector? form) (some #(lane-access-form? % lane-names) form)
+    (map? form) (some #(lane-access-form? % lane-names) (vals form))
+    (set? form) (some #(lane-access-form? % lane-names) form)
+    (symbol? form) (contains? lane-names form)
+    :else false))
+
+(defn- resolve-with-buffers
+  "Resolve a `with-buffers` form against the linked modules.
+
+  Returns `{:function-id id :regions {callee-buffer-id caller-buffer-id}}`. The
+  bare-keyword sugar names a callee's single output buffer; a map form must name
+  every output buffer, so a region is never silently left unbound (D57)."
+  [form env]
+  (let [[_ bindings call-form] form]
+    (when-not (and (seq? call-form) (= 'dsp/call (first call-form)))
+      (fail "with-buffers must wrap a resolved call" {:form form}))
+    (let [function-id (second call-form)
+          callee (get (:modules env) function-id)]
+      (when-not callee
+        (fail "with-buffers refers to an unknown linked function"
+              {:form form :function-id function-id}))
+      (let [outputs (filterv #(= :output (:direction %)) (:buffers callee))
+            output-ids (mapv :id outputs)]
+        (cond
+          (keyword? bindings)
+          (do (when-not (= 1 (count outputs))
+                (fail (str "with-buffers sugar requires a callee with exactly one "
+                           "output buffer; use a map of buffer names")
+                      {:form form :function-id function-id
+                       :output-buffers output-ids}))
+              {:function-id function-id
+               :regions {(first output-ids) bindings}})
+
+          (map? bindings)
+          (do (when-not (= (set (keys bindings)) (set output-ids))
+                (fail "with-buffers must bind exactly the callee's output buffers"
+                      {:form form :function-id function-id
+                       :output-buffers output-ids :bindings (vec (keys bindings))}))
+              {:function-id function-id :regions bindings})
+
+          :else
+          (fail "with-buffers requires a buffer name or a map of buffer names"
+                {:form form :bindings bindings}))))))
+
+(defn- lower-with-buffers
+  "Lower `(with-buffers <binding> <call>)`.
+
+  The call allocates the callee's state partition (D19), and the callee's output
+  buffers are regions inside it (F2, D57). Binding them is therefore pure
+  bookkeeping: each region name becomes an alias for the callee's rebased state
+  slot, which a later `buffer-load` resolves. Nothing is passed to the call --
+  the region *is* the callee's own partition state."
+  [form env]
+  (let [call-form (nth form 2)
+        {:keys [function-id regions]} (resolve-with-buffers form env)
+        call (lower-value call-form env)
+        base (long (or (:state-base (:value call)) 0))
+        slots (:region-slots (get (:modules env) function-id))]
+    (doseq [[callee-buffer region-name] regions]
+      (let [slot (get slots callee-buffer)]
+        (when-not slot
+          (fail "with-buffers names a buffer the callee did not lower as a region"
+                {:form form :buffer callee-buffer}))
+        (when (contains? @(:region-aliases env) region-name)
+          (fail "with-buffers binds a region name twice"
+                {:form form :region region-name}))
+        (swap! (:region-aliases env) assoc region-name
+               (assoc slot :state-id callee-buffer :id region-name
+                      :index (+ base (long (:index slot)))))))
+    call))
 
 (defn- reject-constant-store!
   "Constant tables and records are materialized at initialization only."
@@ -1158,6 +1334,10 @@
       ;; the enclosing arena.
       (let [callee (get (:modules env) function-id)
             partition-size (or (:state-size callee) 0)
+            ;; The call site's partition ordinal, which is its *slot* when the
+            ;; entry is fused: this call is about to take the next partition, so
+            ;; that index is the one a lane slice belongs to (F4).
+            slot (count @(:call-partitions env))
             partition-base (when (pos? partition-size)
                              (let [base @(:call-offset env)]
                                (swap! (:call-offset env) + partition-size)
@@ -1169,6 +1349,27 @@
                                (swap! (:records-more env) into
                                       (rebase-records base (:records callee)))
                                base))
+            ;; A fused entry renders every voice in one call, so the lane region
+            ;; it holds has one slice per voice and a lane-reading callee has to
+            ;; be told which one is *this* call site's (F4). The slot is the call
+            ;; partition the site owns -- the same one a host resets a voice by
+            ;; -- so the base is a compile-time constant here, while a callee that
+            ;; merely forwards the region passes on the base it was handed.
+            lane-base
+            (when (:lane-region? callee)
+              (cond
+                (:lane-slots env)
+                (if partition-base
+                  {:op :const :type :int
+                   :value (* (long slot)
+                             (long (count (:lanes env)))
+                             (long (:lane-frame-capacity env)))}
+                  (fail (str "a fused entry's lane-reading call needs a state"
+                             " partition: a slot is what a host resets a voice by,"
+                             " and what a lane slice belongs to")
+                        {:function-id function-id :lane-slots (:lane-slots env)}))
+
+                (:lane-base? env) {:op :lane-base :type :int}))
             [argument-statements argument-values]
             (reduce (fn [[statements values] arg]
                       (let [value (:value arg)]
@@ -1202,6 +1403,15 @@
           :record-leaves (when (= :record (:return-type signature))
                            (:return-fields signature))
           :state-base partition-base
+          ;; A callee that reads a lane is handed this call site's lane region
+          ;; (F3). The region is not partitioned — there is one, laid out by the
+          ;; entry — so the call site only has to say that the callee wants it,
+          ;; and each backend passes the region it already holds.
+          :lanes (boolean (:lane-region? callee))
+          ;; And, in a fused entry, the base of the slice of the lane region this
+          ;; call site reads: zero-based lane offsets plus a base, exactly as a
+          ;; callee's state indices are resolved against a partition base (D19).
+          :lane-base lane-base
           ;; The callee's inlining request travels with the call site (D47), so
           ;; a target that can call still copies what it was asked to copy.
           :inline (boolean (:inline signature))
@@ -1245,35 +1455,51 @@
 
 (defn- lane-binding
   "One lane's per-frame read from the process's flat `:lanes` region: lane *i*
-  occupies `[i * frame-capacity, ...)`, a compile-time base (D28)."
-  [name index frame-capacity]
+  occupies `[i * frame-capacity, ...)`, a compile-time offset *inside the slice
+  the read resolves against* (D28).
+
+  `slice?` says the read sits in a definition that is handed a slice of the
+  region rather than the whole of it, which is every callee of a fused entry
+  (F4): its offset is added to the base the call site supplies rather than to the
+  region's."
+  [name index frame-capacity slice?]
   {:name name
    :type :float
    :kind :buffer
    :expression {:op :buffer-load
                 :buffer-id :lanes
                 :channel 0
-                :index {:op :frame-offset
+                :index {:op (if slice? :lane-frame-offset :frame-offset)
                         :offset (* (long index) (long frame-capacity))
                         :type :int}
                 :type :float
                 :effects #{:read-memory}}})
 
 (defn- lower-lane
-  "Resolve the `(lane control)` accessor to a per-frame read from the process's
-  flat `:lanes` region.
+  "Resolve the `(lane control)` accessor to a per-frame read from the lane region.
 
-  The control must be a control of the *entry process* that carries a lane. A
-  callee module has no lane region of its own, so the accessor is available only
-  where the region is; a caller that wants a callee to see automation composes
-  at the call site (`(voice (+ cutoff (lane cutoff)))`)."
+  The control must be one the artifact's *entry process* declares a lane for: the
+  region is laid out once by the entry (D28), so its slices are compile-time
+  offsets there however deep in the call graph the read sits (F3). A definition
+  reached from such a process may read a lane — it is handed the region, and
+  `:buffer-load :lanes` is the same node the entry itself uses, because for a
+  callee the region is one of its ABI parameters rather than one of its buffers.
+  A definition not reached from a process has no region to read, and says so."
   [form env]
   (let [[_ control & extra] form]
     (when (or (not (symbol? control)) extra)
       (fail "lane requires exactly one control name" {:form form}))
     (when-not (:lane-frame-capacity env)
-      (fail "lane is only available in the entry process"
+      (fail "lane is only available where a lane region is"
             {:form form :control control}))
+    ;; A fused entry owns one region with one slice per voice, and each slice is
+    ;; the call site that was handed it. The entry is nobody's call site, so it
+    ;; has no slice of its own: refusing keeps a read there from silently being
+    ;; given one voice's automation (F4).
+    (when (:lane-slots env)
+      (fail (str "a fused entry cannot read a lane itself: its lanes belong to the"
+                 " call sites, one slice each")
+            {:form form :control control :lane-slots (:lane-slots env)}))
     (let [lanes (:lanes env)
           index (first (keep-indexed (fn [index lane]
                                        (when (= control (:name lane)) index))
@@ -1282,7 +1508,8 @@
         (fail "lane names a control of this process that carries no lane"
               {:form form :control control
                :lanes (mapv :name lanes)}))
-      (fragment (get-in (lane-binding control index (:lane-frame-capacity env))
+      (fragment (get-in (lane-binding control index (:lane-frame-capacity env)
+                                      (boolean (:lane-base? env)))
                         [:expression])))))
 
 (defn- lower-value
@@ -1311,6 +1538,7 @@
         (= 'break op) (lower-loop-control form env :break)
         (= 'continue op) (lower-loop-control form env :continue)
         (= 'buffer-load op) (lower-buffer-load form env)
+        (= 'with-buffers op) (lower-with-buffers form env)
         (= 'lane op) (lower-lane form env)
         (= 'buffer-store op) (lower-buffer-store form env)
         (= 'state-load op) (lower-state-load form env)
@@ -1702,6 +1930,29 @@
           [[(:name frames) (assoc frames :kind :frames)]
            [(:name sample-rate) (assoc sample-rate :kind :sample-rate)]])))
 
+(defn- lane-name-bindings
+  "A definition's `:lane` controls as reads of the entry process's lane region.
+
+  A control that exists only as a lane has no scalar, so its *name* is its lane.
+  In the entry that is how `process-bindings` binds it; in a callee it is the same
+  read, of the region the callee was handed — which in a fused artifact is the
+  slice its call site is (F4). A callee is also *passed* the caller's value for
+  such a control, and this binding overrides it: the caller's slice is not the
+  callee's, and wherever the artifact has one slice the two are the same read
+  anyway. A lane the entry does not lay out keeps the parameter, as before."
+  [definition lanes lane-capacity slice?]
+  (into {}
+        (keep (fn [control]
+                (when (:lane control)
+                  (when-let [index (first (keep-indexed
+                                           (fn [index lane]
+                                             (when (= (:name control) (:name lane))
+                                               index))
+                                           lanes))]
+                    [(:name control)
+                     (lane-binding (:name control) index lane-capacity slice?)]))))
+        (get-in definition [:process :controls])))
+
 (defn- base-bindings
   [definition state-bindings]
   (merge (into {}
@@ -1713,59 +1964,138 @@
          (context-bindings definition)))
 
 (defn lower
-  "Lower one normalized descriptor to explicit function IR."
+  "Lower one normalized descriptor to explicit function IR.
+
+  `:lanes` and `:lane-capacity` are the *entry process's* lane layout, not
+  this definition's: every `(lane control)` in an artifact resolves against it,
+  because that is the one region there is (F3). A definition whose body reads a
+  lane, or that calls a definition which does, is marked `:lane-region?` — it is
+  handed the region as an ABI parameter.
+
+  `:lane-base?` says this definition is a *callee* of an artifact that renders
+  several voices in one call (`poly`, F4), so the region it is handed is one
+  voice's slice of it and its lane reads resolve against the base the call site
+  supplies (`:lane-frame-offset`). The entry's own env instead carries
+  `:lane-slots`, which is the fact that its slices belong to its call sites."
   ([definition] (lower definition {}))
-  ([definition {:keys [functions definition-id options modules]}]
+  ([definition {:keys [functions definition-id options modules
+                       lanes lane-capacity lane-base?]}]
    (normalized-definition! definition)
    (let [return-type (:return-type definition)
          record-return (:return-record definition)
-         expanded (expand-state (effective-state definition))
-         states (:slots expanded)
          stateful? (boolean (seq (:state definition)))
-         env (assoc (environment (base-bindings definition (:bindings expanded))
-                                 (or functions {}) (or options {}) {} (or modules {}))
-                    :return-record record-return)
+         ;; A module called through `with-buffers` writes the caller's regions,
+         ;; not the caller's process ports (F2, D57). The linker only admits a
+         ;; buffer access through that form, so any buffer access here is a region
+         ;; write: the module's output buffers become *state* in its own call
+         ;; partition, so the call site that owns the partition owns the region.
+         ;; The width is the module's own: its `:process` declaration counts
+         ;; (D40), otherwise the body is scanned. Only a *forced* top-level width
+         ;; is taken from `options` -- `normalize-options` always injects a default
+         ;; `:channels`, which would pin a module to one channel.
+         module-buffers
+         (when (and (:process definition)
+                    (some buffer-access-form? (:body definition)))
+           (let [{:keys [max-channel dynamic?]} (audio-channels-in (:body definition))
+                 channels (cond
+                            (some? (:channels options)) (:channels options)
+                            (:channels-declared? (:process definition))
+                            (get-in definition [:process :channels])
+                            dynamic? (fail (str "a dynamic audio-buffer channel requires "
+                                                "an explicit :channels")
+                                           {:name (:name definition)})
+                            :else (clojure.core/max 1 (inc (long max-channel))))]
+             (mapv #(assoc % :type :float) (process-buffers definition channels))))
+         ;; One region per output buffer: `channels` frame-planes of `stride`
+         ;; frames. The stride is the lane/shared region stride, a compile-time
+         ;; constant every backend shares, so a region is one flat state slot.
+         region-stride (long (or (:frame-capacity options)
+                                 (lane-frame-capacity (get options :precision :f32))))
+         region-states (mapv (fn [{:keys [id channels]}]
+                               {:name id :type :float
+                                :size (* (long channels) region-stride)
+                                :init (vec (repeat (* (long channels) region-stride) 0.0))})
+                             module-buffers)
+         expanded (expand-state (into (effective-state definition) region-states))
+         states (:slots expanded)
+         ;; The module's region buffers, keyed by buffer id: a call-partition
+         ;; state slot plus the channel stride an access folds in.
+         region-buffers
+         (into {}
+               (map (fn [{:keys [id channels]}]
+                      (let [binding (get (:bindings expanded) id)]
+                        [id {:id id :region true :channels (long channels)
+                             :state-id id :index (long (:index binding))
+                             :size (long (:size binding)) :stride region-stride}])))
+               module-buffers)
+         env (assoc (environment (merge (base-bindings definition (:bindings expanded))
+                                        ;; A lane-only control is a read of the
+                                        ;; lane region wherever it is named, not
+                                        ;; just in the entry (F4).
+                                        (lane-name-bindings definition lanes lane-capacity
+                                                            (boolean lane-base?)))
+                                 (or functions {}) (or options {})
+                                 region-buffers
+                                 (or modules {}))
+                    :return-record record-return
+                    ;; The lane accessor resolves here too, against the entry's
+                    ;; layout: a definition reached from a process reads the one
+                    ;; lane region that process laid out (F3), or -- when that
+                    ;; process is fused -- the slice of it this call site was
+                    ;; handed (F4).
+                    :lanes lanes
+                    :lane-frame-capacity lane-capacity
+                    :lane-base? (boolean lane-base?))
          ;; Call-site partitions are allocated after this module's own state.
          _ (reset! (:call-offset env) (state-total states))
          _ (reset! (:records-more env) (vec (:records expanded)))
          ;; The return is a scalar expression, or a map producing a record value;
-         ;; `let`/`do` around it lower as ordinary forms.
+         ;; `let`/`do` around it lower as ordinary forms. A process-shaped module
+         ;; (`:return-type :void`) instead writes its own region buffers and
+         ;; returns nothing (F2, D57).
          returned (lower-forms (:body definition) env)
-         _ (when-not (:value returned)
+         void? (= :void return-type)
+         _ (when (and void? (:value returned)
+                      (not= :void (:type (:value returned))))
+             (fail "a void DSP definition must not produce a value"
+                   {:body (:body definition) :type (:type (:value returned))}))
+         _ (when (and (not void?) (not (:value returned)))
              (fail "DSP function body does not produce a value"
                    {:body (:body definition)}))
-         _ (if record-return
-             (when-not (= :record (:type (:value returned)))
-               (fail "DSP record-returning body must produce a record value"
-                     {:body (:body definition) :type (:type (:value returned))}))
-             (expect-type! return-type (:value returned) (:body definition)))
+         _ (when-not void?
+             (if record-return
+               (when-not (= :record (:type (:value returned)))
+                 (fail "DSP record-returning body must produce a record value"
+                       {:body (:body definition) :type (:type (:value returned))}))
+               (expect-type! return-type (:value returned) (:body definition))))
          ;; Snapshot the return before this module's transitions can clobber a
          ;; state slot the returning expression already read.
          [result-declarations return-value]
-         (if-not stateful?
-           [[] (:value returned)]
-           (if record-return
-             (let [leaves (:record-leaves (:value returned))
-                   pairs (mapv (fn [leaf expr]
-                                 {:local (fresh-local!
-                                          env
-                                          (symbol (str "out_"
-                                                       (str/join "_" (map name (:path leaf)))))
-                                          (:type leaf))
-                                  :expr expr})
-                               leaves (:values (:value returned)))]
-               [(mapv (fn [{:keys [local expr]}]
-                        {:op :declare :name (:name local)
-                         :type (:type local) :init expr})
-                      pairs)
-                {:op :record :type :record :record-leaves leaves
-                 :values (mapv (fn [{:keys [local]}]
-                                 {:op :local :name (:name local) :type (:type local)})
-                               pairs)}])
-             (let [local (fresh-local! env "result" return-type)]
-               [[{:op :declare :name (:name local)
-                  :type return-type :init (:value returned)}]
-                {:op :local :name (:name local) :type return-type}])))
+         (cond
+           void? [[] nil]
+           (not stateful?) [[] (:value returned)]
+           :else (if record-return
+                   (let [leaves (:record-leaves (:value returned))
+                         pairs (mapv (fn [leaf expr]
+                                       {:local (fresh-local!
+                                                env
+                                                (symbol (str "out_"
+                                                             (str/join "_" (map name (:path leaf)))))
+                                                (:type leaf))
+                                        :expr expr})
+                                     leaves (:values (:value returned)))]
+                     [(mapv (fn [{:keys [local expr]}]
+                              {:op :declare :name (:name local)
+                               :type (:type local) :init expr})
+                            pairs)
+                      {:op :record :type :record :record-leaves leaves
+                       :values (mapv (fn [{:keys [local]}]
+                                       {:op :local :name (:name local) :type (:type local)})
+                                     pairs)}])
+                   (let [local (fresh-local! env "result" return-type)]
+                     [[{:op :declare :name (:name local)
+                        :type return-type :init (:value returned)}]
+                      {:op :local :name (:name local) :type return-type}])))
          ;; A module applies its own scalar state transition at the end of its
          ;; body, so consecutive calls in a frame observe each other (D19).
          state-results
@@ -1801,7 +2131,7 @@
                  (:statements returned)
                  result-declarations
                  transitions
-                 [{:op :return :value return-value}])))
+                 (when return-value [{:op :return :value return-value}]))))
          ir {:op :function
              :name (:name definition)
              :id (or definition-id (:name definition))
@@ -1823,6 +2153,20 @@
              :call-partitions (vec @(:call-partitions env))
              :special-mask (special-mask definition)
              :special-count (count (special-bits definition))
+             ;; The module's output buffers as regions (F2): read by a call site's
+             ;; `with-buffers` to know what to bind. The region itself is *state*,
+             ;; recorded below, so every backend addresses it already.
+             :buffers (vec module-buffers)
+             :region-slots region-buffers
+             ;; Does this definition's own body read a lane? A definition that only
+             ;; *calls* one that does is marked in `lower-definitions`, once the
+             ;; callee is lowered and its answer is known. Naming a lane-only
+             ;; control reads the region too: such a control has no scalar, so its
+             ;; name *is* its lane (F4).
+             :lane-access? (boolean (lane-access-form?
+                                     (:body definition)
+                                     (into #{} (comp (filter :lane) (map :name))
+                                           (get-in definition [:process :controls]))))
              :records (vec @(:records-more env))
              :scratch (vec (:entries @(:scratch env)))
              :precision (:precision options)
@@ -1830,19 +2174,58 @@
              :body body}]
      (assoc ir :effects (collect-effects body)))))
 
+(defn- called-ids
+  "Every definition id a lowered body calls, at any depth in the IR."
+  [ir]
+  (let [found (volatile! #{})]
+    (letfn [(walk [value]
+              (cond
+                (map? value)
+                (do (when (= :call (:op value))
+                      (vswap! found conj (:function-id value)))
+                    (run! walk (vals value)))
+                (sequential? value) (run! walk value)
+                :else nil))]
+      (walk (:body ir)))
+    @found))
+
 (defn- lower-definitions
   "Lower definitions in `order`, exposing each lowered callee to the ones that
-  follow so call sites can allocate their state partitions."
-  [definitions order options]
-  (reduce (fn [lowered id]
-            (assoc lowered id
-                   (lower (get definitions id)
-                          {:functions (signatures definitions)
-                           :definition-id id
-                           :options options
-                           :modules lowered})))
-          (array-map)
-          order))
+  follow so call sites can allocate their state partitions.
+
+  `lanes-context` is the entry process's lane layout, handed to every definition
+  so a `(lane control)` read resolves to the one region's offsets (F3). When the
+  entry is fused, that region is sliced one voice per call site: every callee that
+  reads a lane is then handed the base of the slice its call site passes, so it
+  is marked `:lane-base?` (F4) and each backend gives it one more ABI parameter."
+  [definitions order options lanes-context]
+  (let [fused? (> (long (or (:lane-slots lanes-context) 1)) 1)
+        context (dissoc lanes-context :lane-slots)]
+    (reduce (fn [lowered id]
+              (let [ir (lower (get definitions id)
+                              (merge {:functions (signatures definitions)
+                                      :definition-id id
+                                      :options options
+                                      :modules lowered}
+                                     context
+                                     ;; Every definition reached from a fused
+                                     ;; entry is handed the slice its call site
+                                     ;; reads, so its lane reads resolve
+                                     ;; against a base from the start (F4) --
+                                     ;; whether it turns out to read one is what
+                                     ;; the flags below settle afterwards.
+                                     (when fused? {:lane-base? true})))
+                    ;; A definition that calls one reading a lane hands that callee
+                    ;; its own lane region, so it needs one too (F3).
+                    lane-region? (or (:lane-access? ir)
+                                     (boolean (some #(get-in lowered [% :lane-region?])
+                                                    (called-ids ir))))]
+                (assoc lowered id (cond-> ir
+                                    lane-region? (assoc :lane-region? true)
+                                    (and fused? lane-region?)
+                                    (assoc :lane-base? true)))))
+            (array-map)
+            order)))
 
 (defn lower-unit
   "Lower every descriptor in a linked compilation unit."
@@ -1851,7 +2234,7 @@
    (when-not (= :compilation-unit (:dsp/kind unit))
      (fail "DSP IR lowering expects a linked compilation unit" {:unit unit}))
    (let [definitions (:definitions unit)
-         lowered (lower-definitions definitions (dependency-order unit) options)
+         lowered (lower-definitions definitions (dependency-order unit) options nil)
          entry (:entry unit)]
      (assoc (get lowered entry)
             :definitions lowered
@@ -1954,9 +2337,19 @@
         ;; region, not to a block-rate scalar, so it leaves the scalar control
         ;; list entirely: the ABI reports it under `:lanes` instead. Lane *i*
         ;; occupies `[i * frame-capacity, ...)`, a compile-time base, which is
-        ;; why this needs no new IR op.
+        ;; why this needs no new IR op. A lane belongs to a *control*, so a fused
+        ;; entry that expanded a control per slot still has one lane for it: the
+        ;; slots read it from different slices of the region (F4), which is what
+        ;; `:lane-name` names.
         lane-controls (if process
-                        (filterv #(or (:lane %) (:has-lane %)) (:controls process))
+                        (reduce (fn [lanes control]
+                                  (let [name (:lane-name control (:name control))]
+                                    (if (some #(= name (:name %)) lanes)
+                                      lanes
+                                      (conj lanes (assoc control :name name)))))
+                                []
+                                (filter #(or (:lane %) (:has-lane %))
+                                        (:controls process)))
                         [])
         ;; A `:shared` control is read from the pool-wide `:shared` region rather
         ;; than from this instance's control storage, so it leaves the scalar
@@ -1976,7 +2369,7 @@
                                (when (:lane control)
                                  [(:name control)
                                   (lane-binding (:name control) index
-                                                frame-capacity)])))
+                                                frame-capacity false)])))
                             lane-controls)
         ;; A shared control's name *is* a read of the shared region, exactly as a
         ;; lane-only control's name is a read of the lane region.
@@ -2191,6 +2584,24 @@
                    {:channels channels}))
          expanded (expand-state (effective-state definition))
          states (:slots expanded)
+         frame-capacity (long (or (:frame-capacity options)
+                                  (lane-frame-capacity (get options :precision :f32))))
+         ;; A fused entry renders `poly`'s voices in one call, so the one lane
+         ;; region it owns holds one slice per voice and each call site reads its
+         ;; own (F4). The fact is the definition's, marked where the fusion
+         ;; happens; a plain artifact has exactly one slice.
+         lane-slots (long (or (:dsp/lane-slots definition) 1))
+         {:keys [bindings controls lanes shared frames sample-rate]}
+         (process-bindings definition (:bindings expanded) frame-capacity)
+         ;; Callees are lowered first, in dependency order, so every call site
+         ;; can allocate its state partition (D19). The entry's lane layout goes
+         ;; with them: the region is laid out once, here, so a callee's
+         ;; `(lane control)` reads an offset this process fixed (F3), inside the
+         ;; slice this process's call site hands it (F4).
+         modules (lower-definitions definitions (remove #(= entry-id %) order)
+                                    options
+                                    {:lanes lanes :lane-capacity frame-capacity
+                                     :lane-slots lane-slots})
          buffers (process-buffers definition channels)
          ;; A buffer is subscripted by channel only when it is per-channel.
          ;; Input and output are (they are channel-strided); a lane region is
@@ -2198,13 +2609,6 @@
          ;; *broadcast* buffer — one lane can drive both channels. Recording the
          ;; fact here keeps the four backends from each guessing at it.
          per-channel-buffers (set (keep #(when (> (:channels %) 1) (:id %)) buffers))
-         frame-capacity (long (or (:frame-capacity options)
-                                  (lane-frame-capacity (get options :precision :f32))))
-         {:keys [bindings controls lanes shared frames sample-rate]}
-         (process-bindings definition (:bindings expanded) frame-capacity)
-         ;; Callees are lowered first, in dependency order, so every call site
-         ;; can allocate its state partition (D19).
-         modules (lower-definitions definitions (remove #(= entry-id %) order) options)
          ;; The entry arena is its own state, then one partition per call site,
          ;; then local-array scratch. Partition sizes are static, so scratch
          ;; starts after the whole state region.
@@ -2213,18 +2617,24 @@
                               (into {} (map (juxt :id identity) buffers))
                               modules)
                  ;; The lane accessor resolves here, where the region's offsets
-                 ;; are known. A callee module has neither key, so `(lane c)` is
-                 ;; refused there rather than reading the wrong region.
-                 (assoc :lanes lanes :lane-frame-capacity frame-capacity))
+                 ;; are known. The same layout reaches every callee (F3), so a
+                 ;; `(lane c)` means the same slice wherever it is read -- and in
+                 ;; a fused entry the slice a read lands in is the call site's,
+                 ;; so the entry's own body has none (F4).
+                 (assoc :lanes lanes :lane-frame-capacity frame-capacity)
+                 (cond-> (> lane-slots 1) (assoc :lane-slots lane-slots)))
          _ (reset! (:call-offset env) (state-total states))
          _ (reset! (:records-more env) (vec (:records expanded)))
          _ (reset! (:scratch env) {:next total-state :entries []})
          output (lower-forms (:body definition) env)
-         _ (when (:value output)
+         ;; A `:void` value is no value: a body that ends in a process-shaped
+         ;; call has written its buffers and has nothing to store (F2).
+         scalar-output? (and (:value output) (not= :void (:type (:value output))))
+         _ (when scalar-output?
              (expect-type! :float (:value output) (:body definition)))
          ;; A scalar body is the one-channel sugar: lowering stores it to channel
          ;; 0. A `:void` body has written `:output` itself, per channel (D40).
-         output-local (when (:value output) (fresh-local! env "output" :float))
+         output-local (when scalar-output? (fresh-local! env "output" :float))
          output-declaration (when output-local
                               {:op :declare
                                :name (:name output-local)
@@ -2297,6 +2707,7 @@
              :sample-rate sample-rate
              :controls controls
              :lanes lanes
+             :lane-slots lane-slots
              :shared shared
              :frame-capacity frame-capacity
              :locals @(:locals env)

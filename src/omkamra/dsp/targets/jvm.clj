@@ -160,6 +160,11 @@
   (case (:op index)
     :frame [[:iload (:frame slots)]]
     :frame-offset [[:iload (:frame slots)] [:ldc (:offset index)] [:iadd]]
+    ;; A lane read in a fused artifact lands in the slice its call site was
+    ;; handed, so the slice base the callee was given comes first (F4).
+    :lane-frame-offset (vec (concat [[:iload (:lane-base slots)] [:iload (:frame slots)]
+                                     [:ldc (:offset index)]]
+                                    [[:iadd] [:iadd]]))
     :frame-plus (vec (concat [[:iload (:frame slots)]]
                              (expression-instructions (:offset index) slots labels)
                              [[:iadd]]))
@@ -168,6 +173,9 @@
 (defn- buffer-reference-instructions
   [operation slots labels]
   (let [buffer (get slots (:buffer-id operation))]
+    (when (nil? buffer)
+      (throw (ex-info "JVM buffer access has no slot"
+                      {:buffer-id (:buffer-id operation) :slots (vec (keys slots))})))
     ;; A broadcast buffer — a one-channel buffer in a multi-channel process, and
     ;; in particular a lane region — is read identically at every channel, so it
     ;; is never subscripted.
@@ -496,6 +504,19 @@
             (base-instructions :int slots (:int bases))
             [[:iload (:frames slots)]]
             [[(real-local-load-op) (:sample-rate slots)]]
+            ;; A callee that addresses anything by frame is handed the current
+            ;; frame (F2, F3) before its own arguments, matching
+            ;; `callee-descriptor`.
+            (when (or (seq (:region-slots definition))
+                      (:lane-region? definition))
+              [[:iload (:frame slots)]])
+            ;; And a lane-reading one the lane region (F3): the caller's own, which
+            ;; is the one region every definition in the artifact shares — and, in
+            ;; a fused artifact, the base of the slice this call site reads, since
+            ;; that region holds one slice per voice (F4).
+            (when (:lane-region? definition) [[:aload (:lanes slots)]])
+            (when (:lane-base? definition)
+              (expression-instructions (:lane-base expression) slots labels))
             (mapcat #(expression-instructions % slots labels) args)
             [[:invokestatic (:class slots) (:method signature) (:desc signature)]])))))
 
@@ -506,15 +527,25 @@
              :boolean [(if (:value expression) [:iconst-1] [:iconst-0])]
              :int [[:ldc (int (:value expression))]]
              (real-const-instructions (:value expression)))
-    :local (if (= :float (:type expression))
-             [[(real-local-load-op) (get slots (:name expression))]]
-             [[:iload (get slots (:name expression))]])
+    :local (let [slot (get slots (:name expression))]
+             (when (nil? slot)
+               (throw (ex-info "JVM local has no slot"
+                               {:name (:name expression) :slots (vec (keys slots))})))
+             (if (= :float (:type expression))
+               [[(real-local-load-op) slot]]
+               [[:iload slot]]))
     (:state-load :array-load) (let [entry (get (:state-layout slots) (:index expression))]
+                                (when-not entry
+                                  (throw (ex-info "JVM state access has no layout entry"
+                                                  {:index (:index expression)
+                                                   :state-id (:state-id expression)
+                                                   :layout-keys (vec (sort (keys (:state-layout slots))))})))
                                 (vec (concat (state-reference-instructions
                                               entry (:element-index expression) slots labels)
                                              [[(if (= :float (:type entry))
                                                  (real-load-op) :iaload)]])))
     :frame [[:iload (:frame slots)]]
+    :lane-base [[:iload (:lane-base slots)]]
     :frames [[:iload (:frames slots)]]
     :sample-rate [[(real-local-load-op) (:sample-rate slots)]]
     :channel [[:iload (:channel slots)]]
@@ -585,12 +616,17 @@
                          [[(if (= :float (:type statement))
                              (real-local-store-op) :istore)
                            (get slots (:name statement))]]))
-    :expression (conj (vec (expression-instructions (:value statement) slots labels))
-                      [:pop])
-    :return (vec (concat (expression-instructions (:value statement) slots labels)
-                         [(if (= :float (:type (:value statement)))
-                            [(real-return-op)]
-                            [:ireturn])]))
+    :expression (let [instructions (vec (expression-instructions (:value statement) slots labels))]
+                  ;; A void call leaves nothing to discard (F2).
+                  (if (= :void (:type (:value statement)))
+                    instructions
+                    (conj instructions [:pop])))
+    :return (if (nil? (:value statement))
+              [[:return]]
+              (vec (concat (expression-instructions (:value statement) slots labels)
+                           [(if (= :float (:type (:value statement)))
+                              [(real-return-op)]
+                              [:ireturn])])))
     :buffer-store (vec (concat
                         (buffer-reference-instructions statement slots labels)
                         (index-instructions (:index statement) slots labels)
@@ -653,7 +689,11 @@
 
 (defn- jvm-type
   [type]
-  (if (= :float type) (real-type) :int))
+  (case type
+    :float (real-type)
+    ;; A process-shaped module writes its own region and returns nothing (F2).
+    :void :void
+    :int))
 
 (defn- state-layout
   [state]
@@ -851,7 +891,8 @@
         (throw (ex-info "DSP lane region has the wrong primitive type"
                         {:precision (:precision ir)
                          :actual (class lanes)})))
-      (let [required (* declared (long (:frame-capacity ir)))]
+      (let [required (* declared (long (:frame-capacity ir))
+                        (long (or (:lane-slots ir) 1)))]
         (when (< (alength lanes) required)
           (throw (ex-info "DSP lane region is shorter than the lane layout"
                           {:expected required
@@ -1041,11 +1082,27 @@
       (str/replace #"^[0-9]" "_$0")))
 
 (defn- callee-descriptor
-  "The JVM descriptor of a callee method: the ABI, then the definition's params."
+  "The JVM descriptor of a callee method: the ABI, then the definition's params.
+
+  A callee that addresses anything by frame is handed the current frame: a
+  region-writing callee's buffers are frame-indexed (F2) and a lane read is
+  per-frame (F3), and a per-sample callee has no frame local of its own. A
+  lane-reading callee is also handed the lane region — one array for the whole
+  artifact, since a shared lane is laid out once by the entry — and, when the
+  artifact is fused, the base of the slice its call site reads, because that one
+  region holds a slice per voice (F4). A callee that needs neither gets neither
+  parameter."
   [definition]
-  (conj (into [(real-array-class) int-array-class :int :int :int (real-type)]
-              (map (comp jvm-type :type) (:params definition)))
-        (jvm-type (:return-type definition))))
+  (let [frame? (boolean (or (seq (:region-slots definition))
+                            (:lane-region? definition)))
+        lane? (boolean (:lane-region? definition))
+        lane-base? (boolean (:lane-base? definition))]
+    (conj (into [(real-array-class) int-array-class :int :int :int (real-type)]
+                (concat (when frame? [:int])
+                        (when lane? [(real-array-class)])
+                        (when lane-base? [:int])
+                        (map (comp jvm-type :type) (:params definition))))
+          (jvm-type (:return-type definition)))))
 
 (defn- callee-signatures
   "The method name and descriptor each callable definition is emitted under (D47).
@@ -1065,10 +1122,25 @@
   Slots 0..5 are the ABI: two state arrays, two arena bases, `frames`,
   `sample-rate`. The process method names the same values through its own slots, so
   a call site reads one map either way. The state layout is the definition's own,
-  addressed relative to the base registers it was handed."
+  addressed relative to the base registers it was handed. A callee that addresses
+  anything by frame takes the current frame after the ABI (F2, F3), and a
+  lane-reading one the lane region after that, in the order `callee-descriptor`
+  declares them — and, when the artifact is fused, the base of the lane slice it
+  reads after that (F4)."
   [definition layout]
-  (let [[param-slots next-slot] (slot-layout (:params definition)
-                                             (+ 5 (real-param-width)))
+  (let [region? (boolean (seq (:region-slots definition)))
+        lane? (boolean (:lane-region? definition))
+        lane-base? (boolean (:lane-base? definition))
+        frame? (or region? lane?)
+        frame-slot (+ 5 (real-param-width))
+        lane-slot (when lane? (if frame? (inc frame-slot) frame-slot))
+        ;; Only a lane reader is handed a slice base, and a lane base implies the
+        ;; region it slices, so the base always follows it.
+        lane-base-slot (when lane-base? (inc lane-slot))
+        first-param (if lane-base?
+                      (inc lane-base-slot)
+                      (if lane? (inc lane-slot) (if frame? (inc frame-slot) frame-slot)))
+        [param-slots next-slot] (slot-layout (:params definition) first-param)
         [local-slots next-slot] (slot-layout (:locals definition) next-slot)]
     (merge {:float-state 0
             :int-state 1
@@ -1084,6 +1156,9 @@
                                      (:entries layout)))}
            param-slots
            local-slots
+           (when frame? {:frame frame-slot})
+           (when lane? {:lanes lane-slot})
+           (when lane-base? {:lane-base lane-base-slot})
            {:next-temp (atom next-slot)})))
 
 (defn- callee-methods
@@ -1103,7 +1178,11 @@
             {:flags #{:public :static}
              :name (keyword method)
              :desc desc
-             :emit (statement-instructions (:body definition) slots (atom 0) [])}))
+             :emit (let [emitted (statement-instructions (:body definition) slots (atom 0) [])]
+                     ;; A void module's body ends without a return; the JVM needs one.
+                     (if (= :void (:return-type definition))
+                       (conj emitted [:return])
+                       emitted))}))
         signatures))
 
 (defn compile

@@ -65,10 +65,10 @@ once both are done:
 (require '[omkamra.dsp.tests.suite :as suite])
 (suite/run-everything)
 ;; prints the JVM suite's own report under a header, then:
-;;   === browser: 34/34 checks passed (63.5s total) ===
+;;   === browser: 42/42 checks passed (78.0s total) ===
 ;;   === all green ===
-;; => {:jvm {:test 208, :pass 1840, :fail 0, :error 0, :passed? true}
-;;     :browser {:passed? true, :passed 32, :total 32, :failed []}
+;; => {:jvm {:test 225, :pass 1953, :fail 0, :error 0, :passed? true}
+;;     :browser {:passed? true, :passed 42, :total 42, :failed []}
 ;;     :seconds 63.4, :passed? true}
 ```
 
@@ -134,7 +134,7 @@ Notable groups:
 - `jvm-unchecked-process-adapter-does-not-allocate-after-warmup` — allocation
   regression guard for the real-time process path.
 
-Expected baseline: **208 tests, 1840 assertions, 0 failures**.
+Expected baseline: **225 tests, 1953 assertions, 0 failures**.
 
 ---
 
@@ -150,7 +150,7 @@ Evaluate in the dev nREPL:
 ```clojure
 (require '[omkamra.dsp.harness.browser :as browser])
 (browser/run!)
-;; => {:passed? true, :passed 32, :total 32, :results [...]}
+;; => {:passed? true, :passed 36, :total 36, :results [...]}
 ```
 
 Run one check while iterating — `:only` matches check names, and the result
@@ -278,7 +278,13 @@ automatic run.
    sample-for-sample against the interpreter (exact, both use `Math`); Wasm is
    not, because its approximated `pow`/`sin` drift through the long resonant
    voice, so per-operation equivalence there is left to the shared process
-   matrix;
+   matrix. The **fused** instrument (F1, `{:fusion {:slots S}}` threaded by
+   `omkamra.dsp.hosts.instrument`) is checked against the **plain instrument on
+   the same host** instead: the page fetches `/fused-instrument-bundle` and
+   `/fused-instrument-source`, rebuilds the fused voice kernel and the plain one
+   over the same bus, and compares. That is what puts the fused host's kernel
+   wiring under test without mixing in the target's transcendentals; it is also
+   the check that caught the doubled ramp D63 records.
 9. the **containment policies** (P10c) — `:reset`, `:sanitize`, and `:off`
    exercised on JavaScript and Wasm: `:reset` silences a non-finite block,
    resets the voice, and counts each event; `:sanitize` contains the sample
@@ -298,7 +304,10 @@ automatic run.
     check passes when both sides are equally wrong — which is exactly how the
     Wasm pool's missing lane *pointer* stayed invisible while this check compared
     two blocks of nothing (`array-seq` does not walk a JS typed array under
-    Squint; the harness converts with `real->vector` instead).
+    Squint; the harness converts with `real->vector` instead). A lane also reaches
+    a **callee** (F3, D64): the same matrix runs `:automation-lane-in-callee`,
+    where the entry declares the lane and the definition that *reads* it is a
+    module the entry calls.
 12. **shared parameters** (M5) — a parameter bound to a `:shared` control, written
     once into the pool-wide region on both browser hosts, compared against the
     interpreter pool and against literal numbers (two voices of `0.5 + 1.0` must

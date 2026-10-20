@@ -52,3 +52,14 @@
   "A callee that asks to be copied into its call sites instead (D47)."
   [sample amount]
   (* sample amount))
+
+(dsp/defn lane-in-callee
+  "A callee that reads per-frame automation itself (F3).
+
+  A callee has no lane region of its own, so the entry's region is handed to it:
+  the entry lays the lanes out once, and a call site passes the region on. The
+  name in `(lane amount)` is the *caller's* lane for `amount`, not a control of
+  this definition, so the same slice is read wherever the accessor appears."
+  [sample amount]
+  {:process {:input false}}
+  (* sample (lane amount)))

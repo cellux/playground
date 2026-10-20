@@ -180,12 +180,20 @@
      :control-names ["coefficient"]
      :control-defaults [0.5]}))
 
-(def parameter-descriptors
-  [{"name" "coefficient"
-    "defaultValue" 0.5
-    "minValue" -10
-    "maxValue" 10
-    "automationRate" "k-rate"}])
+(defn- control-descriptors
+  "AudioWorklet `parameterDescriptors` for an artifact's controls, in ABI order.
+
+  The adapter writes a descriptor's value into the kernel's control array at the
+  descriptor's own index, so the order *is* the interface. A fused voice's
+  descriptors are therefore its *fused* controls — `frequency_0`, `gate_0`,
+  `frequency_1`, ... — which is what lets one node render every slot with
+  parameters of its own (F5)."
+  [abi]
+  (mapv (fn [control]
+          {"name" (name (:name control))
+           "defaultValue" (double (or (:default control) 0.0))
+           "automationRate" "k-rate"})
+        (:controls abi)))
 
 (def ^:private javascript-worklet-source
   "src/omkamra/dsp/worklet_adapters/js.cljs")
@@ -197,9 +205,10 @@
   "An adapter source, with the placeholders filled in.
 
   The placeholders are how one adapter serves several kernels: the page decides
-  the kernel module's URL and the name the processor registers under, and states
-  them here rather than the adapter hard-coding them."
-  [path processor-name metadata]
+  the kernel module's URL and the name the processor registers under, and each
+  caller states the kernel's parameters here rather than the adapter
+  hard-coding them."
+  [path processor-name metadata descriptors]
   (cond-> (squint/compile-string (slurp (io/file path)) {:elide-imports true})
     (:kernel-url metadata)
     (str/replace "__OMKAMRA_DSP_KERNEL_URL__" (:kernel-url metadata))
@@ -209,16 +218,19 @@
 
     true
     (str/replace "__OMKAMRA_DSP_PARAMETER_DESCRIPTORS__"
-                 (json/generate-string parameter-descriptors))))
+                 (json/generate-string descriptors))))
 
 (defn- squint-worklet-response
   [precision]
-  (let [metadata (worklet-metadata precision)]
+  (let [artifact (dsp/compile one-pole {:target :js
+                                        :entry :process
+                                        :precision precision})
+        metadata (worklet-metadata precision)]
     (javascript-response
      (str "import * as squint_core from '/omkamra/dsp/harness/testbed/squint-core';\n"
           "import { createKernel } from '" (:kernel-url metadata) "';\n"
           (worklet-source javascript-worklet-source "omkamra-dsp-kernel"
-                          metadata)))))
+                          metadata (control-descriptors (:abi artifact)))))))
 
 (defn squint-worklet
   [_request]
@@ -230,9 +242,11 @@
 
 (defn squint-wasm-worklet
   [_request]
-  (javascript-response
-   (str "import * as squint_core from '/omkamra/dsp/harness/testbed/squint-core';\n"
-        (worklet-source wasm-worklet-source "omkamra-dsp-wasm-kernel" {}))))
+  (let [artifact (dsp/compile one-pole {:target :wasm :entry :process :precision :f32})]
+    (javascript-response
+     (str "import * as squint_core from '/omkamra/dsp/harness/testbed/squint-core';\n"
+          (worklet-source wasm-worklet-source "omkamra-dsp-wasm-kernel" {}
+                          (control-descriptors (:abi artifact)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The worker-to-worklet event transport (M1)
@@ -259,12 +273,14 @@
   "The JavaScript adapter serving the `follow-amount` kernel, with an event
   ingress queue, for the worker-to-worklet transport check."
   [_request]
-  (let [metadata (transport-metadata)]
+  (let [artifact (dsp/compile fixtures/follow-amount
+                              {:target :js :entry :process :precision :f32})
+        metadata (transport-metadata)]
     (javascript-response
      (str "import * as squint_core from '/omkamra/dsp/harness/testbed/squint-core';\n"
           "import { createKernel } from '" (:kernel-url metadata) "';\n"
           (worklet-source javascript-worklet-source "omkamra-dsp-transport"
-                          metadata)))))
+                          metadata (control-descriptors (:abi artifact)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The browser pool host (P10d)
@@ -324,12 +340,13 @@
   "The shipping fused lowering (D52): the base bundle for the interpreter oracle,
   and a bundle compiled with `:fusion {:slots n}` for the kernel. Both describe
   the same voice, so the pool is base-shaped either way."
-  [target precision slots]
-  (let [description (assoc fixtures/fused-browser-description
-                           :capacity slots :max-block-frames 128)]
-    {:base (hosts/synth-bundle description {:target target :precision precision})
-     :fused (hosts/synth-bundle description {:target target :precision precision
-                                             :fusion {:slots slots}})}))
+  ([target precision slots]
+   (browser-fused-pair target precision slots fixtures/fused-browser-description))
+  ([target precision slots description]
+   (let [description (assoc description :capacity slots :max-block-frames 128)]
+     {:base (hosts/synth-bundle description {:target target :precision precision})
+      :fused (hosts/synth-bundle description {:target target :precision precision
+                                              :fusion {:slots slots}})})))
 
 (defn fused-pool-bundle
   "Serve what the browser fused pool host needs: the base artifact's ABI and IR
@@ -357,6 +374,50 @@
                      (assoc :wat (:wat fused-artifact)
                             :memory (:memory fused-artifact))))}))
 
+(defn fused-reference-bundle
+  "Serve what the browser fused pool host needs for the *reference instrument's
+  voice*: stereo and process-shaped, so fusing it exercises a per-slot region, the
+  frame, and the stereo sum end to end in the browser (F2c/F2d). The plain bundle
+  is the interpreter oracle."
+  [request]
+  (let [target (requested-target request)
+        precision (requested-precision request)
+        {:keys [base fused]} (browser-fused-pair target precision
+                                                 (requested-slots request)
+                                                 reference-synth/description)
+        base-artifact (:artifact base)
+        fused-artifact (:artifact fused)]
+    {:status 200
+     :headers {"content-type" "application/edn; charset=utf-8"
+               "cache-control" "no-store"}
+     :body (pr-str (cond-> {:runtime (:runtime base)
+                            :fusion (:fusion (:runtime fused))
+                            :base-abi (:abi base-artifact)
+                            :base-ir (pr-str (:ir base-artifact))
+                            :abi (:abi fused-artifact)
+                            ;; The *plain* lowering is the browser-side oracle: the
+                            ;; fused kernel must render what the plain kernel
+                            ;; renders, and comparing within one target makes the
+                            ;; transcendentals cancel where the host interpreter's
+                            ;; would only agree to a tolerance (D14).
+                            :base-source (:source base-artifact)
+                            :precision precision
+                            :target target}
+                     (= :wasm target)
+                     (assoc :wat (:wat fused-artifact)
+                            :memory (:memory fused-artifact)
+                            :base-wat (:wat base-artifact)
+                            :base-memory (:memory base-artifact))))}))
+
+(defn fused-reference-source
+  "Serve the fused reference voice as a JavaScript ES module."
+  [request]
+  (javascript-response
+   (:source (:artifact (:fused (browser-fused-pair
+                                :js (requested-precision request)
+                                (requested-slots request)
+                                reference-synth/description))))))
+
 (defn fused-pool-source
   "Serve the shipping fused lowering as a JavaScript ES module: the kernel the
   page imports for the fused pool."
@@ -365,6 +426,85 @@
    (:source (:artifact (:fused (browser-fused-pair
                                 :js (requested-precision request)
                                 (requested-slots request)))))))
+
+(defn fused-lane-bundle
+  "Serve the fused-lane pool: the same shape as `fused-pool-bundle`, over a voice
+  whose automation exists only as a per-voice lane, so the browser kernels have to
+  read each slot's own slice of the one lane region (F4)."
+  [request]
+  (let [target (requested-target request)
+        precision (requested-precision request)
+        {:keys [base fused]} (browser-fused-pair target precision
+                                                 (requested-slots request)
+                                                 fixtures/gated-lane-only-description)
+        base-artifact (:artifact base)
+        fused-artifact (:artifact fused)]
+    {:status 200
+     :headers {"content-type" "application/edn; charset=utf-8"
+               "cache-control" "no-store"}
+     :body (pr-str (cond-> {:runtime (:runtime base)
+                            :fusion (:fusion (:runtime fused))
+                            :base-abi (:abi base-artifact)
+                            :base-ir (pr-str (:ir base-artifact))
+                            :abi (:abi fused-artifact)
+                            :precision precision
+                            :target target}
+                     (= :wasm target)
+                     (assoc :wat (:wat fused-artifact)
+                            :memory (:memory fused-artifact))))}))
+
+(defn fused-lane-source
+  "Serve the fused-lane voice as a JavaScript ES module, for the JS kernel."
+  [request]
+  (javascript-response
+   (:source (:artifact (:fused (browser-fused-pair
+                                :js (requested-precision request)
+                                (requested-slots request)
+                                fixtures/gated-lane-only-description))))))
+
+;; ---------------------------------------------------------------------------
+;; The fused worklet: one node, `slots` voices (F5)
+;; ---------------------------------------------------------------------------
+;;
+;; A fused voice is one process holding `slots` voices, so a fused worklet node
+;; renders all of them in one call. Its interface is the *fused* one — a per-slot
+;; control is expanded (`gate_0`, `gate_1`, ...) and the rest are hoisted — and the
+;; node's parameters are that interface in ABI order, which is all the adapter
+;; needs: it writes each parameter into the kernel's control array at the
+;; parameter's own index, so no mapping is involved and the page drives the slots
+;; apart directly.
+
+(defn- fused-worklet-artifact
+  [target precision slots]
+  (:artifact (hosts/synth-bundle (assoc fixtures/fused-browser-description
+                                        :capacity slots :max-block-frames 128)
+                                 {:target target :precision precision
+                                  :fusion {:slots slots}})))
+
+(defn squint-fused-worklet
+  "The JavaScript adapter over the *fused* kernel (F5)."
+  [request]
+  (let [slots (requested-slots request)
+        kernel-url (str "/omkamra/dsp/harness/testbed/fused-pool-source"
+                        "?slots=" slots "&precision=" (name (requested-precision request)))
+        abi (:abi (fused-worklet-artifact :js (requested-precision request) slots))]
+    (javascript-response
+     (str "import * as squint_core from '/omkamra/dsp/harness/testbed/squint-core';\n"
+          "import { createKernel } from '" kernel-url "';\n"
+          (worklet-source javascript-worklet-source "omkamra-dsp-fused-kernel"
+                          {:kernel-url kernel-url} (control-descriptors abi))))))
+
+(defn squint-wasm-fused-worklet
+  "The Wasm adapter over the *fused* module (F5). The module bytes arrive as
+  processor options, so this differs from the plain Wasm arm only in its
+  parameters."
+  [request]
+  (let [slots (requested-slots request)
+        abi (:abi (fused-worklet-artifact :wasm (requested-precision request) slots))]
+    (javascript-response
+     (str "import * as squint_core from '/omkamra/dsp/harness/testbed/squint-core';\n"
+          (worklet-source wasm-worklet-source "omkamra-dsp-wasm-fused-kernel" {}
+                          (control-descriptors abi))))))
 
 ;; A pool of N independent kernel instances, against one `(poly N voice)`. The
 ;; same voice either way, so the page can time them against each other and D45
@@ -505,12 +645,26 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- browser-instrument-program
+  ([target precision] (browser-instrument-program target precision {}))
+  ([target precision options]
+   ;; The full reference synthesizer, so the browser check is an end-to-end check
+   ;; of the whole system: the same voice, modulation matrix, and post-mix chain
+   ;; the JVM suite renders.
+   (instrument-host/compile-instrument reference-synth/reference-instrument
+                                       (merge {:target target :precision precision}
+                                              options))))
+
+(def ^:private fused-instrument-slots 2)
+
+(defn- browser-fused-instrument-pair
+  "The reference instrument compiled twice at one target: the plain lowering, which
+  the page hosts as the same-target oracle, and the fused one, which is the kernel
+  under test. Both describe the same instrument, so the same phrase compares."
   [target precision]
-  ;; The full reference synthesizer, so the browser check is an end-to-end check
-  ;; of the whole system: the same voice, modulation matrix, and post-mix chain
-  ;; the JVM suite renders.
-  (instrument-host/compile-instrument reference-synth/reference-instrument
-                                      {:target target :precision precision}))
+  {:base (browser-instrument-program target precision)
+   :fused (browser-instrument-program
+           target precision
+           {:fusion {:slots fused-instrument-slots}})})
 
 (defn instrument-bundle
   "Serve the compiled reference instrument: the voice's runtime configuration,
@@ -551,6 +705,64 @@
   and the bus's, so the page can import each."
   [request]
   (let [program (browser-instrument-program :js (requested-precision request))
+        voice (:artifact (:bundle program))
+        bus (:bus program)]
+    {:status 200
+     :headers {"content-type" "application/edn; charset=utf-8"
+               "cache-control" "no-store"}
+     :body (pr-str {:voice (:source voice) :bus (when bus (:source bus))})}))
+
+(defn fused-instrument-bundle
+  "Serve what the browser *fused* instrument host needs (F1).
+
+  The fused voice's runtime, ABI, IR, and the `:fusion` mapping are the kernel the
+  page threads; the plain lowering of the same voice is served alongside it, so
+  the page has a same-target oracle and the transcendentals cancel (D14, as the
+  fused reference voice check does). The modulation matrix and the post-mix bus
+  travel once: the bus is not fused."
+  [request]
+  (let [target (requested-target request)
+        precision (requested-precision request)
+        {:keys [base fused]} (browser-fused-instrument-pair target precision)
+        base-voice (:artifact (:bundle base))
+        fused-voice (:artifact (:bundle fused))
+        bus (:bus fused)]
+    {:status 200
+     :headers {"content-type" "application/edn; charset=utf-8"
+               "cache-control" "no-store"}
+     :body (pr-str
+            (cond-> {:runtime (get-in fused [:bundle :runtime])
+                     :base-runtime (get-in base [:bundle :runtime])
+                     :fusion (get-in fused [:bundle :runtime :fusion])
+                     ;; The modulation matrix travels as data, as in
+                     ;; `instrument-bundle`.
+                     :routes (:routes fused)
+                     :voice-abi (:abi fused-voice)
+                     :voice-ir (pr-str (:ir fused-voice))
+                     :base-voice-abi (:abi base-voice)
+                     :base-voice-ir (pr-str (:ir base-voice))
+                     :base-source (:source base-voice)
+                     :bus-abi (when bus (:abi bus))
+                     :bus-ir (when bus (pr-str (:ir bus)))
+                     :bus-control-names (when bus
+                                          (mapv :name (get-in bus [:abi :controls])))
+                     :precision precision
+                     :target target}
+              (= :wasm target)
+              (assoc :voice-wat (:wat fused-voice)
+                     :voice-memory (:memory fused-voice)
+                     :base-voice-wat (:wat base-voice)
+                     :base-voice-memory (:memory base-voice)
+                     :bus-wat (when bus (:wat bus))
+                     :bus-memory (when bus (:memory bus)))))}))
+
+(defn fused-instrument-source
+  "Serve the fused instrument's JavaScript modules as EDN text: the fused voice's
+  and the bus's. The plain voice module is served in `fused-instrument-bundle`."
+  [request]
+  (let [program (browser-instrument-program
+                 :js (requested-precision request)
+                 {:fusion {:slots fused-instrument-slots}})
         voice (:artifact (:bundle program))
         bus (:bus program)]
     {:status 200

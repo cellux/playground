@@ -39,6 +39,15 @@
   map for the whole module, so a call site finds its callee's emitted name."
   nil)
 
+(def ^:dynamic *region-ids*
+  "The function IDs whose callee needs the current frame (F2, F3).
+
+  A region is frame-indexed and a lane read is per-frame, and a callee is a
+  per-sample function, so a callee that does either is handed the frame; a callee
+  that does neither is not. Bound while a process body is lowered, because a call
+  site records the fact on its `:call`."
+  #{})
+
 (def ^:private arena-base-name
   "The callee ABI's base parameter. Prefixed like everything else the emitter
   introduces, so it cannot collide with a control or a lowered local."
@@ -107,9 +116,14 @@
       (assoc :element-index (lower-expression (:element-index expression)
                                               channels)))
     :frame {:op :frame :type :int}
+    ;; The slice base a fused entry hands a lane-reading callee (F4): a value the
+    ;; callee adds to every lane read, exactly as it adds a partition base to
+    ;; every state access (D19).
+    :lane-base {:op :lane-base :type :int}
     :frames {:op :frames :type :int}
     :sample-rate {:op :sample-rate :type :float}
     :frame-offset expression
+    :lane-frame-offset expression
     :frame-plus {:op :frame-plus
                  :offset (lower-expression (:offset expression) channels)
                  :type :int}
@@ -135,11 +149,19 @@
               :args (mapv #(lower-expression % channels) (:args expression))}
     :convert {:op :convert :operator (:operator expression) :type (:type expression)
               :value (lower-expression (:value expression) channels)}
-    :call {:op :call
-           :function-id (:function-id expression)
-           :base (:state-base expression)
-           :args (mapv #(lower-expression % channels) (:args expression))
-           :type (:type expression)}
+    :call (cond-> {:op :call
+                   :function-id (:function-id expression)
+                   :base (:state-base expression)
+                   :args (mapv #(lower-expression % channels) (:args expression))
+                   :type (:type expression)}
+            (contains? *region-ids* (:function-id expression)) (assoc :frame? true)
+            ;; A lane-reading callee is handed the lane region (F3); the IR already
+            ;; knows which callees those are, and, in a fused artifact, which
+            ;; slice of it this call site reads (F4).
+            (:lanes expression) (assoc :lane? true)
+            (:lane-base expression) (assoc :lane-base
+                                           (lower-expression (:lane-base expression)
+                                                             channels)))
     (throw (ex-info "unsupported expression in JS lowering"
                     {:expression expression}))))
 
@@ -190,29 +212,39 @@
                :precision (:precision ir)
                :params (:params ir)
                :body (lower-statement (:body ir) 1)}
-    :process {:op :process
-              :name (:name ir)
-              :precision (:precision ir)
-              :channels (:channels ir)
-              ;; A generator (`:input false`, D23) has no input buffer, so its
-              ;; `process` takes no input argument and the emitted arity matches
-              ;; the ABI's derived argument indices.
-              :input? (boolean (some #(= :input (:direction %)) (:buffers ir)))
-              :controls (:controls ir)
-              :state (:state ir)
-              :scratch (:scratch ir)
-              :frames (:frames ir)
-              :sample-rate (:sample-rate ir)
-              :lanes (:lanes ir)
-              :shared (:shared ir)
-              :frame-body (lower-statement (:frame-body ir) (:channels ir))
-              ;; Definitions this target was asked to call, in emission order; the
-              ;; rest were copied into their call sites (D47).
-              :definitions (into (array-map)
-                                 (map (fn [[id definition]]
-                                        [id {:params (:params definition)
-                                             :body (lower-statement (:body definition) 1)}]))
-                                 (:definitions ir))}
+    :process (binding [*region-ids* (into #{}
+                                          (keep (fn [[id definition]]
+                                                  (when (or (seq (:region-slots definition))
+                                                            (:lane-region? definition))
+                                                    id)))
+                                          (:definitions ir))]
+               {:op :process
+                :name (:name ir)
+                :precision (:precision ir)
+                :channels (:channels ir)
+                ;; A generator (`:input false`, D23) has no input buffer, so its
+                ;; `process` takes no input argument and the emitted arity matches
+                ;; the ABI's derived argument indices.
+                :input? (boolean (some #(= :input (:direction %)) (:buffers ir)))
+                :controls (:controls ir)
+                :state (:state ir)
+                :scratch (:scratch ir)
+                :frames (:frames ir)
+                :sample-rate (:sample-rate ir)
+                :lanes (:lanes ir)
+                :shared (:shared ir)
+                :frame-body (lower-statement (:frame-body ir) (:channels ir))
+                ;; Definitions this target was asked to call, in emission order;
+                ;; the rest were copied into their call sites (D47).
+                :definitions (into (array-map)
+                                   (map (fn [[id definition]]
+                                          [id {:params (:params definition)
+                                               :frame? (boolean (or (seq (:region-slots definition))
+                                                                    (:lane-region? definition)))
+                                               :lane? (boolean (:lane-region? definition))
+                                               :lane-base? (boolean (:lane-base? definition))
+                                               :body (lower-statement (:body definition) 1)}]))
+                                   (:definitions ir))})
     (throw (ex-info "unsupported IR entry in JS lowering" {:ir ir}))))
 
 ;; ---------------------------------------------------------------------------
@@ -415,6 +447,11 @@
     :sample-rate 'sampleRate
     :channel 'channel
     :frame-offset (list '+ frame-counter (:offset expression))
+    ;; A lane read in a fused artifact resolves inside the slice this call site was
+    ;; handed, so the base the callee was given comes before the lane's own offset
+    ;; (F4).
+    :lane-frame-offset (list '+ 'lbase frame-counter (:offset expression))
+    :lane-base 'lbase
     :frame-plus (list '+ frame-counter (expression-form (:offset expression)))
     (:state-load :array-load)
     (coerce-form (:type expression) (list 'aget state-arena (index-form expression)))
@@ -449,7 +486,17 @@
     :call (list* (callee-name (:function-id expression))
                  (call-base-form (:base expression))
                  'frames 'sampleRate
-                 (map expression-form (:args expression)))
+                 ;; Something a callee needs by frame is handed the current frame
+                 ;; (F2) and something that reads a lane the lane region (F3) —
+                 ;; the caller's own, which is the one region a shared lane has.
+                 ;; The optional elements and the arguments are one seq, or `list*`
+                 ;; would splice only the last and a `when`'s nil would become a
+                 ;; literal argument.
+                 (concat (when (:frame? expression) ['frame])
+                         (when (:lane? expression) ['lanes])
+                         (when (:lane-base expression)
+                           [(expression-form (:lane-base expression))])
+                         (map expression-form (:args expression))))
     :convert (case (:operator expression)
                :int->float (coerce-form :float (expression-form (:value expression)))
                :float->int (coerce-form :int
@@ -622,7 +669,11 @@
   The four leading parameters are the ABI: the partition base, then the two context
   values every definition may reference. A callee reaches nothing else — its
   environment has no bindings — and the arena needs no parameter because these
-  functions are defined inside the kernel and close over it.
+  functions are defined inside the kernel and close over it. A callee that
+  addresses anything by frame takes the current frame next (F2, F3) and a
+  lane-reading one the lane region after that (F3), in the order the call site
+  passes them — and, in a fused artifact, the base of the lane slice it reads after
+  that (F4).
 
   The form is `(name [args] body)`, like every other `letfn` binding here: emitting
   a `defn` instead makes Squint name the entry itself (`defn_6`), and two of them
@@ -631,6 +682,9 @@
   (binding [*callee* (assoc *callee* :base arena-base-name)]
     (list name
           (vec (concat [arena-base-name 'frames 'sampleRate]
+                       (when (:frame? definition) ['frame])
+                       (when (:lane? definition) ['lanes])
+                       (when (:lane-base? definition) ['lbase])
                        (map parameter-symbol (:params definition))))
           (normalize-booleans (:params definition)
                               (cons 'do (statement-forms [(:body definition)]))))))

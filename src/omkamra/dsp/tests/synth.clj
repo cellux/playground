@@ -11,6 +11,8 @@
   (:require [clojure.test :refer [deftest is testing]]
             [omkamra.dsp :as dsp]
             [omkamra.dsp.examples.demo-synth :as demo]
+            [omkamra.dsp.hosts.instrument :as instrument-host]
+            [omkamra.dsp.instrument :as inst]
             [omkamra.dsp.library.filter :as filter]
             [omkamra.dsp.synth :as synth]
             [omkamra.dsp.hosts :as host]
@@ -169,6 +171,65 @@
                               (pool/set-voice-lane! pool 2 'amount (float-array [1.0]))))
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no such lane"
                               (pool/set-voice-lane! pool 0 'nope (float-array [1.0]))))))))
+
+(deftest a-fused-pool-gives-each-slot-its-own-lane
+  ;; F4. A fused entry renders every slot in one call, so it owns *one* lane
+  ;; region, while a lane is per voice: each call site has to read its own slice of
+  ;; it. Two different curves make that visible -- with one slice shared by every
+  ;; slot the last write wins and both slots read the same automation, which is a
+  ;; wrong answer rather than a missing one, and the whole point of a per-voice
+  ;; lane is that two voices can be automated apart.
+  (let [description fixtures/gated-lane-only-description
+        render (fn [options write]
+                 (let [pool (host/synth-pool (compiled description options))
+                       output (float-array 4)]
+                   (write pool)
+                   (pool/note-on! pool 60 1.0)
+                   (pool/note-on! pool 64 1.0)
+                   (pool/render! pool output 4 48000.0)
+                   (vec output)))
+        two-curves
+        (fn [pool]
+          (pool/set-voice-lane! pool 0 'amount (float-array [1.0 2.0 3.0 4.0]))
+          (pool/set-voice-lane! pool 1 'amount (float-array [10.0 10.0 10.0 10.0])))]
+    (testing "each slot reads the curve written for it"
+      (is (= [22.0 24.0 26.0 28.0]
+             (render {:target :jvm :fusion {:slots 2}} two-curves))
+          "2*(1+10), 2*(2+10), ...: one slot on 1..4, the other on 10")
+      (is (= [22.0 24.0 26.0 28.0]
+             (render {:target :interpreter :fusion {:slots 2}} two-curves))
+          "the interpreter hosts a fused pool too, and agrees"))
+    (testing "a plain pool over the same description is the oracle"
+      (is (= (render {} two-curves) (render {:fusion {:slots 2}} two-curves))
+          "the lane is per voice either way"))))
+
+(deftest a-fused-pool-expands-a-lane-carrying-control-per-slot
+  ;; F4. A per-slot control that *carries* a lane used to be refused -- a lane
+  ;; region was the entry process's, so expanding the control would have given
+  ;; every slot the same automation. Now the control is expanded (each slot has
+  ;; its own scalar) while the *lane* stays one lane the slots read from their own
+  ;; slices, which is what makes a fused voice's slots automatable apart.
+  (let [description fixtures/gated-lane-carried-description
+        render (fn [options write]
+                 (let [pool (host/synth-pool (compiled description options))
+                       output (float-array 4)]
+                   (write pool)
+                   (pool/note-on! pool 60 1.0)
+                   (pool/note-on! pool 64 1.0)
+                   (pool/render! pool output 4 48000.0)
+                   (vec output)))
+        two-curves
+        (fn [pool]
+          (pool/set-voice-lane! pool 0 'amount (float-array [1.0 2.0 3.0 4.0]))
+          (pool/set-voice-lane! pool 1 'amount (float-array [10.0 10.0 10.0 10.0])))]
+    (testing "each slot reads its own slice of the one lane"
+      (is (= [31.0 32.0 33.0 34.0] (render {:target :jvm :fusion {:slots 2}} two-curves))
+          "(10+1)+(10+10) through (10+4)+(10+10), as a plain pool gives")
+      (is (= [31.0 32.0 33.0 34.0]
+             (render {:target :interpreter :fusion {:slots 2}} two-curves))
+          "the interpreter hosts a fused pool too, and agrees"))
+    (testing "a plain pool over the same description is the oracle"
+      (is (= (render {} two-curves) (render {:fusion {:slots 2}} two-curves))))))
 
 (defn- render-bits
   "Play `events` into a fresh pool and return every rendered sample as raw bits.
@@ -1256,7 +1317,7 @@
       ;; What `poly` used to lose: it redeclared the controls by name alone, so a
       ;; shared control arrived as an ordinary scalar and the fused interface had
       ;; no shared region at all (D50, D52).
-      (let [bundle (host/synth-bundle (assoc fixtures/shared-voice-description :capacity 2)
+      (let [bundle (host/synth-bundle (assoc shared-voice-description :capacity 2)
                                       (assoc options :fusion {:slots 2}))]
         (is (= '[amount] (mapv :name (:shared (:abi (:artifact bundle)))))
             "the fused interface declares the control the voice declared")
@@ -1264,7 +1325,7 @@
         (is (= {:slots 2 :controls [] :per-slot []} (:fusion (:runtime bundle)))
             "a shared control is hoisted, so nothing is expanded per slot")
         (is (thrown? clojure.lang.ExceptionInfo
-                     (host/compile-synth (assoc fixtures/shared-voice-description :capacity 2)
+                     (host/compile-synth (assoc shared-voice-description :capacity 2)
                                          (assoc options :fusion {:slots 2})))
             "and a fused voice with nothing per slot has nothing to fuse")))
     (testing "the option is closed and checked"
@@ -1273,6 +1334,30 @@
       (is (thrown? clojure.lang.ExceptionInfo
                    (host/compile-synth description (assoc options :fusion {:slots 2
                                                                            :chunk 2})))))))
+
+(deftest a-fused-pool-runs-on-the-interpreter-oracle
+  ;; The interpreter must run a fused pool, or a fused pool on any host has no
+  ;; oracle -- the JVM and the browser would only agree with each other. The
+  ;; interpreter kernel applies the same base -> fused control mapping and resets
+  ;; one slot's partition, so it renders a fused pool and stays the reference
+  ;; (D59).
+  (let [description (assoc fixtures/echo-voice-description
+                           :capacity 4 :max-block-frames 128)
+        render (fn [target fusion]
+                 (let [pool (host/synth-pool
+                             (host/compile-synth
+                              description
+                              (cond-> {:target target :precision :f32}
+                                fusion (assoc :fusion fusion))))
+                       output (float-array 128)]
+                   (pool/note-on! pool 69 1.0)
+                   (pool/note-on! pool 72 1.0)
+                   (dotimes [_ 3] (pool/render! pool output 128 48000.0))
+                   (vec output)))]
+    (is (= (render :interpreter nil) (render :interpreter {:slots 4}))
+        "the interpreter renders a fused pool as its own plain pool")
+    (is (= (render :jvm {:slots 4}) (render :interpreter {:slots 4}))
+        "and it is the oracle for the JVM's fused pool")))
 
 (deftest a-fused-pool-preserves-a-release-tail
   ;; M6b: the guard skips slots a pool has not gated, but a slot that *has*
@@ -1351,3 +1436,74 @@
             (str label ": and it was freed, not stolen"))
         (is (= 1 (:released (stats)))
             (str label ": the release was counted"))))))
+
+(deftest a-fused-instrument-renders-what-a-plain-instrument-renders
+  ;; F1: the instrument layer hands the bundle's `:fusion` to its kernel. Before
+  ;; this, `compile-instrument` accepted `:fusion` and built a fused artifact,
+  ;; and `instrument-pool` then built a *plain* kernel over it -- which threw at
+  ;; the first note-on. A fused instrument must render exactly what the plain one
+  ;; does, and the artifact must actually be the fused one.
+  (let [value (inst/instrument (assoc fixtures/echo-voice-description
+                                      :capacity 2 :max-block-frames 128))
+        options {:target :jvm :precision :f32 :containment :off}
+        play (fn [program]
+               (let [live (instrument-host/instrument-pool
+                           program {:containment :off})
+                     instrument-pool (instrument-host/pool-of live)
+                     block (float-array 128)]
+                 (pool/note-on! instrument-pool 60 1.0)
+                 (pool/render! instrument-pool block 128 48000.0)
+                 (vec block)))
+        plain-program (instrument-host/compile-instrument value options)
+        fused-program (instrument-host/compile-instrument
+                       value (assoc options :fusion {:slots 2}))
+        plain (play plain-program)
+        fused (play fused-program)]
+    (is (= 4 (count (get-in plain-program [:bundle :artifact :abi :controls])))
+        "the plain instrument has the voice's controls")
+    (is (= 8 (count (get-in fused-program [:bundle :artifact :abi :controls])))
+        "the fused instrument expanded them per slot")
+    (is (= plain fused)
+        "a fused instrument renders the plain instrument's samples")
+    (is (some (fn [sample] (not (zero? sample))) plain)
+        "and the instrument actually sounds, so the comparison is not silence")))
+
+(deftest a-fused-instrument-holds-exactly-its-slots
+  ;; F1. A fused artifact *is* `slots` voices, so the pool's capacity has to be the
+  ;; slot count, not the description's: the kernel maps a pool voice onto a slot by
+  ;; creation order, so a larger pool hands several handles the same slot -- and
+  ;; any host step that writes every voice, the modulation publisher being the one
+  ;; that does, then clobbers that slot's controls with each handle's in turn.
+  (let [value (inst/instrument (assoc fixtures/echo-voice-description
+                                      :capacity 8 :max-block-frames 128))
+        options {:target :jvm :precision :f32 :containment :off}
+        capacity (fn [fusion]
+                   (let [program (instrument-host/compile-instrument
+                                  value (cond-> options
+                                          fusion (assoc :fusion {:slots fusion})))]
+                     (get-in program [:bundle :runtime :capacity])))]
+    (is (= 8 (capacity nil)) "a plain instrument keeps the description's capacity")
+    (is (= 2 (capacity 2)) "a fused one holds its slots, not the description's 8")))
+
+(deftest a-fused-voice-does-not-ramp-a-smoothed-control-twice
+  ;; F1. `synthesize` fuses a module-shaped voice by wrapping it in `guard` and
+  ;; `poly`, and both are *derived* definitions: their bodies only call the voice,
+  ;; so the voice owns the control and ramps it once per call site. They used to
+  ;; inherit the declaration *and* ramp from it as well, so the control went
+  ;; through two poles and a fused voice lagged its plain self -- percent for the
+  ;; first milliseconds, settling only after thousands of frames.
+  (let [play (fn [options]
+               (let [program (host/compile-synth
+                              fixtures/smoothed-amount-description
+                              (merge {:target :jvm :precision :f32 :containment :off}
+                                     options))
+                     pool (pool/voice-pool (:runtime program) (:kernel program))
+                     block (float-array 8)]
+                 (pool/note-on! pool 60 1.0)
+                 (pool/render! pool block 8 48000.0)
+                 (vec block)))
+        plain (play {})
+        fused (play {:fusion {:slots 1}})]
+    (is (= [0.0 0.5 0.75 0.875 0.9375 0.96875 0.984375 0.9921875] plain)
+        "the plain voice's ramp is a single pole, so the check below is not vacuous")
+    (is (= plain fused) "a fused voice renders the plain voice's samples")))

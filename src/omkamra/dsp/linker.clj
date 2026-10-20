@@ -10,6 +10,7 @@
 
 (def ^:private language-forms
   (into '#{if let do set! while break continue buffer-load buffer-store lane
+           with-buffers
            state-load state-store store-special array array-load array-store aget aset
            field set-field! int->float float->int
            + - * / = not= < <= > >= and or not
@@ -99,45 +100,57 @@
        (not (contains? language-forms (first form)))
        (not (contains? record-names (first form)))))
 
+(defn- with-buffers-form?
+  "`(with-buffers <binding> <call>)`: the third element is an ordinary call whose
+  callee may reach the caller's process buffers, because the form binds them."
+  [form]
+  (and (= 'with-buffers (first form)) (= 3 (count form))))
+
 (defn- call-sites
   "Return call-head symbols in deterministic source order, with paths.
 
   The small DSP language has no quoted executable forms, so every nested list
-  headed by a non-language symbol is an ordinary DSP call candidate."
+  headed by a non-language symbol is an ordinary DSP call candidate. A call
+  directly inside `with-buffers` is marked `:buffered? true`: its callee is
+  allowed to access process buffers (F2)."
   [definition]
   (let [record-names (state-record-names definition)]
-    (letfn [(walk [form path out]
+    (letfn [(walk [form path buffered? out]
               (cond
                 (seq? form)
                 (let [out (if (callable-form? record-names form)
-                            (conj out {:symbol (first form) :path path :form form})
-                            out)]
+                            (conj out {:symbol (first form) :path path :form form
+                                       :buffered? buffered?})
+                            out)
+                      buffered-child (when (with-buffers-form? form) 2)]
                   (reduce-kv (fn [out index child]
-                               (walk child (conj path index) out))
+                               (walk child (conj path index)
+                                     (= index buffered-child)
+                                     out))
                              out
                              (vec form)))
 
                 (vector? form)
                 (reduce-kv (fn [out index child]
-                             (walk child (conj path index) out))
+                             (walk child (conj path index) false out))
                            out form)
 
                 (map? form)
                 (reduce (fn [out [key value]]
-                          (walk value (conj path key) out))
+                          (walk value (conj path key) false out))
                         out form)
 
                 (set? form)
-                (reduce (fn [out value] (walk value path out)) out (sort-by pr-str form))
+                (reduce (fn [out value] (walk value path false out)) out (sort-by pr-str form))
 
                 :else out))]
       (let [body-calls (reduce-kv (fn [out index form]
-                                    (walk form [:body index] out))
+                                    (walk form [:body index] false out))
                                   []
                                   (:body definition))]
         (reduce-kv (fn [out index state]
                      (if (some? (:next state))
-                       (walk (:next state) [:state index :next] out)
+                       (walk (:next state) [:state index :next] false out)
                        out))
                    body-calls
                    (vec (:state definition)))))))
@@ -249,7 +262,11 @@
                                    :resolved-id id})))]
     ;; A module owns its own state and buffers, but it may not reach into the
     ;; caller's I/O ports: `buffer-load`/`buffer-store` name process buffers.
-    (when (definition-buffer-access? (second resolved))
+    ;; A call inside `with-buffers` is the exception (F2, D57): it binds those
+    ;; buffers to regions the call site owns, so the callee writes its own output
+    ;; rather than the caller's.
+    (when (and (definition-buffer-access? (second resolved))
+               (not (:buffered? call)))
       (fail "DSP modules cannot access the caller's process buffers"
             (merge (source-data definition (:path call) (:form call))
                    {:reference (:symbol call)
@@ -259,35 +276,38 @@
 (defn- rewrite-calls
   [definition resolve-call]
   (let [record-names (state-record-names definition)]
-    (letfn [(rewrite [form path]
+    (letfn [(rewrite [form path buffered?]
               (cond
                 (seq? form)
-                (let [items (map-indexed (fn [index item]
-                                           (rewrite item (conj path index)))
+                (let [buffered-child (when (with-buffers-form? form) 2)
+                      items (map-indexed (fn [index item]
+                                           (rewrite item (conj path index)
+                                                    (= index buffered-child)))
                                          form)]
                   (if (callable-form? record-names form)
                     (let [[id _] (resolve-call {:symbol (first form)
                                                 :path path
-                                                :form form})]
+                                                :form form
+                                                :buffered? buffered?})]
                       (list* 'dsp/call id (rest items)))
                     (apply list items)))
 
-                (vector? form) (mapv #(rewrite % (conj path %2)) form (range))
+                (vector? form) (mapv #(rewrite %1 (conj path %2) false) form (range))
                 (map? form) (into (empty form)
                                   (map (fn [[key value]]
-                                         [key (rewrite value (conj path key))])
+                                         [key (rewrite value (conj path key) false)])
                                        form))
-                (set? form) (into #{} (map #(rewrite % path)) form)
+                (set? form) (into #{} (map #(rewrite % path false)) form)
                 :else form))]
       (-> definition
           (update :body
-                  #(mapv (fn [form index] (rewrite form [:body index])) % (range)))
+                  #(mapv (fn [form index] (rewrite form [:body index] false)) % (range)))
           (update :state
                   #(mapv (fn [state index]
                            (if (some? (:next state))
                              (update state :next
                                      (fn [form]
-                                       (rewrite form [:state index :next])))
+                                       (rewrite form [:state index :next] false)))
                              state))
                          %
                          (range)))))))

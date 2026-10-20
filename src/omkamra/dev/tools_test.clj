@@ -369,11 +369,19 @@
       (let [explicit (tools/reload 'fixture.a)]
         (is (= :reloaded (:status explicit)))
         (is (= '[fixture.a] (:reloaded explicit))
-            "only the explicit target is reloaded"))
+            "only the explicit target is reloaded")
+        (is (= {:count 1 :sample '[fixture.b]} (:stale explicit))
+            (str "and the report names the edit it left behind, so \"the image is "
+                 "current now\" is never something the caller assumed"))
+        (is (str/includes? (str (:note explicit)) "not reloaded")
+            "said in words too"))
       (let [next-result (tools/reload)]
         (is (= :reloaded (:status next-result))
             "the unrelated edit is still detected, not absorbed")
         (is (= '[fixture.b] (:changed next-result)))
+        (is (nil? (:stale next-result))
+            (str "and a detection-driven reload leaves nothing stale, so the key "
+                 "above is a claim the tool checked rather than one it assumed"))
         (is (= 2 @(ns-resolve 'fixture.b 'x))))
       (finally
         (forget! 'fixture.a 'fixture.b)

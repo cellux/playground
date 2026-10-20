@@ -142,6 +142,10 @@
     ;; mandatory, but a `:has-lane` one is optional — an untouched region reads
     ;; zero, so a host that never sends automation gets the plain scalar.
     [:has-lane {:optional true} boolean?]
+    ;; The lane a control carries, when the control was expanded per slot: a lane
+    ;; belongs to a *control*, so every slot's copy names the one lane they all
+    ;; read -- from their own slice of the region (F4).
+    [:lane-name {:optional true} symbol?]
     ;; `:shared` is the *global* counterpart of a control: the value is read
     ;; from the process's `:shared` region, one region per *pool*, instead of
     ;; from this instance's control storage. The control leaves the scalar
@@ -228,7 +232,17 @@
    ;; fully-qualified id. They are validated on arrival by the linker, so a
    ;; shallow shape is enough here. `normalize` drops the key; `link` reads it
    ;; from the raw value before normalizing.
-   [:dsp/dependencies {:optional true} [:or nil? [:map-of symbol? [:map]]]]])
+   [:dsp/dependencies {:optional true} [:or nil? [:map-of symbol? [:map]]]]
+   ;; `graph/derived-definition` builds a definition whose body *calls* the voice
+   ;; it was derived from, so that voice evaluates the controls and ramps them,
+   ;; once per call site. The declaration still travels -- the derived interface
+   ;; is the voice's, mode included -- but this definition must not ramp too (F1).
+   [:dsp/forwarded-controls {:optional true} boolean?]
+   ;; A derived definition that renders `n` voices in one call -- `poly` -- owns
+   ;; one lane region with one slice per voice, so a lane read by a call site
+   ;; resolves inside that call site's slice (F4). The fact is the entry's, so it
+   ;; travels on the definition rather than being recomputed by each backend.
+   [:dsp/lane-slots {:optional true} pos-int?]])
 
 (def ^:private SourceForm
   [:schema {:registry {::source-form
@@ -702,6 +716,9 @@
       (merge (select-keys control [:smooth :slew])
              (when (:lane control) {:lane true})
              (when (:has-lane control) {:has-lane true})
+             ;; The lane an expanded control carries, so every slot's copy names
+             ;; the one lane they read (F4).
+             (when (:lane-name control) {:lane-name (:lane-name control)})
              (when (:shared control) {:shared true})))))
 
 (defn- normalize-buffer-name
@@ -1008,7 +1025,7 @@
               {:names (vec collisions)
                :parameters (mapv :name params)
                :states (mapv :name states)}))
-      (when (= :void return-type)
+      (when (and (= :void return-type) (not (contains? definition :process)))
         (fail "DSP function return type :void is not supported by the initial expression entry"
               source [:return-type] {}))
       (when-not (= 1 (count body))
@@ -1025,7 +1042,16 @@
             ;; toward. The rewrite covers the body and every *user* `:next`, and
             ;; must happen before the synthesized updates are added — rewriting
             ;; those would turn their target into the smoothed value itself.
-            ramps (ramp-states (:controls process) states source)
+            ;;
+            ;; A derived definition is the exception. Its body only calls the
+            ;; voice it was derived from, so that voice -- which owns the control
+            ;; -- evaluates it and ramps it once per call site. Ramping here as
+            ;; well would compound the two, and the derived signal would lag the
+            ;; plain one until it settles (F1). The declaration stays, so the
+            ;; interface -- and the ABI a host reads -- still reports the mode.
+            ramps (ramp-states (when-not (:dsp/forwarded-controls definition)
+                                 (:controls process))
+                               states source)
             rewrite (fn [form]
                       (reduce (fn [form {:keys [control replaced]}]
                                 (replace-symbol form control replaced))
@@ -1051,6 +1077,10 @@
                                                            source)
                          :options (validate-options (or compiler-options {})
                                                     source [:options])}
-                         (:inline definition) (assoc :inline true))]
+                         (:inline definition) (assoc :inline true)
+                         (:dsp/forwarded-controls definition)
+                         (assoc :dsp/forwarded-controls true)
+                         (:dsp/lane-slots definition)
+                         (assoc :dsp/lane-slots (:dsp/lane-slots definition)))]
         (validate-expression-types! (first body) params states return-type source)
         normalized))))

@@ -57,63 +57,75 @@
   (extends AudioWorkletProcessor)
   (constructor [this options]
                (super)
-               (let [processor-options (.-processorOptions options)
-                     control-names (or (aget processor-options "controlNames")
-                                       #js ["coefficient"])
-                     control-defaults (or (aget processor-options "controlDefaults")
-                                          #js [0.5])
-                     input-channels (or (aget processor-options "inputChannels") 1)
-                     channels (or (aget processor-options "channels") 1)
-                     event-capacity (or (aget processor-options "eventCapacity") 1024)
-                     ;; The generated ABI is (input?), output, frames,
-                     ;; sample-rate, then the positional controls.
-                     control-offset (+ 3 (if (pos? input-channels) 1 0))]
-                 (set! (.-input-channels this) input-channels)
-                 (set! (.-channels this) channels)
-                 (set! (.-control-offset this) control-offset)
-                 (set! (.-control-names this) control-names)
-                 (set! (.-control-defaults this) control-defaults)
-                 ;; Reuse this argument array on every process call, so a block
-                 ;; allocates nothing.
-                 (set! (.-process-args this)
-                       (js/Array. (+ control-offset (.-length control-names))))
-                 ;; The event ingress queue: preallocated, so receiving an event
-                 ;; never grows it.
-                 (set! (.-event-capacity this) event-capacity)
-                 (set! (.-event-frames this) (js/Float64Array. event-capacity))
-                 (set! (.-event-controls this) (js/Int32Array. event-capacity))
-                 (set! (.-event-values this) (js/Float64Array. event-capacity))
-                 (set! (.-event-count this) 0)
-                 (set! (.-event-pointer this) 0)
-                 (set! (.-events-ready this) false)
-                 ;; A control an event has set stays set across blocks; AudioParams
-                 ;; must not clobber it on the next block's read.
-                 (set! (.-event-set this) (js/Int8Array. (.-length control-names)))
-                 (set! (.-control-index this)
-                       (let [index #js {}]
-                         (dotimes [control (.-length control-names)]
-                           (aset index (aget control-names control) control))
-                         index)))
-               (set! (.-kernel this) (createKernel))
-               (set! (.-ready this) true)
-               (set! (.-onmessage (.-port this))
-                     (fn [event]
-                       (let [data (.-data event)]
-                         (cond
-                           (= "status" (.-type data))
-                           (.postMessage (.-port this) #js {:type "ready"})
+               ;; A constructor that throws is otherwise invisible: the worklet
+               ;; reports a bare `processorerror` and the page only sees a node
+               ;; that never answers. Posting it means `worklet-ready` rejects
+               ;; with the reason instead of timing out (F5).
+               (try
+                 ;; A node created without processor options must fall back to the
+                 ;; adapter's defaults rather than throw where nothing reports it.
+                 (let [processor-options (or (.-processorOptions options) #js {})
+                       control-names (or (aget processor-options "controlNames")
+                                         #js ["coefficient"])
+                       control-defaults (or (aget processor-options "controlDefaults")
+                                            #js [0.5])
+                       input-channels (or (aget processor-options "inputChannels") 1)
+                       channels (or (aget processor-options "channels") 1)
+                       event-capacity (or (aget processor-options "eventCapacity") 1024)
+                       ;; The generated ABI is (input?), output, frames,
+                       ;; sample-rate, then the positional controls.
+                       control-offset (+ 3 (if (pos? input-channels) 1 0))]
+                   (set! (.-input-channels this) input-channels)
+                   (set! (.-channels this) channels)
+                   (set! (.-control-offset this) control-offset)
+                   (set! (.-control-names this) control-names)
+                   (set! (.-control-defaults this) control-defaults)
+                   ;; Reuse this argument array on every process call, so a block
+                   ;; allocates nothing.
+                   (set! (.-process-args this)
+                         (js/Array. (+ control-offset (.-length control-names))))
+                   ;; The event ingress queue: preallocated, so receiving an event
+                   ;; never grows it.
+                   (set! (.-event-capacity this) event-capacity)
+                   (set! (.-event-frames this) (js/Float64Array. event-capacity))
+                   (set! (.-event-controls this) (js/Int32Array. event-capacity))
+                   (set! (.-event-values this) (js/Float64Array. event-capacity))
+                   (set! (.-event-count this) 0)
+                   (set! (.-event-pointer this) 0)
+                   (set! (.-events-ready this) false)
+                   ;; A control an event has set stays set across blocks; AudioParams
+                   ;; must not clobber it on the next block's read.
+                   (set! (.-event-set this) (js/Int8Array. (.-length control-names)))
+                   (set! (.-control-index this)
+                         (let [index #js {}]
+                           (dotimes [control (.-length control-names)]
+                             (aset index (aget control-names control) control))
+                           index)))
+                 (set! (.-kernel this) (createKernel))
+                 (set! (.-ready this) true)
+                 (set! (.-onmessage (.-port this))
+                       (fn [event]
+                         (let [data (.-data event)]
+                           (cond
+                             (= "status" (.-type data))
+                             (.postMessage (.-port this) #js {:type "ready"})
 
-                           ;; The page transfers one end of a MessageChannel here;
-                           ;; the worker holds the other.
-                           (= "connect" (.-type data))
-                           (let [port (aget (.-ports event) 0)]
-                             (set! (.-onmessage port)
-                                   (fn [message]
-                                     (handle-event! this (.-data message))))
-                             (set! (.-event-port this) port))
+                             ;; The page transfers one end of a MessageChannel here;
+                             ;; the worker holds the other.
+                             (= "connect" (.-type data))
+                             (let [port (aget (.-ports event) 0)]
+                               (set! (.-onmessage port)
+                                     (fn [message]
+                                       (handle-event! this (.-data message))))
+                               (set! (.-event-port this) port))
 
-                           :else
-                           (handle-event! this data))))))
+                             :else
+                             (handle-event! this data)))))
+                 (catch :default e
+                   (.postMessage (.-port this)
+                                 #js {:type "error"
+                                      :message (str "processor options: "
+                                                    (.-message e))}))))
   Object
   (^:static ^:get parameterDescriptors [this]
                                        (js* "__OMKAMRA_DSP_PARAMETER_DESCRIPTORS__"))

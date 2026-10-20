@@ -87,7 +87,12 @@
   named voice too keeps the two cases identical and costs nothing.
 
   `overrides` may replace `:params` and `:controls`, for a combinator that
-  changes the interface — a fixed-N `poly` voice adds one control per slot."
+  changes the interface — a fixed-N `poly` voice adds one control per slot.
+
+  The result is marked `:dsp/forwarded-controls`: its body calls `voice`, so
+  `voice` evaluates and ramps the controls, once per call site. The declaration
+  travels — the derived interface is the voice's, `:smooth`/`:slew` included —
+  but `normalize` must not ramp them a second time in the wrapper (F1)."
   ([voice body]
    (derived-definition voice body nil))
   ([voice body overrides]
@@ -98,6 +103,7 @@
                     :body [body]
                     :state nil
                     :resolution {:aliases {} :refers {}}
+                    :dsp/forwarded-controls true
                     :dsp/dependencies (assoc (:dsp/dependencies voice) id voice))
        params (assoc :params params)
        controls (assoc-in [:process :controls] controls)))))

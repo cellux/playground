@@ -111,7 +111,8 @@
         ;; compile-time constants (D28). The *region* is the voice's — one per
         ;; voice, allocated with the voice — so a per-voice lane has somewhere of
         ;; its own to live and a shared one is written once per voice by the
-        ;; pool (M4c).
+        ;; pool (M4c). A fused instance renders every slot in one call, so its one
+        ;; region holds a slice per slot and the voice's slot says which (F4).
         lane-stride (long (or (:lane-stride abi) 0))
         lane-layout (into {}
                           (map (clojure.core/fn [lane]
@@ -119,6 +120,8 @@
                                   (long (:offset lane))]))
                           (:lanes abi))
         lane-count (count lane-layout)
+        lane-slots (long (or (:lane-slots abi) 1))
+        lane-region-size (* lane-stride lane-count lane-slots)
         ;; One shared region per *kernel*, i.e. per pool: a broadcast parameter is
         ;; written once and read by every voice (M5). Its slices are the lanes'
         ;; shape, so one stride and one addressing serve both.
@@ -163,7 +166,7 @@
              :float-controls (mixing/real-array f64? float-count)
              :int-controls (int-array (int int-count))
              :lane-region (when (pos? lane-count)
-                            (mixing/real-array f64? (* lane-stride lane-count)))
+                            (mixing/real-array f64? lane-region-size))
              :scratch (mixing/scratch-buffer f64? channels max-block-frames)
              :reset! (clojure.core/fn [] (dsp/reset! instance))})
           (let [slot (long (mod (long @created) slots))]
@@ -175,8 +178,7 @@
                           :float-controls (mixing/real-array f64? float-count)
                           :int-controls (int-array (int int-count))
                           :lane-region (when (pos? lane-count)
-                                         (mixing/real-array
-                                          f64? (* lane-stride lane-count)))
+                                         (mixing/real-array f64? lane-region-size))
                           :scratch (mixing/scratch-buffer f64? channels max-block-frames)
                           :refs (volatile! slots)})))
             (vswap! created inc)
@@ -229,11 +231,17 @@
                               (long (aget ^doubles values position))))))))))
       (write-voice-lane! [_ voice lane values]
         (let [key (if (string? lane) lane (clojure.core/name lane))
-              offset (get lane-layout key)]
-          (when-not offset
+              lane-offset (get lane-layout key)]
+          (when-not lane-offset
             (throw (ex-info "this DSP voice declares no such lane"
                             {:lane lane :lanes (vec (sort (keys lane-layout)))})))
-          (let [length (min (mixing/value-length values) lane-stride)]
+          ;; A fused instance holds one slice per slot, so a voice's lane is written
+          ;; into the slice its slot *is*; without that, every slot would take
+          ;; turns overwriting one automation (F4). A plain voice has no slot, and
+          ;; its kernel has one slice.
+          (let [offset (+ (long lane-offset)
+                          (* (long (or (:slot voice) 0)) lane-stride lane-count))
+                length (min (mixing/value-length values) lane-stride)]
             (if f64?
               (let [^doubles target (:lane-region voice)]
                 (dotimes [index length]

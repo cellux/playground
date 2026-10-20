@@ -41,7 +41,9 @@
                            (when (.-ready this)
                              (.call (.-init-fn this) nil)
                              (.postMessage (.-port this) #js {:type "init"}))))))
-               (let [processor-options (.-processorOptions options)
+               ;; A node created without processor options must reach the adapter's own
+               ;; "invalid metadata" report rather than throw where nothing sees it.
+               (let [processor-options (or (.-processorOptions options) #js {})
                      wasm-bytes (aget processor-options "wasmBytes")
                      element-bytes (or (aget processor-options "elementBytes") 4)
                      element-type (or (aget processor-options "elementType") "f32")

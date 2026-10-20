@@ -103,17 +103,24 @@
          ;; copies this range back from the instance's initial state, exactly as
          ;; the JVM host does (D51). The layout gives each slot's byte offset,
          ;; because an int slot in an f64 block is padded to the block's
-         ;; alignment.
+         ;; alignment. A partition is resolved from the layout *segments* that
+         ;; overlap it, not from a lookup per arena index: a per-call-site region
+         ;; is one entry spanning thousands of indices, and the indices inside it
+         ;; have no entry of their own.
          partition-ranges (when mapping
                             (mapv (fn [{:keys [base size]}]
-                                    (let [entries (mapv (fn [index]
-                                                          (get state-layout index))
-                                                        (range (long base)
-                                                               (+ (long base) (long size))))]
-                                      {:start (reduce min (map :offset entries))
+                                    (let [base (long base)
+                                          end (+ base (long size))
+                                          entries (filter (clojure.core/fn [[index entry]]
+                                                            (let [index (long index)
+                                                                  span (long (or (:size entry) 1))]
+                                                              (and (< index end)
+                                                                   (< base (+ index span)))))
+                                                          state-layout)]
+                                      {:start (reduce min (map (comp long :offset val) entries))
                                        :end (reduce max
-                                                    (map (fn [{:keys [offset size
-                                                                      element-bytes]}]
+                                                    (map (clojure.core/fn [[_ {:keys [offset size
+                                                                                      element-bytes]}]]
                                                            (+ (long offset)
                                                               (* (long (or size 1))
                                                                  (long element-bytes))))
@@ -140,6 +147,9 @@
                                    (long (:offset lane))]))
                            (:lanes abi))
          lane-count (clojure.core/count lane-layout)
+         ;; A fused instance renders every slot in one call, so its one region
+         ;; holds a slice per slot and the voice's slot says which (F4).
+         lane-slots (long (or (:lane-slots abi) 1))
          lanes-offset (long (get-in memory-layout [:regions :lanes :offset] 0))
          ;; The shared region is the *pool's*: one host-side master, copied into
          ;; each instance's own region before it runs, because a Wasm instance
@@ -175,6 +185,12 @@
                  arguments (js/Array. (+ 3 control-count
                                          (if (pos? lane-count) 1 0)
                                          (if (pos? shared-count) 1 0)))]
+             ;; A Wasm instance starts from zeroed memory, so the module's own
+             ;; `reset` seeds the state from the IR's initial values -- the same
+             ;; thing the JavaScript host gets from `create`, which writes the
+             ;; state array. The pool resets a voice only when it *steals* one,
+             ;; so a fresh voice would otherwise render from zero (D59).
+             (when reset (reset))
              (when lane-slot
                ;; The generated ABI puts the regions last, by address: the module
                ;; reads its own linear memory, so the pointer is this instance's
@@ -192,7 +208,7 @@
               :arguments arguments
               :lanes (when (pos? lane-count)
                        (real-view memory f64? lanes-offset
-                                  (* lane-stride lane-count)))
+                                  (* lane-stride lane-count lane-slots)))
               :shared (when (pos? shared-count)
                         (real-view memory f64? shared-offset
                                    (* shared-stride shared-count)))
@@ -207,6 +223,14 @@
              (when (zero? slot)
                (let [instance (js/WebAssembly.Instance. module)
                      exports (.-exports instance)
+                     ;; The module seeds every state slot from the IR's initial
+                     ;; values in its own `reset`, which for a plain kernel runs
+                     ;; at note-on. A fused slot instead restores its partition
+                     ;; from the snapshot below, so the seed has to run first --
+                     ;; otherwise the snapshot is the zeroed memory a Wasm module
+                     ;; is instantiated with, and every slot starts from zero.
+                     _ (when-let [seed (gobj/get exports "reset")]
+                         (seed))
                      memory (gobj/get exports "memory")
                      arguments (js/Array. (+ 3 control-count
                                              (if (pos? lane-count) 1 0)
@@ -221,7 +245,7 @@
                            :arguments arguments
                            :lanes (when (pos? lane-count)
                                     (real-view memory f64? lanes-offset
-                                               (* lane-stride lane-count)))
+                                               (* lane-stride lane-count lane-slots)))
                            :shared (when (pos? shared-count)
                                      (real-view memory f64? shared-offset
                                                 (* shared-stride shared-count)))
@@ -278,11 +302,15 @@
                      (js/Number (mixing/value-at values index)))))))
        (write-voice-lane! [_ voice lane values]
          (let [key (if (string? lane) lane (clojure.core/name lane))
-               offset (get lane-layout key)]
-           (when-not offset
+               lane-offset (get lane-layout key)]
+           (when-not lane-offset
              (throw (ex-info "this DSP voice declares no such lane"
                              {:lane lane :lanes (vec (sort (keys lane-layout)))})))
-           (let [length (min (mixing/value-length values) lane-stride)
+           ;; A fused instance holds one slice per slot, so a voice's lane belongs
+           ;; to the slice its slot *is* (F4); a plain voice has no slot.
+           (let [offset (+ (long lane-offset)
+                           (* (long (or (:slot voice) 0)) lane-stride lane-count))
+                 length (min (mixing/value-length values) lane-stride)
                  ;; The voice's own region is a view into its linear memory, so
                  ;; this writes the values where the module already reads them.
                  target (:lanes voice)]

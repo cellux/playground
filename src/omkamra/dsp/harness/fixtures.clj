@@ -421,6 +421,28 @@
   {:process {:controls [{:name amount :lane true :smooth 0.5}]}}
   (* sample amount))
 
+(omkamra.dsp/defn smoothed-amount
+  "A generator whose whole output *is* one smoothed control, so a duplicated ramp
+  is visible in the sample itself: two poles make the value move at roughly half
+  speed through the first frames. The control's `:default` is the ramp's start
+  and the description's parameter is its target."
+  [gate amount]
+  {:process {:input false
+             :controls [{:name gate}
+                        {:name amount :smooth 0.5 :default 0.0}]}}
+  amount)
+
+(def smoothed-amount-description
+  "A synth description over `smoothed-amount`: a module-shaped voice with a `gate`
+  control, which is exactly what `synthesize` wraps in `guard` and `poly` (F1).
+  `amount` starts at 0 in the voice and is resolved to 1 by the pool, so the first
+  block shows whether its ramp is one pole or two."
+  {:id :smoothed-amount
+   :capacity 2
+   :max-block-frames 8
+   :parameters {:amount {:default 1.0}}
+   :voice {:definition #'smoothed-amount}})
+
 (omkamra.dsp/defn two-lane-mix
   "Two independent lanes in one region."
   [sample a b]
@@ -467,10 +489,50 @@
   {:process {:input false :controls [{:name amount :lane true}]}}
   (* 2.0 amount))
 
+(omkamra.dsp/defn gated-lane-only
+  "A lane-only control beside a `gate`, the per-slot control that lets a fused
+  build tell its slots apart at all (F4). The automation has no scalar and is
+  hoisted, so nothing about the *control* distinguishes one slot from another:
+  the only thing that can is which slice of the lane region a call site reads."
+  [gate amount]
+  {:process {:input false
+             :controls [{:name gate} {:name amount :lane true}]}}
+  (* 2.0 amount))
+
+(def gated-lane-only-description
+  "A synth description over `gated-lane-only`: one per-voice lane with no
+  scalar at all, and the runtime control that makes the voice fusable."
+  {:id :gated-lane-only
+   :capacity 2
+   :max-block-frames 8
+   :parameters {:amount {:scope :per-voice :default 10.0}}
+   :voice {:definition #'gated-lane-only}})
+
+(omkamra.dsp/defn gated-lane-carried
+  "A `gate` beside a control that keeps its scalar *and* carries a lane
+  (`:has-lane`), which is the per-slot case: the control is expanded per slot, so
+  each slot has its own scalar, while the lane is one lane the slots read from
+  their own slices (F4). The `gate` is also what `guard` latches on, so the voice
+  has state of its own to fuse with."
+  [gate amount]
+  {:process {:input false
+             :controls [{:name gate} {:name amount :has-lane true}]}}
+  (+ amount (lane amount)))
+
+(def gated-lane-carried-description
+  "A synth description over `gated-lane-carried`: the per-voice lane of
+  `lane-voice-description`, in a voice that can be fused."
+  {:id :gated-lane-carried
+   :capacity 2
+   :max-block-frames 8
+   :parameters {:amount {:scope :per-voice :default 10.0}}
+   :voice {:definition #'gated-lane-carried}})
+
 (omkamra.dsp/defn lane-in-callee
-  "A callee that reaches for a lane. A callee module has no lane region of its
-  own, so `(lane amount)` is refused there rather than reading the wrong
-  region."
+  "A callee that reaches for a lane. A callee has no lane region of its own, so
+  the region is handed to it: the entry laid it out, and a call site passes it on
+  (F3). Reading `(lane amount)` here therefore reads the *caller's* slice for
+  `amount`, not a region of this definition's own."
   [amount]
   {:process {:input false}}
   (+ amount (lane amount)))

@@ -60,7 +60,9 @@
               (jvm-host/jvm-kernel artifact containment))
        :interpreter
        (interpreter-host/interpreter-kernel (:ir artifact) (:abi artifact)
-                                            {:containment containment})
+                                            {:containment containment
+                                             :mapping (when fusion
+                                                        (fused-mapping artifact fusion))})
        (synth/fail (str "this DSP target has no JVM host kernel; a JavaScript"
                         " or Wasm kernel is built in the browser"
                         " (omkamra.dsp.hosts.js)")
@@ -128,7 +130,13 @@
          ;; for every slot it was compiled with. `guard` owns a per-call-site
          ;; latch, so a reset clears it; it is applied only to a voice that
          ;; actually declares `gate`, which is the control a pool opens.
+         ;; `guard` (M6b) is written for a *module-shaped* voice: it skips a slot by
+         ;; reproducing the sample it would have produced. A process-shaped voice
+         ;; writes a region instead, so guarding it is a different mechanism; until
+         ;; that exists, such a voice is fused without it (an optimisation, not
+         ;; correctness).
          guarded? (and fusion (:guard fusion)
+                       (not= :void (:return-type (deref resolved)))
                        (some #(= 'gate (:name %)) (:controls abi)))
          voice (if guarded?
                  (comb/guard (deref resolved))
@@ -201,8 +209,15 @@
                                                :required? (boolean (:required? control))})
                                             (:shared abi))
                               :shared-stride (long (or (:shared-stride abi) 0)))
+                 ;; A fused artifact *is* `slots` voices (M6), so the pool's
+                 ;; capacity is the slot count rather than the description's: the
+                 ;; kernel maps a voice onto a slot by creation order, so a larger
+                 ;; pool hands several handles the same slot -- and a host step
+                 ;; that writes every voice (the modulation publisher) then
+                 ;; clobbers that slot's controls with each handle's in turn.
                  fusion
-                 (assoc :fusion {:slots (:slots fusion)
+                 (assoc :capacity (:slots fusion)
+                        :fusion {:slots (:slots fusion)
                                  :controls (mapv (comp keyword :name) (:controls abi))
                                  :per-slot per-slot}))
       :artifact artifact

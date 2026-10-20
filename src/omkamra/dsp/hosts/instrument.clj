@@ -150,7 +150,13 @@
   ([program {:keys [containment] :or {containment :reset}}]
    (let [bundle (:bundle program)
          runtime (:runtime bundle)
-         kernel (hosts/host-kernel (:artifact bundle) {:containment containment})
+         ;; Fusion is a property of the compiled voice, so it travels in the
+         ;; runtime the bundle already carries (F1). Without this the pool builds
+         ;; a plain kernel over a fused artifact, which throws at the first
+         ;; note-on; a process-shaped voice is still refused earlier, by `poly`.
+         kernel (hosts/host-kernel (:artifact bundle)
+                                   {:containment containment
+                                    :fusion (:fusion runtime)})
          live-pool (pool/voice-pool runtime kernel)
          shared (pool/shared-parameter-values live-pool)
          channels (long (:channels runtime))

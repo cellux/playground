@@ -2922,6 +2922,432 @@ and its baselines now read 192/1729 and 28/28.
 
 ---
 
+## F2a — process-shaped voices fuse on the interpreter (completed)
+
+**Delivered.** The mechanism, the surface, and the invariant beneath them:
+
+- **Surface (D57).** `(with-buffers <binding> <call>)` binds a process-shaped
+  callee's output buffers to region names the call site reads; the binding is a
+  map from callee buffer id to region name, or the bare name as sugar when the
+  callee writes exactly one output buffer. `linker.clj` threads a `buffered?`
+  context through `call-sites`/`rewrite-calls`, so the buffer refusal relaxes only
+  for the wrapped call; a plainly-called buffer writer still refuses with
+  "cannot access the caller's process buffers".
+- **Mechanism.** A bound buffer is a **region buffer** of the entry
+  (`:direction :region`, per channel like `:output`); the callee's output buffers
+  lower as a process-shaped module's own buffers, and `ir/lower-call` records
+  `:regions {callee-buffer region}` on the call. The interpreter allocates the
+  regions once per block and `evaluate-call` overlays them into a *fresh* callee
+  context, so the caller's context is untouched. No ABI, target, or bundle-schema
+  change was needed for F2a.
+- **A process-shaped callee returns `:void`** (D58): the descriptor allows it for
+  a `:process` definition, `lower` omits the return, `coerce-value` handles
+  `:void`, and the module-buffer setup is gated on `(:process definition)` so a
+  plain function still has no buffer namespace.
+
+**The trap that cost the most.** `descriptor/default-options` carries
+`:channels 1` and `normalize-options` merges it unconditionally, so
+`(:channels options)` is never a "was a width declared?" signal. F2's first cut
+read it in `lower`, pinning every module to one channel; the failure was a
+stereo voice writing `:output 1` into a one-channel buffer. Worse, the *first*
+fix only *dissoc'd* `:channels` when the top-level width was inferred and never
+*wrote* the resolved value when it came from `:process :channels`, so an explicit
+2 still reached modules as the default 1. `compile` now writes the resolved width
+into `lowering-options` (or removes it when inferred), and `lower` reads the
+forced width first, then the module's own declaration, then its body. Inference
+does not propagate: a mono helper in a stereo entry stays mono (**D58**).
+
+**Tests.** `a-fused-process-voice-writes-the-call-sites-region` renders the
+fused entry and asserts it is exactly the sum of two separately-rendered voices,
+frame and channel, with an audibility guard so `0 == 0` cannot pass;
+`a-callee-that-writes-its-output-must-be-given-a-region` and
+`with-buffers-refuses-an-unbindable-region` pin the two refusals. **Bite-check:**
+disabling the region overlay (a `false` branch) collapsed the fused output to
+zeros and failed all three assertions. The JVM target does not yet handle
+regions — that is **F2b**, which the interpreter-only test waits on.
+
+**Suite.** JVM **219 tests / 1918 assertions, 0 failures**; `clj-kondo` and
+`cljfmt` clean on `src/omkamra/dsp`.
+
+---
+
+## F2b — regions on the JVM, and the F2a rework that made them free (completed)
+
+**Delivered.** F2b is small because F2a was reworked first.
+
+- **F2a reworked to D57's design (D59).** F2a had given the entry a per-call-site
+  `:region` *buffer* (a per-channel array) and overlaid it into the callee's
+  context. That worked on the interpreter but asked the JVM for a region *buffer
+  argument* — a new ABI shape — and every other target for the same plumbing. The
+  rework makes a region exactly what D57 said: a **state slot in the callee's call
+  partition**. A process-shaped module's output buffers become state (`channels *
+  stride` floats, the lane/shared stride), its `buffer-store`/`buffer-load` lower
+  to `:state-store`/`:state-load` with the channel folded into the element index,
+  and a `with-buffers` name aliases the callee's rebased slot. The interpreter's
+  region code (an allocation in `process-context`, an overlay in `evaluate-call`)
+  was **deleted**; the entry's `:buffers` keeps only `:output`.
+- **The frame (D59).** A region is frame-indexed; a per-sample callee has no
+  frame local. So a callee with `:region-slots` gets one extra leading `:int`
+  parameter — the current frame — between `sample-rate` and its arguments, and
+  `callee-descriptor`/`callee-slots`/`call-instructions` agree on it. A callee
+  with no regions is unchanged. The interpreter needed nothing: its callee context
+  already carries `:frame`. **Bite-checked** — passing a constant zero left only
+  frame 0 correct and failed the test on frames 1..7.
+- **The JVM's `:void`.** `jvm-type` maps `:void` to the `:void` descriptor insn
+  uses; a void module's method gets a trailing `return`; a void call is not
+  `pop`ped. Two compile-time guards (a state access or a local with no layout
+  entry) now say so instead of emitting a null var index — they cost nothing, being
+  emitter-time.
+
+**Tests.** `a-fused-process-voice-writes-the-call-sites-region` now runs the
+interpreter *and* the JVM and requires them bit-for-bit equal to the sum of two
+separately-rendered voices, and pins that the regions are state (entry `:buffers`
+holds only `:output`, two call partitions, `:state-size` = two regions).
+
+**Suite.** JVM **219 tests / 1926 assertions, 0 failures**; browser **34/34**;
+`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
+
+---
+
+## F2c/F2d — the rest of fusion (done)
+
+**Delivered.**
+
+- **F2c (targets).** JavaScript and Wasm apply a region-writing callee's per-slot
+  region as ordinary state, so the only target facts were the frame parameter and
+  the `:void` return. JS needed only the frame (it is dynamically typed); Wasm
+  also needed `:void` in `wasm-type`'s result position and no `drop` after a void
+  call. The region itself, the void module, and the frame were already correct in
+  the shared IR.
+- **F2d (`poly`).** `poly` now fuses a *process-shaped* voice (D60): each slot's
+  call is wrapped `(with-buffers :slot-k …)` and the fused body sums the regions
+  into `:output` per channel, requiring the voice to declare `:process :channels`.
+  `reference-voice` now declares `:void` and `:channels 2`, and the reference
+  instrument fuses on every target.
+- **The interpreter hosts fused pools (D60).** The interpreter kernel applies the
+  same base → fused mapping and resets one slot's partition from the ABI's
+  `:call-partitions`, so a fused pool on *any* host has an oracle. This was the
+  gap you flagged; without it the JVM and the browser only agreed with each other.
+- **Guard.** A process-shaped voice is fused without the M6b guard (it writes a
+  region, not a scalar), an optimisation withheld rather than a correctness gap.
+- **Checks.** `a-fused-pool-runs-on-the-interpreter-oracle` (fused == plain on the
+  interpreter, and the JVM matches it); `a-fused-reference-instrument-renders-
+  what-a-plain-one-renders` (the stereo reference instrument, interpreter + JVM,
+  bit for bit, with an audibility guard); and a browser check that renders the
+  fused reference voice against the *plain* voice on the same kernel, so the
+  transcendentals cancel (JavaScript matches exactly). **Bite-checked**: a
+  one-channel region (the channel factor dropped) errored the stereo test.
+
+**Bugs found on the way.** A `list*` splices only its *last* argument, so the JS
+call emitted the optional frame as a literal `null` argument on *every* call — the
+whole shared JS matrix regressed, which is how it was caught. Wasm `drop`ped a
+void call's absent result. And a restored bite-check whose `ir.clj` was never
+reloaded made the region one channel wide in the running image; the browser
+fused-reference check is what exposed it.
+
+**The Wasm item, closed.** The **Wasm** fused reference voice drifted from the
+plain Wasm voice (~0.26), and the cause was not fusion at all: a Wasm instance
+starts from zeroed memory and reaches the IR's initial values only through the
+module's `reset` — and the pool resets a voice only when it **steals** one, so a
+*fresh* Wasm voice rendered from zero, while the JavaScript host seeds the state
+array in `create`. The fused path had a second, independent bug: it snapshotted
+`:initial` before seeding (so the per-slot restore copied zeros), and
+`partition-ranges` resolved a partition one arena index at a time, but a region is
+a *single* layout entry spanning thousands of indices — so the interior had no
+entry, `min` collapsed the start to nil, and the reset built a negative-index view
+that restored nothing while writing state bytes into the input region. Both
+fixed (D61), both bite-checked independently, and the browser check now steals a
+voice so the per-slot reset is exercised. The fused and plain reference voices
+now render **bit for bit** identically on JavaScript *and* Wasm (`worst 0`).
+
+Two lessons, both about "the oracle": the drift was a *host* divergence that the
+fused check merely made visible, and the segment bug was invisible to every
+module-shaped fused check because only a region makes a multi-slot partition.
+
+**Suite.** JVM **221 tests / 1933 assertions, 0 failures**; browser **36/36**;
+`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`. Verified in a fresh JVM as
+well as the long-lived one.
+
+---
+
+## F1's browser half — served, written, and held on a kernel divergence
+
+**What landed.**
+
+- **The browser fused instrument is served.** `fused-instrument-bundle` and
+  `fused-instrument-source` carry the same pair the fused-pool endpoints do: the
+  fused voice's runtime, ABI, IR, and `:fusion` mapping; the *plain* lowering of
+  the same voice as the same-target oracle (D14), so the transcendentals cancel;
+  and the modulation matrix and post-mix bus, which are not fused.
+- **`check-fused-instrument`** rebuilds the host over them and asserts the fused
+  instrument renders the plain one's phrase, finite and block-size invariant. It
+  is written for both JavaScript and Wasm and is **not registered** yet.
+- **A fused runtime holds its slots (D62).** `runtime-config` takes `:capacity`
+  from the description, and the fusion branch never overrode it, so a fused build
+  of an eight-voice description produced a pool of eight voices over a two-voice
+  artifact. The kernels map a pool voice onto a slot by creation order, so several
+  handles landed on one slot — and `modulation/publisher`, which writes the
+  matrix's targets to *every* voice each block, had them clobber each other. The
+  browser fused-pool endpoints had been setting `:capacity slots` by hand, which
+  is what the lowering should have done. Pinned by
+  `a-fused-instrument-holds-exactly-its-slots`.
+
+**The blocker, and what is eliminated.** The fused **reference instrument** —
+process-shaped, with smoothed controls — does not match its plain twin on the
+**JVM** or **JS/Wasm**, though it matches exactly *until a smoothed control
+departs from its default* (`pulse-width`, `cutoff`, `resonance`); every other
+control is bit-identical, and `:guard` on or off, `slots` 1, 2 or 4, and f32 or
+f64 all behave the same. The fused signal is ~1e-4 smaller at first and settles a
+few percent low.
+
+The **interpreter is exact** for the same comparison with the same IR and the
+same control values, and interpreter-plain equals JVM-plain, so the fused
+lowering is right and the JVM/JS kernels are wrong. Three candidates are already
+ruled out, each by measurement rather than by reading:
+
+- **The control mapping.** `fusion/fused-position` maps every base control onto
+  its fused twin — printed position by position — and for `slots 1` the fused
+  interface is the base interface with the hoisted pair moved to the front, so
+  delivery is effectively an identity.
+- **The control values.** The pool resolves identical values for both, and the
+  controls that diverge are exactly the smoothed ones.
+- **Rebasing.** If the callee's state accesses were unrebased, the partition base
+  would matter: dropping the entry's duplicated ramp slots moves that base and
+  must change the audio. It does not — the divergence is bit-identical — which is
+  also how we know those duplicated entry slots were dead code.
+
+A minimal voice with a single smoothed control fuses *exactly* on both targets, so
+the reproducer needs more of the reference voice's structure; that is where this
+picks up. One near-miss is worth recording: the Wasm host had a real bug of the
+same family (resolving a partition by arena *index* rather than by layout
+*segment*, which a region breaks), but the JVM's `partition-ranges` already
+handles multi-slot entries, so that is not this one.
+
+**Suite.** JVM **222 tests / 1935 assertions, 0 failures**; browser **36/36**;
+`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
+
+---
+
+## F1 closed — the drift was a doubled ramp, not a kernel bug
+
+The fused **instrument** disagreed with the plain one as soon as a smoothed
+control left its default, on the JVM and in the browser, by ~1e-4 and settling
+percent low. It looked like numerical drift — the interpreter seemed exact, which
+sent the hunt into the JVM host's control delivery, the fused partition's arena
+base, and the region address lowering. All three were innocent.
+
+**What it actually was.** A **derived definition ramped the controls it merely
+forwards**. `derived-definition` carries the voice's control *declarations* across
+— including `:smooth` — and `normalize` turned each of them into a ramp state, so
+the wrapper smoothed the raw control and handed the *smoothed* value to a voice
+that smoothed it again. Two poles compound, so the derived signal lagged: percent
+for the first milliseconds, settling only after thousands of frames. The decay
+that made it look like a transient was real, and it was the tell.
+
+It was never `poly`'s alone. `guard`, `unison`, `share`, the instrument wrapper,
+and the modulation transformers all build on `derived-definition`, so any voice
+that passed through a wrapper doubled its smoothed controls.
+
+**How it was pinned.** A generator whose whole output *is* a smoothed control
+made it exact and legible in eight samples: the plain voice ramps
+`[0.0 0.5 0.75 0.875 …]` and the fused one `[0.0 0.0 0.0 0.125 0.3125 …]`. Reading
+the interpreter's own ramp state settled the remaining doubt — plain and derived
+ramp *identically*, so it was never the ramp's shape; and the state showed the
+same control ramped twice, once in the wrapper and once in the voice. Everything
+larger was consistent with several stories; the small subject was not.
+
+**Two things the hunt got wrong, worth remembering.**
+
+- **The "interpreter is exact" evidence was a stale Var.** `tools/reload`
+  unloads and rebuilds a namespace, so a REPL helper compiled *before* the reload
+  keeps calling the *old* Var, and therefore the old `poly`, forever. Several
+  measurements taken after the fix were really measurements of the unfixed code.
+  Helper functions in `user` must be re-evaluated after a reload.
+- **`guard` doubled, but it was not the only doubler.** The M6b guard is withheld
+  for process-shaped voices, so the process-shaped *reference* instrument was
+  never guarded — its divergence came through `poly` itself. Had the fix gone
+  into `guard` alone, the reference would still have drifted.
+
+**The fix.** `graph/derived-definition` marks its result
+`:dsp/forwarded-controls`; `descriptor/normalize` reads the mark and skips ramp
+creation, so the declaration still travels — the ABI a host reads still reports
+the mode — while the value stays raw until the voice that owns it ramps it, once
+per call site. That is D63. The `:smooth`/`:slew` stripping tried earlier inside
+`combinators/poly` is gone: one rule, in one place. It was bite-checked by
+removing the mark: the first block becomes
+`[0.0 0.0 0.0 0.125 0.3125 …]`, and the check fails.
+
+**Also landed.** The fused runtime's capacity is the slot count (D62): a fused
+build of an eight-voice description used to make an eight-voice pool over a
+two-voice artifact, so several handles shared one slot and the modulation
+publisher — which writes every voice each block — had them clobber each other.
+
+**Registered.** `javascript-fused-instrument-test` and
+`wasm-fused-instrument-test` are checks now, not comments: F1's browser half.
+They were failing before this and pass after, which is what proves they are not
+comparing a plain kernel with itself.
+
+**Suite.** JVM **223 tests / 1937 assertions, 0 failures**; browser **38/38**;
+`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
+
+---
+
+## F3 — a lane reaches a callee
+
+**What it was.** `(lane control)` was refused anywhere but the entry process
+("lane is only available in the entry process", `ir.clj`), for a shared lane as
+much as a per-voice one, so automation died at the first module boundary and a
+caller had to compose at the call site. That refusal is gone: a definition that
+reads a lane is now handed the region.
+
+**The shape (D64).** One pointer per lane-reading definition, plus the current
+frame. Not a base into the callee's own partition: a lane's offset is
+`index * frame-capacity` — a constant of the *entry's* layout (D28) — so the
+region is all a callee needs, and every definition in the artifact reads the same
+slices. A definition that only calls a lane reader forwards its own region, so
+`lower-definitions` propagates the flag up the call graph.
+
+**The two halves, and where each was caught.**
+
+- The *IR* half — the lane table reaches callees, the refusal goes, and a
+  lane-reading definition is marked — was caught by the JVM suite: bite-checked
+  by withholding the table, which refuses with "lane is only available where a
+  lane region is".
+- The *target* half — passing the region and, with it, **the frame** — was caught
+  by the browser. A lane read is per-frame, so a lane reader needs the frame for
+  the same reason a `with-buffers` region writer does (F2), and the first cut
+  gave the lanes path the region but not the frame: the JVM emitted `[:iload
+  nil]` for the read's index (found by printing the callee's instructions) and
+  the browser matrix failed on both JavaScript precisions with `ReferenceError:
+  lanes is not defined` and, once that was in, `frame` likewise. One predicate
+  now answers for regions and lanes on all four targets.
+
+**Verified on all four targets** by a case in the shared catalog,
+`:automation-lane-in-callee`: an entry that declares a lane and calls a callee
+whose body reads it with `(lane amount)`. The JVM suite runs it on the
+interpreter and the JVM; the browser matrix runs it on JavaScript and Wasm, f32
+and f64. Nothing was hand-written for any target — that is the catalog's point —
+and the browser went from two failures to green on exactly this case, which is
+what makes it a bite check rather than a formality.
+
+**A note on the tooling.** Two of this slice's measurements were wrong before
+they were right, both for the reason F1 recorded: `(tools/reload '[a b])`
+*forces* those namespaces and skips detection, so a file edited but not named
+stays stale in the image — which is how the JavaScript target kept emitting a
+callee without its lane parameter while the source clearly had it. The
+no-argument `(tools/reload)` is what finds everything. The tool now says so
+itself: a named target reports `:stale` — the loaded namespaces whose content
+changed and were not reloaded, with a note — so the image's freshness is never
+something a caller has to remember to check.
+
+**Suite.** JVM **223 tests / 1944 assertions, 0 failures**; browser **38/38**;
+`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
+
+---
+
+## F4 — a lane reaches every fused slot
+
+**What it was.** A fused entry renders every voice in one call, so it owns *one*
+lane region — and a lane is per voice. `poly` therefore refused one on a per-slot
+control outright ("poly cannot expand a lane per slot: a lane belongs to the entry
+process"), and a lane-only control slipped past that refusal with a worse outcome:
+it was hoisted, one slice was laid out, and every slot read the same automation,
+whichever voice happened to write it last. Two different curves make that a wrong
+block rather than a missing one, which is how the pin was written.
+
+**The shape (D65).** The region is the entry's, `slots` slices of it, and a call
+site hands its callee the base of **its** slice: zero-based lane offsets plus a
+base, exactly as a callee's state indices are resolved against a partition base
+(D19). Nothing else in the ABI changes — a lane-reading callee gains one `int`
+next to the region it already had — and a callee that merely forwards the region
+passes the base it was handed. Three further facts fell out of "one slice per
+voice":
+
+- **Expansion does not multiply lanes.** `poly` expands a per-slot control, but a
+  lane belongs to the *control*: the expanded declarations carry the lane's name
+  (`:lane-name`), so the entry lays out one lane per base control and the slots
+  differ by slice. Without this the callee's `(lane amount)` could not resolve at
+  all: the entry's layout held `amount_0`/`amount_1` and the voice declared
+  `amount`.
+- **A lane-only control's name is a lane read wherever it is read.** In the entry
+  that was already true; a callee now binds it to a read of *its own* slice rather
+  than to the value the caller passed. Where the artifact has one slice the two
+  are the same read, so no existing check moved.
+- **A slot is a call partition.** The base a call site hands out is the partition
+  ordinal — the same index a host resets one voice by (M6a) — so a fused entry's
+  lane-reading call site has to own one; it is refused loudly otherwise rather
+  than given an arbitrary slice.
+
+**Where each half was caught.** The IR half and the JVM/interpreter hosts were
+caught by the JVM suite; the two pins were written first and failed for exactly
+the two reasons above (`[40 40 40 40]` where the plain pool gave `[22 24 26 28]`,
+and the refusal). The JavaScript *host* half — its fused branch still allocated a
+one-slice lane region, so slice 1's writes went out of bounds and read as zeros —
+was caught by the new browser check, which is the bite check for a line no JVM
+test can reach: it reported `[[0 0 0 0]]` against the interpreter's
+`[[22 24 26 28]]` and went green on the fix.
+
+**Verified on all four targets.** The JVM suite renders both pins on the
+interpreter and the JVM (`a-fused-pool-gives-each-slot-its-own-lane`,
+`a-fused-pool-expands-a-lane-carrying-control-per-slot`), each against a plain
+pool over the same description as the oracle; the browser runs `JavaScript fused
+lane` and `Wasm fused lane` over a served fused bundle, with two curves written to
+the two voices and the interpreter pool as the oracle. The per-slot-lane refusal
+in `poly`'s tests became a positive test of the lane that travels with an expanded
+control.
+
+**Suite.** JVM **225 tests / 1953 assertions, 0 failures**; browser **40/40**;
+`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
+
+---
+
+## F5 — a fused AudioWorklet
+
+**What it was.** The worklet adapter serves one kernel instance per node, so a
+fused voice — one process holding `slots` voices — needed a node that renders all
+of them, with a parameter of its own for every per-slot control. F5 is that node.
+
+**What it turned out to be: plumbing, not a mechanism.** The adapter writes each
+parameter into the kernel's control array at the parameter's own index and builds
+its own kernel, so there is no pool inside a worklet and *nothing has to be
+mapped*: the node's parameters simply **are** the fused interface, in ABI order
+(`gate_0`, `frequency_0`, `delay_0`, `mix_0`, `gate_1`, ...). The plan had assumed
+the pool's `:mapping` would have to be applied here; it is not needed, because
+`:mapping` exists to translate the *pool's* base-shaped writes, and a worklet has
+no pool. So the change is: the served adapter's parameter descriptors are
+generated from the fused artifact's ABI instead of being a `one-pole` literal, and
+one fused arm is served per target.
+
+**Two bugs fell out, and the check caught both.**
+
+- The adapter read `processorOptions` unguarded, so a node created without them
+  threw where nothing could see it: the worklet reported a bare `processorerror`
+  and the page saw only a node that never answered. Both adapters now default it
+  to an empty object, and the JavaScript one also reports a constructor throw
+  through its own port, so `worklet-ready` rejects with the *reason* instead of
+  timing out. That is how "Cannot read properties of undefined (reading
+  'controlNames')" was found — and it was mine: the page had put the processor
+  fields at the top level of the node options rather than under
+  `processorOptions`.
+- A stub of the descriptor *order* did **not** bite, which is worth writing down:
+  the adapter indexes by `processorOptions.controlNames`, not by the descriptor
+  list, so `parameterDescriptors` only has to *name* what the page drives. The
+  check does bite when the per-slot *names* go missing ("rendered silence for a
+  gated slot").
+
+**The check.** `JavaScript fused worklet` and `Wasm fused worklet` each render one
+node three times — slot 0 alone, slot 1 alone, and both — with the second slot at
+twice the first's `frequency`, and ask two things of the blocks: that slot 1's
+peak is twice slot 0's (a parameter reached the slot it names, not a neighbour's
+control block) and that the both-slots block *is* their sum (one node rendered
+both voices, not one). The worst difference is one f32 ulp-ish (3e-5), and the
+same numbers come out of both hosts.
+
+**Suite.** JVM **225 tests / 1953 assertions, 0 failures**; browser **42/42**;
+`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
+
+---
+
 ## Handoff — current state (rolling entry)
 
 This is the one living entry, as opposed to the completed-phase entries above:
@@ -2930,23 +3356,18 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
 
 ### Resume here
 
-- **M6 is complete; no slice is defined next.** M6a, M6b and M6c are done and
-  the option is real: `{:fusion {:slots S}}` compiles the base artifact for the
-  runtime and `(poly S voice)` for the kernel, `poly` carries a voice's control
-  declarations through, a pool over the option renders bit-for-bit what a pool of
-  separate voices renders, and the bench's fused arm now builds its artifact
-  through the option too — which dropped the realistic sweep's ratio from ~1.9× to
-  1.3–1.7×, because the option expands four controls per slot where `poly`'s
-  default expanded two (D45's re-measured table). **M6b** is done: the `guard`
-  combinator skips a slot whose `gate` has never opened, latched per call site and
-  cleared by the slot's reset (D53). **M6c** is done (D55): the JavaScript and Wasm
-  kernels take a `:mapping` (`fusion/runtime-mapping`, the portable form of the
-  JVM's), share one instance across `slots` handles, apply the partitions the ABI
-  already publishes (a JS arena is indexed by state slot, so `:base`/`:size` *are*
-  the range; a Wasm partition's byte range comes from the served
-  `:state-layout`), map each slot's controls, and read that slot's `:activity` —
-  so a fused pool runs on every host, checked by two new browser arms
-  (`(browser/run! {:only ["fused pool"]})`).
+- **The F workstream is complete: F0, F1, F2, F3, F4 and F5 are all done.** Fusion is *deployed*: `{:fusion {:slots S}}`
+  fuses the **reference instrument** (stereo, process-shaped) and a fused pool
+  renders its plain pool **bit for bit** on the **interpreter, the JVM, and in the
+  browser** — and the fused **instrument host** does too (D62, D63). A **lane
+  reaches a callee** on all four targets (D64), and a **fused entry gives each of
+  its slots its own lane slice**, so per-voice automation and fusion compose (F4,
+  D65). The workstream is `with-buffers` (D57); a region is a **call-partition
+  state slot** (D59); a process-shaped module returns `:void` and is handed the
+  frame; `poly` fuses such a voice by summing its slots' regions (D60); the
+  browser's **JavaScript** and **Wasm** fused reference voices match their plain
+  voices exactly, through a steal (D61), and a fused **worklet node** renders all
+  `slots` voices of a fused voice, driven per slot (F5, D66).
 - **Seams 1–4 are done on every host**: the pool mixes a fused instance once
   per block (`instance-key`, an *equality* contract the pool numbers itself), the
   kernel maps the pool's base control plan onto each slot's slice
@@ -2960,8 +3381,9 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
   the tail-freedom fusion had given up.
 - **Fusion is an option, `{:fusion {:slots S}}`** (D52): a compile option beside
   `:target`/`:precision`/`:containment`, lowering a module-shaped voice to
-  `(poly S voice)`; `poly` now carries a voice's control declarations through, so a
-  `:shared` control stays shared and a lane is refused with a reason.
+  `(poly S voice)`; `poly` carries a voice's control declarations through, so a
+  `:shared` control stays shared and a lane travels with the control it belongs to
+  (a shared control per slot is still refused with a reason).
 - **The measurements it rests on** are D45's post-D47 section: the pool is ~2×
   slower at a full patch on the JVM (1.5–1.8× on JS, ~1.1× on Wasm) and 2–7.5×
   *faster* at two voices, flat in capacity; on a delay-line voice fusion is ~1.9×
@@ -4220,3 +4642,66 @@ the JVM test has, and the reason the bite is a whole-instance reset.
 **Verified.** JVM 215 tests / 1907 assertions, browser **34/34** (two new arms),
 `clj-kondo` and `cljfmt` clean. D55 records the decision; the pool checks that
 were there stay green, because a kernel with no mapping is unchanged.
+
+### F0 decided, and F1's JVM half — fusion reaches the instrument layer
+
+M6 built a fused pool that renders a plain one and runs on every host, but it was
+reachable only by calling `compile-synth`/a pool host directly, and only for a
+module-shaped, lane-free voice. This opens the **F workstream** (PHASES.md) to
+deploy it, and settles F0.
+
+**F0 — the spine (D56).** Every per-process region a callee touches is owned by
+the *call site* and carried by the callee ABI, exactly as the state arena already
+is (D19): output buffers partitioned per call site (F2), the lane region passed
+to the callee (F3) and partitioned per call site for a per-voice lane (F4). The
+reason is D19's: two slots of one voice are two voices, and one buffer would make
+them overwrite each other. Reading the code while deciding turned up two facts
+worth recording: the module/process refusal is a **linker** rule
+(`linker.clj:253`), not the IR, so F2's load-bearing change is relaxing it *only*
+for a call that owns a region; and a process body is already evaluated per frame
+(D40) with `buffer-store` writing the current frame (confirmed: `reference-voice`
+stores `:output` by channel and the current frame), so the fused entry needs no
+new scheduling model — call each slot, then store the sum to `:output`.
+
+**F1's JVM half.** `instrument-pool` now threads the bundle's `:fusion` into
+`host-kernel`. This closed a **live bug**, not just a gap: `compile-instrument`
+already forwarded `:fusion` to `synth-bundle` (so the artifact really was fused),
+while `instrument-pool` built a *plain* kernel over it — a module-shaped
+instrument compiled that way threw `Index 4 out of bounds for length 4` at the
+first `note-on!` (verified before the fix). The regression test
+`a-fused-instrument-renders-what-a-plain-instrument-renders` builds the same
+module-shaped instrument both ways and compares a rendered block; it bites —
+reverting the thread makes it throw the original error. F1's browser half (the
+instrument testbed, which would serve the base voice artifact for the interpreter
+oracle and the fused one for the kernel, as the fused-pool endpoints do) is next.
+
+F5 (a fused AudioWorklet) was moved from optional to in scope at the user's
+request.
+
+### F2 scoped — process-shaped fusion needs a mechanism *and* a surface
+
+Before writing F2 I read the three pieces it touches, and it is two changes, not
+one. The record, because it is the shape of the slice:
+
+- **The refusal is a linker rule**, not the IR (`linker.clj`'s `resolve-definition`
+  rejects any called definition whose body or state accesses a process buffer).
+  So relaxing it is F2's load-bearing change, and it must be relaxed *only* for a
+  call that owns a region — a call with no region keeps today's honest error.
+- **A process body is per-frame, and `buffer-store` writes the current frame.**
+  `frame-index` maps a literal offset to `:frame-offset` ("current frame + 0"), so
+  `reference-voice`'s `(buffer-store :output 0 0 left)` writes channel 0 of the
+  *current* frame. That is why F0's answer is small: the callee stays a per-frame
+  function, its region base is one more ABI parameter, and the fused entry sums
+  one frame at a time. No new process structure, no block-level call.
+- **The hard part is the surface.** `poly` must declare the per-slot regions
+  (scratch records), call each slot into its region, and read the regions to sum
+  them. But `graph/derived-definition` forces `:state nil`, and there is no DSL
+  form for "call this callee with its output buffers bound to *this* region".
+  Records are state, not call returns, so the voice→module adapter is not
+  expressible (a call returns a scalar, and the reference voice is stereo).
+
+So F2 is scoped F2a (mechanism + one new form, on the interpreter) → F2b (JVM) →
+F2c (JS/Wasm) → F2d (reference instrument fuses; the browser instrument host then
+switches on, which is F1's second half). The new form's shape is the open design
+decision — it becomes DSL surface, so it is worth choosing deliberately rather
+than by accident.

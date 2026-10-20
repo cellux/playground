@@ -85,6 +85,9 @@
                                    (long (:offset lane))]))
                            (:lanes abi))
          lane-count (clojure.core/count lane-layout)
+         ;; A fused instance renders every slot in one call, so its one region
+         ;; holds a slice per slot and the voice's slot says which (F4).
+         lane-slots (long (or (:lane-slots abi) 1))
          ;; The shared region is the *pool's*, not a voice's: one array, passed to
          ;; every voice, so a broadcast parameter is written once (M5). It is the
          ;; lane region's shape, so one addressing serves both.
@@ -120,7 +123,7 @@
                                        (if (pos? lane-count) 1 0)
                                        (if (pos? shared-count) 1 0)))
               :lane-region (when (pos? lane-count)
-                             (mixing/real-array f64? (* lane-stride lane-count)))
+                             (mixing/real-array f64? (* lane-stride lane-count lane-slots)))
               :scratch (mixing/scratch-buffer f64? channels max-block-frames)
               :reset! (clojure.core/fn [] (.call (.-reset object) object))})
            (let [slot (long (mod (long @created) slots))]
@@ -134,7 +137,7 @@
                                                     (if (pos? shared-count) 1 0)))
                            :lane-region (when (pos? lane-count)
                                           (mixing/real-array
-                                           f64? (* lane-stride lane-count)))
+                                           f64? (* lane-stride lane-count lane-slots)))
                            :scratch (mixing/scratch-buffer f64? channels
                                                            max-block-frames)
                            ;; The arena's initial values, taken once, before any
@@ -188,11 +191,15 @@
                      (js/Number (mixing/value-at values index)))))))
        (write-voice-lane! [_ voice lane values]
          (let [key (if (string? lane) lane (clojure.core/name lane))
-               offset (get lane-layout key)]
-           (when-not offset
+               lane-offset (get lane-layout key)]
+           (when-not lane-offset
              (throw (ex-info "this DSP voice declares no such lane"
                              {:lane lane :lanes (vec (sort (keys lane-layout)))})))
-           (let [length (min (mixing/value-length values) lane-stride)
+           ;; A fused instance holds one slice per slot, so a voice's lane belongs
+           ;; to the slice its slot *is* (F4); a plain voice has no slot.
+           (let [offset (+ (long lane-offset)
+                           (* (long (or (:slot voice) 0)) lane-stride lane-count))
+                 length (min (mixing/value-length values) lane-stride)
                  region (:lane-region voice)]
              (dotimes [index length]
                (aset region (+ offset index)

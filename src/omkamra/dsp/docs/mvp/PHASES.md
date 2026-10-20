@@ -805,6 +805,238 @@ the `shadow` runtime the worker does not get); release generation is unaffected.
 
 ---
 
+## F — Fusion, deployed
+
+**Goal.** Make the fusion work of M6 *reachable*: requestable through the
+instrument layer, applicable to the voice shapes real instruments use, and
+composable with lanes — so the speedups M6 measured describe a configuration a
+user can actually select. Fusion stays opt-in and the pool stays the default
+(D45); F adds no DSP semantics.
+
+**Why a letter, not a number.** Like M, F is not part of the P spine's dependency
+order, and nothing in the spine depends on it. It is a *deployment* axis over an
+existing optimization: the language, the IR, and the targets already exist, and F
+extends them only where a fused process needs a region a callee cannot reach yet.
+Lettering it keeps the P identifiers stable.
+
+**Depends on.** P10 (voice pool), P11 (reference instrument, D42), D28 (lanes),
+and all of M (D45, D50–D55). F also uses instance memory and the browser hosts
+(the P12–P14 capabilities); those already exist in the code, so F is **not**
+gated on those phases being marked done — its only hard gate is M.
+
+**The problem it removes.** M6 built a fused pool that renders a plain pool's
+samples and, since M6c, runs on every host. But it can only be switched on by
+calling `compile-synth` or a pool host *directly*, and only for a
+**module-shaped, lane-free** voice. Three limits keep it out of reach of real
+instruments:
+
+1. The **instrument layer never requests `:fusion`**. `instrument-pool` calls
+   `host-kernel` without it, so no instrument — not even a module-shaped one —
+   can fuse. Worse, the option is *accepted and then ignored*:
+   `compile-instrument` forwards `:fusion` to `synth-bundle` (producing a fused
+   artifact whose runtime carries `:fusion`), and `instrument-pool` then builds a
+   **plain** kernel over that artifact. A module-shaped instrument compiled this
+   way throws at the first `note-on!` (`Index 4 out of bounds for length 4`,
+   verified). F either threads the option or refuses it — never half-accepts it.
+2. **`poly` refuses a process-shaped voice** — one that writes the caller's
+   output buffers (`buffer-store :output`). That is every *stereo* or
+   *multi-output* voice, including `reference-voice`, so the reference instrument
+   cannot fuse even in principle (M6-0's boundary).
+3. **A lane is resolved from the entry process.** A `(lane control)` read inside
+   a callee is refused (`lane is only available in the entry process`), so *any*
+   lane in a called voice — shared or per-voice — is refused; `poly` additionally
+   refuses a per-slot lane. Neither the callee ABI nor the fused interface
+   carries a lane region.
+
+Because the guard (M6b), the per-slot `:activity` readback (D54), and chunking
+(`:slots < capacity`) all live on the fused path, these limits make the whole M6
+investment inert for the voices it was measured on.
+
+**Deliverables.**
+
+1. A **fused instrument host**: `compile-instrument`/`instrument-pool` thread
+   `:fusion` (or refuse it loudly), on the JVM and in the browser instrument
+   host, with a module-shaped fixture pinned end to end.
+2. **Process-shaped voices fuse**: each call site gets its own output-buffer
+   region — the buffer analogue of the state partition D19 already gives it — the
+   slots render into their regions, and the fused entry sums them into its own
+   output. The reference instrument becomes fusable and renders the plain one's
+   samples.
+3. **A lane reaches a callee**, so a shared lane survives fusion.
+4. **Per-voice lanes fuse**, so per-voice automation and fusion compose.
+5. A **fused AudioWorklet**: one worklet node renders `slots` voices, so the
+   browser worklet path crosses the kernel boundary once per `slots` voices
+   rather than once per voice.
+
+**Slices.**
+
+- **F0 — decide the region shapes (design only, no code).** Two decisions,
+  recorded in `DECISIONS.md` before anything is built:
+  1. *How a process-shaped voice is fused.* The candidate: partition the
+     process's **output buffers per call site**, exactly as D19 partitions state
+     — a private region per call site, the callee writing there, the fused entry
+     summing the regions into its output. Alternatives to weigh: the same idea
+     restricted to `:output` plus a per-slot address; or a *voice → module*
+     adapter that turns the voice's buffers into scratch records and returns the
+     signal. The answer must state how it treats M6-0's module/process boundary.
+  2. *How a lane reaches a callee.* The candidate: add the lane region to the
+     callee ABI the way the state base already is (D19/D47), rebased per call
+     site; a per-voice lane gets one region per slot.
+  The two answers share a spine — **the remaining per-process regions (output
+  buffers, lanes) are partitioned per call site and passed through the callee
+  ABI** — and F0 exists to settle that spine, and its cost on four backends,
+  before F2–F4 build on it.
+- **F1 — the fused instrument host (module-shaped voice). DONE.** `instrument-pool`
+  threads the bundle's `:fusion` into `host-kernel` (bite-checked: reverting the
+  thread throws `Index 4 out of bounds for length 4`), the fused runtime takes
+  its `:capacity` from the slot count (D62, pinned by
+  `a-fused-instrument-holds-exactly-its-slots`), and the fused instrument renders
+  the plain one bit for bit. The browser half is registered too:
+  `fused-instrument-bundle` / `fused-instrument-source` carry the fused voice's
+  ABI, IR, and `:fusion` mapping, the plain lowering as the same-target oracle,
+  and the post-mix bus, and `check-fused-instrument` rebuilds the host over them
+  for JavaScript and Wasm.
+
+  **What the browser half found.** Comparing the *reference instrument* —
+  process-shaped, with smoothed controls — surfaced a real bug that the
+  module-shaped JVM fixture had hidden: a **derived definition ramped the
+  controls it merely forwards**, so every wrapper a voice passed through smoothed
+  a value the voice then smoothed again. The fused signal lagged the plain one by
+  percent for the first milliseconds and settled only after thousands of frames;
+  `poly`, `guard`, `unison`, `share`, and the instrument and modulation wrappers
+  all doubled this way. D63 fixes it in `graph/derived-definition` +
+  `descriptor/normalize`, and
+  `a-fused-voice-does-not-ramp-a-smoothed-control-twice` pins it (bite-checked:
+  without the fix the first block is `[0.0 0.0 0.0 0.125 0.3125 …]` where the
+  plain voice's is `[0.0 0.5 0.75 0.875 0.9375 …]`).
+- **F2 — process-shaped voices fuse.** The load-bearing slice, and the one F0
+  says reopens M6-0's boundary. Reading the code for it turned up that it needs
+  **two** changes, and the second is the harder:
+  1. *The mechanism.* A call site that calls a definition touching a process
+     buffer owns a per-call-site **buffer region** — the buffer analogue of
+     D19's state partition — and the callee ABI carries its base. Automatic, as
+     D19 is: the call site always owns the region, so nothing new is needed to
+     *pass* it. Relax `linker.clj`'s refusal only for a call that owns a region.
+     The callee stays a per-frame function (D40), so its `buffer-store` writes
+     `region + channel·stride + frame` and the fused entry sums per frame; no
+     new process structure is needed.
+  2. *The surface.* `poly` must declare the per-slot regions, call each slot
+     into its region, and read the regions to sum them into `:output`. The
+     region is a buffer of the entry with `:direction :region` (per channel, like
+     `:output`), and the missing piece was a form for "call this callee with its
+     output buffers bound to *this* region". **Settled (D57)**: one new form,
+     `(dsp/with-buffers <binding> <call>)`, where `<binding>` is a map from the
+     callee's buffer id to a caller-visible region name, or — when the callee
+     writes exactly one output buffer — the bare name as sugar; the bound names
+     are read with the existing `buffer-load`. The region reuses the call-site
+     state partition (D19), so no new ABI parameter is added.
+  Sub-slices: **F2a** the mechanism plus the new form, on the interpreter (the
+  oracle) — **done**, see D57, D58, D59; **F2b** the JVM — **done** (the region
+  is state, so the only target change is the void return and the callee's frame
+  parameter); **F2c** JavaScript and Wasm — **done** (the same two, plus a void
+  call is no longer `drop`ped in Wasm); **F2d** the reference instrument fuses
+  (stereo and process-shaped, D60) and the browser renders the fused reference
+  voice as the plain one **bit for bit** on both JavaScript and Wasm, through a
+  steal — **done**, see D61.
+- **F3 — a shared lane reaches a callee. DONE.** F0's spine (D56) applied to the
+  lane region: a definition that reads `(lane control)` is *handed* the region —
+  one pointer, since a shared lane is one region the entry laid out — and the
+  call site passes its own on. No base arithmetic is involved, because a lane's
+  offset is a compile-time constant of the entry's layout (D28), so `(lane x)`
+  means the same slice wherever it appears; a definition that only calls a lane
+  reader forwards its own region and is marked for it. The callee ABI grows by
+  the region plus **the current frame**, which a lane read needs for the same
+  reason a region write does (F2). Decision: **D64**.
+
+  Pinned on all four targets by `:automation-lane-in-callee` in the shared
+  catalog — an entry that declares a lane and calls a callee which reads it —
+  which the JVM suite runs on the interpreter and JVM and the browser matrix runs
+  on JavaScript and Wasm, f32 and f64. The JVM suite also renders it directly
+  (`a-control-carries-an-optional-lane-beside-its-scalar`), and that check was
+  bite-checked twice: without the lane table reaching callees it refuses
+  ("lane is only available where a lane region is"), and without the JVM call
+  site's argument the callee fails a `VerifyError`.
+- **F4 — per-voice lanes fuse. DONE.** The entry's one lane region now holds one
+  slice per voice, and a call site hands its callee the base of *its* slice —
+  zero-based lane offsets plus a base, exactly as a callee's state indices are
+  resolved against a partition base (D19) — so `poly`'s refusal of a lane on a
+  per-slot control is gone. A lane belongs to the *control*, so expanding a control
+  per slot does not multiply lanes: the expanded declarations name the lane they
+  carry (`:lane-name`) and the entry lays out one lane per base control. A
+  lane-only control's name is a read of the lane region wherever it is read, so a
+  callee reads its own slice rather than the value its caller passed. Decision:
+  **D65**.
+
+  Pinned on all four targets by two checks: the JVM suite renders
+  `a-fused-pool-gives-each-slot-its-own-lane` and
+  `a-fused-pool-expands-a-lane-carrying-control-per-slot` on the interpreter and
+  the JVM against a plain pool over the same description, and the browser runs
+  `JavaScript fused lane` and `Wasm fused lane` over a served fused bundle with two
+  curves written to the two voices. Both failed before the change for the two
+  reasons it exists (`[40 40 40 40]` where the plain pool gave `[22 24 26 28]`, and
+  the refusal); the browser check was also the bite check for the JavaScript host's
+  one-slice region.
+- **F5 — a fused AudioWorklet. DONE.** One worklet node renders `slots` voices:
+  its parameters are the *fused* interface in ABI order (`gate_0`, `frequency_0`,
+  ...), generated from the fused artifact's controls, so the page drives the slots
+  apart directly. No mapping is involved — the pool's `fused-position` exists for
+  the pool's base-shaped writes, and a worklet has no pool — and slot assignment
+  stays the page's, which is the static half of polyphony `poly` has documented
+  since D38. Decision: **D66**.
+
+  Pinned by `JavaScript fused worklet` and `Wasm fused worklet`: one node rendered
+  three times — one slot, the other, and both — with slot 1 at twice slot 0's
+  `frequency`, asking that slot 1's peak be twice slot 0's and that the both-slots
+  block be their sum. The check found two real bugs (an unguarded
+  `processorOptions` read, and the page nesting the processor fields wrongly) and
+  bites when the per-slot names go missing; a stub of the descriptor *order* does
+  not bite, which is expected — adapters index by `controlNames`.
+
+**Done when.** `{:fusion {:slots S}}` can be requested for the **reference
+instrument** — stereo and lane-using — through the instrument layer on
+interpreter/JVM/JS/Wasm, and a fused instrument renders bit-for-bit what the
+plain instrument renders (transcendentals within the documented tolerance), with
+the pool still the default and every existing check unchanged; and the
+AudioWorklet path renders `slots` voices per node. The M6 measurements then
+describe a configuration a user can select.
+
+**Risks and open questions.** F2 is load-bearing and reopens M6-0's
+module/process boundary; if output-buffer partitioning needs a new ABI shape,
+that is a decision, not a fix. F3/F4 touch all four backends and the interpreter,
+and F3's callee-ABI change is felt by every call site (D47). The instrument
+layer's half-acceptance of `:fusion` is a *current* bug, not only a missing
+feature; F1 closes it in both hosts (D62, D63).
+
+**Status.** **F0, F1, F2, F3, F4 and F5 are done — the workstream is complete.**
+F1's instrument
+layer threads `:fusion` on both the JVM and in the browser (D62, D63), a lane
+reaches a callee on every target (D64), and a fused entry gives each of its slots
+its own lane slice (D65). **F2a–F2d are
+done**: the surface is
+`with-buffers` (map or bare-name sugar, D57); a bound buffer is a **call-partition
+state slot** (D59), read with the existing `buffer-load`, so the entry's `:buffers`
+keeps only its own `:output` and no target needs region-specific code; a
+process-shaped callee returns `:void` and is handed the frame; and **`poly` fuses
+such a voice** by binding each slot's region and summing them into `:output`
+(D60). The reference instrument therefore fuses on every target: a fused pool
+renders its plain pool **bit for bit** on the interpreter and the JVM (D60), and
+the browser renders the fused reference voice exactly as the plain one on both
+JavaScript and Wasm, through a steal (D61).
+
+Four traps fell out and are fixed: `normalize-options` always injects a default
+`:channels 1`, so an explicit top-level width must be written into the options
+module lowering reads (D58); a per-sample callee has no frame, so a
+region-writing one is handed the current frame (D59); a void call must not
+`pop`/`drop`/pass a stray argument (D59/D60); and the Wasm host must seed a
+fresh instance's state itself and resolve a partition's byte range from layout
+*segments* (D61). The first F2a cut used a `:region` *buffer* instead of state
+and was reworked to D57's design (D59).
+
+**Done when** is met: a fused instrument renders bit for bit what the plain one
+renders on every target, and the AudioWorklet path renders `slots` voices per node.
+
+---
+
 ## Dependencies at a glance
 
 ```text
@@ -815,9 +1047,11 @@ P12 + P13 ───────────────────────�
 P9 + artifacts ───────────────────────────────────────── P15
 P11 + P12 + P14 ──────────────────────────────────────── P16
 P9 + P10 + P11 ──────────────────────────────────────────── M
+M ───────────────────────────────────────────────────────── F
 ```
 
 P12–P16 are infrastructure/quality phases; their position reflects the point at
-which their inputs and consumers exist, not a required serialization. **M** is a
-separate, lettered workstream (instrument semantics and host topology); see its
-entry above.
+which their inputs and consumers exist, not a required serialization. **M** and
+**F** are separate, lettered workstreams — M is instrument semantics and host
+topology, F deploys M6's fusion through the instrument layer and to the voice
+shapes real instruments use (stereo, lane-using); see their entries above.

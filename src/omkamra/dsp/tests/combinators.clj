@@ -196,11 +196,20 @@
                    (comb/poly (deref #'fixtures/shared-gain)
                               {:count 2 :per-slot [:amount]}))
           "a shared control is one region for the whole process")))
-  (testing "a lane cannot be polyphonic at all"
-    (is (thrown? clojure.lang.ExceptionInfo
-                 (comb/poly (deref #'fixtures/lane-on-frequency)
-                            {:count 2 :per-slot [:frequency]}))
-        "a lane belongs to the entry process"))
+  (testing "a lane travels with the control it belongs to, one lane for every slot"
+    ;; F4. A per-slot control is expanded, but its lane is not: the slots read one
+    ;; lane, each from its own slice of the region, so the expanded copies all
+    ;; name the lane the voice declared. That is what lets a lane reach a fused
+    ;; voice's slots at all -- and what keeps the entry's lane layout the voice's.
+    (let [fused (comb/poly (deref #'fixtures/lane-on-frequency)
+                           {:count 2 :per-slot [:frequency]})
+          controls (get-in fused [:process :controls])]
+      (is (= '[frequency_0 frequency_1] (mapv :name controls)))
+      (is (every? #(true? (:has-lane %)) controls))
+      (is (= '[frequency frequency] (mapv :lane-name controls))
+          "both slots read the one lane the voice declared")
+      (is (= 2 (:dsp/lane-slots fused))
+          "and the entry says its region holds one slice per voice")))
   (testing "and an undeclared control is still just a name"
     (let [fused (comb/poly (deref #'fixtures/sine-voice)
                            {:count 2 :per-slot [:gate :frequency]})]

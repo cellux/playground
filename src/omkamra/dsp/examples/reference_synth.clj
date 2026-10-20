@@ -165,7 +165,10 @@
    attack decay sustain release
    filter-attack filter-decay filter-sustain filter-release
    lfo-rate lfo-shape vibrato-depth drive]
-  {:process {:input false
+  {:return-type :void
+   ;; The width is declared so `poly` can sum the fused slots' regions channel by
+   ;; channel (F2); the body would otherwise infer the same stereo width.
+   :process {:input false :channels 2
              ;; The continuous controls the matrix modulates are smoothed per
              ;; frame (D27): the host sets them once per block, and a bare step
              ;; would click (zipper noise). Each starts at its declared default,

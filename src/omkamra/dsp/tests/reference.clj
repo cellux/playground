@@ -12,6 +12,7 @@
             [omkamra.dsp.graph :as graph]
             [omkamra.dsp.harness.fixtures :refer [allocated-bytes
                                                   thread-allocation-meter]]
+            [omkamra.dsp.hosts :as host]
             [omkamra.dsp.hosts.instrument :as inst-host]
             [omkamra.dsp.instrument :as inst]
             [omkamra.dsp.library.effect]
@@ -359,3 +360,33 @@
               (str "the interpreter host allocates " reference-bytes
                    " bytes, which must exceed the " allowance " byte allowance")))))
     (is true "thread allocation measurement is unavailable on this JVM")))
+
+(deftest a-fused-reference-instrument-renders-what-a-plain-one-renders
+  ;; F2's acceptance. The reference voice is stereo *and* process-shaped -- it
+  ;; writes its own `:output` -- so fusing it exercises the whole path: a
+  ;; per-slot region, the frame a region-writing callee needs, and the stereo
+  ;; sum. A fused pool must render exactly what a plain pool renders, on the JVM
+  ;; and on the interpreter that is its oracle (the interpreter kernel runs
+  ;; fused pools too, so a fused pool on any host has an oracle at all, D59).
+  (let [render (fn [target fusion]
+                 (let [description (cond-> ref/description
+                                     fusion (assoc :capacity 2))
+                       pool (host/synth-pool
+                             (host/compile-synth
+                              description
+                              (cond-> {:target target :precision :f32}
+                                fusion (assoc :fusion fusion))))
+                       output (planar-output 64)]
+                   (pool/note-on! pool 60 1.0)
+                   (pool/note-on! pool 64 1.0)
+                   (dotimes [_ 3] (pool/render! pool output 64 48000.0))
+                   (mapv (fn [channel] (vec (aget output channel))) [0 1])))]
+    (doseq [target [:interpreter :jvm]]
+      (let [plain (render target nil)
+            fused (render target {:slots 2})]
+        (is (= plain fused)
+            (str (name target) ": a fused instrument is its plain instrument"))
+        (is (some #(not= 0.0 %) (first plain))
+            (str (name target) ": and the block is audible"))))
+    (is (= (render :interpreter {:slots 2}) (render :jvm {:slots 2}))
+        "the interpreter is the oracle for the JVM's fused instrument")))

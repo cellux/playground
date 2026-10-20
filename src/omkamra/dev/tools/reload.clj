@@ -657,6 +657,18 @@
         remembered (remember-loaded!)
         {:keys [root-set not-loaded]} (select-roots scan file->ns known explicit
                                                     remembered)
+        ;; What detection alone would reload, whatever drove this call.
+        ;;
+        ;; A reload refreshes the image, and the one thing an explicitly *named*
+        ;; target leaves unsaid is that it refreshed only what it named — which is
+        ;; the point of the form (it is how you reload one namespace while another
+        ;; file is mid-edit, and why it must not quietly adopt the rest). So the
+        ;; report says what it left behind: "the image is current now" should
+        ;; never be something the caller assumed. Computed on every call rather
+        ;; than only the named ones, so the claim is checked instead of assumed;
+        ;; for a detection-driven call the set below is empty by construction.
+        detected-roots (:root-set (select-roots scan file->ns known nil remembered))
+        stale (vec (sort (remove (set root-set) detected-roots)))
         members (set (keys ns->files))
         ;; The namespaces a reload may touch at all: remembered, and in scope.
         session (into #{} (filter remembered) members)
@@ -752,7 +764,27 @@
                  :else :unchanged)]
     (swap! state assoc :known new-known)
     (repair-aliases! outcome)
-    (let [aliases-repaired (refresh-stale-aliases!)]
+    (let [aliases-repaired (refresh-stale-aliases!)
+          ;; Every remark the call owes the caller, in one place: they are
+          ;; independent, and a report that quietly dropped one because another
+          ;; was already written would be the report lying by omission. Each is
+          ;; as short as it can be and still be read on its own: what happened,
+          ;; and the one command that answers it. The reasoning lives in
+          ;; `reload`'s docstring, where there is room for it.
+          notes (cond-> []
+                  (seq not-loaded)
+                  (conj (str (count not-loaded) " namespace(s) never loaded in this "
+                             "session: `require` them"))
+                  wholesale?
+                  (conj (str "the whole session changed (" (count closure) " of "
+                             (count session) "), a replaced baseline rather than an "
+                             "edit. Nothing was reloaded. (reload :all) refreshes all "
+                             (count session) ", (reload 'some.ns) only what you name"))
+                  (and (= :unchanged status) (empty? not-loaded))
+                  (conj "nothing changed; name a namespace to reload it")
+                  (seq stale)
+                  (conj (str (count stale) " namespace(s) changed and were not "
+                             "reloaded: (reload) picks them up")))]
       (cond-> {:status status
                :changed (vec (sort root-set))
                :reloaded (vec (:reloaded outcome))
@@ -765,23 +797,14 @@
         (assoc :aliases-repaired aliases-repaired)
         (seq not-loaded)
         (assoc :not-loaded {:count (count not-loaded)
-                            :sample (vec (take not-loaded-sample-size not-loaded))}
-               :note (str (count not-loaded) " namespace(s) it was pointed at have "
-                          "never been loaded in this session, so nothing was done "
-                          "for them: a reload refreshes the image, it does not grow "
-                          "it — `require` them instead"))
+                            :sample (vec (take not-loaded-sample-size not-loaded))})
         wholesale?
-        (assoc :would-reload (count closure)
-               :note (str "detection says the whole session changed ("
-                          (count closure) " of " (count session) " namespaces this "
-                          "session may touch), which is a replaced or corrupted "
-                          "baseline rather than an edit. Nothing was reloaded or "
-                          "unloaded. If that really is what you want, (reload :all) "
-                          "refreshes all " (count session) " of them; (reload "
-                          "'some.ns) refreshes only the namespaces you name"))
-        (and (= :unchanged status) (empty? not-loaded))
-        (assoc :note (str "no file content changed since the last reload; "
-                          "pass a namespace to reload it explicitly"))))))
+        (assoc :would-reload (count closure))
+        (seq stale)
+        (assoc :stale {:count (count stale)
+                       :sample (vec (take not-loaded-sample-size stale))})
+        (seq notes)
+        (assoc :note (str/join " " notes))))))
 
 (defn reload
   "Reload a namespace set and report compactly.
@@ -805,6 +828,13 @@
   and force the loaded namespaces among those named (and their loaded
   dependents), which is the deterministic escape hatch when detection cannot know
   about an edit. A namespace that is not loaded is still left alone.
+
+  A *named* target reloads what it names and nothing else — deliberately, since
+  that is what makes it usable while another file is mid-edit — so it is the one
+  form that can leave the image stale. The report therefore says so, under
+  `:stale`, naming the namespaces whose content changed and were not reloaded.
+  Detection runs on every call for that reason, so `:stale` being absent is a
+  claim the tool checked rather than one it assumed.
 
   `(reload {:dirs [...]})` sets the scan scope first (the classpath source
   directories by default; an optional `:files` pattern selects filenames) and

@@ -225,10 +225,13 @@
           params (graph/parameter-symbols voice)
           shared (vec (remove per-slot params))
           slot-params (vec (filter per-slot params))
-          ;; The voice's control *declarations* -- `:shared`, a lane, a default --
-          ;; travel with the names, or a fused interface is not the voice's
-          ;; interface: a shared control would arrive as an ordinary scalar and a
-          ;; declared default would be lost (D50).
+          ;; The voice's control *declarations* -- `:shared`, a lane, a default,
+          ;; the smoothing mode -- travel with the names, or a fused interface is
+          ;; not the voice's interface: a shared control would arrive as an
+          ;; ordinary scalar and a declared default would be lost (D50). The mode
+          ;; travels as a *declaration* only: this definition's body calls the
+          ;; voice, so the voice is what ramps the control (F1), which
+          ;; `derived-definition` records as `:dsp/forwarded-controls`.
           declarations (into {}
                              (map (fn [control] [(control-name control) control]))
                              (get-in voice [:process :controls]))
@@ -239,15 +242,22 @@
                   (throw (ex-info (str "poly cannot expand a shared control per"
                                        " slot: it is one region for the whole"
                                        " process")
-                                  {:control param :per-slot (vec (sort per-slot))})))
-                (when (or (:lane declared) (:has-lane declared))
-                  (throw (ex-info (str "poly cannot expand a lane per slot: a lane"
-                                       " belongs to the entry process")
                                   {:control param :per-slot (vec (sort per-slot))})))))
           declared-control (fn [param name]
                              (if-let [declared (declaration param)]
                                (assoc declared :name name)
                                {:name name}))
+          ;; A lane belongs to the *control*, and expanding a control per slot does
+          ;; not make the slots' lanes different lanes: they are one lane read from
+          ;; the slice each slot's call site is (F4). The expanded declaration
+          ;; names the lane it carries, so the entry lays out one lane per base
+          ;; control rather than one per slot.
+          slot-control (fn [param slot]
+                         (let [name (symbol (str (name param) "_" slot))
+                               declared (declared-control param name)]
+                           (cond-> declared
+                             (or (:lane declared) (:has-lane declared))
+                             (assoc :lane-name param))))
           slots (mapv (fn [slot]
                         (mapv (fn [param]
                                 (if (per-slot param)
@@ -256,22 +266,53 @@
                               params))
                       (range count))
           calls (mapv #(graph/definition-call voice %) slots)
-          body (reduce (fn [left right] (list '+ left right)) calls)
+          ;; A process-shaped voice (`:return-type :void`) writes its own `:output`
+          ;; rather than returning a sample, so its copies cannot simply be summed
+          ;; as values. Each call owns a per-slot *region* (`with-buffers`, D57),
+          ;; and the fused body sums the regions into `:output`, one channel at a
+          ;; time (F2). A module-shaped voice keeps the scalar sum.
+          process? (= :void (:return-type voice))
+          body
+          (if process?
+            (let [channels (get-in voice [:process :channels])]
+              (when-not (and (integer? channels) (pos? channels))
+                (throw (ex-info (str "a fusable process-shaped voice must declare"
+                                     " :process :channels")
+                                {:voice (graph/definition-id voice)})))
+              (let [region (fn [slot] (keyword (str "slot-" slot)))
+                    mix (fn [channel]
+                          (reduce (fn [left right] (list '+ left right))
+                                  (mapv (fn [slot]
+                                          (list 'buffer-load (region slot) channel 0))
+                                        (range count))))]
+                (list* 'do
+                       (concat
+                        (mapv (fn [slot call]
+                                (list 'with-buffers (region slot) call))
+                              (range count) calls)
+                        (mapv (fn [channel]
+                                (list 'buffer-store :output channel 0 (mix channel)))
+                              (range channels))))))
+            (reduce (fn [left right] (list '+ left right)) calls))
           names (vec (concat shared
                              (mapcat (fn [slot]
                                        (mapv #(symbol (str (name %) "_" slot)) slot-params))
                                      (range count))))]
-      (graph/derived-definition
-       voice
-       body
-       {:params names
-        :controls (vec (concat (mapv (fn [param] (declared-control param param)) shared)
-                               (mapcat (fn [slot]
-                                         (mapv (fn [param]
-                                                 (declared-control
-                                                  param (symbol (str (name param) "_" slot))))
-                                               slot-params))
-                                       (range count))))}))))
+      (assoc (graph/derived-definition
+              voice
+              body
+              {:params names
+               :controls (vec (concat (mapv (fn [param] (declared-control param param))
+                                            shared)
+                                      (mapcat (fn [slot]
+                                                (mapv #(slot-control % slot) slot-params))
+                                              (range count))))})
+             ;; One entry, `count` voices: the lane region is the entry's, so it
+             ;; holds one slice per voice and each call site reads its own (F4).
+             ;; A lane is per voice by definition, so a single slice shared by
+             ;; every slot is not a missing feature but a wrong answer -- the
+             ;; slots would take turns overwriting one automation.
+             :dsp/lane-slots count))))
 
 (defn share
   "Return `voice` with its output evaluated once and bound to a fresh local;

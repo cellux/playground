@@ -1646,6 +1646,168 @@
                                           {:precision (:precision bundle)}))))))))))
 
 ;; ---------------------------------------------------------------------------
+;; A fused worklet node: one node, `slots` voices (F5)
+;; ---------------------------------------------------------------------------
+;;
+;; A fused voice is one process holding `slots` voices, so one worklet node
+;; renders all of them in one call, and its parameters are the *fused* interface:
+;; a per-slot parameter for every per-slot control (`gate_0`, `frequency_0`,
+;; `gate_1`, ...), because the adapter writes a parameter into the kernel's
+;; control array at the parameter's own index and has no pool to map through.
+;;
+;; The check drives the two slots apart -- 220 on one, 440 on the other -- and
+;; renders three times: slot 0 alone, slot 1 alone, and both. The voice scales its
+;; output by `frequency`, so:
+;;
+;; - slot 1's block has to be twice slot 0's, which is what shows a parameter
+;;   reached the slot it names rather than a neighbour's control block;
+;; - the both-slots block has to be their sum, which is what shows one node
+;;   rendered both voices rather than one.
+
+(defn- render-fused-worklet
+  "Render one block on a fresh fused worklet node and return its first channel.
+
+  `options` is the processor's shape and `parameters` the node's own parameter
+  names and values, both plain Clojure data; `bytes` is a Wasm module's compiled
+  bytes, which only the Wasm adapter needs and which has to be set on the options
+  object after the conversion."
+  [worklet-url processor options parameters bytes]
+  (let [context (js/OfflineAudioContext. 1 256 44100)]
+    (-> (.addModule (.-audioWorklet context) (str worklet-url "?v=" (js/Date.now)))
+        (.then
+         (clojure.core/fn [_]
+           (let [node-options (clj->js {:numberOfInputs 0
+                                        :numberOfOutputs 1
+                                        :channelCount 1
+                                        :channelCountMode "explicit"
+                                        :outputChannelCount [1]
+                                        :parameterData parameters
+                                        :processorOptions options})]
+             (when bytes
+               (aset (aget node-options "processorOptions") "wasmBytes" bytes))
+             (let [node (js/AudioWorkletNode. context processor node-options)]
+               (.connect node (.-destination context))
+               (-> (worklet-ready node)
+                   (.then
+                    (clojure.core/fn [_]
+                      ;; A Wasm adapter initializes its instance itself; a reset
+                      ;; makes the block it renders the one a fresh pool would.
+                      (if bytes (worklet-reset! node) (js/Promise.resolve nil))))
+                   (.then (clojure.core/fn [_] (.startRendering context))))))))
+        (.then (clojure.core/fn [buffer]
+                 (vec (array-seq (.getChannelData buffer 0))))))))
+
+(defn- fused-worklet-parameters
+  "The fused interface's per-slot values: each slot's own `gate` and `frequency`,
+  indexed by slot."
+  [gates frequencies]
+  (into {}
+        (mapcat (clojure.core/fn [slot]
+                  [[(str "gate_" slot) (if (nth gates slot) 1.0 0.0)]
+                   [(str "frequency_" slot) (nth frequencies slot)]]))
+        (range (count gates))))
+
+(defn- peak-of
+  [block]
+  (reduce clojure.core/max 0.0 (map #(js/Math.abs %) block)))
+
+(defn- check-fused-worklet
+  "Render a fused worklet node as one slot, the other, and both; ask that the
+  parameters reached the right slots and that both were rendered."
+  [name render]
+  (-> (js/Promise.all
+       #js [(render (fused-worklet-parameters [true false] [220.0 440.0]))
+            (render (fused-worklet-parameters [false true] [220.0 440.0]))
+            (render (fused-worklet-parameters [true true] [220.0 440.0]))])
+      (.then
+       (clojure.core/fn [[first-slot second-slot both]]
+         (let [first-peak (peak-of first-slot)
+               second-peak (peak-of second-slot)
+               sum (mapv + first-slot second-slot)
+               worst (reduce clojure.core/max 0.0
+                             (map (clojure.core/fn [a b] (js/Math.abs (- a b)))
+                                  both sum))]
+           (require! (> first-peak 1e-4)
+                     (str name " rendered silence for a gated slot: " first-peak))
+           (require! (matches-value? (/ second-peak first-peak) 2.0)
+                     (str name ": slot 1's frequency is twice slot 0's, so its block"
+                          " should be too, but the peaks were " first-peak " and "
+                          second-peak))
+           (require! (< worst 1e-3)
+                     (str name " rendered both slots as something other than their"
+                          " sum: worst sample differs by " worst))
+           {:name name
+            :passed? true
+            :detail (str "one node rendered both slots: slot 1 at twice slot 0's"
+                         " frequency, and both together as their sum (worst " worst
+                         ")")})))))
+
+(defn- fused-worklet-options
+  "The processor shape a fused worklet node needs, read from the fused bundle's
+  ABI: the interface's own parameter names and defaults, so nothing about the
+  fused interface is written down twice."
+  [bundle processor-options]
+  (let [abi (:abi bundle)
+        f64? (= :f64 (:precision bundle))]
+    (merge {:channels (long (or (get-in abi [:channels :count]) 1))
+            :frameCapacity 256
+            :elementBytes (if f64? 8 4)
+            :elementType (if f64? "f64" "f32")
+            :controlNames (mapv (comp name :name) (:controls abi))
+            :controlDefaults (mapv (clojure.core/fn [control]
+                                     (double (or (:default control) 0.0)))
+                                   (:controls abi))}
+           processor-options)))
+
+(defn- javascript-fused-worklet-test
+  "The JavaScript host: one worklet node over the fused kernel, driven by the
+  fused interface's per-slot parameters (F5)."
+  []
+  (-> (fetch-edn "/omkamra/dsp/harness/testbed/fused-pool-bundle?slots=2")
+      (.then
+       (clojure.core/fn [bundle]
+         (let [options (fused-worklet-options
+                        bundle
+                        {:kernelUrl (str "/omkamra/dsp/harness/testbed/fused-pool-source"
+                                         "?slots=2&precision="
+                                         (name (:precision bundle)))
+                         :inputChannels 0})]
+           (check-fused-worklet
+            "JavaScript fused worklet"
+            (clojure.core/fn [parameters]
+              (render-fused-worklet
+               "/omkamra/dsp/harness/testbed/squint-fused-worklet"
+               "omkamra-dsp-fused-kernel" options parameters nil))))))))
+
+(defn- wasm-fused-worklet-test
+  "The Wasm host: one worklet node over the fused module, driven by the fused
+  interface's per-slot parameters (F5)."
+  []
+  (-> (fetch-edn "/omkamra/dsp/harness/testbed/fused-pool-bundle?target=wasm&slots=2")
+      (.then
+       (clojure.core/fn [bundle]
+         (-> (compile-wasm (:wat bundle))
+             (.then
+              (clojure.core/fn [bytes]
+                (let [memory (:memory bundle)
+                      options (fused-worklet-options
+                               bundle
+                               {:inputChannels 0
+                                :inputOffset (:input-offset memory)
+                                :outputOffset (:output-offset memory)
+                                :channels (long (or (get-in memory [:regions :output
+                                                                    :channels])
+                                                    1))
+                                :frameCapacity (long (:frame-capacity memory))
+                                :channelStride (long (:channel-stride memory))})]
+                  (check-fused-worklet
+                   "Wasm fused worklet"
+                   (clojure.core/fn [parameters]
+                     (render-fused-worklet
+                      "/omkamra/dsp/harness/testbed/squint-wasm-fused-worklet"
+                      "omkamra-dsp-wasm-fused-kernel" options parameters bytes)))))))))))
+
+;; ---------------------------------------------------------------------------
 ;; A fused pool: one process, slots voices (M6c)
 ;; ---------------------------------------------------------------------------
 ;;
@@ -1800,6 +1962,117 @@
                    (reader/read-string (:base-ir bundle))
                    (or (get-in abi [:channels :count]) 1)
                    kernel)))))))))
+
+(defn- worst-abs-diff
+  "The largest absolute difference between two block sequences, flattened."
+  [actual expected]
+  (letfn [(flat [x]
+            (cond (sequential? x) (mapcat flat x)
+                  (number? x) [x]
+                  :else []))]
+    (reduce clojure.core/max 0.0
+            (map (clojure.core/fn [a e] (js/Math.abs (- a e)))
+                 (flat actual) (flat expected)))))
+
+(defn- check-fused-reference
+  "Compare a fused reference-voice pool against the *plain* pool on the same
+  browser kernel.
+
+  The reference voice is stereo and process-shaped, so this is the browser end of
+  F2: a per-slot region, the frame a region-writing callee needs, the stereo sum,
+  and a steal that resets one slot's region on its own. Comparing within one
+  target makes the transcendentals cancel, where the host interpreter would only
+  agree to a tolerance on Wasm (D14)."
+  [name runtime channels plain-kernel fused-kernel]
+  (let [blocks (clojure.core/fn [k]
+                 (let [p (pool/voice-pool runtime k)]
+                   (pool/note-on! p 60 1.0)
+                   (pool/note-on! p 64 1.0)
+                   (mapv (clojure.core/fn [index]
+                           ;; A third note-on past the two-slot capacity steals the
+                           ;; oldest voice -- the one path that resets a single
+                           ;; slot (M6a), so the region a fused slot restores is
+                           ;; exercised rather than merely written.
+                           (when (= 1 index)
+                             (pool/note-on! p 67 1.0))
+                           (let [block (render-block channels 128)]
+                             (pool/render! p block 128 48000.0)
+                             (block->vectors block channels)))
+                         (range 3))))
+        actual (blocks fused-kernel)
+        expected (blocks plain-kernel)
+        worst (worst-abs-diff actual expected)]
+    (require! (= actual expected)
+              (str name " drifted from the plain voice: max-abs " worst
+                   " fused " (pr-str (vec (take 5 (first (first actual)))))
+                   " plain " (pr-str (vec (take 5 (first (first expected)))))))
+    (require! (audible? (last actual))
+              (str name ": the fused voice should render sound, not silence"))
+    {:name name
+     :passed? true
+     :detail (str "the fused reference voice rendered what the plain voice"
+                  " rendered, block for block and through a steal")}))
+
+(defn- javascript-fused-reference-test
+  "The JavaScript host over the fused reference voice: the fused kernel must
+  render what the plain kernel renders, on the same target."
+  []
+  (-> (js/Promise.all
+       #js [(fetch-edn "/omkamra/dsp/harness/testbed/fused-reference-bundle")
+            (response-text "/omkamra/dsp/harness/testbed/fused-reference-source")])
+      (.then
+       (clojure.core/fn [[bundle source]]
+         (let [make-url (clojure.core/fn [text]
+                          (js/URL.createObjectURL
+                           (js/Blob. #js [text] #js {:type "text/javascript"})))
+               fused-url (make-url source)
+               base-url (make-url (:base-source bundle))
+               abi (:abi bundle)
+               build (clojure.core/fn [module-url module-abi mapping]
+                       (-> (dynamic-import module-url)
+                           (.then
+                            (clojure.core/fn [module]
+                              (js-host/js-kernel
+                               (gobj/get module "createKernel") module-abi
+                               (cond-> {:precision (:precision bundle)}
+                                 mapping (assoc :mapping mapping)))))))
+               fused (build fused-url abi
+                            (fusion/runtime-mapping (:controls abi) (:fusion bundle)))
+               plain (build base-url (:base-abi bundle) nil)]
+           (-> (js/Promise.all #js [fused plain])
+               (.then
+                (clojure.core/fn [[fused-kernel plain-kernel]]
+                  (check-fused-reference
+                   "JavaScript fused reference voice"
+                   (:runtime bundle) (or (get-in abi [:channels :count]) 1)
+                   plain-kernel fused-kernel)))
+               (.finally
+                (clojure.core/fn []
+                  (js/URL.revokeObjectURL fused-url)
+                  (js/URL.revokeObjectURL base-url)))))))))
+
+(defn- wasm-fused-reference-test
+  "The Wasm host over the fused reference voice."
+  []
+  (-> (fetch-edn "/omkamra/dsp/harness/testbed/fused-reference-bundle?target=wasm")
+      (.then
+       (clojure.core/fn [bundle]
+         (-> (js/Promise.all #js [(compile-wasm (:wat bundle))
+                                  (compile-wasm (:base-wat bundle))])
+             (.then
+              (clojure.core/fn [[fused-bytes base-bytes]]
+                (let [build (clojure.core/fn [bytes page-abi memory mapping]
+                              (wasm-host/wasm-kernel
+                               (js/WebAssembly.Module. bytes) page-abi memory
+                               (cond-> {:precision (:precision bundle)}
+                                 mapping (assoc :mapping mapping))))
+                      abi (:abi bundle)]
+                  (check-fused-reference
+                   "Wasm fused reference voice"
+                   (:runtime bundle) (or (get-in abi [:channels :count]) 1)
+                   (build base-bytes (:base-abi bundle) (:base-memory bundle) nil)
+                   (build fused-bytes abi (:memory bundle)
+                          (fusion/runtime-mapping (:controls abi) (:fusion bundle))))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; A pool of N against one fused process (D45)
@@ -2306,6 +2579,129 @@
                   (check-reference-host "Wasm instrument host"
                                         bundle voice-kernel bus-runner nil)))))))))
 
+;; ---------------------------------------------------------------------------
+;; The fused instrument host (F1's browser half)
+;; ---------------------------------------------------------------------------
+
+(defn- check-fused-instrument
+  "Compare a *fused* instrument host against the plain one on the same browser
+  kernel: the fused voice kernel -- built with the `:fusion` mapping the runtime
+  carries -- plus the post-mix bus must render exactly the phrase the plain voice
+  kernel plus the same bus renders.
+
+  This is F1's browser half. The instrument layer threads `:fusion` on the JVM;
+  the page has to thread it the same way, and a fused artifact hosted by a plain
+  kernel throws at the first note-on rather than rendering anything.
+
+  Comparing within one target makes the transcendentals cancel (D14), as the
+  fused reference voice check does."
+  [name bundle plain-kernel fused-kernel bus-runner]
+  (let [bus-controls (reference-bus-controls bundle)
+        js-controls (clj->js bus-controls)
+        phrase (reference-phrase 64 4)
+        split (reference-phrase 32 8)
+        ;; The two sides differ only in which runtime drives the pool: the fused
+        ;; one names the expanded per-slot controls, the plain one the voice's.
+        plain-view (assoc bundle
+                          :runtime (:base-runtime bundle)
+                          :voice-abi (:base-voice-abi bundle))
+        actual (play-reference-phrase bundle fused-kernel bus-runner
+                                      js-controls phrase)
+        expected (play-reference-phrase plain-view plain-kernel bus-runner
+                                        js-controls phrase)
+        split-actual (play-reference-phrase bundle fused-kernel bus-runner
+                                            js-controls split)]
+    (require! (all-finite? actual)
+              (str name " rendered a non-finite sample"))
+    (require! (audible? actual)
+              (str name ": the fused instrument should render sound, not silence"))
+    (require! (= actual expected)
+              (str name " drifted from the plain instrument host: "
+                   (pr-str (first-mismatch actual expected))))
+    (require! (= actual split-actual)
+              (str name " changed when its held blocks were split: "
+                   (pr-str (first-mismatch actual split-actual))))
+    {:name name
+     :passed? true
+     :detail (str "the fused instrument rendered what the plain instrument"
+                  " rendered, finite and block-size invariant")}))
+
+;; F1's browser half: the fused instrument host. The two sides use the same bus
+;; and the same phrase, so a drift is the fused voice kernel's.
+(defn- javascript-fused-instrument-test
+  []
+  (-> (js/Promise.all
+       #js [(fetch-edn "/omkamra/dsp/harness/testbed/fused-instrument-bundle")
+            (fetch-edn "/omkamra/dsp/harness/testbed/fused-instrument-source")])
+      (.then
+       (clojure.core/fn [[bundle sources]]
+         (let [make-url (clojure.core/fn [text]
+                          (js/URL.createObjectURL
+                           (js/Blob. #js [text] #js {:type "text/javascript"})))
+               fused-url (make-url (:voice sources))
+               base-url (make-url (:base-source bundle))
+               bus-url (make-url (:bus sources))
+               build-voice (clojure.core/fn [url abi mapping]
+                             (-> (dynamic-import url)
+                                 (.then
+                                  (clojure.core/fn [module]
+                                    (js-host/js-kernel
+                                     (gobj/get module "createKernel") abi
+                                     (cond-> {:precision (:precision bundle)
+                                              :containment :off}
+                                       mapping (assoc :mapping mapping)))))))]
+           (-> (js/Promise.all
+                #js [(build-voice
+                      fused-url (:voice-abi bundle)
+                      (fusion/runtime-mapping (:controls (:voice-abi bundle))
+                                              (:fusion bundle)))
+                     (build-voice base-url (:base-voice-abi bundle) nil)
+                     (-> (dynamic-import bus-url)
+                         (.then
+                          (clojure.core/fn [module]
+                            (js-host/js-bus-kernel
+                             (gobj/get module "createKernel")
+                             (:bus-abi bundle)))))])
+               (.then
+                (clojure.core/fn [[fused-kernel plain-kernel bus-runner]]
+                  (check-fused-instrument "JavaScript fused instrument"
+                                          bundle plain-kernel fused-kernel
+                                          bus-runner)))
+               (.finally
+                (clojure.core/fn []
+                  (js/URL.revokeObjectURL fused-url)
+                  (js/URL.revokeObjectURL base-url)
+                  (js/URL.revokeObjectURL bus-url)))))))))
+
+(defn- wasm-fused-instrument-test
+  []
+  (-> (fetch-edn
+       "/omkamra/dsp/harness/testbed/fused-instrument-bundle?target=wasm")
+      (.then
+       (clojure.core/fn [bundle]
+         (-> (js/Promise.all #js [(compile-wasm (:voice-wat bundle))
+                                  (compile-wasm (:base-voice-wat bundle))
+                                  (compile-wasm (:bus-wat bundle))])
+             (.then
+              (clojure.core/fn [[fused-bytes base-bytes bus-bytes]]
+                (let [abi (:voice-abi bundle)
+                      build (clojure.core/fn [bytes abi memory mapping]
+                              (wasm-host/wasm-kernel
+                               (js/WebAssembly.Module. bytes) abi memory
+                               (cond-> {:precision (:precision bundle)
+                                        :containment :off}
+                                 mapping (assoc :mapping mapping))))]
+                  (check-fused-instrument
+                   "Wasm fused instrument"
+                   bundle
+                   (build base-bytes (:base-voice-abi bundle)
+                          (:base-voice-memory bundle) nil)
+                   (build fused-bytes abi (:voice-memory bundle)
+                          (fusion/runtime-mapping (:controls abi) (:fusion bundle)))
+                   (wasm-host/wasm-bus-kernel
+                    (js/WebAssembly.Module. bus-bytes) (:bus-abi bundle)
+                    (:bus-memory bundle) (:precision bundle)))))))))))
+
 (defn- selected?
   "True when check `name` is selected. With no selection (nil or empty),
   everything runs; otherwise a check runs when some selected needle is a
@@ -2359,6 +2755,82 @@
       (boolean (some (clojure.core/fn [c] (selected? selection (str (:case c))))
                      (:cases result)))))
 
+(defn- check-fused-lane
+  "Compare a fused pool automated per voice against the interpreter pool over the
+  base voice, with two different lane curves written to the two voices."
+  [name runtime base-abi base-ir channels kernel]
+  (let [oracle (interpreter-host/interpreter-kernel base-ir base-abi)
+        render (clojure.core/fn [k]
+                 (let [p (pool/voice-pool runtime k)
+                       block (render-block channels 4)]
+                   (pool/set-voice-lane!
+                    p 0 (symbol "amount") (js/Float32Array. #js [1.0 2.0 3.0 4.0]))
+                   (pool/set-voice-lane!
+                    p 1 (symbol "amount") (js/Float32Array. #js [10.0 10.0 10.0 10.0]))
+                   (pool/note-on! p 60 1.0)
+                   (pool/note-on! p 64 1.0)
+                   (pool/render! p block 4 48000.0)
+                   (block->vectors block channels)))
+        actual (render kernel)
+        expected (render oracle)]
+    (require! (= actual expected)
+              (str name " drifted from the interpreter on a per-voice lane: "
+                   (pr-str actual) " vs " (pr-str expected)))
+    (require! (= [22.0 24.0 26.0 28.0] (first actual))
+              (str name " should read each slot's own slice of the lane: "
+                   (pr-str actual)))
+    {:name name
+     :passed? true
+     :detail "each fused slot read its own slice of the one lane region"}))
+
+(defn- javascript-fused-lane-test
+  "The JavaScript host over a fused pool whose voices are automated per voice."
+  []
+  (-> (js/Promise.all
+       #js [(fetch-edn "/omkamra/dsp/harness/testbed/fused-lane-bundle")
+            (response-text "/omkamra/dsp/harness/testbed/fused-lane-source")])
+      (.then
+       (clojure.core/fn [[bundle source]]
+         (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
+               url (js/URL.createObjectURL blob)
+               run (clojure.core/fn [module]
+                     (let [abi (:abi bundle)
+                           kernel (js-host/js-kernel
+                                   (gobj/get module "createKernel") abi
+                                   {:precision (:precision bundle)
+                                    :mapping (fusion/runtime-mapping
+                                              (:controls abi) (:fusion bundle))})]
+                       (check-fused-lane
+                        "JavaScript fused lane" (:runtime bundle) (:base-abi bundle)
+                        (reader/read-string (:base-ir bundle))
+                        (or (get-in abi [:channels :count]) 1)
+                        kernel)))]
+           (-> (dynamic-import url)
+               (.then run)
+               (.finally (clojure.core/fn [] (js/URL.revokeObjectURL url)))))))))
+
+(defn- wasm-fused-lane-test
+  "The Wasm host over a fused pool whose voices are automated per voice."
+  []
+  (-> (fetch-edn "/omkamra/dsp/harness/testbed/fused-lane-bundle?target=wasm")
+      (.then
+       (clojure.core/fn [bundle]
+         (-> (compile-wasm (:wat bundle))
+             (.then
+              (clojure.core/fn [bytes]
+                (let [module (js/WebAssembly.Module. bytes)
+                      abi (:abi bundle)
+                      kernel (wasm-host/wasm-kernel
+                              module abi (:memory bundle)
+                              {:precision (:precision bundle)
+                               :mapping (fusion/runtime-mapping
+                                         (:controls abi) (:fusion bundle))})]
+                  (check-fused-lane
+                   "Wasm fused lane" (:runtime bundle) (:base-abi bundle)
+                   (reader/read-string (:base-ir bundle))
+                   (or (get-in abi [:channels :count]) 1)
+                   kernel)))))))))
+
 (defn- run-suite!
   ([summary results-list] (run-suite! summary results-list nil))
   ([summary results-list selection]
@@ -2407,6 +2879,29 @@
                    (when (selected? selection "Wasm fused pool")
                      (fn [] (-> (wasm-fused-pool-test)
                                 (.then (fn [r] [r])))))
+;; A fused pool whose voices are automated apart (F4). A lane is per voice, so
+;; every slot of a fused entry has to read its own slice of the one lane region:
+;; two different curves make a kernel that gave every slot the same slice render
+;; their sum instead, which is a wrong block rather than a missing one.
+
+                   (when (selected? selection "JavaScript fused lane")
+                     (fn [] (-> (javascript-fused-lane-test)
+                                (.then (fn [r] [r])))))
+                   (when (selected? selection "Wasm fused lane")
+                     (fn [] (-> (wasm-fused-lane-test)
+                                (.then (fn [r] [r])))))
+                   (when (selected? selection "JavaScript fused reference voice")
+                     (fn [] (-> (javascript-fused-reference-test)
+                                (.then (fn [r] [r])))))
+                   (when (selected? selection "Wasm fused reference voice")
+                     (fn [] (-> (wasm-fused-reference-test)
+                                (.then (fn [r] [r])))))
+                   (when (selected? selection "JavaScript fused instrument")
+                     (fn [] (-> (javascript-fused-instrument-test)
+                                (.then (fn [r] [r])))))
+                   (when (selected? selection "Wasm fused instrument")
+                     (fn [] (-> (wasm-fused-instrument-test)
+                                (.then (fn [r] [r])))))
                    (when (selected? selection "JavaScript shared parameter")
                      (fn [] (-> (javascript-shared-test)
                                 (.then (fn [r] [r])))))
@@ -2433,6 +2928,12 @@
                      (fn [] (schedule-invariance-tests)))
                    (when (selected? selection "worker event transport")
                      (fn [] (-> (transport-test) (.then (fn [r] [r])))))
+                   (when (selected? selection "fused worklet")
+                     (fn [] (-> (javascript-fused-worklet-test)
+                                (.then (fn [r] [r])))))
+                   (when (selected? selection "fused worklet")
+                     (fn [] (-> (wasm-fused-worklet-test)
+                                (.then (fn [r] [r])))))
                    (when (selected? selection "AudioWorklet")
                      (fn [] (-> (audio-worklet-test :f32)
                                 (.then (fn [a]

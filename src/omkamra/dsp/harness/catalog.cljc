@@ -17,7 +17,8 @@
   ;; Some cases call DSP library functions by fully-qualified name.  The JVM
   ;; side links those definitions, so it must have the library loaded; the
   ;; browser receives compiled IR instead and never needs the namespace.
-  #?(:clj (:require [omkamra.dsp.library.math]
+  #?(:clj (:require [omkamra.dsp.harness.call-fixture]
+                    [omkamra.dsp.library.math]
                     [omkamra.dsp.library.oscillator]
                     [omkamra.dsp.library.noise]
                     [omkamra.dsp.library.envelope]
@@ -167,6 +168,19 @@
                   :return-type :float
                   :process {:controls [{:name 'amount :lane true}]}
                   :body ['(* sample amount)]}
+     :precisions [:f32 :f64]
+     :controls []
+     :lane-samples lane-automation-samples
+     :input-samples sine-input-samples}
+    {:id :automation-lane-in-callee
+     :entry :process
+     :definition {:dsp/kind :function
+                  :name 'automation-lane-in-callee
+                  :params ['sample 'amount]
+                  :return-type :float
+                  :process {:controls [{:name 'amount :lane true}]}
+                  :body ['(omkamra.dsp.harness.call-fixture/lane-in-callee
+                           sample amount)]}
      :precisions [:f32 :f64]
      :controls []
      :lane-samples lane-automation-samples

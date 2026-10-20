@@ -302,3 +302,108 @@
       (is (= 0 (long (get-in artifact [:abi :special-mask])))
           (str (name target) ": it is still not the entry's own contract"))
       (is (= {} (get-in artifact [:abi :special-slots]))))))
+
+;; A process-shaped callee writes its own `:output` buffers, so a call site must
+;; own the region they land in: `(with-buffers ...)` binds them (F2, D57). The
+;; region reuses the call-site state partition (D19), so no new ABI parameter is
+;; needed -- the callee's buffer access lowers to state addressing relative to the
+;; partition base it is already handed.
+(omkamra.dsp/defn region-voice
+  [gate]
+  {:process {:input false :channels 2 :controls [{:name gate}]}
+   :return-type :void}
+  (buffer-store :output 0 0 (* gate 2.0))
+  (buffer-store :output 1 0 (* gate 3.0)))
+
+(omkamra.dsp/defn fused-regions
+  [g0 g1]
+  {:process {:input false :channels 2 :controls [{:name g0} {:name g1}]}
+   :return-type :void}
+  (with-buffers :slot-0 (region-voice g0))
+  (with-buffers :slot-1 (region-voice g1))
+  (buffer-store :output 0 0 (+ (buffer-load :slot-0 0) (buffer-load :slot-1 0)))
+  (buffer-store :output 1 0 (+ (buffer-load :slot-0 1 0) (buffer-load :slot-1 1 0))))
+
+(deftest a-fused-process-voice-writes-the-call-sites-region
+  ;; F2a/F2b. Two process-shaped voices, each into its own per-call-site region --
+  ;; a state slot in its own call partition (D57) -- summed by the fused entry.
+  ;; The reference interpreter is the oracle, and the JVM target must match it
+  ;; bit for bit; a region-writing callee is handed the current frame, since a
+  ;; per-sample callee has no frame local of its own.
+  (doseq [target [:interpreter :jvm]]
+    (let [fused (dsp/compile #'fused-regions {:target target :entry :process})
+          plain (dsp/compile #'region-voice {:target target :entry :process})
+          frames 8
+          render (fn [artifact controls]
+                   (let [output (make-array Float/TYPE 2 frames)]
+                     (apply dsp/invoke artifact nil output frames controls)
+                     output))
+          rendered (render fused [0.25 0.5])
+          p0 (render plain [0.25])
+          p1 (render plain [0.5])
+          expected (fn [channel]
+                     (mapv + (aget p0 channel) (aget p1 channel)))]
+      ;; The fused entry is exactly the sum of the two voices' regions, frame by
+      ;; frame and channel by channel -- not one voice, and not a shared region.
+      (is (= (expected 0) (vec (aget rendered 0))) (str (name target) ": left"))
+      (is (= (expected 1) (vec (aget rendered 1))) (str (name target) ": right"))
+      ;; Non-vacuous: the regions are audible, so a sum of two zeros would not pass.
+      (is (some #(not= 0.0 %) (aget rendered 0)) (str (name target) ": audible"))
+      ;; The regions are *state*, not buffers (D57): the entry keeps only its own
+      ;; `:output`, and the two regions are one slot each in a call partition.
+      (is (= [[:output :output 2]]
+             (mapv (juxt :id :direction :channels) (:buffers (:ir fused))))
+          (str (name target) ": regions are not buffers"))
+      (is (= 2 (count (:call-partitions (:ir fused))))
+          (str (name target) ": one partition per slot"))
+      (is (= (* 2 2 1024) (get-in fused [:ir :state-size]))
+          (str (name target) ": each region is channels * frame-stride")))))
+
+(omkamra.dsp/defn plain-region-caller
+  [g]
+  {:process {:input false :channels 2 :controls [{:name g}]}
+   :return-type :void}
+  (region-voice g)
+  (buffer-store :output 0 0 0.0))
+
+(deftest a-callee-that-writes-its-output-must-be-given-a-region
+  ;; The refusal is scoped to `with-buffers` (D57): a process-shaped callee called
+  ;; plainly still cannot reach the caller's ports.
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo
+       #"cannot access the caller's process buffers"
+       (dsp/compile #'plain-region-caller
+                    {:target :interpreter :entry :process}))))
+
+(omkamra.dsp/defn two-outputs
+  [g]
+  {:process {:input false :channels 2 :controls [{:name g}]
+             :buffers [{:name :left :direction :output}
+                       {:name :right :direction :output}]}
+   :return-type :void}
+  (buffer-store :left 0 0 g)
+  (buffer-store :right 0 0 g))
+
+(omkamra.dsp/defn sugar-two-outputs
+  [g]
+  {:process {:input false :channels 2 :controls [{:name g}]}
+   :return-type :void}
+  (with-buffers :slot-0 (two-outputs g))
+  (buffer-store :output 0 0 (buffer-load :slot-0 0)))
+
+(omkamra.dsp/defn map-two-outputs
+  [g]
+  {:process {:input false :channels 2 :controls [{:name g}]}
+   :return-type :void}
+  (with-buffers {:left :slot-0} (two-outputs g))
+  (buffer-store :output 0 0 (buffer-load :slot-0 0)))
+
+(deftest with-buffers-refuses-an-unbindable-region
+  ;; The bare sugar needs a single output buffer; a map must cover them all. Both
+  ;; refusals name the map form, so a region is never silently left unwritten.
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo #"exactly one output buffer"
+       (dsp/compile #'sugar-two-outputs {:target :interpreter :entry :process})))
+  (is (thrown-with-msg?
+       clojure.lang.ExceptionInfo #"bind exactly the callee's output buffers"
+       (dsp/compile #'map-two-outputs {:target :interpreter :entry :process}))))

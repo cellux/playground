@@ -357,11 +357,26 @@
                          :process {:controls [{:name 'amount}]}
                          :body '[(lane amount)]}
                         {:target :interpreter :entry :process}))))
-    (testing "an accessor inside a callee is refused"
-      (is (thrown-with-msg?
-           clojure.lang.ExceptionInfo
-           #"only available in the entry process"
-           (dsp/compile #'lane-carrying-caller {:target :interpreter :entry :process}))))
+    (testing "an accessor inside a callee reads the caller's lane (F3)"
+      ;; There is one lane region and the entry lays it out, so a callee is
+      ;; *handed* it rather than reaching for one: the same slice is read wherever
+      ;; the accessor appears, which is what makes automation survive composition.
+      (let [render-callee (fn [target controls lanes frames]
+                            (let [artifact (dsp/compile #'lane-carrying-caller
+                                                        {:target target :entry :process})
+                                  output (float-array frames)]
+                              (dsp/process! artifact
+                                            (cond-> {:output output :frames frames
+                                                     :sample-rate 48000.0
+                                                     :controls controls}
+                                              (seq lanes) (assoc :lanes lanes)))
+                              (mapv double (vec output))))]
+        (doseq [target [:interpreter :jvm]]
+          (is (= [11.0 12.0 13.0]
+                 (render-callee target [10.0] {'amount (float-array [1.0 2.0 3.0])} 3))
+              (name target))
+          (is (= [10.0 10.0 10.0] (render-callee target [10.0] nil 3))
+              (str (name target) " with no automation")))))
     (testing "a control cannot be a lane and lane-carrying at once"
       (is (thrown-with-msg?
            clojure.lang.ExceptionInfo

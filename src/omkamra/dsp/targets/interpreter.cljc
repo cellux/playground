@@ -165,6 +165,9 @@
     :float (logical-real value)
     :int (logical-int value)
     :boolean (logical-boolean value)
+    ;; A process-shaped callee writes its own region buffers and returns nothing
+    ;; (F2); a `:void` result is no value at all.
+    :void nil
     ;; A record value is a Clojure map of leaf path -> value; nothing to narrow.
     :record value
     (throw (ex-info "unknown DSP logical type" {:type type :value value}))))
@@ -469,6 +472,29 @@
           (set-state-value! state (+ index element-index) type value))
         nil))))
 
+(defn reset-partition!
+  "Reset the persistent state one call partition owns, leaving its neighbours
+  alone (M6a). `base`/`size` are the partition's logical arena range, which the
+  ABI records per call site; a fused slot then resets on its own, so stealing one
+  does not clobber another."
+  [ir state base size]
+  (with-dsp-precision (precision! ir)
+    (fn []
+      (binding [*real-state* (float-arena? ir)]
+        (check-state! ir state)
+        (let [lo (long base)
+              hi (+ (long base) (long size))]
+          (doseq [{:keys [index type init] :as state-description} (:state ir)]
+            (let [index (long index)]
+              (when (and (>= index lo) (< index hi))
+                (doseq [[element-index value]
+                        (map-indexed vector
+                                     (if (= 1 (state-size state-description))
+                                       [init]
+                                       init))]
+                  (set-state-value! state (+ index element-index) type value)))))
+          nil)))))
+
 ;; ---------------------------------------------------------------------------
 ;; Evaluation
 ;; ---------------------------------------------------------------------------
@@ -559,6 +585,11 @@
   (case (:op expr)
     :frame (:frame context)
     :frame-offset (+ (:frame context) (:offset expr))
+    ;; A lane read in a fused artifact resolves inside the *slice* its call site
+    ;; was handed, so the slice base comes before the lane's own offset (F4).
+    :lane-frame-offset (+ (or (:lane-base context) 0)
+                          (:frame context)
+                          (:offset expr))
     :frame-plus (+ (:frame context)
                    (logical-int (evaluate-expression (:offset expr) locals context)))
     (logical-int (evaluate-expression expr locals context))))
@@ -618,11 +649,21 @@
                                      (evaluate-expression (nth arg-forms index)
                                                           locals context)))))
       ;; A stateful callee runs against its own partition: its zero-based state
-      ;; indices are resolved relative to the call-site base (D19).
+      ;; indices are resolved relative to the call-site base (D19). A region a
+      ;; `with-buffers` form binds is *in* that partition (F2, D57), so a
+      ;; process-shaped callee writes its region the same way it writes any other
+      ;; state, and the caller reads it by index -- no buffer to pass. A lane
+      ;; slice is handed over the same way: the caller resolves this call site's
+      ;; base and the callee adds it to every lane read (F4).
       (let [result (execute-statement
                     (:body callee) callee-locals
-                    (update context :state-base (fnil + 0)
-                            (or (:state-base expression) 0)))]
+                    (-> context
+                        (update :state-base (fnil + 0)
+                                (or (:state-base expression) 0))
+                        (assoc :lane-base
+                               (if-let [base (:lane-base expression)]
+                                 (logical-int (evaluate-expression base locals context))
+                                 0))))]
         (coerce-value (:return-type callee) (:value result))))))
 
 (defn- evaluate-expression
@@ -644,6 +685,8 @@
     :frames (:frames context)
     :sample-rate (:sample-rate context)
     :frame-offset (+ (:frame context) (:offset expression))
+    :lane-frame-offset (buffer-index expression locals context)
+    :lane-base (or (:lane-base context) 0)
     :frame-plus (buffer-index expression locals context)
     :channel (:channel context)
     :buffer-load (let [[buffer index] (checked-buffer-index expression locals context)]
@@ -802,7 +845,8 @@
               ;; One mutable environment for the whole block. Every local the
               ;; frame body reads is declared earlier in the same body (the IR
               ;; guarantees it), so reusing the map across frames is safe; the
-              ;; control entries seeded here stay put.
+              ;; control entries seeded here stay put. A `with-buffers` region is
+              ;; call-partition state (F2, D57), so it needs no entry here.
               control-locals (seeded-locals (:controls ir) controls)]
           (dotimes [frame frames]
             (execute-statement

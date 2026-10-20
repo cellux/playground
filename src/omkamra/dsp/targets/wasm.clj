@@ -122,8 +122,12 @@
         ;; one pointer rather than one parameter per lane (D28). A process with
         ;; no lanes contributes no bytes at all.
         lane-count (count (:lanes ir))
+        ;; A fused entry renders every voice in one call, so its region holds one
+        ;; slice per voice and every later region moves along (F4). A plain
+        ;; artifact is one voice, with one slice.
+        lane-slots (long (or (:lane-slots ir) 1))
         lanes-offset (+ output-offset output-bytes)
-        lanes-bytes (* lane-count channel-stride-bytes)
+        lanes-bytes (* lane-count channel-stride-bytes lane-slots)
         ;; The pool's shared region: the same shape as the lane region, but one
         ;; region for the whole pool rather than one per voice (M5). A process
         ;; with no shared control contributes no bytes.
@@ -200,6 +204,16 @@
               :frame-offset (wat-form "i32.add"
                                       (wat-form "local.get" (wat-symbol "$frame"))
                                       (wat-form "i32.const" (:offset index)))
+              ;; A lane read in a fused artifact resolves inside the slice its call
+              ;; site was handed, so the base the callee was given is added before
+              ;; the frame (F4) -- and all three are frames, scaled once below.
+              :lane-frame-offset (wat-form "i32.add"
+                                           (wat-form "i32.add"
+                                                     (wat-form "local.get"
+                                                               (wat-symbol "$lbase"))
+                                                     (wat-form "local.get"
+                                                               (wat-symbol "$frame")))
+                                           (wat-form "i32.const" (:offset index)))
               :frame-plus (wat-form "i32.add"
                                     (wat-form "local.get" (wat-symbol "$frame"))
                                     (emit-expression (:offset index)))
@@ -313,6 +327,7 @@
     (:state-load :array-load) (wat-form (str (wasm-type (:type expression)) ".load")
                                         (emit-state-address expression))
     :frame (wat-form "local.get" (wat-symbol "$frame"))
+    :lane-base (wat-form "local.get" (wat-symbol "$lbase"))
     :frames (wat-form "local.get" (wat-symbol "$frames"))
     :sample-rate (wat-form "local.get" (wat-symbol "$sampleRate"))
     :channel (wat-form "local.get" (wat-symbol "$channel"))
@@ -375,6 +390,15 @@
                                                          (:state-size definition)))
                      (wat-form "local.get" (wat-symbol "$frames"))
                      (wat-form "local.get" (wat-symbol "$sampleRate"))]
+                    ;; Something a callee needs by frame is handed the current
+                    ;; frame (F2, F3), and one that reads a lane the lane region
+                    ;; (F3) — the caller's own, the one region a shared lane has.
+                    (when (:frame? definition)
+                      [(wat-form "local.get" (wat-symbol "$frame"))])
+                    (when (:lane? definition)
+                      [(wat-form "local.get" (wat-symbol "$lanes"))])
+                    (when (:lane-base? definition)
+                      [(emit-expression (:lane-base expression))])
                     (map emit-expression (:args expression)))))
     :bitwise (if (= :bit-not (:operator expression))
                (wat-form "i32.xor" (emit-expression (first (:args expression)))
@@ -924,7 +948,11 @@
                           (wat-form (str (wasm-type (:type statement)) ".const") 0)))
      :assign (wat-form "local.set" (local-name (:name statement))
                        (emit-expression (:value statement)))
-     :expression (wat-form "drop" (emit-expression (:value statement)))
+     ;; A void call leaves nothing on the stack to drop (F2).
+     :expression (let [value (emit-expression (:value statement))]
+                   (if (= :void (:type (:value statement)))
+                     value
+                     (wat-form "drop" value)))
      :buffer-store (wat-form (str (float-type) ".store")
                              (emit-buffer-address statement)
                              (emit-expression (:value statement)))
@@ -1159,11 +1187,24 @@
   [definition name]
   (binding [*callee* (wat-form "local.get" (base-local))
             *state-layout* (definition-layout definition)]
-    (let [params (concat
+    (let [void? (= :void (:return-type definition))
+          params (concat
                   [(wat-form "param" (base-local) (wat-symbol "i32"))
                    (wat-form "param" (wat-symbol "$frames") (wat-symbol "i32"))
                    (wat-form "param" (wat-symbol "$sampleRate")
                              (wat-symbol (float-type)))]
+                  ;; Something a callee needs by frame is handed the current frame
+                  ;; (F2, F3), and one that reads a lane the lane region (F3), in
+                  ;; the order the call site passes them.
+                  (when (or (seq (:region-slots definition))
+                            (:lane-region? definition))
+                    [(wat-form "param" (wat-symbol "$frame") (wat-symbol "i32"))])
+                  (when (:lane-region? definition)
+                    [(wat-form "param" (wat-symbol "$lanes") (wat-symbol "i32"))])
+                  ;; ... and, in a fused artifact, the slice of it this call site
+                  ;; reads, in frames like the frame counter it is added to (F4).
+                  (when (:lane-base? definition)
+                    [(wat-form "param" (wat-symbol "$lbase") (wat-symbol "i32"))])
                   (map #(wat-form "param" (local-name (:name %))
                                   (wat-symbol (wasm-type (:type %))))
                        (:params definition)))
@@ -1177,8 +1218,11 @@
       (apply list
              (concat [(wat-symbol "func") name]
                      params
-                     [(wat-form "result"
-                                (wat-symbol (wasm-type (:return-type definition))))]
+                     ;; A process-shaped module writes its own region and returns
+                     ;; nothing, so it has no result type (F2).
+                     (when-not void?
+                       [(wat-form "result"
+                                  (wat-symbol (wasm-type (:return-type definition))))])
                      locals
                      (flatten-forms (emit-statement (:body definition))))))))
 
@@ -1192,7 +1236,11 @@
   (into (array-map)
         (map-indexed (fn [index [id definition]]
                        [id {:name (callee-name id index)
-                            :state-size (:state-size definition)}]))
+                            :state-size (:state-size definition)
+                            :frame? (boolean (or (seq (:region-slots definition))
+                                                 (:lane-region? definition)))
+                            :lane? (boolean (:lane-region? definition))
+                            :lane-base? (boolean (:lane-base? definition))}]))
         definitions))
 
 (defn emit-module-form

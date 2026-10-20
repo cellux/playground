@@ -73,6 +73,10 @@ Reload namespaces through `omkamra.dev.tools/reload`; do not use
 - `(tools/reload 'my.ns)`, `(tools/reload '[a b])`, and `(tools/reload :all)`
   ignore detection and force the **loaded** named namespaces (and their loaded
   dependents). Use them when you are unsure whether the baseline saw an edit.
+- A *named* target reloads only what it names, so it reports `:stale` — the
+  loaded namespaces whose content changed and were not reloaded. When you see it,
+  `(tools/reload)` with no argument picks them up. An absent `:stale` is a
+  checked claim: detection runs on every call.
 - A detection-driven reload that would refresh the whole session — a poisoned
   baseline, or a check-out that rewrites the tree — refuses with
   `:status :refused` rather than doing it; its `:note` says how to mean it.

@@ -2947,3 +2947,434 @@ clobbered) and an empty readback fails the activity check (the tail is freed a
 block early). What remains is the same browser-vs-JVM edge the pool already has:
 a fused *instrument* host and the AudioWorklet path are not fused, and per-voice
 lanes with fusion are still refused by the interface (D52).
+
+## D56 — The remaining per-process regions are partitioned per call site (F0)
+
+**Status.** Decided (F0). Not implemented: output buffers in F2, a shared lane in
+F3, per-voice lanes in F4. This entry fixes the spine those three build on; the
+concrete ABI shapes are their decisions.
+
+**The problem.** M6 made a fused process, but only for a module-shaped, lane-free
+voice (D52). Two unrelated refusals keep the rest out:
+
+- A **process-shaped** voice — one that writes the caller's output buffers — is
+  refused while linking ("DSP modules cannot access the caller's process
+  buffers", `linker.clj`). That is every stereo or multi-output voice, including
+  `reference-voice`, so no realistic voice can fuse.
+- A **lane** is resolved from the entry process, so a `(lane control)` read in a
+  callee is refused ("lane is only available in the entry process", `ir.clj`),
+  for a shared lane as much as a per-voice one; `poly` additionally refuses a
+  per-slot lane.
+
+**The decision.** Every per-process region a callee touches is **owned by the
+call site** and carried by the callee ABI, exactly as the state arena already is
+(D19):
+
+| region | today | F |
+|---|---|---|
+| state | partitioned per call site (D19) | — |
+| output buffers | the callee may not touch them (linker) | partitioned per call site; the fused entry sums them (F2) |
+| lane region | the callee cannot reach it | passed to the callee (one region; F3), partitioned per call site for a per-voice lane (F4) |
+
+A call site that calls a definition touching such a region allocates it a private
+region in the enclosing arena (instance memory, preallocated on the audio path),
+the callee ABI carries that region's base, and the **caller** decides what the
+region means: for a fused voice, the entry sums the slots' buffer regions into
+the process's own output; for a lane, the record is the region the host wrote.
+This is the same move D19 made for state, applied to the two regions it did not
+cover.
+
+**Why per call site, not one shared region.** For the same reason state is
+(D19): two slots of one voice are two independent voices, and one buffer would
+make them overwrite each other's samples. D19 already answers the aliasing,
+reset, and per-slot-lifecycle questions, so the buffer and lane partitions
+inherit those answers instead of inventing new ones.
+
+**Why the fused body needs no new scheduling model.** A process-shaped body is
+already evaluated **per frame** (D40) and `buffer-store` writes the current
+frame, so the fused entry's body is: call each slot (each writing its own region
+at this frame), then store the sum of the region's channels to `:output` at this
+frame. The private regions are block-shaped (`channels × frame-capacity`) because
+the callee addresses them by frame, but only the current frame is summed.
+
+**What F0 deliberately leaves open.** The exact ABI shape — one combined region
+with per-buffer offsets versus one region per named buffer, and how many bases a
+callee takes — is settled in F2 (and mirrored in F4). Whether `poly` is extended
+or a sibling combinator is added is also F2's. F0 fixes only the spine: *regions
+are per call site, and the callee ABI carries their bases.*
+
+**Consequences.** The load-bearing change is the linker rule: it must be relaxed
+**only** for a call that owns a region, so a call with no region keeps today's
+refusal and the error stays honest. The linked unit grows by one region per call
+site (instance scratch), and the callee ABI grows by the region bases — a change
+felt by every call site on all four targets (D47). The pool stays the default;
+none of this changes a non-fused artifact.
+
+## D57 — A fused call site binds its callee's output buffers (`with-buffers`) (F2)
+
+**Status.** Decided (surface settled); implementation in F2a–F2d.
+
+**The form.** A definition body may bind the output buffers a call's callee writes
+to names the caller can read:
+
+```clojure
+(dsp/with-buffers {:output :left :aux :tail} (voice args…))
+(dsp/with-buffers :slot-0 (voice args…))       ; sugar for {:output :slot-0}
+```
+
+`with-buffers` is the **only** new form. The bound names are read with the existing
+`(buffer-load id channel offset)`, where `offset 0` is the current frame — the same
+vocabulary `buffer-store` already uses.
+
+**The sugar is never ambiguous.** The bare form is legal *iff* the callee writes
+exactly one output buffer; it binds that buffer. A callee that writes none (a
+scalar module) or more than one is refused with a reason naming the map form. So a
+bare name always denotes exactly one buffer, and which buffer is never guessed —
+the same strictness the descriptor validates declarations with.
+
+**Why a form and not a combinator.** A combinator returns a source form, but what
+this changes is *where a callee's output goes* — lowering behaviour, not a body. It
+is a DSL form resolved at link time, when the callee's buffer set is known, so the
+bare/map choice is made against real data rather than at macro-expansion.
+
+**The mechanism it implies — and why it is small.** A bound buffer is a
+per-call-site region, and the region reuses the call-site **state partition**
+(D19): a called definition's output buffers live in its own partition, and its
+`buffer-store`/`buffer-load` on them lower to state addressing relative to the
+partition base the callee is already handed (D47).
+
+- **No new ABI parameter.** The state base already flows to every callee, so
+  region passing is free; a target changes only if the region's channel/frame
+  addressing differs from the state array's.
+- **Uniform per definition.** The link-time refusal relaxes *only* for a call
+  inside `with-buffers`, so a called definition always has its buffers bound and
+  its relative addressing is the same at every call site. A call with no binding
+  keeps today's error ("DSP modules cannot access the caller's process buffers").
+- **The per-slot lifecycle is inherited.** Because the region is in the call
+  partition, D51's reset and the M6 seam-4 activity readback already cover it.
+
+**What remains for the slices.** F2a fixes the exact region layout (channel stride
+× frame capacity) and the interpreter form; F2b the JVM; F2c JS/Wasm; F2d the
+reference instrument. Whether `buffer-load` names the region directly or a
+declared buffer aliases it is F2a's detail.
+
+## D58 — A process-shaped module returns nothing, and an explicit top-level `:channels` is unit-wide (F2a)
+
+**Status.** Decided; F2a implements it on the interpreter.
+
+**1. A process-shaped callee returns `:void`.** A definition that writes its own
+`:output` has no value to return. The descriptor now permits `:return-type :void`
+when the definition has a `:process` (the old refusal stays for a scalar
+expression entry), the lowerer then omits the `:return` and the return coercion
+handles `:void` as "no value", and a call to it is a statement. A process entry
+already ignored its (defaulted) return type for a buffer-writing body; making the
+void explicit lets a *callee* carry the same shape through `signatures`.
+A module's output buffers only exist when the definition is process-shaped: a
+plain function with `(buffer-load :input x)` still has no buffer namespace and is
+still rejected, so the F2 path cannot silently give every function ports.
+
+**2. An explicit top-level `:channels` is the unit-wide channel policy.**
+`descriptor/default-options` always contains `:channels 1`, and
+`normalize-options` merges it unconditionally, so `(:channels options)` is never
+a trustworthy "was a width declared?" signal — reading it pinned every module to
+one channel. `compile` resolves the width from the **raw** maps (an explicit
+compile option, then a definition option, then the top definition's
+`:process :channels` declaration; otherwise nil to count from the body) and
+writes that resolved value into the options module lowering reads, *replacing*
+the injected default. When the width is inferred, `:channels` is removed instead,
+so each definition counts its own.
+
+`lower` therefore consults, in order: the forced top-level width, the module's own
+`:process :channels` declaration, then its body (D40). The container's explicit
+declaration is authority — a voice in a stereo instrument is stereo whether or not
+its own body would infer it — but **inference does not propagate**: a genuinely
+mono helper called from a stereo entry keeps its own width. This is the invariant
+that an explicit width takes effect at every layer, and that the default never
+masks it.
+
+## D59 — A region is call-partition state, and its writer is handed the frame (F2a rework, F2b)
+
+**Status.** Decided; F2a's region representation was reworked to it, and F2b
+implements it on the JVM.
+
+**A region is state, not a buffer.** D57 already said a bound output buffer
+"reuses the call-site state partition". F2a's first cut instead gave the entry a
+per-call-site `:region` *buffer* (a per-channel array) and overlaid it into the
+callee's context. That was a deviation with a cost: the JVM would have needed the
+region as a buffer argument — a new ABI shape — and every target its own region
+plumbing. The rework is faithful to D57 and smaller everywhere:
+
+- a process-shaped module's output buffers **become state slots** in its own call
+  partition — one flat slot of `channels * stride`, the stride being the
+  lane/shared region stride, so it is a compile-time constant every target shares;
+- its `buffer-store`/`buffer-load` on those buffers lower to
+  `:state-store`/`:state-load` with the channel folded into the element index;
+- a `with-buffers` region name is an **alias** for the callee's rebased state slot,
+  which `buffer-load`/`buffer-store` resolve;
+
+so the interpreter needs no region code at all, and no target does either: the
+region is addressed by machinery they already have. The entry's `:buffers` keeps
+only its own `:output`; the region is state.
+
+**A region-writing callee is handed the frame.** A callee is a per-sample
+function (D40) and has no frame local, but a region is frame-indexed. So a callee
+whose `:region-slots` is non-empty gets one extra leading `:int` parameter — the
+current frame — pushed between `sample-rate` and its own arguments; a callee with
+no regions is unchanged, so ordinary composition pays nothing. The interpreter
+needs no equivalent: its callee context is dynamically scoped and already carries
+`:frame`. **Bite-checked** on the JVM: passing a constant zero instead leaves only
+frame 0 correct and the rest stale.
+
+Two smaller facts fall out. A void-returning module needs a `:void` JVM type
+(`jvm-type`), a `return` for it, no `pop` after the call, and a trailing `return`
+in its method — all added. And `state-elements`/`create-state` require an array
+state's `:init`, so a region carries a zeroed `:init` like the large delay-line
+buffers the codebase already materializes.
+
+## D60 — `poly` fuses a process-shaped voice, and the interpreter hosts fused pools (F2c/F2d)
+
+**Status.** Decided; implemented.
+
+**1. `poly` fuses a process-shaped voice by binding its regions.** A voice whose
+`:return-type` is `:void` writes its own `:output` rather than returning a sample,
+so its copies cannot be summed as values. `poly` now branches on that: each slot's
+call is wrapped `(with-buffers :slot-k (voice args...))`, and the fused body sums
+the regions into `:output`, one channel at a time (F2, D57). A module-shaped voice
+keeps the scalar sum, so the M6 lowering is unchanged. The fused body is
+`(do <calls> <per-channel stores>)` and the derived definition carries `:void`.
+
+This moves one requirement onto the voice: it must **declare `:process :channels`**.
+The summing is unrolled per channel, and a combinator holds only data — it cannot
+count the width the compiler would infer from the body (D40). A process-shaped
+voice without the declaration is refused with a reason rather than summed wrongly.
+
+**2. The interpreter hosts fused pools.** A fused pool on any host needs an
+oracle, or the JVM and the browser only agree with each other. The interpreter
+kernel now applies the same base -> fused control mapping the JVM and browser
+kernels do (D50), and resets one slot's partition on its own — using the `:base`/
+`:size` the ABI already publishes per call site (`:call-partitions`, M6 seam 4)
+rather than new artifact fields. It reads a fused slot's specials from that
+partition too. The interpreter is therefore the reference for a fused pool *and*
+for a fused instrument, not only for the fused process IR.
+
+**3. The M6b guard stays module-shaped.** `guard` skips a slot by reproducing the
+sample it would have produced; a process-shaped voice writes a region instead, so
+guarding it is a different mechanism. A process-shaped voice is fused **without**
+the guard until that exists — an optimisation withheld, not a correctness change.
+
+**4. Two void-call target facts.** A void call leaves no value: JavaScript must not
+pass a stray argument for an absent frame (a `list*` splices only its last
+argument, so the optional element and the arguments are one seq), and Wasm must not
+`drop` it. Both are the same shape as the JVM's "no `pop`" (D59).
+
+## D61 — a Wasm instance seeds its state, and a partition range comes from layout segments (F2d)
+
+**Status.** Decided; implemented.
+
+**1. A Wasm kernel seeds a fresh voice at creation.** A Wasm module's memory is
+zero at instantiation and the IR's initial values reach it only through the
+module's own `init`/`reset`. The JavaScript host gets the same effect from the
+module's `create`, which allocates the state array already initialised; the Wasm
+host had left it to `:reset!` — and the pool resets a voice **only when it steals
+one** (`poly-note-on!` passes `stolen?`), so a *fresh* Wasm voice rendered from
+zeroed state. That is a host-level divergence from JavaScript, not a fusion bug,
+and it is why the plain Wasm voice never matched its JavaScript twin. Both paths
+now seed once, right after instantiation: the plain kernel before it returns the
+voice, and the fused kernel **before** it snapshots `:initial`, or the per-slot
+restore would copy zeros. The snapshot must also happen after a whole-arena seed,
+since the seed writes every slot, not just one slot's partition.
+
+**2. A call partition's byte range resolves layout segments, not indices.** The
+Wasm host addressed each partition by looking up every arena index in
+`[base, base + size)` — but the memory layout holds one entry per *slot*, and a
+per-call-site region is a single entry spanning thousands of indices, so the
+region's interior had no entry. `min` over the missing entries produced a nil
+start (`(long nil)` -> 0), so `:start` collapsed to zero and the reset built a
+view at `-state-offset`, restored nothing, and wrote the state region's bytes into
+the input region. A partition is now the set of layout segments that *overlap* it.
+The bug only appears when a partition contains a multi-slot entry, which is
+exactly what a region is — so it was invisible to every module-shaped fused check.
+
+**3. What this closes.** The fused reference voice (stereo, process-shaped)
+renders what the plain voice renders **bit for bit** in the browser on both
+JavaScript and Wasm, and the check now includes a steal so the per-slot reset is
+exercised rather than merely written. Both fixes are bite-checked independently.
+
+## D62 — a fused runtime holds exactly its slots (F1)
+
+**Status.** Decided; implemented.
+
+A fused artifact *is* `slots` voices, so the runtime configuration a fused
+`synthesize` returns takes its `:capacity` from the slot count rather than from
+the description. `runtime-config` reads `:capacity` straight out of the
+description, and the fusion branch of `synthesize` added `:fusion` without
+touching it, so a fused build of an eight-voice description produced a pool of
+eight voices over an artifact that holds two.
+
+The kernel maps a pool voice onto a slot by creation order (`mod created slots`),
+so a larger pool hands several handles the *same* slot. That is wrong in itself —
+two pool voices would share one voice's state — and it is silently worse for any
+host step that writes every voice: `modulation/publisher` publishes the matrix's
+targets to every voice in the pool each block, so several handles write one slot's
+controls in turn and the last one wins.
+
+The existing browser fused-pool endpoints had been working around this by setting
+`:capacity slots` themselves (`browser-fused-pair`), which is what showed the
+configuration the lowering should produce. A plain build is unchanged: only
+fusion asks for `slots` voices.
+
+## D63 — a derived definition forwards its controls; it does not ramp them (F1)
+
+**Status.** Decided; implemented.
+
+`graph/derived-definition` now marks its result `:dsp/forwarded-controls`, and
+`descriptor/normalize` reads that mark to **skip ramp creation** for the derived
+definition's controls. The control *declarations* still travel — the derived
+interface is the voice's, `:smooth`/`:slew` included, so the ABI a host reads
+still reports the mode — but the wrapper no longer smooths a value the voice is
+about to smooth again.
+
+A derived definition's body only *calls* the voice it was derived from. Every
+occurrence of a control in that body is an argument to that voice, which owns the
+control and ramps it once per call site. Inheriting the declaration therefore
+created a second ramp: the wrapper smoothed the raw control and handed the
+*smoothed* value to a voice that smoothed it again. Two poles compound, so the
+derived signal lagged the plain one — percent for the first milliseconds, settling
+only after thousands of frames. It looked like a numerical drift and was not one.
+
+This was not `poly`'s alone. `guard`, `unison`, `share`, the instrument wrapper
+(`hosts/instrument`), and the modulation transformers all build on
+`derived-definition`, so every one of them doubled a smoothed control. The fused
+*synth* path showed it first as `poly` + `guard`, which is what `synthesize`
+wraps a module-shaped voice in.
+
+**Rejected alternative.** Stripping `:smooth`/`:slew` from the declaration at
+derivation time. It fixes the sound but loses the mode from the interface, and the
+mode is *true* from the host's side: setting the control does move it through a
+smoother, one owned by the callee. `tests/combinators.clj` already asserted the
+declaration survives derivation ("the wrapped voice keeps its control mode"), and
+that is the behaviour worth keeping.
+
+## D64 — a lane reaches a callee by being handed the region (F3)
+
+**Status.** Decided; implemented. Applies F0's spine (D56) to the shared-lane
+case; F4 extends it to a per-voice lane.
+
+A definition whose body reads `(lane control)` is now **handed the lane region**,
+and the entry-only refusal is gone. The region is one array for the whole
+artifact — the entry lays the lanes out, exactly as it already did — and a call
+site passes **its own** region on, so every definition in the artifact reads the
+same slices. That is why no base arithmetic is involved: a lane's offset is
+`index * frame-capacity`, a compile-time constant of the *entry's* layout (D28),
+so `(lane x)` means the same memory wherever it appears. A definition that only
+*calls* one that reads a lane is handed the region too, because it forwards its
+own; `lower-definitions` marks it by propagating the flag up the call graph.
+
+The callee ABI therefore grows by **one pointer** per lane-reading definition
+(the region) and by **the current frame** — a lane read is per-frame, exactly as
+a `with-buffers` region write is (F2), and a per-sample callee has no frame local
+of its own. The frame is what the first cut of this missed: the JVM emitted
+`[:iload nil]` for the read's index and the JS emitted a reference to a `frame`
+that was not in scope, which two targets reported in their own way (a `nil`
+instruction operand, a `ReferenceError`). Both are one condition — a callee that
+addresses anything by frame takes the frame — so one predicate now answers for
+regions and lanes alike on all four targets.
+
+**Not partitioned (yet).** A *shared* lane is one region, not one per call site
+(D56), so the pointer every call site passes is the same one. F4 makes a
+per-voice lane one region per slot; then the call site passes a different pointer
+and nothing else in the ABI changes — which is the point of passing a pointer
+rather than a base into the callee's own partition.
+
+**Rejected: making the lane region part of the state arena.** Then a callee would
+need only an int base — the region's place in the arena — and could address it as
+`state[base + offset]`. It was rejected because the lane region is *host-owned*:
+the pool writes automation into it, and it is one region for the whole pool
+(M4/M5), while the arena is per instance. Moving it would change the pool, all
+four hosts, and the Wasm memory layout to save one ABI argument. The pointer also
+makes F4 fall out rather than needing a second base.
+
+**What did not change.** The linker needed no relaxation: its rule is about a
+callee whose *source* body uses `buffer-load`/`buffer-store`, and `(lane control)`
+is not that form. A lane read's effects are the ones it already had
+(`:read-memory`).
+
+---
+
+## D65 — a lane is one per control, and a fused entry slices the region per voice (F4)
+
+**Status.** Decided; implemented. Extends D64 to a per-voice lane.
+
+`poly`'s refusal is gone: a lane on a per-slot control fuses. The entry's lane
+region gains a slot dimension — `slots` slices of the shape it already had — and a
+call site hands its callee the base of **its** slice, so a lane-reading callee
+keeps zero-based lane offsets and adds a base, exactly as its state indices are
+resolved against a partition base (D19). A callee that only forwards the region
+passes the base it was handed. The region is host-owned and pool-written, so it
+stays where it is (D64's rejection still holds): the slice is an offset into it,
+not a second region.
+
+**A lane belongs to the control, not to the slot.** `poly` expands a per-slot
+control — `gate_0`, `gate_1` — but a lane is one lane the slots read from
+different slices. The expanded declarations therefore carry the lane's *name*
+(`:lane-name`), and the entry lays out one lane per base control. Without this the
+callee could not resolve `(lane amount)` at all: the entry's layout held
+`amount_0`/`amount_1`, while the voice that reads it declares `amount`.
+
+**A lane-only control's name is a read of the lane region wherever it is read.**
+In the entry that was already how it bound; in a callee it now binds to a read of
+*its own* slice instead of to the value the caller passed. The caller's value is
+still passed — a call site cannot know the callee's slice — but the binding
+overrides it. Where the artifact has one slice the two are the same read, which is
+why no existing check moved.
+
+**A slot is a call partition.** The base is the call site's partition ordinal —
+the same index a host resets one voice by (M6a) — so a fused entry's lane-reading
+call site must own a partition, and is refused with a message that says so rather
+than being handed an arbitrary slice. A fused entry's *own* lane read is refused
+too: the entry is nobody's call site, so it has no slice of its own.
+
+**Rejected: one lane region per slot.** The entry would take `slots` region
+parameters, or a list of them, changing the process ABI for every target, the
+memory layout, and the host's argument assembly. One region and a per-call-site
+base changes only what a lane-reading callee receives — one `int` — and leaves the
+`slots`-versus-one distinction a property of the layout, where it belongs.
+
+**Rejected: a compile-time base inside the callee.** A callee is emitted once and
+serves every call site (D47), so the slice is not a property of its body. Baking a
+slot into the emitted code would mean emitting a copy per slot, which is exactly
+what D47 exists to avoid.
+
+**Where the reservation remains.** A fused entry still needs a positive slot count
+and at least one per-slot control (the fused interface is the expanded one), and a
+stateless fused voice is still refused: a slot is a partition to reset.
+
+---
+
+## D66 — a fused worklet node is the fused interface, with no mapping (F5)
+
+**Status.** Decided; implemented.
+
+One worklet node renders `slots` voices. Its AudioWorklet parameters **are** the
+fused interface, in ABI order — `gate_0`, `frequency_0`, `delay_0`, `mix_0`,
+`gate_1`, ... — generated from the fused artifact's controls. The adapter already
+writes a parameter into the kernel's control array at the parameter's own index
+and builds its own kernel, so no mapping step exists: the pool's
+`fusion/fused-position` translates the *pool's* base-shaped writes into a fused
+control array, and a worklet has no pool.
+
+This is the *static* half of polyphony, which is what `poly` has documented since
+D38: the page owns slot assignment and drives `gate_k`. A keyed voice allocator
+inside the worklet would be a different slice, not a consequence of this one.
+
+**Descriptor order is not load-bearing; names are.** An adapter reads a parameter
+by name and writes it at the index `processorOptions.controlNames` gives, so
+`parameterDescriptors` only has to declare the names the page drives. Reversing the
+descriptor list changes nothing; dropping the per-slot names silences a gated slot.
+
+**A constructor that throws is otherwise invisible.** A worklet reports a bare
+`processorerror`, and the page then sees a node that never answers. Both adapters
+now default missing `processorOptions` to an empty object — which routes a
+misconfigured node into the adapter's own reported "invalid metadata" path — and
+the JavaScript one reports a constructor throw through its port, so
+`worklet-ready` rejects with the reason instead of timing out.

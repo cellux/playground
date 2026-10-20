@@ -472,6 +472,11 @@
      ;; `:lanes` region, `:lane-stride` frames apart; the host addresses a lane
      ;; by name, and only a host writing memory directly needs the offset.
      :lane-stride (:frame-capacity ir)
+     ;; One lane region, one slice per voice: a fused entry renders every voice in
+     ;; one call, so each call site reads its own slice and the host writes a
+     ;; voice's lanes into the slice that voice is (F4). A plain artifact is one
+     ;; voice, with one slice.
+     :lane-slots (long (or (:lane-slots ir) 1))
      :lanes (mapv (clojure.core/fn [index lane]
                     (assoc (select-keys lane [:name :type :smooth :slew :required?])
                            :role :lane
@@ -806,7 +811,18 @@
                     (:channels options)
                     (:channels-declared? (:process definition))
                     (get-in definition [:process :channels])
-                    :else nil)]
+                    :else nil)
+         ;; The resolved width is the unit-wide channel policy: an explicit
+         ;; top-level width must reach *every* layer, so it is written into the
+         ;; options module lowering reads. `options :channels` at this point is
+         ;; the `normalize-options` default whenever the width came from the
+         ;; `:process` declaration rather than an option, so it is replaced with
+         ;; the resolved value; when the width is inferred (`nil` here), the
+         ;; option is dropped so each definition counts its own from its body
+         ;; instead of being pinned to the default (F2/D57).
+         lowering-options (cond-> options
+                            (some? channels) (assoc :channels channels)
+                            (nil? channels) (dissoc :channels))]
      (when-not (contains? #{:f32 :f64} (:precision options))
        (throw (ex-info "DSP precision must be :f32 or :f64"
                        {:dsp/error :unsupported-option
@@ -814,12 +830,12 @@
                         :precision (:precision options)
                         :target target})))
      (case entry
-       :function (let [lowered (ir/lower-unit unit {:options options})]
+       :function (let [lowered (ir/lower-unit unit {:options lowering-options})]
                    (compile-function-target target
                                             (prepare-ir target entry lowered)
                                             options))
        :process (let [lowered (ir/lower-process unit {:channels channels
-                                                      :options options})]
+                                                      :options lowering-options})]
                   (compile-process-target target
                                           (prepare-ir target entry lowered)
                                           options))
