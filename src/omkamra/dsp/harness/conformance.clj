@@ -105,6 +105,10 @@
        :entry :process
        :precision precision
        :ir ir
+       ;; The process's channel count: the shape of both audio ports, and the one
+       ;; thing a runner needs to allocate them. It is a property of the
+       ;; definition, so it belongs in the target-neutral plan.
+       :channels (long (or (get-in artifact [:abi :channels :count]) 1))
        :controls (:controls case)
        ;; The lane region's shape is the ABI's, shared by every target: each
        ;; lane is one `:lane-stride`-frame slice, named individually. Targets
@@ -126,10 +130,20 @@
     (double-array values)
     (float-array values)))
 
+(defn- per-channel
+  "One value per channel: a flat buffer when the process is mono, one buffer per
+  channel when it is not — which is the shape both audio ports have, and every
+  adapter checks it as a primitive array of primitive arrays."
+  [precision channels values]
+  (if (= 1 (long channels))
+    (real-array precision values)
+    (into-array (map (fn [_] (real-array precision values)) (range channels)))))
+
 (defn- run-process-once
   [artifact input controls sample-rate frames lanes]
   (let [precision (:precision (:ir artifact))
-        out (real-array precision (repeat frames 0.0))
+        channels (long (or (get-in artifact [:abi :channels :count]) 1))
+        out (per-channel precision channels (repeat frames 0.0))
         ;; Whether an input is passed is a property of the process, not of the
         ;; block: a 0-frame invocation still has an (empty) input buffer, while a
         ;; generator has none at any length.
@@ -138,7 +152,7 @@
                                     :frames frames
                                     :sample-rate sample-rate
                                     :controls controls}
-                             input? (assoc :input (real-array precision (or input [])))
+                             input? (assoc :input (per-channel precision channels (or input [])))
                              ;; A lane is supplied by name; the artifact flattens
                              ;; the names into its own region.
                              (seq lanes)
@@ -146,7 +160,7 @@
                                                  (map (fn [[name values]]
                                                         [name (real-array precision values)]))
                                                  lanes))))
-    (vec out)))
+    (if (= 1 (long channels)) (vec out) (mapv vec out))))
 
 (defn run-function-plan
   [artifact plan]
@@ -233,6 +247,84 @@
                         (results-match? target precision e a)
                         :else (scalar-match? target precision a e)))
                     expected actual))))
+
+;; ---------------------------------------------------------------------------
+;; Case rows: what each target did with each case, as data
+;; ---------------------------------------------------------------------------
+
+(def target-row-keys
+  "The row key each target's verdict is reported under.
+
+  One vocabulary for every half: the browser reports `:javascript` and `:wasm`,
+  this namespace reports `:interpreter` and `:jvm`, and both are read here."
+  {:interpreter :interpreter
+   :jvm :jvm
+   :js :javascript
+   :wasm :wasm})
+
+(defn target-ran?
+  "True when a row says `target` ran the case and matched the oracle."
+  [row target]
+  (true? (get row (get target-row-keys target))))
+
+(defn coverage
+  "What a set of case rows proves, per case and precision:
+  `{case-id {precision #{targets}}}`.
+
+  The set holds the targets that ran the case *and* matched the oracle, so a
+  target that mismatched is absent from it. Comparing two of these — before and
+  after a change, or one half of the suite against the other — then shows exactly
+  what moved."
+  [rows]
+  (reduce (fn [coverage row]
+            (let [targets (into #{}
+                                (keep #(when (target-ran? row %) %))
+                                (keys target-row-keys))]
+              (update-in coverage [(:case row) (:precision row)] (fnil into #{}) targets)))
+          {}
+          rows))
+
+(defn parity
+  "The declared targets a case row does not reach: `{:cases n :gaps [...]}`.
+
+  Each row declares the targets it means to cover in `:targets`, and `parity`
+  reports every declared target it cannot see in that row's verdicts, carrying the
+  row's `:check` when it has one. A `:passed?` cannot answer this: a case that
+  never ran and a case that passed are equally silent, so parity is only ever
+  proved by reading which targets a case actually reached."
+  [rows]
+  (let [gaps (into []
+                   (for [row rows
+                         target (:targets row)
+                         :when (not (target-ran? row target))]
+                     (assoc (select-keys row [:check :case :precision]) :target target)))]
+    {:cases (count (distinct (map (juxt :case :precision) rows)))
+     :gaps gaps}))
+
+(defn case-rows
+  "Every catalog case's verdict on the interpreter and the JVM, as data.
+
+  The interpreter is the oracle and the JVM backend is compared against it — what
+  `omkamra.dsp.tests.conformance` asserts one case at a time. Building the same
+  rows as data is what lets a parity check read the two JVM-side targets in the
+  shape the browser reports `:js` and `:wasm` in, so one table can cover all four."
+  ([] (case-rows catalog/all-cases))
+  ([cases]
+   (into []
+         (for [case cases
+               precision (:precisions case)
+               :let [plan (plan case precision)
+                     expected (run-plan (target-artifact case precision :interpreter) plan)
+                     actual (run-plan (target-artifact case precision :jvm) plan)
+                     matched (results-match? :jvm precision expected actual)]]
+           {:case (:id case)
+            :precision precision
+            :targets [:interpreter :jvm]
+            ;; The interpreter is the oracle, so it cannot disagree with itself;
+            ;; it is reported because it *ran*, which is the question parity asks.
+            :interpreter true
+            :jvm matched
+            :passed? matched}))))
 
 ;; ---------------------------------------------------------------------------
 ;; Serialization for the browser endpoint

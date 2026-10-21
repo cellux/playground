@@ -63,3 +63,29 @@
   [sample amount]
   {:process {:input false}}
   (* sample (lane amount)))
+
+(dsp/defn region-gain
+  "A *process-shaped* callee: it writes its own `:output` buffer instead of
+  returning a sample, so a call site must hand it a region (D57).
+
+  Two call sites with different gates therefore write into different call
+  partitions, which is what makes a mis-derived region base visible as a wrong
+  sample rather than as a crash."
+  [gate amount]
+  {:process {:input false :channels 1 :controls [{:name gate}]}
+   :return-type :void}
+  (buffer-store :output 0 0 (* gate amount)))
+
+(dsp/defn stereo-region-gain
+  "A stereo process-shaped callee: one value per channel, so a region holds two
+  samples per frame and its channel stride is two (F2, D57).
+
+  The two channels carry opposite signs, and the harness calls it with different
+  gates, so a target that folded the channel into the index wrongly -- reading
+  channel 0's slice for a channel-1 access -- changes the sign of an output rather
+  than merely its magnitude."
+  [gate amount]
+  {:process {:input false :channels 2 :controls [{:name gate}]}
+   :return-type :void}
+  (buffer-store :output 0 0 (* gate amount))
+  (buffer-store :output 1 0 (* gate (- 0.0 amount))))

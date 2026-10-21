@@ -191,6 +191,21 @@
           (aset region (+ (long offset) i) (aget supplied i))))
       region)))
 
+(defn- port-buffer
+  "One audio port for one block: a flat buffer for a mono process, one buffer per
+  channel for a multi-channel one — the shape every adapter checks."
+  [plan precision values]
+  (if (= 1 (long (or (:channels plan) 1)))
+    (real-array precision values)
+    (into-array (map (fn [_] (real-array precision values))
+                     (range (:channels plan))))))
+
+(defn- port-output
+  "The port buffer a target returned, in the plan's shape: a vector of samples for
+  a mono process, a vector of channels for a multi-channel one."
+  [plan out]
+  (if (= 1 (long (or (:channels plan) 1))) (vec out) (mapv vec out)))
+
 (defn- interpreter-process-outputs
   "Run the portable IR in the browser, which is the oracle every target is
   compared against. It takes the plan because a lane has to be flattened into a
@@ -206,14 +221,14 @@
                 "reset" (do (interpreter/reset-state! ir state) outputs)
                 "process" (let [samples (when input (decode-values input))
                                 region (lane-region plan precision lanes)
-                                out (real-array precision (repeat frames 0.0))]
+                                out (port-buffer plan precision (repeat frames 0.0))]
                             (interpreter/process-context
                              ir (cond-> {:output out :frames frames
                                          :sample-rate sample-rate
                                          :controls controls :state state}
-                                  samples (assoc :input (real-array precision samples))
+                                  samples (assoc :input (port-buffer plan precision samples))
                                   region (assoc :lanes region)))
-                            (conj outputs (vec out)))))
+                            (conj outputs (port-output plan out)))))
             [] (:invocations plan))))
 
 (defn- interpreter-function-values
@@ -233,17 +248,17 @@
      ;; `samples` is nil for a generator (D23), whose kernel `process` takes no
      ;; input argument; the frame count always comes from the plan.
      :process (fn [samples frames controls lanes]
-                (let [out (real-array precision (repeat frames 0.0))
+                (let [out (port-buffer plan precision (repeat frames 0.0))
                       ;; Any number of lanes is one flat region, and the kernel
                       ;; takes it as one final argument.
                       region (lane-region plan precision lanes)]
                   (.apply process kernel
                           (to-array (concat (when samples
-                                              [(real-array precision samples)])
+                                              [(port-buffer plan precision samples)])
                                             [out frames catalog/sample-rate]
                                             controls
                                             (when region [region]))))
-                  (vec out)))}))
+                  (port-output plan out)))}))
 
 (defn- replay-process
   [plan {:keys [reset process]}]
@@ -317,6 +332,7 @@
                                output-offset (:output-offset layout 4096)
                                lanes-offset (:lanes-offset layout 0)
                                width (if (= :f64 precision) 8 4)
+                               channels (long (or (:channels plan) 1))
                                expected (interpreter-process-outputs plan)
                                controls (decode-values (:controls plan))
                                ;; Lane bases are element offsets, so a byte
@@ -325,8 +341,21 @@
                                            (if (= :f64 precision)
                                              (js/Float64Array. (.-buffer memory) byte-offset (max 1 frames))
                                              (js/Float32Array. (.-buffer memory) byte-offset (max 1 frames))))
+                               ;; One audio port per channel, a fixed
+                               ;; `:channel-stride`-byte slice apart: the module's
+                               ;; own declaration, not a guess (P12 makes it
+                               ;; ABI-declared layout).
+                               channel-stride (long (or (:channel-stride layout) 4096))
                                input-view (partial lane-view input-offset)
                                output-view (partial lane-view output-offset)
+                               input-view-at (fn [channel frames]
+                                               (lane-view (+ input-offset
+                                                             (* (long channel) channel-stride))
+                                                          frames))
+                               output-view-at (fn [channel frames]
+                                                (lane-view (+ output-offset
+                                                              (* (long channel) channel-stride))
+                                                           frames))
                                write-lanes! (fn [lanes frames]
                                               (when (seq (:lane-layout plan))
                                                 (let [values (lane-values-by-name precision lanes)]
@@ -347,8 +376,12 @@
                                              "process"
                                              (let [samples (when input (decode-values input))]
                                                (when samples
-                                                 (.set (input-view frames)
-                                                       (real-array precision samples)))
+                                                 (if (= 1 channels)
+                                                   (.set (input-view frames)
+                                                         (real-array precision samples))
+                                                   (doseq [channel (range channels)]
+                                                     (.set (input-view-at channel frames)
+                                                           (real-array precision samples)))))
                                                (write-lanes! lanes frames)
                                                (.apply process nil
                                                        (to-array (concat (when samples [input-offset])
@@ -358,9 +391,15 @@
                                                                          (when (seq (:lane-layout plan))
                                                                            [lanes-offset]))))
                                                (conj outputs
-                                                     (if (zero? frames)
-                                                       []
-                                                       (vec (output-view frames)))))))
+                                                     (cond
+                                                       (zero? frames)
+                                                       (if (= 1 channels) [] (vec (repeat channels [])))
+                                                       (= 1 channels)
+                                                       (vec (output-view frames))
+                                                       :else
+                                                       (mapv (fn [channel]
+                                                               (vec (output-view-at channel frames)))
+                                                             (range channels)))))))
                                          [] (:invocations plan)))]
                            (require! (results-match? :wasm precision actual expected)
                                      (str (:id c) " " (name precision)
@@ -433,9 +472,12 @@
               (-> (run-function-case! c precision)
                   (.then (fn [result]
                            (run (next remaining)
-                                (conj results (assoc result
-                                                     :javascript
-                                                     (not (false? (:passed? result)))))))))
+                                (conj results
+                                      (assoc result
+                                             :case (:id c)
+                                             :precision precision
+                                             :javascript
+                                             (not (false? (:passed? result)))))))))
               (js/Promise.resolve results)))]
     (run (filterv #(some #{precision} (:precisions %)) cases) [])))
 

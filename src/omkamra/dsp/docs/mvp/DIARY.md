@@ -4946,3 +4946,105 @@ and both per-dimension refusals at once.
 cases per shared process matrix (was 90). H's remaining open items are H1
 (deferred to after P13 → P14 by design) and nothing else: H2, H3, H4 and H5 are
 done.
+
+### Parity audit before P12 — three targets, and one hole in the *verification*
+
+The question was whether JVM, JavaScript and Wasm have feature parity now. There are
+two kinds of answer and the second is the one that matters: what the targets
+implement, and what the suite would *notice* if one of them stopped.
+
+**Implementation.** The builtin surface is identical — 25 `[operator type]` methods in
+each of `targets/jvm.clj`, `targets/js.clj` and `targets/wasm.clj`, no target-only and
+no missing entry (compared as `defmulti` method tables in the REPL). No `"this target
+cannot …"` refusal is left anywhere in the hosts: the only target-flavoured message
+still standing is the *same* fused-slot refusal, word for word, in `hosts/js.cljs`,
+`hosts/wasm.cljs` and `hosts/interpreter.cljc`. The IR vocabulary reaches all three
+emitters; `:project` is the one exception, and by design — the interpreter holds a
+record-returning call's result as a map while the backends split it into locals while
+inlining, which `:biquad-multimode` pins on all four targets.
+
+**Coverage.** 93 process cases × f32/f64 on JavaScript **and** Wasm, plus the function
+cases on interpreter/JVM/JavaScript. Wasm has no function-entry form at all (it is
+process-only), so the function matrix declares `:targets [:js]` and the operators
+reach Wasm through process cases instead — an architectural asymmetry, not a gap in
+what Wasm can compute. `parity` over a whole run: 207 case/precision pairs, no gaps.
+
+**The hole was in the verification.** `with-buffers` (D57's regions) was tested only
+for `[:interpreter :jvm]`: a process-shaped callee writing its own `:output` is handed
+a region by each call site, and no browser check ever did that. Closed with a *shared*
+case — `:region-buffers` in the catalog, over a `region-gain` fixture — so the
+existing matrices pin it on all four targets, with no new page code and no host region
+involved. Its read-back is deliberately one frame back (`(buffer-load :lo 0 1)`): a
+region is state addressing, so the *runtime frame* is the only target-visible part of
+the index, and a same-frame read-back would pass whether or not a target got the frame
+term right.
+
+**Two bites, one of which taught something.** The first stub dropped the call-site
+base from the region alias, so both calls share one slot — and *nothing failed*. The
+catalog is a **differential** check: expected outputs come from the interpreter built
+from the same IR, so a lower-level bug is invisible to it by construction. That is
+exactly what a target-parity case is for, and worth remembering before designing the
+next one. The second stub was at the target: `targets/js.clj`'s `index-form` ignoring
+the element index. Now `coverage` reads `{:region-buffers {:f32 #{:wasm} :f64 #{:wasm}}}`
+— JavaScript absent, Wasm present — and `:constant-table` and `:delay-line-unit` lose
+JavaScript with it. A *failure* also settles the other question: Shadow had rebuilt
+(0 warnings, 2 files per rebuild) and the case ran before the stub, so the pass that
+followed the first stub was a real result, not a stale page.
+
+**The harness was lying, quietly, and that is where the time went.** Every lookup by
+case id returned nothing: the page sends a ClojureScript keyword as its printed form,
+so `:gain` arrives as the string `":gain"`, and `(keyword ":gain")` builds a keyword
+whose *name* contains the colon — one that compares equal to nothing, so
+`(= :gain (:case row))` was false for a row that was right there. `decode-result` now
+strips it, and it is public precisely so a test can pin it
+(`omkamra.dsp.tests.harness`). Three things came out of the same seam: the function
+matrix's rows carried no `:case`/`:precision` (they collapsed into one spurious `:` key
+in a coverage map), the extraction I kept hand-writing is now `failures`,
+`check-results`, `case-results`, `coverage` and `parity`, and `run!` takes
+`:views [:failures :parity]` to attach them. `parity` is the one worth keeping: a case
+that ran nowhere and a case that passed are equally green, so parity is only ever
+proved by reading which targets a case *reached*.
+
+**Counts.** JVM 237 tests / 2053 assertions / 0 failures; browser 50/50 with no parity
+gaps. TESTING.md now documents the result shape, the five queries and the wire
+encoding.
+
+### The two residuals: four targets in one table, and a stereo region on every target
+
+Both were named in the parity audit as things left unverified, and both are now
+closed.
+
+**A row is a row, whichever half produced it.** The browser reported per-case rows
+and the JVM suite compared interpreter against JVM one *assertion* at a time, so
+"did every target run every case?" took two vocabularies and a hand-written merge.
+Now `conformance/case-rows` builds the interpreter/JVM comparison as the same kind
+of row the page sends, `conformance/target-row-keys` is the single place that says
+which key a target's verdict lives under, and `conformance/coverage` and
+`conformance/parity` read rows from either half without asking where they came
+from. `(suite/parity)` is the one call: it runs the browser suite, adds the
+interpreter/JVM rows, and returns the four-target table — 209 case/precision pairs
+with the targets each one reached, `:gaps` empty, `:passed?` true only when the
+browser suite passed and no row left a declared target unreached. A mismatch and a
+case that never ran are both *gaps*, which is the property the whole thing exists
+for.
+
+**A stereo region, executed on every target.** `with-buffers` regions were pinned
+mono, and a region's channel stride — `channel * stride + offset + frame` — was
+therefore computed but never *executed* off the JVM. The plan now carries
+`:channels` (the one thing a runner needs to allocate both audio ports), the JVM
+runner allocates a primitive array of primitive arrays, and the page does the same
+in its oracle, its JavaScript runner and its Wasm runner — the last one addressing
+each channel at the module's own `:channel-stride`, not at a guess. The case is
+`:stereo-region-buffers` over a new `stereo-region-gain` fixture: two regions read
+back one frame late on *both* channels, with the callee's channels carrying
+opposite signs, so a channel folded into the index wrongly flips an output's sign
+instead of merely changing its magnitude. Interpreter and JVM agreed on the first
+try; JavaScript and Wasm passed the moment their runners could allocate.
+
+**The bite.** The same target-level one as before — `targets/js.clj`'s `index-form`
+ignoring the element index — now takes *both* region cases off JavaScript in f32
+and f64 and leaves Wasm untouched: `:gaps` reads `{:case :region-buffers … :target
+:js}` and `{:case :stereo-region-buffers … :target :js}`, four entries, and the
+stereo case is shown to be load-bearing rather than decorative. That a *lowering*
+stub still cannot be seen this way is unchanged and by design: these rows pin
+parity between targets, not the value of an expression all four compute.

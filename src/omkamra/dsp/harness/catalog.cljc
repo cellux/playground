@@ -413,7 +413,74 @@
                    previous))
       :params [{:name 'sample :type :float}]
       :controls [{:name 'bank :type :int :default 1}
-                 {:name 'index :type :int :default 2}]})]
+                 {:name 'index :type :int :default 2}]})
+    ;; A process-shaped callee writes its own `:output`, so each call site must be
+    ;; handed a region (F2, D57). A region is a call partition of its own, read and
+    ;; written through state addressing -- no host region is involved, so every
+    ;; target runs this case. The read-back is one frame back, which makes the
+    ;; *runtime frame* in the index load-bearing: the region holds what the
+    ;; previous frame's call wrote, and a target that dropped the frame term would
+    ;; read `offset 1` from a slot nothing ever writes.
+    {:id :region-buffers
+     :entry :process
+     :definition {:dsp/kind :function
+                  :name 'region-buffers
+                  :params [{:name 'sample :type :float}
+                           {:name 'low :type :float}
+                           {:name 'high :type :float}]
+                  :process {:input :sample
+                            :controls [{:name 'low :type :float}
+                                       {:name 'high :type :float}]}
+                  :return-type :void
+                  :body ['(do
+                            (with-buffers
+                              :lo
+                              (omkamra.dsp.harness.call-fixture/region-gain
+                               low sample))
+                            (with-buffers
+                              :hi
+                              (omkamra.dsp.harness.call-fixture/region-gain
+                               high sample))
+                            (buffer-store :output 0 0
+                                          (+ (buffer-load :lo 0 1)
+                                             (buffer-load :hi 0 1))))]}
+     :precisions [:f32 :f64]
+     :controls [0.5 0.25]
+     :input-samples sine-input-samples}
+    ;; The same shape, stereo: a region then holds one sample per channel per
+    ;; frame, so the channel is part of the index the target must compute. The
+    ;; read-back is one frame back on *both* channels, and the callee's channels
+    ;; carry opposite signs, so folding the channel in wrongly flips an output.
+    {:id :stereo-region-buffers
+     :entry :process
+     :definition {:dsp/kind :function
+                  :name 'stereo-region-buffers
+                  :params [{:name 'sample :type :float}
+                           {:name 'low :type :float}
+                           {:name 'high :type :float}]
+                  :process {:input :sample
+                            :channels 2
+                            :controls [{:name 'low :type :float}
+                                       {:name 'high :type :float}]}
+                  :return-type :void
+                  :body ['(do
+                            (with-buffers
+                              :lo
+                              (omkamra.dsp.harness.call-fixture/stereo-region-gain
+                               low sample))
+                            (with-buffers
+                              :hi
+                              (omkamra.dsp.harness.call-fixture/stereo-region-gain
+                               high sample))
+                            (buffer-store :output 0 0
+                                          (+ (buffer-load :lo 0 1)
+                                             (buffer-load :hi 0 1)))
+                            (buffer-store :output 1 0
+                                          (+ (buffer-load :lo 1 1)
+                                             (buffer-load :hi 1 1))))]}
+     :precisions [:f32 :f64]
+     :controls [0.5 0.25]
+     :input-samples sine-input-samples}]
    [(unary-float-case :abs '(abs sample))
     (unary-float-case :floor '(floor sample))
     (unary-float-case :ceil '(ceil sample))

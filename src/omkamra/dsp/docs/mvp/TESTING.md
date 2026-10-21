@@ -65,11 +65,11 @@ once both are done:
 (require '[omkamra.dsp.tests.suite :as suite])
 (suite/run-everything)
 ;; prints the JVM suite's own report under a header, then:
-;;   === browser: 50/50 checks passed (73.2s total) ===
+;;   === browser: 50/50 checks passed (73.4s total) ===
 ;;   === all green ===
-;; => {:jvm {:test 230, :pass 2024, :fail 0, :error 0, :passed? true}
+;; => {:jvm {:test 238, :pass 2061, :fail 0, :error 0, :passed? true}
 ;;     :browser {:passed? true, :passed 50, :total 50, :failed []}
-;;     :seconds 73.2, :passed? true}
+;;     :seconds 73.4, :passed? true}
 ```
 
 Use it before a commit, or after a change that touches both a target and the
@@ -133,8 +133,14 @@ Notable groups:
 - `bitwise-operators-are-emitted-by-js-and-wasm` — checks emitted operator text.
 - `jvm-unchecked-process-adapter-does-not-allocate-after-warmup` — allocation
   regression guard for the real-time process path.
+- `omkamra.dsp.tests.harness` — the harness's own contracts, not the DSP language:
+  how a page result is decoded off the wire, and what `case-results`, `coverage`
+  and `parity` answer about one — including that the interpreter/JVM rows and the
+  browser rows are read by the same two functions, which is what lets one table
+  cover four targets. They run in the JVM suite because they are pure functions
+  over a row map, needing no browser.
 
-Expected baseline: **230 tests, 2024 assertions, 0 failures**.
+Expected baseline: **238 tests, 2061 assertions, 0 failures**.
 
 ---
 
@@ -194,35 +200,90 @@ query suppresses the page's own automatic run so the programmatic call is the
 only run. `run!` starts and stops its own browser; no connected runtime or
 `cljs-eval` session is required.
 
-Inspect failures:
+### Reading a result
+
+`run!` returns the page's own report: `{:passed? :passed :total :results}`, where
+each result is one check with `:name`, `:passed?`, `:detail`, and — for the two
+shared matrices — `:targets` and a per-case `:cases` breakdown. Five functions
+answer the questions that breakdown invites, and `:views` attaches any of them to
+the result in the same call:
 
 ```clojure
-(into {}
-      (comp (remove :passed?)
-            (map (juxt :name :detail)))
-      (:results (browser/run!)))
+(browser/failures (browser/run!))
+;; => []          ; the checks that did not pass, with their :detail (only `true`
+;;                ; counts as passed, so a missing verdict is reported too)
+
+(browser/run! {:views [:failures :parity]})
+;; => {:passed? true :failures [] :parity {:cases 207 :gaps []} ...}
+
+(browser/check-results result "post-mix")
+;; => the checks whose name contains the needle, the way `:only` selects them
+
+(browser/case-results result :region-buffers)
+;; => [{:case :region-buffers :precision :f32 :javascript false :wasm true
+;;      :passed? false} {... :f64 ...}]   ; every matrix row for one case
+
+(browser/coverage result)
+;; => {:gain {:f32 #{:js :wasm} :f64 #{:js :wasm}} ...}
+;;    each precision maps to the targets that ran the case *and* matched
+
+(browser/parity result)
+;; => {:cases 207 :gaps []}
+;;    the case/precision/target triples that missed a target their check declares
 ```
 
-Each result entry also carries the target and per-case breakdown. For example,
-the process matrix lists which of JavaScript and Wasm passed each case and
-precision, and the function-case matrices report `:targets [:js]` because Wasm
-is process-only:
+A target's boolean in a row means *ran it and matched the interpreter*, and a
+case that never ran is simply absent — which is why these queries exist: a case
+that passed and a case that ran nowhere produce the same green run, so a bite
+check has to ask where a case went rather than whether the suite passed.
+
+### All four targets in one call
+
+The browser reports JavaScript and Wasm; the JVM suite's conformance test
+compares the interpreter with the JVM one case at a time. `conformance/case-rows`
+turns that second comparison into the *same kind of row*, so one table can cover
+all four targets:
 
 ```clojure
-(->> (browser/run!)
-     :results
-     (filter #(= "shared process matrix f32" (:name %)))
-     first
-     ((juxt :targets :cases)))
-;; => [[:js :wasm]
-;;     [{:case :gain     :precision :f32 :javascript true :wasm true}
-;;      {:case :one-pole :precision :f32 :javascript true :wasm true}
-;;      ...]]
+(suite/parity)
+;; => {:passed? true
+;;     :cases 209   ; process and function cases, f32 and f64, across four targets
+;;     :gaps []
+;;     :coverage {:stereo-region-buffers {:f32 #{:interpreter :jvm :js :wasm}
+;;                                        :f64 #{:interpreter :jvm :js :wasm}}
+;;                ...}}
 ```
+
+`:coverage` is `conformance/coverage` over the pooled rows and `:gaps` is
+`conformance/parity`, so a target that mismatched — or a case that never reached
+it — is an entry in `:gaps` rather than an absent line in a table. `:passed?` is
+true only when the browser suite passed and no row has a gap; the JVM *test*
+namespaces stay `run-all`'s business. With no argument `suite/parity` runs the
+browser suite itself; pass a `browser/run!` result to reuse one that already ran.
+
+The row vocabulary is the whole contract: `conformance/target-row-keys` says which
+key each target's verdict lives under (`:js` → `:javascript`, and so on), and both
+halves' rows are read by those two functions and no others.
+`parity` is the whole-suite form of that question, and an empty `:gaps` on a run
+whose `:only` selection named the check is the claim worth quoting.
+
+The shared matrices declare their targets — `[:js :wasm]` for the process
+matrix, `[:js]` for the function-case matrices, because Wasm is process-only — so
+`parity` reads a declared target that a row does not reach as a gap. A check whose
+name already says which target it is (`Wasm pool host`) declares none and
+contributes no cases.
+
+Case IDs are matched by name, with or without a colon or a namespace, because the
+page sends a ClojureScript keyword as its *printed* form: `:gain` arrives as the
+string `":gain"`, and `(keyword ":gain")` would build a keyword whose name
+contains the colon — one that compares equal to nothing. `decode-result` is the wire
+contract that strips it, and `omkamra.dsp.tests.harness` pins it: without the strip,
+every lookup by case ID quietly found nothing.
 
 `run!` options: `:headless` (default `true`), `:timeout` (ms, default
 `60000`), `:server?` (start `:on-demand-http` if needed, default `true`),
-`:autorun?` (default `false`), `:only` (see above), and `:executable-path`
+`:autorun?` (default `false`), `:only` (see above), `:views` (see above; an
+unknown view name throws rather than attaching nothing), and `:executable-path`
 (explicit browser binary).
 The first run also compiles the Shadow build and can take longer than later
 runs; raise `:timeout` on a cold cache.
@@ -257,7 +318,9 @@ automatic run.
 ### What the browser checks cover
 
 1. the shared **process** matrix — every `acceptance/cases` entry, f32 and f64,
-   on JavaScript and Wasm;
+   on JavaScript and Wasm, mono and multi-channel alike (`:stereo-region-buffers`
+   is the multi-channel one: a region holds one sample per channel per frame, so
+   the channel is part of the index the target computes);
 2. the shared **function-case** matrix — every `acceptance/function-cases`
    entry, f32 and f64, on JavaScript;
 3. a WAT bounded-loop trap check;
@@ -366,7 +429,10 @@ functions any more. It has two vectors:
 
 - `process-cases` (alias `cases`) — block-processing kernels. Each entry
   carries a `:definition`, `:entry :process`, `:precisions`, `:controls`, and
-  an `:input-samples` trace generator (with optional `:blocks`).
+  an `:input-samples` trace generator (with optional `:blocks`). The compiled
+  plan carries the process's `:channels`, which is the one thing a runner needs to
+  allocate both audio ports: a flat buffer for mono, one buffer per channel
+  otherwise.
 - `function-cases` — scalar functions. Each entry carries a `:definition`,
   `:entry :function`, `:precisions`, and `:vectors` of argument lists.
 

@@ -464,6 +464,15 @@ round over D42's graph and D34's matrix.
 
 **Goal.** Turn WAT-only Wasm output into a complete, instance-oriented artifact.
 
+**Entry state.** Parity across JVM, JavaScript and Wasm was audited before this
+phase, because P12 is what changes the Wasm memory ABI and nothing in the spine
+should have to wonder whether a target is behind. The outcome: identical builtin
+surfaces, no target-specific refusal left in any host, 93 process cases with no
+parity gap in f32 or f64, and one verification hole closed (`with-buffers` regions,
+now a shared catalog case). The one standing asymmetry is architectural and
+unchanged by P12: Wasm has no function-entry form, so its operators are covered
+through process cases. See the diary entry *Parity audit before P12*.
+
 **Depends on.** P0; benefits from P8 (instance regions) and P4 (layout).
 
 **Deliverables.**

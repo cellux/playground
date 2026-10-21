@@ -7,11 +7,13 @@
   is the whole of it: these tests and the browser conformance suite, at once."
   (:require [clojure.test :as test]
             [omkamra.dsp.harness.browser :as browser]
+            [omkamra.dsp.harness.conformance :as conformance]
             [omkamra.dsp.tests.automation]
             [omkamra.dsp.tests.combinators]
             [omkamra.dsp.tests.composition]
             [omkamra.dsp.tests.conformance]
             [omkamra.dsp.tests.descriptor]
+            [omkamra.dsp.tests.harness]
             [omkamra.dsp.tests.interpreter]
             [omkamra.dsp.tests.ir]
             [omkamra.dsp.tests.js]
@@ -45,12 +47,41 @@
     omkamra.dsp.tests.modulation
     omkamra.dsp.tests.synth
     omkamra.dsp.tests.reference
-    omkamra.dsp.tests.sequencer])
+    omkamra.dsp.tests.sequencer
+    omkamra.dsp.tests.harness])
 
 (defn run-all
   "Run every DSP test namespace and return the `clojure.test` summary."
   []
   (apply test/run-tests test-namespaces))
+
+(defn parity
+  "The four-target parity table, in one call.
+
+  Builds the interpreter and JVM rows from the catalog and the JavaScript and Wasm
+  rows from a browser run of the same catalog, then reports what the four targets
+  proved *together*: `{:cases n :coverage {...} :gaps [...]}`, where a gap is a
+  declared target a row never reached — a mismatch or a case that did not run.
+  `:passed?` is true only when the browser suite passed and no row has a gap. The
+  JVM *test* namespaces are `run-all`'s business, not this report's.
+
+  With no argument it runs the browser suite itself; pass a result from
+  `browser/run!` to reuse one that already ran. This is the check to make before a
+  phase that changes a target's code path: it answers whether a target is behind,
+  for every case at once, which a green test run cannot, because a case that passed
+  and a case that never ran are equally green.
+
+  The reads are the ones `TESTING.md` documents one target at a time;
+  `conformance/coverage` and `conformance/parity` are the same functions over the
+  same rows."
+  ([] (parity (browser/run!)))
+  ([browser-result]
+   (let [rows (into (vec (conformance/case-rows)) (browser/case-rows browser-result))
+         {:keys [cases gaps]} (conformance/parity rows)]
+     {:cases cases
+      :coverage (conformance/coverage rows)
+      :gaps gaps
+      :passed? (and (browser/passed? browser-result) (empty? gaps))})))
 
 (defn- timeout-result
   [half]
