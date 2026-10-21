@@ -302,13 +302,153 @@
                                             (set-field! store :cursor (+ (:cursor store) 1))
                                             previous))))
                          {:entry :process})))))
-    ;; An array of records cannot yet contain an array field.
+    ;; An array of records is not one array place: its rows are strided, so the
+    ;; terse `(aget store k)` needs both indices (see `record-array-fields`).
     (is (thrown-with-msg?
          clojure.lang.ExceptionInfo
-         #"cannot contain array fields"
+         #"record index and an element index"
          (dsp/compile (assoc-in definition [:state 0]
                                 {:name 'store :size 2
                                  :fields [{:name :line :type :float :size 4}]})
+                      {:entry :process})))))
+
+(deftest record-array-fields
+  ;; An array of records may own an array field (H5): the leaf is one flat block
+  ;; of `records * elements` slots carrying `:stride`, so a record index and an
+  ;; element index fold into one flat index (`record * stride + element`) and
+  ;; every backend keeps a constant base offset and a single element index.
+  (let [wavetable {:dsp/kind :function
+                   :name 'wavetable-bank
+                   :params [{:name 'sample :type :float}
+                            {:name 'bank :type :int}
+                            {:name 'index :type :int}]
+                   :state [{:name 'tables
+                            :size 3
+                            :constant true
+                            :fields [{:name :samples :type :float :size 4
+                                      :init [0.0 0.25 0.5 0.75]}]}]
+                   :process {:input :sample
+                             :controls [{:name 'bank :type :int}
+                                        {:name 'index :type :int}]}
+                   :return-type :float
+                   :body ['(field tables bank :samples index)]}
+        artifact (dsp/compile wavetable {:entry :process})
+        jvm (dsp/compile wavetable {:target :jvm :entry :process})
+        read-bank (fn [compiled bank index]
+                    (let [input (float-array 1) output (float-array 1)]
+                      (apply dsp/invoke compiled input output 1 [bank index])
+                      (nth output 0)))
+        cases [[2 3] [0 0] [1 2] [0 1]]]
+    ;; One flat constant block, the field's initializers repeated once per
+    ;; record, and the leaf carries the per-record stride.
+    (is (= [{:name 'tables.samples :type :float :size 12
+             :init [0.0 0.25 0.5 0.75 0.0 0.25 0.5 0.75 0.0 0.25 0.5 0.75]
+             :index 0}]
+           (:state (:ir artifact))))
+    (is (= [{:path [:samples] :type :float :offset 0 :size 12 :stride 4}]
+           (get-in artifact [:abi :records 0 :fields])))
+    ;; Two dynamic indices folded into `bank * 4 + index`.
+    (is (= {:op :binary :operator :+
+            :left {:op :binary :operator :*
+                   :left {:op :local :name 'bank :type :int}
+                   :right {:op :const :type :int :value 4}
+                   :type :int}
+            :right {:op :local :name 'index :type :int}
+            :type :int}
+           (get-in artifact [:ir :frame-body :statements 0 :init :element-index])))
+    ;; A fully constant access folds at compile time, so a bank read with literal
+    ;; indices is still a constant.
+    (is (= {:op :const :type :int :value 6}
+           (get-in (dsp/compile (assoc-in wavetable [:body 0]
+                                          '(field tables 1 :samples 2))
+                                {:entry :process})
+                   [:ir :frame-body :statements 0 :init :element-index])))
+    ;; Every record reads its own slice of the bank, on the interpreter and the
+    ;; JVM alike. The same shape is a shared catalog case
+    ;; (`:constant-table-bank`), so it also runs on JavaScript and Wasm.
+    (is (= [0.75 0.0 0.5 0.25] (mapv (fn [[bank index]] (read-bank artifact bank index))
+                                     cases)))
+    (is (= (mapv (fn [[bank index]] (read-bank artifact bank index)) cases)
+           (mapv (fn [[bank index]] (read-bank jvm bank index)) cases)))
+    ;; A record array owning an array field is a bank of writable buffers, and
+    ;; the strided layout keeps the records independent.
+    (let [lines {:dsp/kind :function
+                 :name 'delay-bank
+                 :params [{:name 'sample :type :float}
+                          {:name 'which :type :int}
+                          {:name 'index :type :int}]
+                 :state [{:name 'voices
+                          :size 2
+                          :fields [{:name :line :type :float :size 3
+                                    :init [1.0 2.0 3.0]}
+                                   {:name :cursor :type :int :init 0}]}]
+                 :process {:input :sample
+                           :controls [{:name 'which :type :int}
+                                      {:name 'index :type :int}]}
+                 :return-type :float
+                 :body ['(let [previous (field voices which :line index)]
+                           (do (set-field! voices which :line index sample)
+                               (+ previous
+                                  (field voices (- 1 which) :line index))))]}
+          explicit (dsp/compile lines {:entry :process})
+          explicit-jvm (dsp/compile lines {:target :jvm :entry :process})
+          terse (dsp/compile (assoc-in lines [:body 0]
+                                       '(let [previous (aget voices which index)]
+                                          (do (aset voices which index sample)
+                                              (+ previous
+                                                 (aget voices (- 1 which) index)))))
+                             {:entry :process})
+          render (fn [compiled]
+                   (let [input (float-array [10.0 20.0 30.0])
+                         output (float-array 3)]
+                     (apply dsp/invoke compiled input output 3 [1 2])
+                     (vec output)))]
+      (is (= [{:name 'voices.line :type :float :size 6
+               :init [1.0 2.0 3.0 1.0 2.0 3.0] :index 0}
+              {:name 'voices.cursor :type :int :size 2 :init [0 0] :index 6}]
+             (:state (:ir explicit))))
+      (is (= [{:path [:line] :type :float :offset 0 :size 6 :stride 3}
+              {:path [:cursor] :type :int :offset 6 :size 2}]
+             (get-in explicit [:abi :records 0 :fields])))
+      ;; `(aset voices i k v)` is exactly `(set-field! voices i :field k v)`.
+      (is (= (:ir (:process (:ir explicit))) (:ir (:process (:ir terse)))))
+      ;; Writing record 1 leaves record 0's slice alone, so the read-back of the
+      ;; other record is the constant 3.0 while this record's value advances.
+      ;; Each artifact is invoked once: an invocation continues the instance's
+      ;; state, so a wrong stride would smear across records and show up here.
+      (let [interpreter-run (render explicit)
+            jvm-run (render explicit-jvm)
+            terse-run (render terse)]
+        (is (= [6.0 13.0 23.0] interpreter-run))
+        (is (= interpreter-run jvm-run))
+        (is (= interpreter-run terse-run))))
+    ;; Both indices are required, and each is checked when it is constant.
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"array field needs an element index"
+         (dsp/compile (assoc-in wavetable [:body 0] '(field tables bank :samples))
+                      {:entry :process})))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"field needs a record index"
+         (dsp/compile (assoc-in wavetable [:body 0] '(field tables :samples index))
+                      {:entry :process})))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"record index is outside the declared range"
+         (dsp/compile (assoc-in wavetable [:body 0] '(field tables 3 :samples 0))
+                      {:entry :process})))
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"array index is outside the declared range"
+         (dsp/compile (assoc-in wavetable [:body 0] '(field tables 0 :samples 4))
+                      {:entry :process})))
+    ;; A bank of constant tables stays read-only.
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"read-only"
+         (dsp/compile (assoc-in wavetable [:body 0]
+                                '(set-field! tables bank :samples index sample))
                       {:entry :process})))))
 
 (deftest dynamic-memory-access-and-checks

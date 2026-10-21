@@ -65,11 +65,11 @@ once both are done:
 (require '[omkamra.dsp.tests.suite :as suite])
 (suite/run-everything)
 ;; prints the JVM suite's own report under a header, then:
-;;   === browser: 42/42 checks passed (78.0s total) ===
+;;   === browser: 50/50 checks passed (73.2s total) ===
 ;;   === all green ===
-;; => {:jvm {:test 225, :pass 1953, :fail 0, :error 0, :passed? true}
-;;     :browser {:passed? true, :passed 42, :total 42, :failed []}
-;;     :seconds 63.4, :passed? true}
+;; => {:jvm {:test 230, :pass 2024, :fail 0, :error 0, :passed? true}
+;;     :browser {:passed? true, :passed 50, :total 50, :failed []}
+;;     :seconds 73.2, :passed? true}
 ```
 
 Use it before a commit, or after a change that touches both a target and the
@@ -134,7 +134,7 @@ Notable groups:
 - `jvm-unchecked-process-adapter-does-not-allocate-after-warmup` — allocation
   regression guard for the real-time process path.
 
-Expected baseline: **225 tests, 1953 assertions, 0 failures**.
+Expected baseline: **230 tests, 2024 assertions, 0 failures**.
 
 ---
 
@@ -150,7 +150,7 @@ Evaluate in the dev nREPL:
 ```clojure
 (require '[omkamra.dsp.harness.browser :as browser])
 (browser/run!)
-;; => {:passed? true, :passed 36, :total 36, :results [...]}
+;; => {:passed? true, :passed 50, :total 50, :results [...]}
 ```
 
 Run one check while iterating — `:only` matches check names, and the result
@@ -312,6 +312,29 @@ automatic run.
     once into the pool-wide region on both browser hosts, compared against the
     interpreter pool and against literal numbers (two voices of `0.5 + 1.0` must
     render `3.0`), with the declared default checked before the write.
+13. **the post-mix chain's own regions** (H2, D67) — a post-mix stage that declares
+    a lane, and one that reads a shared control, through the bus runner on both
+    browser hosts, each compared against the in-page interpreter bus runner **and**
+    against the curve itself. The fixture voice (`bus-gain-voice`) renders exactly
+    `gate`, so the samples *are* the chain's gain: a kernel that never received the
+    region renders zeros, which a purely differential check would miss when both
+    sides are silent. The page fetches `/bus-lane-bundle`/`-source` and
+    `/bus-shared-bundle`/`-source`.
+14. **a fused pool whose slots have no state** (H4, D70) — the same voice
+    (`stateless-voice`, `:guard false`) through a real fused pool on both browser
+    hosts against the in-page interpreter pool, with literal samples (92 per
+    frame). Its slots own *empty* call partitions, so this is the check that
+    exercises the Wasm host's byte-range scan for a partition no layout segment
+    overlaps: a stub there fails Wasm and leaves JavaScript passing.
+    `/stateless-fused-bundle` and `/stateless-fused-source` serve it.
+15. **a lane on a per-channel control** (H3, D68) — one voice taking three
+    channels in turn through a real pool on both browser hosts, against the
+    in-page interpreter pool and against literal numbers: each channel's curve,
+    then a channel nobody wrote (zero), then a curve published while the voice is
+    sounding. `:bend` is the pool's per-channel source, so its lane is a curve
+    per channel and the pool keeps a copy — a stub of the delivery renders
+    `[[1 2 3 4] [1 2 3 4] [1 2 3 4] [5 5 5 5]]`, the voice never following its
+    channel. `/bend-lane-bundle` and `/bend-lane-source` serve the fixture.
 
 The pool and instrument host checks are the ones that exercise the sequencing
 layer rather than a single kernel. The page fetches a compiled voice —

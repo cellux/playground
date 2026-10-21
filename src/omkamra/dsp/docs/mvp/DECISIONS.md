@@ -3378,3 +3378,302 @@ now default missing `processorOptions` to an empty object — which routes a
 misconfigured node into the adapter's own reported "invalid metadata" path — and
 the JavaScript one reports a constructor throw through its port, so
 `worklet-ready` rejects with the reason instead of timing out.
+
+---
+
+## D67 — the post-mix chain has instrument-level lane and shared regions (H2)
+
+**Status.** Decided; implemented.
+
+A post-mix stage is a processor like any other, so it may declare a control as a
+lane (`:lane`, `:has-lane`) or read one from the shared region (`:shared`), and
+the declaration must survive the chain's own lowering: `chain-effect` rebuilds the
+interface at every stage (`graph/derived-definition` with an overriding
+`:controls`), and it used to rebuild each control as bare `{:name control}` —
+silently dropping what the effect had declared. It now carries the declaration
+across, pairing the effect's controls with the chain's arguments **positionally**,
+because the effect names controls by its own parameters while the chain names them
+by the arguments the instrument passes.
+
+**The regions are instrument-level.** The chain is one mono processor run once
+per output channel over the same summed signal, so its lane region and its shared
+region are each **one region for the whole instrument**, written once and handed
+to every channel's instance — the shape M5 gave the pool's shared region, one
+level up. The host owns them: `set-bus-lane!` writes a per-frame curve, and the
+shared region is filled from the shared *parameter* of the same name (refused,
+once at construction, when no such parameter drives it) — which is exactly the
+rule a post-mix *scalar* control already follows, so one `set-parameter!` reaches
+the voices and the chain together. Rejected: a region per channel instance (three
+copies of one curve, and the chain has no per-channel identity to justify one); a
+new `set-bus-shared!` API (it would be a second way to write the same shared
+value, and would not follow a parameter).
+
+**Wasm cannot share the region, so it copies.** A Wasm instance owns its linear
+memory, so the host's region has to reach the instance: the bus kernel copies the
+frames a block can read into the instance's own region before each call — the
+handoff the pool already gives a voice's shared region. JS hands the host-owned
+array to every instance in its argument array, so nothing is copied. Both browser
+runners expose the same `:write-lane!` / `:write-shared!` pair, so the page's code
+is target-independent.
+
+**`dsp/process!` accepts a host-owned region.** Its context may now carry the
+region itself (a primitive array), not only a map of named values to flatten. The
+docstring already promised this path for a real-time host ("writes the region
+directly and skips this path"); there was no way to take it, and without it the
+interpreter bus path could not be handed the regions the JVM path passes
+positionally. A `:shared` value may also be a bare number, broadcast across the
+slice — the rule the shared region already had.
+
+**Consequences.** The fixtures are the check: `bus-gain-voice` renders exactly
+`gate`, so a chain stage whose gain is the region makes the samples *be* the
+curve, and neither the JVM/interpreter pins nor the browser ones need a tolerance.
+The browser checks stay differential against the in-page interpreter host, which
+now delivers the same regions. `write-region!` / `region-layout` /
+`region-offset` live in `hosts/mixing.cljc`, the plumbing every host kernel
+shares, because three hosts (JS, Wasm, the in-page interpreter runner) now write
+the same kind of slice.
+
+**Evidence.** JVM 227 tests / 1973 assertions, browser 46/46. Four bites:
+dropping the declaration merge fails exactly the new assertions; a no-op
+`set-bus-lane!` renders zeros; a no-op `write-bus-shared!` leaves the shared region
+zero; on the page, withholding the JS lane argument fails the run and skipping the
+Wasm copy renders `[[0 …]]` against the curve.
+
+---
+
+## D68 — a lane on a per-channel control is a curve per channel (H3)
+
+**Status.** Decided; implemented.
+
+`bend` is the pool's global source *bank*, indexed by channel: `set-pitch-bend!`
+takes a channel, and a `:bend` control resolves to the value of the channel the
+voice is on. The lane beside it therefore has a third scope — `:channel` — beside
+`:per-voice` (the default) and `:shared`: the pool keeps one curve per channel and
+a voice reads the curve for the channel it is on, exactly as it reads that
+channel's bend. The scope is inferred from the *source*, like the other two: a
+lane's values belong to whoever owns the thing it sits beside, which is the rule
+`lane-scope` already stated and `:bend` was the exception to.
+
+**The pool keeps its own copy, and re-delivers it when a voice starts.** Two
+facts make that necessary rather than merely convenient:
+
+- a voice that starts on a channel *later* must read the curve published for that
+  channel, so a setter cannot simply hand the host's array to whichever voices
+  exist at that moment;
+- a voice can *move* to another channel — a steal, a mono retrigger, a host
+  playing several channels — and its lane region is per voice, so it would
+  otherwise keep reading the channel it was on.
+
+So `set-channel-lane!` copies the curve into a `channel-count` × `lane-stride`
+bank allocated at construction (`lane-stride` from the runtime config, like every
+other array the pool owns), writes it into every voice already on that channel,
+and `sound-voice!` delivers the channel's curves to a voice as it starts.
+Rejected: declaring the bend lane per voice (a lane whose scope differs from its
+own source's is the inconsistency this removes — and `:pan`, the genuinely
+per-voice source, keeps `set-voice-lane!` for that); and leaving re-delivery to
+the host (a per-voice lane needs no such rule because a voice's region persists,
+and a channel lane cannot have that property).
+
+**The other two setters refuse it, loudly and accurately.** `set-lane!` says a
+channel lane is not shared, `set-voice-lane!` says it is not per voice, and each
+names the setter that is.
+
+**Consequences.** The refusal "a lane on a per-channel control has no per-lane
+delivery yet" is gone, and `lane-on-bend`'s fixture docstring and its test flipped
+from a construction failure to a delivery check. `synth/pool.cljc` grows the bank,
+the delivery, and two private value helpers (`value-count` / `value-at`), which
+the hosts already have as `mixing/value-length` / `value-at` but the pool cannot
+reach: it deliberately does not depend on the host layer.
+
+**Evidence.** JVM 228 tests / 1991 assertions, browser 48/48. Three bites: no
+activation delivery → the channel-change and later-start checks read the *old*
+channel's curve (6 failures); no copy (the bank stays zero) → 14 failures; no
+set-time delivery → the "already sounding" check keeps the old curve (2 failures).
+On the page the same activation stub renders `[[1 2 3 4] [1 2 3 4] [1 2 3 4]
+[5 5 5 5]]` instead of the per-channel curves.
+
+---
+
+## D69 — the MIDI-shaped sources are host configuration; the language stays protocol-free
+
+**Status.** Position, recorded.
+
+The pool's runtime sources are MIDI-shaped by construction:
+`synth/pool.cljc`'s "The global source bank is indexed by MIDI channel" and its
+`channel-count` of 16; `note` as a MIDI number; `bend` arriving as a normalized
+wheel and leaving as cents; `sequencer.cljc`'s `:routing` mapping a MIDI channel
+to a pool. **None of it reaches the compiler**: the descriptor, the IR, the ABI and
+all four targets see only float controls (`gate`, `note`, `bend`, `detune`,
+`frequency`, `pan`, `velocity`), and the *pool* is what turns a channel index into
+a bend value. That is D34's boundary (host policy above the kernel) and D35's
+(pitch domain in the kernel), and it is what keeps the language usable by a host
+that speaks something else.
+
+The position to keep: **MIDI is one possible configuration of the host layer, not
+a property of the language.**
+
+- No protocol vocabulary in the descriptor, IR, ABI or a target: a control is a
+  name and a type.
+- The host layer may be as MIDI-shaped as it likes — 16 indices, note numbers,
+  wheel-to-cents, channel routing — because another protocol supplies the same
+  controls differently.
+- A later refactor toward generality happens *there*, and it should be a
+  reconfiguration rather than a rewrite: the runtime sources are a bank the pool
+  reads, and a lane takes its scope from the control it sits beside (D46/D68), so
+  "channels" can become "source indices" with a host-level policy for how many
+  exist and what maps to them.
+
+Two vocabulary notes, so that the asymmetry is deliberate rather than accidental:
+
+- H3's lane scope is spelled `:channel` because the pool already speaks channels
+  in five places (`note-on!`, `set-pitch-bend!`, `voice-snapshot`, `:routing`, the
+  bank comment). One concept with two names would be worse than a protocol-flavored
+  name in a protocol-flavored layer. Renaming it is a small, local change (the
+  keyword, `set-channel-lane!`, `lane-scope`, the bank) if the source index ever
+  stops being a channel.
+- A scalar's host-facing value is in *source* units and a lane's is in *kernel*
+  units. The pool scales a scalar `:bend` by `:bend-range` (a wheel in, cents out)
+  and passes a lane through verbatim — uniformly for every lane, because a host
+  that owns a curve writes what the kernel reads. A host that thinks in wheels
+  applies `:bend-range` itself; `Kernel/write-voice-lane!` documents it.
+
+---
+
+## D70 — a call site owns a slot; state is one of the things it may own (H4)
+
+**Status.** Decided; implemented.
+
+A fused entry renders S voices in one call, and a host needs a per-slot identity
+for four things: which slice of the fused control list a handle writes (M6), which
+slice of the lane region it reads (F4), what a reset restores (D51), and which
+specials it publishes (M6 seam 4). All four were *derived from* the call site's
+**state partition**, so a voice with no state had no slots at all — every host
+refused it, with "a slot cannot be reset on its own", which is not even true of a
+voice that has nothing to reset.
+
+The ABI now records **one partition per call site**, in evaluation order, with an
+empty range when the callee has no state: `ir.clj`'s `lower-call` always conj's an
+entry, and the ordinal stays the *call-site* ordinal. `:call-partitions` therefore
+means what its name and every host's refusal message already said — the call sites
+a slot indexes.
+
+- A stateless voice fuses: S identities, a no-op reset, no specials — exactly how
+  S plain stateless voices behave in a pool (a voice with no `:activity` is
+  already a case the pool handles).
+- A lane-reading callee no longer needs a state partition to have a slice: the
+  fused base is `slot × lanes × stride` off the call-site ordinal. That also fixes
+  a latent shift, where a stateless call site before a stateful one skewed the
+  ordinals and so the slice bases.
+- The Wasm host's partition-range resolution must accept an empty range: an empty
+  partition overlaps no layout segment, and that is a slot whose reset does
+  nothing rather than a lowering error. The JVM's `partition-ranges` already
+  returned an empty range for one, and the JavaScript host loops `size` times, so
+  only the Wasm byte-range scan needed the degenerate case named.
+
+Rejected: deciding that a fused voice must carry state. It would have been
+cheaper, and H's rules allow a recorded refusal — but it would have had to assert
+something false ("a slot cannot be reset on its own" for a voice with nothing to
+reset) and it would forgo the *most* fusable voice there is, the one whose only
+per-slot cost is the entry call.
+
+**Evidence.** JVM 229 tests / 1999 assertions, browser 50/50. Bites: making the
+partition conditional on state again → all three new assertions fail with the
+original refusal (the test cannot even build the pool); throwing on an empty
+partition range in the Wasm host → the Wasm check fails with "empty partition"
+while the JavaScript one still passes.
+
+**A bite lesson, recorded because it nearly slipped through.** The first attempt at
+the Wasm bite removed the guard but left the parentheses unbalanced. The stub threw
+a reader error, Shadow served the *previous* build, and the check passed — a false
+negative that looks exactly like "the guard is not needed". A bite stub has to be
+checked for validity before its result is trusted (the second attempt kept the
+structure and threw instead, which also proved the empty range *is* reached).
+
+---
+
+## D71 — an array of records may own an array field (H5)
+
+**Status.** Decided; implemented. Closes the last item H named as a *language*
+omission.
+
+**What this supersedes.** D16's "an array of records cannot yet contain an array
+field (rejected)". The rule that made it look expensive ("for a slot of `:size N`,
+each leaf becomes one flat state entry of `:size N`") is the same rule that makes it
+cheap: the record dimension is already a stride.
+
+**The omission.** D16 said "an array of records cannot yet contain an array field
+(rejected)", and `descriptor.clj` refused `{:name voices :size 2 :fields
+[{:name :line :type :float :size 4}]}` outright. The layout was the reason it
+looked expensive; it was not. D16's own rule — "for a slot of `:size N`, each leaf
+becomes one flat state entry of `:size N`" — already made the record dimension a
+*stride*, and the selector grammar already had both positions
+(`[record-index?] field-name+ [element-index?]`). The missing pieces were the
+descriptor's refusal, the leaf's stride, and the accessor's arithmetic.
+
+**Decision.** A leaf of an array of `n` records whose field declares `:size m` is
+one flat block of `n * m` slots, and carries `:stride m`. An access folds the two
+indices into the single element index the ABI already had — `record * stride +
+element` — so a leaf still has one constant base offset and one element index and
+**no backend changed**: the JVM, JavaScript, Wasm and interpreter emitters saw a
+constant base plus an expression before and after. The field's initializers repeat
+once per record, flattened, because `:init` is also the state array's length (the
+interpreter builds the arena from it, and a short vector is caught as "state has
+the wrong size").
+
+Consequences, all deliberate:
+
+- **The grammar now means what D16 said.** `(field voices i :line k)` reads element
+  `k` of record `i`; `(set-field! voices i :line k v)` writes it; `(aget voices i
+  k)` / `(aset voices i k v)` are the terse spellings for a record array that owns
+  exactly one array field, exactly as `(aget store k)` is for a scalar record.
+- **A record array now needs its record index.** An array of records is always
+  indexed: `(field voices :phase)` was a silent read of record 0's element and is
+  now "a record array's field needs a record index". A *write* through
+  `set-field!`/`set!` with no index used to be refused with a misleading message
+  ("use aset to write an array field element") for a field that was not an array;
+  it is now refused for the right reason.
+- **A constant bank is a wavetable bank.** A `:constant` array of records owning
+  an array field, indexed by a control and a phase, is the shape
+  `:constant-table-bank` pins on all four targets. A fully constant access folds at
+  compile time, so with literal indices the access stays a constant and reports no
+  dynamic diagnostic.
+- **Static checks are per dimension.** A constant record index outside
+  `[0, n)` and a constant element index outside `[0, m)` are refused separately,
+  each naming its dimension. This is the safety the flat-array workaround could
+  not give: one flat bound cannot tell a wrong record from a wrong element, so a
+  hand-linearized bank could silently read the neighbouring table.
+
+**Rejected alternatives.** (a) *The constant-only first slice* I sketched as a
+cheaper variant — unnecessary, because the writable case is the same layout and a
+bank of buffers is the obvious second consumer. (b) *Leaving the flat
+`(array :float (* n m))` workaround as the answer*, which was my recommendation in
+the discussion and the plan's own default: overridden — a language that can name
+the shape should not require the user to linearize it by hand, and the cost turned
+out to be descriptor + layout + accessor only. (c) *The terse `(aget voices k)`*
+for a record array: ambiguous between a record index and an element index, so both
+are required. (d) *A row place* — `(field voices i :samples)` with no element
+index: a row's base offset is dynamic and the language has no array values, so the
+element is required.
+
+**Not in scope, and said out loud.** A *nested* record field still cannot declare
+`:size` ("DSP nested record fields cannot declare :size") — a different omission,
+and one with an exact workaround: hoisting the nested records to a top-level
+sibling record uses the same flat arena with the same layout. Named here so the
+next reader knows it was considered rather than missed.
+
+**Known residual.** The interpreter validates the *flat* index against the flat
+block (as it does for every state access), so with a dynamic element index and an
+in-range record index, an out-of-range element reads into the neighbouring record.
+A per-dimension runtime check is a candidate for P15, where the diagnostics live;
+the static checks above cover the constant case, which is where hand-written
+linearization goes wrong most.
+
+**Evidence.** JVM 230 tests / 2024 assertions, browser 50/50. The shape is a
+shared catalog case both ways — `:constant-table-bank` and `:record-array-buffer` —
+so the shared process matrix proves it on **all four targets** in f32 and f64 (92
+cases per matrix, was 90). Bites, all bit: the stride ignored in the accessor →
+shape refusals; a wrong stride in the fold → `[4.0 13.0 23.0]` instead of
+`[6.0 13.0 23.0]` and `[0.25 0.0 0.75 0.25]` instead of `[0.75 0.0 0.5 0.25]`;
+the initializers not repeated → "state has the wrong size {:expected 12, :actual
+4}" and a broken pre-existing record-array case; constant folding removed → the
+folded-node assertion and both per-dimension refusals fail.

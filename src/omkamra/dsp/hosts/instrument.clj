@@ -11,6 +11,7 @@
   (:require [omkamra.dsp :as dsp]
             [omkamra.dsp.graph :as graph]
             [omkamra.dsp.hosts :as hosts]
+            [omkamra.dsp.hosts.mixing :as mixing]
             [omkamra.dsp.instrument :as instrument]
             [omkamra.dsp.synth.pool :as pool]))
 
@@ -25,13 +26,31 @@
   {:process {:controls []}}
   sample)
 
+(defn- control-declarations
+  "A processor's control declarations, keyed by name.
+
+  A `:process` says what *kind* of control each of its parameters is: whether it
+  is a per-frame lane (`:lane`, `:has-lane`), a shared variable, a `:smooth` /
+  `:slew` value, or carries a `:default`. A derived interface has to carry those
+  across, or a post-mix control silently loses the kind it was declared with."
+  [processor]
+  (into {}
+        (map (fn [control] [(:name control) control]))
+        (get-in processor [:process :controls])))
+
 (defn- chain-effect
   "Wrap processor `bus` in processor `effect`, extending the interface with the
   effect's controls.
 
   This is `comb/through` for a *processor*: `bus`'s first parameter is its signal
   input, kept at the front, and the effect's controls (the symbols in
-  `arguments`) are appended. The body is `(effect (bus …) arguments…)`."
+  `arguments`) are appended. The body is `(effect (bus …) arguments…)`.
+
+  Each control keeps the declaration it was written with, whether it came from
+  the accumulated bus or from the effect just wrapped. The declaration has to
+  reach the *entry* process: the derived body calls the effect, and the effect
+  evaluates its own controls, but the region a lane or a shared control is read
+  from belongs to the entry, so this is where the compiler looks for it."
   [bus effect arguments]
   (let [bus-params (vec (graph/parameter-symbols bus))
         effect-params (vec (rest (graph/parameter-symbols effect)))
@@ -46,14 +65,28 @@
                        :parameters effect-params
                        :arguments arguments})))
     (let [added (vec (remove (set bus-params) (filter symbol? arguments)))
-          params (into bus-params added)]
+          params (into bus-params added)
+          ;; The effect's declaration wins for a name it introduces; the bus's
+          ;; stands for a control an earlier stage contributed. The effect names
+          ;; its controls by its own *parameters*, while the chain names them by
+          ;; the arguments, so the two are paired positionally.
+          effect-declarations (control-declarations effect)
+          argument-declarations (into {}
+                                      (keep (fn [[parameter argument]]
+                                              (when (symbol? argument)
+                                                [(graph/normalize-control-name argument)
+                                                 (get effect-declarations parameter)]))
+                                            (map vector effect-params arguments)))
+          declarations (merge (control-declarations bus) argument-declarations)]
       (graph/derived-definition
        bus
        (apply list (graph/definition-id effect)
               (graph/definition-call bus bus-params)
               arguments)
        {:params params
-        :controls (mapv (fn [control] {:name control}) (vec (rest params)))}))))
+        :controls (mapv (fn [control]
+                          (merge (get declarations control) {:name control}))
+                        (vec (rest params)))}))))
 
 (defn lower-bus
   "Fold the instrument's post-mix chain into one mono processor definition, or
@@ -118,17 +151,23 @@
 ;; The live instrument
 ;; ---------------------------------------------------------------------------
 
+(defn- shared-parameter-index
+  "The index of each shared parameter, by name, for binding a post-mix control."
+  [runtime]
+  (into {}
+        (map-indexed (fn [index parameter]
+                       [(name parameter) (long index)]))
+        (:shared-parameters runtime)))
+
 (defn- bus-shared-index
-  "Per bus ABI control, the index of the `:shared` parameter it reads.
+  "Per bus control, the index of the `:shared` parameter it reads.
 
   A post-mix control binds to the parameter of the same name. The chain is
   instrument-level, so only a `:shared` parameter may drive it; a control with no
-  such parameter is refused."
+  such parameter is refused. A *scalar* control and a `:shared` one bind the same
+  way: the difference is only where the kernel reads the value from."
   [runtime abi-controls]
-  (let [shared (vec (:shared-parameters runtime))
-        by-name (into {} (map-indexed (fn [index parameter]
-                                        [(name parameter) index])
-                                      shared))]
+  (let [by-name (shared-parameter-index runtime)]
     (mapv (fn [control]
             (let [control-name (name (:name control))]
               (if-let [index (get by-name control-name)]
@@ -138,7 +177,18 @@
                                  :parameters (vec (sort (keys by-name)))})))))
           abi-controls)))
 
-(declare write-bus-controls!)
+(defn- region-layout
+  "A region's slices by name: the offset each control's slice starts at.
+
+  A lane, a shared variable, and a per-voice lane slice all have the same shape,
+  so one lookup serves them."
+  [controls]
+  (into {}
+        (map (fn [control]
+               [(name (:name control)) (long (:offset control))]))
+        controls))
+
+(declare write-bus-controls! write-bus-shared!)
 
 (defn instrument-pool
   "Build the live instrument from a program: the voice pool plus one bus
@@ -168,7 +218,33 @@
          target (when bus (:target bus))
          layout (:control-layout bus)
          f64? (= :f64 (get-in bus [:physical-type :precision]))
-         slots (when (and bus (= :jvm target)) (control-slots layout))]
+         slots (when (and bus (= :jvm target)) (control-slots layout))
+         ;; The chain is instrument-level, so its regions are: one lane region
+         ;; and one shared region, written once and handed to every channel's
+         ;; instance — the same shape the pool gives every voice, one level up
+         ;; (M5). A bus is not fused, so a lane has one slice and there is no
+         ;; slot term in the addressing.
+         bus-lanes (if bus (vec (get-in bus [:abi :lanes])) [])
+         bus-shared (if bus (vec (get-in bus [:abi :shared])) [])
+         lane-layout (region-layout bus-lanes)
+         lane-stride (long (or (get-in bus [:abi :lane-stride]) 0))
+         lane-region (when (seq lane-layout)
+                       (mixing/real-array f64? (* lane-stride (count lane-layout))))
+         shared-layout (region-layout bus-shared)
+         shared-stride (long (or (get-in bus [:abi :shared-stride]) 0))
+         shared-region (when (seq shared-layout)
+                         (mixing/real-array f64? (* shared-stride (count shared-layout))))
+         ;; A `:shared` control reads the bus's own region, and the value comes
+         ;; from the instrument parameter of the same name — exactly the rule a
+         ;; scalar bus control follows, so both bind by name and both refuse a
+         ;; control no parameter drives.
+         shared-slices (when (seq shared-layout)
+                         (mapv (fn [control index]
+                                 {:name (name (:name control))
+                                  :offset (long (:offset control))
+                                  :parameter (long index)})
+                               bus-shared
+                               (bus-shared-index runtime bus-shared)))]
      ;; A bus control's initial value is its shared parameter's default.
      (when bus
        (dotimes [position (count abi-controls)]
@@ -187,6 +263,12 @@
                   :bus-controls (volatile! (vec control-values))
                   :bus-shared shared
                   :bus-shared-index shared-index
+                  :bus-lane-region lane-region
+                  :bus-lane-layout lane-layout
+                  :bus-lane-stride lane-stride
+                  :bus-shared-region shared-region
+                  :bus-shared-stride shared-stride
+                  :bus-shared-slices shared-slices
                   :sample-rate 48000.0}
                   slots
                   (assoc :bus-slots slots
@@ -195,9 +277,11 @@
                                                (float-array (long (:float-count layout))))
                          :bus-int-controls (int-array (long (:int-count layout)))))]
        ;; The JVM bus reads its own physical arrays, so seed them from the
-       ;; shared parameters' defaults before the first render.
+       ;; shared parameters' defaults before the first render. Its regions are
+       ;; host-owned, so they are seeded here too.
        (when (:bus-slots live)
          (write-bus-controls! live))
+       (write-bus-shared! live)
        live))))
 
 (defn pool-of
@@ -228,6 +312,31 @@
                     (long (aget values position)))))))
   nil)
 
+(defn- write-bus-shared!
+  "Broadcast every shared post-mix control's parameter across its slice.
+
+  A `:shared` control is read one float per *frame*, so its parameter's current
+  value has to sit in every frame of the slice — the same broadcast a shared
+  region gets on every target (M5). Resolved once at construction, so this is
+  off the audio path: it runs when the instrument is built and when a parameter
+  is set."
+  [live]
+  (when-let [region (:bus-shared-region live)]
+    (let [^doubles shared (:bus-shared live)
+          stride (long (:bus-shared-stride live))
+          f64? (:bus-f64? live)]
+      (doseq [{:keys [offset parameter]} (:bus-shared-slices live)]
+        (let [value (aget shared (long parameter))
+              offset (long offset)]
+          (if f64?
+            (let [^doubles target region]
+              (dotimes [frame stride]
+                (aset-double target (int (+ offset frame)) value)))
+            (let [^floats target region]
+              (dotimes [frame stride]
+                (aset-float target (int (+ offset frame)) (float value)))))))))
+  nil)
+
 (defn- refresh-bus-values!
   "Re-read every bus control from its shared parameter, and refresh the vector
   the portable (interpreter) bus runner reads."
@@ -238,7 +347,44 @@
       (dotimes [position (alength indices)]
         (aset values position (aget shared (aget indices position))))
       (vreset! (:bus-controls live) (vec values))))
+  (write-bus-shared! live)
   nil)
+
+(defn set-bus-lane!
+  "Set a per-frame curve for one of the post-mix chain's lanes.
+
+  `lane` names a control the compiled chain declares a lane for (a `:lane` or
+  `:has-lane` control on a stage), and `values` is one float per frame, however
+  the host spells it. The region belongs to the *instrument*, not to a channel:
+  the chain is one processor run once per channel over the same summed signal,
+  so every channel's instance reads the same curve — the pool's shared lane, one
+  level up (M4c/M5).
+
+  Takes effect on the next `render!`."
+  [live lane values]
+  (let [region (:bus-lane-region live)]
+    (when-not region
+      (throw (ex-info "the post-mix chain declares no lanes" {:lanes []})))
+    (let [layout (:bus-lane-layout live)
+          key (if (string? lane) lane (clojure.core/name lane))
+          offset (get layout key)]
+      (when-not offset
+        (throw (ex-info "the post-mix chain declares no such lane"
+                        {:lane lane :lanes (vec (sort (keys layout)))})))
+      (let [stride (long (:bus-lane-stride live))
+            length (min (mixing/value-length values) stride)
+            f64? (:bus-f64? live)
+            offset (long offset)]
+        (if f64?
+          (let [^doubles target region]
+            (dotimes [index length]
+              (aset-double target (int (+ offset index))
+                           (double (mixing/value-at values index)))))
+          (let [^floats target region]
+            (dotimes [index length]
+              (aset-float target (int (+ offset index))
+                          (float (mixing/value-at values index))))))))
+    nil))
 
 (defn set-parameter!
   "Set a `:shared` parameter. Every sounding voice and the post-mix bus follow
@@ -281,15 +427,23 @@
 
   The JVM path uses the unchecked primitive adapter, exactly as the voice pool
   does; the interpreter (and, later, a browser host) uses the context adapter,
-  where the extra allocation is acceptable because it is not the audio path."
+  where the extra allocation is acceptable because it is not the audio path.
+
+  Both are handed the chain's two regions: the lane region a per-frame curve is
+  written into, and the shared region a `:shared` control is read from. They
+  belong to the instrument, so every channel's instance sees the same ones."
   [live bus buffer frames sample-rate]
   (case (:bus-target live)
     :jvm (dsp/process-unchecked! bus buffer buffer frames (double sample-rate)
                                  (:bus-float-controls live)
-                                 (:bus-int-controls live))
+                                 (:bus-int-controls live)
+                                 (:bus-lane-region live)
+                                 (:bus-shared-region live))
     (dsp/process! bus {:input buffer :output buffer :frames frames
                        :sample-rate sample-rate
-                       :controls @(:bus-controls live)})))
+                       :controls @(:bus-controls live)
+                       :lanes (:bus-lane-region live)
+                       :shared (:bus-shared-region live)})))
 
 (defn note-on!
   "Start `note` at `velocity`, returning the voice index it took."

@@ -107,6 +107,9 @@
          ;; overlap it, not from a lookup per arena index: a per-call-site region
          ;; is one entry spanning thousands of indices, and the indices inside it
          ;; have no entry of their own.
+         ;; A call site with no state owns an *empty* partition (D70), so a range
+         ;; with nothing in it is not an error: it is a slot whose reset does
+         ;; nothing, because there is nothing of its own to restore.
          partition-ranges (when mapping
                             (mapv (fn [{:keys [base size]}]
                                     (let [base (long base)
@@ -117,14 +120,16 @@
                                                               (and (< index end)
                                                                    (< base (+ index span)))))
                                                           state-layout)]
-                                      {:start (reduce min (map (comp long :offset val) entries))
-                                       :end (reduce max
-                                                    (map (clojure.core/fn [[_ {:keys [offset size
-                                                                                      element-bytes]}]]
-                                                           (+ (long offset)
-                                                              (* (long (or size 1))
-                                                                 (long element-bytes))))
-                                                         entries))}))
+                                      (if (empty? entries)
+                                        {:start 0 :end 0}
+                                        {:start (reduce min (map (comp long :offset val) entries))
+                                         :end (reduce max
+                                                      (map (clojure.core/fn [[_ {:keys [offset size
+                                                                                        element-bytes]}]]
+                                                             (+ (long offset)
+                                                                (* (long (or size 1))
+                                                                   (long element-bytes))))
+                                                           entries))})))
                                   (:call-partitions abi)))
          ;; The base -> fused control table, one row per slot (M6). A plain kernel
          ;; has one identity row, so the write path is the same loop either way.
@@ -342,6 +347,21 @@
            (.apply (:process voice) nil arguments))
          (mixing/mix-block! containment f64? channels voice output frames))))))
 
+(defn- copy-region!
+  "Copy the frames about to be rendered from a host region into an instance's.
+
+  A Wasm instance owns its memory, so the instrument's lane and shared regions
+  live outside it: the host writes the master once and this copies the run a
+  block can read into the instance's own region, one run per slice — the same
+  handoff the pool gives a voice's shared region (M5)."
+  [target master stride slices frames]
+  (when (and target master (pos? (long slices)))
+    (let [frames (js/Math.min frames stride)]
+      (dotimes [slice slices]
+        (let [base (* slice stride)]
+          (dotimes [index frames]
+            (aset target (+ base index) (aget master (+ base index)))))))))
+
 (defn wasm-bus-kernel
   "A post-mix bus over a Wasm module.
 
@@ -350,37 +370,64 @@
   frames, sample-rate, controls…)`, then copies the output region back. The
   input and output views are made once per instance.
 
+  The chain is instrument-level, so its regions are: one lane region and one
+  shared region for the whole instrument, handed to every channel's instance.
+  The host writes them with `:write-lane!` / `:write-shared!`, and each call
+  copies the frames it can read into the instance's own memory, because a Wasm
+  instance owns its memory (M5's handoff, one level up).
+
   `memory-layout` is the artifact's `:memory` map and `precision` its physical
-  precision. Returns the same `{:create-bus, :run-bus!, :reset-bus!}` map as
-  `omkamra.dsp.hosts.js/js-bus-kernel`."
+  precision. Returns the same `{:create-bus, :run-bus!, :reset-bus!,
+  :write-lane!, :write-shared!}` map as `omkamra.dsp.hosts.js/js-bus-kernel`."
   [module abi memory-layout precision]
   (let [f64? (= :f64 precision)
         frame-capacity (long (:frame-capacity memory-layout))
         input-offset (long (get-in memory-layout [:regions :input :offset] 0))
         output-offset (long (get-in memory-layout [:regions :output :offset] 0))
-        control-count (clojure.core/count (:controls abi))]
+        control-count (clojure.core/count (:controls abi))
+        lane-stride (long (or (:lane-stride abi) 0))
+        lane-layout (mixing/region-layout (:lanes abi))
+        lane-count (clojure.core/count lane-layout)
+        lanes-offset (long (get-in memory-layout [:regions :lanes :offset] 0))
+        lane-region (when (pos? lane-count)
+                      (mixing/real-array f64? (* lane-stride lane-count)))
+        shared-stride (long (or (:shared-stride abi) 0))
+        shared-layout (mixing/region-layout (:shared abi))
+        shared-count (clojure.core/count shared-layout)
+        shared-offset (long (get-in memory-layout [:regions :shared :offset] 0))
+        shared-region (when (pos? shared-count)
+                        (mixing/real-array f64? (* shared-stride shared-count)))
+        ;; Where each region sits in the generated argument list: the input, the
+        ;; output, frames and the sample rate, then the controls, then the
+        ;; regions — which for Wasm are this instance's own region offsets.
+        lane-slot (when (pos? lane-count) (+ 4 control-count))
+        shared-slot (when (pos? shared-count)
+                      (+ 4 control-count (if (pos? lane-count) 1 0)))]
     {:create-bus
      (clojure.core/fn []
-       ;; A post-mix chain that declares a lane needs the same delivery the
-       ;; voices now get. Until it has it, refuse once here rather than on every
-       ;; block in the audio path.
-       (when (or (seq (:lanes abi)) (seq (:shared abi)))
-         (throw (ex-info "this target cannot deliver lanes or a shared region to a bus yet"
-                         {:lanes (mapv :name (:lanes abi))
-                          :shared (mapv :name (:shared abi))
-                          :target :wasm})))
        (let [instance (js/WebAssembly.Instance. module)
              exports (.-exports instance)
-             memory (gobj/get exports "memory")]
+             memory (gobj/get exports "memory")
+             arguments (js/Array. (+ 4 control-count
+                                     (if (pos? lane-count) 1 0)
+                                     (if (pos? shared-count) 1 0)))]
+         (when lane-slot (aset arguments lane-slot lanes-offset))
+         (when shared-slot (aset arguments shared-slot shared-offset))
          {:instance instance
           :memory memory
           :process (gobj/get exports "process")
           :reset (gobj/get exports "reset")
           :input-view (real-view memory f64? input-offset frame-capacity)
           :output-view (real-view memory f64? output-offset frame-capacity)
-          :arguments (js/Array. (+ 4 control-count))}))
+          :lanes (when (pos? lane-count)
+                   (real-view memory f64? lanes-offset (* lane-stride lane-count)))
+          :shared (when (pos? shared-count)
+                    (real-view memory f64? shared-offset (* shared-stride shared-count)))
+          :arguments arguments}))
      :run-bus!
      (clojure.core/fn [bus input output frames sample-rate controls]
+       (copy-region! (:lanes bus) lane-region lane-stride lane-count frames)
+       (copy-region! (:shared bus) shared-region shared-stride shared-count frames)
        (let [in-view (:input-view bus)
              out-view (:output-view bus)]
          (dotimes [index frames]
@@ -397,4 +444,18 @@
            (aset output index (aget out-view index)))))
      :reset-bus!
      (clojure.core/fn [bus]
-       (when-let [reset (:reset bus)] (.call reset)))}))
+       (when-let [reset (:reset bus)] (.call reset)))
+     :write-lane!
+     (clojure.core/fn [lane values]
+       (when lane-region
+         (mixing/write-region! lane-region
+                               (mixing/region-offset lane-layout lane :lane)
+                               lane-stride values f64?))
+       nil)
+     :write-shared!
+     (clojure.core/fn [control values]
+       (when shared-region
+         (mixing/write-region! shared-region
+                               (mixing/region-offset shared-layout control :shared-control)
+                               shared-stride values f64?))
+       nil)}))

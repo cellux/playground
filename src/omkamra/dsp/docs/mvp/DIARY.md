@@ -3356,6 +3356,35 @@ rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
 
 ### Resume here
 
+- **Next: H — closing the declared gaps** (`PHASES.md`, the section after F).
+  An audit of the source for "not yet"/"cannot … yet" found five: the worklet
+  path is a renderer rather than a runtime (no lanes, shared region, `:activity`
+  read-back, per-slot reset or allocator, and mono-only events); the browser bus
+  carries neither lanes nor a shared region; a lane on a per-channel control has
+  no delivery; a fused voice with no state and no `gate` cannot fuse; and arrays
+  of records cannot hold array fields.
+
+  **Order and one deferral.** **H2, H3 and H4 are done (D67, D68, D70)**: the
+  chain's own lane and shared regions, a per-channel lane, and a slot that is the
+  call site's identity rather than a state partition. **H5** (array fields in
+  records) is the last H item and it is a language decision, not a slice.
+  **H1 — the pool inside a worklet node — is deferred until after P13 and P14**,
+  because how a worklet gets its kernel and its configuration is exactly what
+  those phases decide: P13 runs the compiler in the browser (squint as its JS
+  backend *inside* SCI), so a node's kernel is a blob the page creates rather
+  than a per-request server URL, and P14 makes worklet installation
+  artifact-driven while *removing* the testbed assembly H1 would have extended.
+  H1 then starts with a decision about where the allocator lives (SCI hosting the
+  pool in the worklet / a Shadow-built worklet runtime / an allocator emitted by
+  the compiler).
+
+  **Toolchain, since it decides this.** Shadow compiles this project's
+  ClojureScript (page, worker, hosts, pool, `synth`) with cljs semantics; SCI is
+  how our Clojure code is meant to run in the browser (P13), also semantics
+  preserving; **squint is not a ClojureScript compiler** — syntax to native JS,
+  JS data structures, `Symbol.for` protocols — and its one intended job here is
+  the emitter's JS backend (D41), running inside SCI. So no *library* namespace
+  goes through squint.
 - **The F workstream is complete: F0, F1, F2, F3, F4 and F5 are all done.** Fusion is *deployed*: `{:fusion {:slots S}}`
   fuses the **reference instrument** (stereo, process-shaped) and a fused pool
   renders its plain pool **bit for bit** on the **interpreter, the JVM, and in the
@@ -4705,3 +4734,215 @@ F2c (JS/Wasm) → F2d (reference instrument fuses; the browser instrument host t
 switches on, which is F1's second half). The new form's shape is the open design
 decision — it becomes DSL surface, so it is worth choosing deliberately rather
 than by accident.
+
+### H2 — the post-mix chain gets its own lane and shared regions
+
+The audit item was "the browser bus carries neither lanes nor a shared region":
+`hosts/js.cljs` and `hosts/wasm.cljs` refused at bus construction. Reading the
+code first changed what the slice is — the refusal was **unreachable**. A
+post-mix stage *could* write `{:name amount :lane true}` and the compiler would
+honour it, but `chain-effect` (which rebuilds the chain's interface at every
+stage, and overrides `:process :controls` to do it) rebuilt each control as bare
+`{:name control}`, so the declaration never reached the entry process. The gap
+was therefore in **lowering** as much as in the hosts, and the same is true one
+level down: `hosts/instrument.clj`'s `run-bus!` handed the bus neither region
+(`process-unchecked!` with only the physical control arrays; `dsp/process!` with
+only `:controls`), so even the interpreter target could not run a lane-carrying
+chain.
+
+**What landed (D67).**
+
+- `chain-effect` keeps each control's declaration — the chain's own, and the
+  effect's (paired positionally, because the effect names its controls by *its*
+  parameters while the chain names them by the *arguments*). A declaration has to
+  reach the entry process: the derived body calls the effect, and the effect
+  evaluates its own controls, but the region a lane or shared control is read from
+  belongs to the entry.
+- The chain's regions are **instrument-level**: one lane region and one shared
+  region, written once and handed to every channel's instance — the pool's
+  `:shared` region, one level up. The instrument host owns them
+  (`set-bus-lane!`; the shared region is filled from the shared *parameter* of the
+  same name, the rule a scalar bus control already follows, so `set-parameter!`
+  reaches the chain too) and `run-bus!` passes them to the JVM *and* the
+  interpreter path.
+- `dsp/process!` now accepts a region a host already owns, not only named values
+  to flatten. Its docstring already promised that path ("a real-time host writes
+  the region directly and skips this path"); there was no way to take it.
+- The browser buses do the same. JS hands the host's region to every instance in
+  its argument array; Wasm copies the frames a block can read into each instance's
+  own memory before the call — the handoff the pool already gives a voice's shared
+  region, because a Wasm instance owns its memory. Both runners gained
+  `:write-lane!` / `:write-shared!` (a bare number broadcasts, as `dsp/process!`
+  does for a shared control).
+- The in-page interpreter bus runner gained the same two writers, so the browser
+  checks stay differential.
+
+**The fixture is the check.** `fixtures/bus-gain-voice` renders exactly `gate`,
+i.e. 1.0 for every frame it sounds, so a post-mix stage whose gain is the region
+makes the samples *be* the curve — nothing to compute, nothing to tolerate.
+`bus-lane-instrument` and `bus-shared-instrument` are the two chains, pinned:
+
+- JVM (the oracle) and interpreter: `a-post-mix-lane-reaches-the-bus` (renders
+  `[1..8]`, plus the two loud refusals: an unknown lane name, and
+  `set-bus-control!` on a lane-only control, which has no scalar) and
+  `a-post-mix-shared-control-follows-its-parameter` (the parameter's default fills
+  the region at construction, and setting it reaches the chain — not only the
+  voices).
+- Browser: `JavaScript post-mix lane/shared` and `Wasm post-mix lane/shared`,
+  each compared with the in-page interpreter host *and* against the exact curve.
+
+**Bites, all four.** Dropping the declaration merge in `chain-effect` → exactly
+the new assertions fail (6 failures, 1 error); a no-op `set-bus-lane!` → the lane
+samples become zeros; a no-op `write-bus-shared!` → the shared region stays zero;
+on the page, not handing the lane to the JS instance → the suite fails with
+`Cannot read properties of undefined (reading '0')`, and skipping the Wasm
+per-block copy → `[[0 …]]` against `[[1 2 3 4 5 6 7 8]]`.
+
+**Counts.** JVM 227 tests / 1973 assertions / 0 failures; browser 46/46 (was
+225/1953 and 42/42). H3 (a lane on a per-channel control) is next.
+
+### H3 — a lane beside `:bend` is a curve per channel
+
+The audit item was "a lane on a per-channel control has no delivery", refused at
+pool construction. Reading the code made the shape of the answer clear: the
+pool's `:bend` is a *source bank indexed by channel* — `set-pitch-bend!` takes a
+channel, and `resolve-controls!` reads `(aget bends (aget channels index))` — so a
+lane beside it is a curve per channel, and the scope should be inferred from the
+source, which is exactly what `lane-scope` already does for `:shared` and
+`:per-voice` parameters. `:bend` was the one exception, and it was an exception
+because the delivery did not exist, not because the scope was wrong.
+
+**What landed (D68).** A third lane scope, `:channel`, and the delivery it needs:
+the pool allocates a `channel-count` × `lane-stride` curve bank at construction,
+`set-channel-lane!` copies a host's curve into it and writes it to every voice
+already on that channel, and `sound-voice!` delivers a channel's curves to a voice
+as it starts. The two facts that force the copy are worth stating: a voice that
+starts *later* must read the curve published for its channel (a setter cannot
+reach a voice that has not started), and a voice can *move* to another channel (a
+steal, a mono retrigger, a host playing several channels) while its lane region is
+per voice — so without re-delivery it would keep reading the channel it left. The
+other two setters now refuse a channel lane with a message that names the right
+one.
+
+**The check.** `a-per-channel-lane-reaches-the-voice-on-its-channel` runs on the
+JVM and the interpreter: two curves published before any note, one voice per
+channel reading its own curve frame for frame; a channel nobody wrote reading
+zero; a host's buffer mutated after the write, so a pool that only *pointed* at it
+would read the wrong thing; a curve published while a voice is already sounding
+(the write-time delivery); and one voice taking three channels in turn (the
+activation delivery). In the browser, `JavaScript`/`Wasm channel lane` run the
+same steps through a real pool over a browser kernel against the in-page
+interpreter pool, with the same literal numbers.
+
+**Bites, all three, plus the page.** No activation delivery → 6 failures (the
+other channel reads channel 0's curve, and the moved voice keeps the old one); no
+copy (the bank stays zero) → 14 failures; no set-time delivery → the "already
+sounding" check keeps the old curve (2 failures). On the page, the activation stub
+renders `[[1 2 3 4] [1 2 3 4] [1 2 3 4] [5 5 5 5]]` — the voice never follows its
+channel.
+
+**Counts.** JVM 228 tests / 1991 assertions / 0 failures; browser 48/48 (was
+227/1973 and 46/46). H4 — a fused slot identity that does not require state — is
+next.
+
+### H4 — a slot is the call site's identity, and state is one thing it may own
+
+The audit item was "a fused voice with no state and no `gate` cannot fuse", refused
+by every host with "a slot cannot be reset on its own". Reading the code showed the
+refusal is *false* for that voice: a stateless slot has nothing to reset. What the
+refusal actually said was that a slot was *derived from* a state partition — the
+hosts counted partitions, the lane base indexed by partition ordinal, the specials
+readback hung off one — so a voice with no state had no identities at all. The
+plan's two options were "give every call site an identity of its own" or "decide a
+fused voice must carry state"; the first is what the ABI's own name
+(`:call-partitions`) and every host's message ("the number of call sites the
+process has") already claimed.
+
+**What landed (D70).** `ir.clj`'s `lower-call` always records a partition, empty
+when the callee has no state, so slot *k* is the *k*-th call site whether or not it
+carries anything. Three consequences: a stateless voice fuses (S identities, a
+no-op reset, no specials — the pool already handles a voice with no `:activity`); a
+lane-reading callee gets its slice without state (the base is `slot × lanes ×
+stride` off the call-site ordinal, which also removes a latent shift where a
+stateless call site before a stateful one skewed every later slice); and the Wasm
+host's byte-range scan has to accept an empty range, since an empty partition
+overlaps no layout segment. The JVM's range resolution already returned an empty
+range for one and the JavaScript host loops `size` times, so only Wasm named the
+degenerate case.
+
+**The check.** `a-fused-slot-does-not-need-state-of-its-own` pins both halves on
+the JVM and the interpreter: `stateless-voice-description` with `{:fusion {:slots 2
+:guard false}}` renders what two plain voices render (92 = 60×1.0 + 64×0.5, so a
+comparison of silence cannot pass), and `gated-lane-only` — no state at all —
+renders F4's own numbers `[22 24 26 28]`, each slot reading its own lane slice. The
+artifact is asserted directly too: two partitions, each `{:size 0}`. In the
+browser, `JavaScript`/`Wasm stateless fused pool` run the stateless voice through
+a real kernel against the in-page interpreter pool, which is what exercises the
+Wasm host's empty-range path.
+
+**Bites, and one that did not bite.** Reverting the partition to "stateful call
+sites only" → all three new assertions fail with the original refusal (the pool
+cannot even be built). Throwing on an empty Wasm range → the Wasm check fails
+("empty partition") while JavaScript still passes — precisely the asymmetry that
+motivated the fix. The *first* attempt at that bite removed the guard but left the
+parentheses unbalanced; Shadow could not rebuild that stub and served the previous
+build, so the check passed — a false negative indistinguishable from "the guard is
+not needed". A bite stub has to be checked for validity before its silence is
+believed.
+
+**Counts.** JVM 229 tests / 1999 assertions / 0 failures; browser 50/50 (228/1991
+and 48/48 after H3, 225/1953 and 42/42 before H2). H5 — array fields in records,
+the one remaining H item — is a decision, not a slice; H1 stays deferred until
+P13/P14.
+
+### H5 — an array of records owns an array field, and a bank is just a record
+
+The last H item was a *language* omission, not a host gap: `descriptor.clj` refused
+an array of records whose field declared `:size`, and D16 had recorded it as
+"(rejected)". The plan had it as a decision ("decide and
+record *not now*"), and my recommendation was the same, on the grounds that a flat
+`(array :float (* n m))` with hand arithmetic loses no expressiveness. Asking what
+it would *buy* first is what exposed that it was cheap; the user then overrode the
+default — "The DSP language should not have such omissions" — and was right. D16's own layout rule already made the record
+dimension a stride ("for a slot of `:size N`, each leaf becomes one flat state entry
+of `:size N`"), and the selector grammar already had both positions, so what was
+missing was the refusal, one `:stride` key, and one multiply.
+
+**What landed (D71).** A leaf of an array of `n` records with a field of `:size m`
+is one flat block of `n * m` slots carrying `:stride m`, and an access folds the
+two indices into the single element index the ABI already had: `record * stride +
+element`. The consequence worth stating is the one that kept the slice small —
+**no backend changed**. Every target already saw a constant base offset and one
+element index expression; they now see `bank * 4 + index` where they used to see
+`index`. `strided-index` folds the index at compile time when both parts are
+constant, so a literal bank read stays a `:const` and reports no dynamic
+diagnostic. Per dimension, a constant index is checked against its own bound —
+which is the safety a flat array cannot offer, because one flat bound cannot tell a
+wrong record from a wrong element.
+
+**Grammar now matches D16.** `(field voices i :line k)` and
+`(set-field! voices i :line k v)` are the general spellings; `(aget voices i k)` and
+`(aset voices i k v)` are the terse ones for a record array owning exactly one
+array field, generalizing `(aget store k)` for a scalar record. In exchange, an
+array of records is now *always* indexed: `(field voices :phase)` used to read
+record 0's element silently and is now refused. The catalog case `:constant-table-bank`
+is the wavetable bank the user asked for, and `:record-array-buffer` is the
+writable twin — both shared cases, so the browser's process matrix runs them on
+JavaScript and Wasm in f32 and f64, alongside the interpreter and JVM runs the JVM
+suite already makes.
+
+**The four bites.** Ignoring the stride in the accessor flips the shape detection
+and refuses the element index; folding with a wrong stride keeps everything
+compiling and changes the numbers (`[4.0 13.0 23.0]` for `[6.0 13.0 23.0]`,
+`[0.25 0.0 0.75 0.25]` for `[0.75 0.0 0.5 0.25]`, and `:value 1` where the folded
+index should be 4); not repeating the field's initializers per record gives a
+12-slot block a 4-value `:init` and the interpreter says "state has the wrong size
+{:expected 12, :actual 4}" — that bite also broke an existing record-array case,
+which is how I learned that `:init` is the *source of truth* for the state array's
+length, not `:size`; and removing the constant fold fails the folded-node assertion
+and both per-dimension refusals at once.
+
+**Counts.** JVM 230 tests / 2024 assertions / 0 failures; browser 50/50, with 92
+cases per shared process matrix (was 90). H's remaining open items are H1
+(deferred to after P13 → P14 by design) and nothing else: H2, H3, H4 and H5 are
+done.

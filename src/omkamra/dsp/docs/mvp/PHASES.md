@@ -29,6 +29,11 @@ are met.
 Phase identifiers are stable. Later phases never silently change an earlier
 phase's meaning; a changed decision is recorded in `DECISIONS.md`.
 
+Three lettered sections sit *off* the P spine, because nothing in the spine
+depends on them: **M** (instrument parameters and modulation), **F** (fusion,
+deployed) and **H** (closing the declared gaps). Each states its own goal,
+dependencies and slices, and each ends with a status line saying what is done.
+
 ---
 
 ## P0 — Baseline (completed)
@@ -1034,6 +1039,211 @@ and was reworked to D57's design (D59).
 
 **Done when** is met: a fused instrument renders bit for bit what the plain one
 renders on every target, and the AudioWorklet path renders `slots` voices per node.
+
+---
+
+## H — Closing the declared gaps
+
+**Goal.** Leave nothing that the code itself declares missing. An audit of
+`src/omkamra/dsp` for "not yet" / "cannot … yet" / "until it has it" finds a
+handful of capabilities that a *user* would reasonably expect and that no
+decision entry blesses as a design choice. H implements them — or, where
+implementation is a genuine design change, replaces the refusal with a decision
+that says why not, so nothing keeps reading as an unfinished edge.
+
+**Why a letter, not a number.** Like M and F, H is not in the P spine's
+dependency order and nothing in the spine depends on it. It adds no language
+surface: every gap is in a *host* — the browser worklet, the browser bus, the
+pool's lane routing — where the compiler, the IR and the targets already work.
+
+**Depends on.** All of M (the fused hosts) and all of F — in particular F5's
+fused worklet node, which H grows into a runtime. D28/D46 (lanes), D52/D56–D66
+(fusion). H2–H4 are not gated on P12–P16: the browser hosts and the pool already
+exist in the code. **The worklet-runtime slice, H1, is** — it waits for P13 and
+P14, for the reason given under H1.
+
+**The problem it removes.** The audit, with the evidence for each item:
+
+1. **The worklet path is a renderer; the pool path is a runtime.** A worklet
+   node has no lanes, no shared region, no specials read-back (so no `:activity`,
+   hence no tail-aware freeing), no per-slot reset (`worklet_adapters/js.cljs`
+   has none at all; the Wasm one resets the whole module), no allocator, and
+   mono-only event dispatch ("left for the planar-worklet slice"). Everything a
+   pool gives for free, a node makes the page rebuild.
+2. **The browser bus carries neither lanes nor a shared region**:
+   `hosts/js.cljs` and `hosts/wasm.cljs` refuse at bus construction ("this target
+   cannot deliver lanes or a shared region to a bus yet"). The JVM folds the
+   post-mix chain into the instrument's own artifact, so it handles them; the
+   browser builds the bus as a separate kernel and does not. **Closed (D67).**
+3. **A lane on a per-channel control has no delivery** — `synth/pool.cljc`
+   refuses `:bend`'s lane ("no per-lane delivery yet"). **Closed (D68).**
+4. **A fused voice with no state and no `gate` cannot fuse**: every host refuses
+   with "a slot cannot be reset on its own", because slot identity *is* a call
+   partition and only a stateful call site (or `guard`'s latch) has one.
+   **Closed (D70).**
+5. **Arrays of records cannot contain array fields** — `descriptor.clj` refuses
+   it. Unlike the others this is a *language* gap (nested aggregate layout in a
+   flat arena), not a host gap. **Closed (D71).**
+
+Two ledger entries that are **decisions, not gaps**, and so stay: `poly`
+refusing a `:shared` control per slot (D50 — one value is the point), and the
+linker refusing a module access to the caller's process buffers (D57's
+`with-buffers` is the sanctioned path). `guard` not skipping *process-shaped*
+fused voices is a withheld optimisation, explicitly not a correctness gap.
+
+**Deliverables.**
+
+1. A **worklet node that owns a pool** — *after P13/P14*: it renders, allocates,
+   automates per voice and frees tails exactly as a pool over the same kernel
+   does, with the page's surface being the pool's own API rather than one message
+   per capability.
+2. **Sample-accurate note timing** in that node — finer than the pool path,
+   which applies control writes at block boundaries.
+3. A **browser bus** that carries lanes and a shared region, pinned per target.
+4. **Per-channel lane delivery**, or a decision.
+5. A **fused slot identity that does not require state**, or a decision.
+6. A **recorded position on array fields in records**, so the language's
+   remaining edge is a decision rather than a refusal.
+
+**Note on the toolchain (durable).** Three layers, and they are not
+interchangeable.
+
+- **Shadow** compiles this project's ClojureScript — the page, the worker build,
+  the browser hosts, the pool, `synth` — and keeps cljs semantics: persistent data
+  structures, real protocol dispatch, `deftype`/`reify`.
+- **SCI** is how *our* Clojure code is meant to run in the browser (P13). It is an
+  interpreter, so it preserves those semantics too.
+- **Squint** is not a ClojureScript compiler: it compiles *syntax* to native JS,
+  so data structures are JS objects and arrays rather than persistent ones, and
+  protocols dispatch through `Symbol.for`. Here it has exactly one intended job —
+  the **JS backend of the emitter** (D41), running *inside* SCI in the browser
+  (P13). The emitter builds ClojureScript forms and hands them to
+  `squint.compiler`; D41's four rules keep the result a standalone module (in
+  particular, nothing may lower to a `squint_core` reference).
+
+So the squint-compiled code in the repository today is either emitter output (the
+kernels) or written in squint's own idiom (`defclass`, `aget`/`aset`, `js*`,
+`squint_core`) — the two worklet adapters. No *library* namespace goes through
+squint: `synth/pool.cljc`, `synth.cljc` and `hosts/{js,wasm,mixing,fusion}` are
+real ClojureScript, and running them through it would be a semantic change, not a
+portability question.
+
+**Slices.** H2–H5 land before P12; **H1 waits for P13 and P14.**
+
+- **H2 — the post-mix chain carries lanes and a shared region. DONE (D67).** The
+  chain is a processor, so it needs the region handoff the pool gives voices — but
+  the gap was in *lowering* before it was in the hosts: `chain-effect` rebuilt each
+  control as bare `{:name …}`, so a stage's declaration never reached the entry
+  process, and the browser refusal was unreachable. The chain's lane and shared
+  regions are instrument-level (one each, written once, handed to every channel's
+  instance) and every host delivers them: the JVM and interpreter paths, the JS
+  bus (the host's array in each instance's arguments), the Wasm bus (copied into
+  the instance's memory, as a voice's shared region is). Pinned by
+  `bus-gain-voice`, whose output is exactly 1.0 while it sounds, so the samples
+  *are* the curve: `a-post-mix-lane-reaches-the-bus` and
+  `a-post-mix-shared-control-follows-its-parameter` on the JVM and interpreter,
+  `JavaScript`/`Wasm post-mix lane` and `… shared` on the page.
+- **H3 — a lane on a per-channel control. DONE (D68).** `:bend` is the pool's
+  source bank indexed by *channel*, so its lane is a curve per channel and the
+  scope is inferred from the source, like `:shared` and `:per-voice`. The pool
+  keeps a curve bank (allocated at construction), `set-channel-lane!` copies a
+  host's curve into it and writes it to the voices already on that channel, and
+  `sound-voice!` delivers a channel's curves to a voice as it starts — which is
+  what makes both "a voice that starts later reads the curve published before its
+  note" and "a voice that moves to another channel stops reading the old one"
+  true. Pinned on the JVM and the interpreter
+  (`a-per-channel-lane-reaches-the-voice-on-its-channel`, with the host's buffer
+  mutated after the write) and on the page (`JavaScript`/`Wasm channel lane`).
+- **H4 — a fused slot identity without state. DONE (D70).** Slot `k` was the
+  `k`-th *state* partition, so a voice with no state had no slots and every host
+  refused it ("a slot cannot be reset on its own" — false for a voice with nothing
+  to reset). Every call site now owns a partition, empty when the callee has no
+  state, so the ordinal is the call-site ordinal: a stateless voice fuses (S
+  identities, a no-op reset), a lane-reading callee gets its slice without state,
+  and the Wasm host's byte-range scan accepts an empty range. Pinned by
+  `a-fused-slot-does-not-need-state-of-its-own` (JVM and interpreter) and
+  `JavaScript`/`Wasm stateless fused pool` on the page.
+- **H5 — array fields in records. DONE (D71).** A language omission, not a host
+  gap: an array of records whose field declared `:size` was refused outright, and
+  D16 recorded it as "(rejected)". A leaf is now one flat block of `n * m` slots
+  carrying `:stride m`, and an access folds the two indices into the one element
+  index the ABI already had (`record * stride + element`), so **no backend
+  changed**; a constant bank with dynamic indices (a wavetable bank) and a bank of
+  writable buffers are both expressible, and a constant index is checked per
+  dimension. Pinned by `record-array-fields` (JVM and interpreter) and, as shared
+  catalog cases, by `:constant-table-bank` and `:record-array-buffer` on all four
+  targets. A *nested* record field still cannot declare `:size` — a different
+  omission with an exact hoisting workaround; see D71.
+- **H1 — the worklet runtime (deferred; depends on P13 and P14).** The five
+  worklet gaps are one gap: they all dissolve if the pool — or an equivalent
+  allocator — lives in the node. But *how it gets there* is not H's to invent:
+
+  - **P13** puts the compiler in the browser with squint as its JS backend
+    *inside* SCI, so a node's kernel is produced by the page (a blob URL for
+    `addModule`) instead of being fetched from a per-request server URL. That
+    makes H1's original problem — delivering a per-request kernel into a
+    statically built module — disappear rather than get solved.
+  - **P14** makes worklet installation artifact-driven and explicitly *removes*
+    worklet configuration reconstruction from `omkamra.dsp.testbed` — the very
+    code H1 would otherwise have extended.
+
+  So H1 starts after P14, and begins with a **decision** about where the
+  allocator lives, taken in that world:
+
+  1. **SCI in the worklet**, hosting the pool (`synth/pool.cljc`). The
+     architecture-aligned option: real cljs semantics (persistent data, protocol
+     dispatch), one implementation of the allocation policy, no second build. The
+     cost is SCI's runtime in the worklet and interpretation overhead on
+     control-rate work — per block and per note, never per sample.
+  2. **A Shadow-built worklet runtime.** Faithful and fast, but a second build
+     target, and a direction P13 does not take.
+  3. **An allocator emitted by the compiler**, in the squint-safe forms D41
+     already constrains kernels to. Smallest at runtime, but a second
+     implementation of a policy the pool's contract says must not be duplicated.
+
+  Once chosen, the slices are the ones sketched earlier: the port's protocol is
+  the pool's own API (note-on/off, all-notes-off, set-control,
+  set-voice-controls, set-lane, set-voice-lane, set-shared, stats,
+  voice-snapshot), so lanes, shared delivery, `:activity` and per-slot reset need
+  no new messages at all; and note events are applied at their exact frame by
+  splitting the block at event frames and calling `note-on!`/`note-off!` between
+  sub-block renders — finer than the pool path's block-rate writes. The node's
+  *parameters* stay (D66): the fused interface remains a manual surface, notes
+  are a second one.
+
+**Done when.** Every refusal the audit found is either gone or replaced by a
+decision entry: H2–H4 done before P12, H5 decided, and H1 — with P13/P14 in place
+— leaving a worklet node that renders, allocates, automates and frees like a
+pool.
+
+**Risks and open questions.**
+
+- **H1 is deferred by design, not by omission.** Its mechanism belongs to
+  P13/P14; taking it earlier would either duplicate them or invent a
+  worklet-build path the roadmap does not have. The spike that was going to prove
+  a Shadow build loads as a worklet module is dropped: with the compiler in the
+  browser (P13) the kernel is a blob the page creates, and P14 owns how a worklet
+  is configured.
+- **H1's decision has a realtime edge.** Wherever the allocator lives it runs on,
+  or is consulted from, the audio thread: the pool is documented as a total audio
+  path (no throw, allocation, lock or log), SCI interpretation adds overhead to
+  control-rate work, and an emitted allocator needs the same no-allocation
+  discipline. That is why it is a decision with a measurement, not a default.
+- **H3 and H4 change assumptions, not just code.** H3 fans channels into voices;
+  H4 changes what a slot is. Both touch what D19/D62 rest on, so each gets a
+  decision before an implementation.
+- **H2 has no JVM parallel to copy.** The JVM's bus is folded into the
+  instrument's artifact; the browser's is a separate kernel, so the fix and its
+  check are per browser target.
+- **Stereo worklet events stay out of scope.** H1's sample-accurate notes are
+  mono, the same limit the control-event path already has; a planar (stereo)
+  worklet dispatch remains its own slice.
+
+**Status.** **H2–H5 done (D67, D68, D70, D71)**: the chain's own lane and shared
+regions, a per-channel lane, a slot that is the call site's identity, and array
+fields in arrays of records. **H1** is the one outstanding item and it waits for
+**P13 → P14** by design — P13's own dependencies (P2–P4) are all done, so the
+plan's reordering rule permits those ahead of P12.
 
 ---
 

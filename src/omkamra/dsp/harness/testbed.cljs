@@ -16,6 +16,7 @@
             [omkamra.dsp.hosts.fusion :as fusion]
             [omkamra.dsp.hosts.interpreter :as interpreter-host]
             [omkamra.dsp.hosts.js :as js-host]
+            [omkamra.dsp.hosts.mixing :as mixing]
             [omkamra.dsp.hosts.wasm :as wasm-host]
             [omkamra.dsp.targets.interpreter :as interpreter]
             [omkamra.dsp.reference :as reference]
@@ -1528,6 +1529,96 @@
      :detail (str "two voices, each with its own lane, matched the interpreter"
                   " over " (* (count actual) 4) " frames")}))
 
+(defn- check-channel-lane-pool
+  "Compare a pool's *per-channel* lane delivery on a browser kernel against the
+  interpreter pool (H3).
+
+  `bend` is the pool's global source bank indexed by *channel*, so the lane
+  beside it is a curve per channel and a voice reads the curve of the channel it
+  is on: one voice takes three channels in turn (its region must follow it), and
+  a curve published while it sounds must reach it. The numbers are the ones
+  `omkamra.dsp.tests.synth` pins on the JVM, so the two sides of the project pin
+  the same samples."
+  [name runtime abi ir channels kernel]
+  (let [play (clojure.core/fn [k steps]
+               (let [p (pool/voice-pool runtime k)
+                     render (clojure.core/fn []
+                              (let [block (render-block channels 4)]
+                                (pool/render! p block 4 48000.0)
+                                (first (block->vectors block channels))))]
+                 (mapv (clojure.core/fn [step]
+                         (case (first step)
+                           :lane (do (pool/set-channel-lane!
+                                      p (nth step 1) "bend"
+                                      (js/Float32Array. (clj->js (nth step 2))))
+                                     nil)
+                           :note (do (pool/note-on! p (nth step 1) 1.0 (nth step 2)) nil)
+                           :render (render)))
+                       steps)))
+        steps [[:lane 0 [1.0 2.0 3.0 4.0]]
+               [:lane 1 [10.0 20.0 30.0 40.0]]
+               [:note 60 0] [:render]
+               [:note 62 1] [:render]
+               [:note 64 5] [:render]
+               [:lane 5 [5.0 5.0 5.0 5.0]] [:render]]
+        actual (filterv some? (play kernel steps))
+        expected (filterv some? (play (interpreter-host/interpreter-kernel ir abi)
+                                      steps))]
+    (require! (= actual expected)
+              (str name " drifted from the interpreter: "
+                   (pr-str actual) " vs " (pr-str expected)))
+    (require! (= [[1.0 2.0 3.0 4.0] [10.0 20.0 30.0 40.0] [0.0 0.0 0.0 0.0]
+                  [5.0 5.0 5.0 5.0]]
+                 actual)
+              (str name ": one voice on channels 0, 1 and 5, then a curve"
+                   " published under it, must render [1..4] [10..40] [0] [5], not "
+                   (pr-str actual)))
+    {:name name
+     :passed? true
+     :detail (str "one voice followed its channel's curve, its channel change and"
+                  " a curve published while it sounded")}))
+
+(defn- javascript-channel-lane-test
+  "The JavaScript host over a pool whose lane is per channel."
+  []
+  (-> (js/Promise.all
+       #js [(fetch-edn "/omkamra/dsp/harness/testbed/bend-lane-bundle")
+            (response-text "/omkamra/dsp/harness/testbed/bend-lane-source")])
+      (.then
+       (clojure.core/fn [[bundle source]]
+         (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
+               url (js/URL.createObjectURL blob)]
+           (-> (dynamic-import url)
+               (.then
+                (clojure.core/fn [module]
+                  (let [abi (:abi bundle)]
+                    (check-channel-lane-pool
+                     "JavaScript channel lane"
+                     (:runtime bundle) abi (reader/read-string (:ir bundle))
+                     (or (get-in abi [:channels :count]) 1)
+                     (js-host/js-kernel (gobj/get module "createKernel") abi
+                                        {:precision (:precision bundle)})))))
+               (.finally (clojure.core/fn [] (js/URL.revokeObjectURL url)))))))))
+
+(defn- wasm-channel-lane-test
+  "The Wasm host over the same pool: each instance owns its memory, so the curve
+  is written into the voice's own region either way."
+  []
+  (-> (fetch-edn "/omkamra/dsp/harness/testbed/bend-lane-bundle?target=wasm")
+      (.then
+       (clojure.core/fn [bundle]
+         (-> (compile-wasm (:wat bundle))
+             (.then
+              (clojure.core/fn [bytes]
+                (let [module (js/WebAssembly.Module. bytes)
+                      abi (:abi bundle)]
+                  (check-channel-lane-pool
+                   "Wasm channel lane"
+                   (:runtime bundle) abi (reader/read-string (:ir bundle))
+                   (or (get-in abi [:channels :count]) 1)
+                   (wasm-host/wasm-kernel module abi (:memory bundle)
+                                          {:precision (:precision bundle)}))))))))))
+
 (defn- check-shared-pool
   "Compare a pool's shared-region delivery on a browser kernel against the
   interpreter pool: one parameter, two voices, one block.
@@ -1910,6 +2001,84 @@
      :passed? true
      :detail (str "two slots matched the interpreter across a steal, and a released"
                   " voice held its tail then freed from its own :activity")}))
+
+(defn- check-stateless-fused-pool
+  "H4: a fused pool whose slots have no state at all.
+
+  `:guard false` means nothing supplies a per-call-site latch, so each slot owns an
+  *empty* call partition: a slot is only an identity, and a reset is a no-op
+  because there is nothing of its own to restore. The interpreter pool over the
+  base voice is the oracle, and the samples are literal too — 60*1.0 + 64*0.5 is
+  92 — so a comparison of two blocks of nothing cannot pass."
+  [name runtime base-abi base-ir channels kernel]
+  (let [play (clojure.core/fn [k]
+               (let [p (pool/voice-pool runtime k)
+                     block (render-block channels 4)]
+                 (pool/note-on! p 60 1.0)
+                 (pool/note-on! p 64 0.5)
+                 (pool/render! p block 4 48000.0)
+                 (block->vectors block channels)))
+        actual (play kernel)
+        expected (play (interpreter-host/interpreter-kernel base-ir base-abi))]
+    (require! (= actual expected)
+              (str name " drifted from the interpreter: "
+                   (pr-str actual) " vs " (pr-str expected)))
+    (require! (= [[92.0 92.0 92.0 92.0]] actual)
+              (str name " should render 92 per frame (60*1.0 + 64*0.5), not "
+                   (pr-str actual)))
+    {:name name
+     :passed? true
+     :detail "two stateless slots shared one instance and matched the interpreter"}))
+
+(defn- javascript-stateless-fused-test
+  "The JavaScript host over a fused pool with nothing to reset."
+  []
+  (-> (js/Promise.all
+       #js [(fetch-edn "/omkamra/dsp/harness/testbed/stateless-fused-bundle")
+            (response-text "/omkamra/dsp/harness/testbed/stateless-fused-source")])
+      (.then
+       (clojure.core/fn [[bundle source]]
+         (let [blob (js/Blob. #js [source] #js {:type "text/javascript"})
+               url (js/URL.createObjectURL blob)]
+           (-> (dynamic-import url)
+               (.then
+                (clojure.core/fn [module]
+                  (let [abi (:abi bundle)]
+                    (check-stateless-fused-pool
+                     "JavaScript stateless fused pool"
+                     (:runtime bundle) (:base-abi bundle)
+                     (reader/read-string (:base-ir bundle))
+                     (or (get-in abi [:channels :count]) 1)
+                     (js-host/js-kernel
+                      (gobj/get module "createKernel") abi
+                      {:precision (:precision bundle)
+                       :mapping (fusion/runtime-mapping (:controls abi)
+                                                        (:fusion bundle))})))))
+               (.finally (clojure.core/fn [] (js/URL.revokeObjectURL url)))))))))
+
+(defn- wasm-stateless-fused-test
+  "The Wasm host over the same pool: an empty partition has no layout segments in
+  the instance's memory, so the range resolution must accept that rather than
+  fail on an empty set."
+  []
+  (-> (fetch-edn "/omkamra/dsp/harness/testbed/stateless-fused-bundle?target=wasm")
+      (.then
+       (clojure.core/fn [bundle]
+         (-> (compile-wasm (:wat bundle))
+             (.then
+              (clojure.core/fn [bytes]
+                (let [module (js/WebAssembly.Module. bytes)
+                      abi (:abi bundle)]
+                  (check-stateless-fused-pool
+                   "Wasm stateless fused pool"
+                   (:runtime bundle) (:base-abi bundle)
+                   (reader/read-string (:base-ir bundle))
+                   (or (get-in abi [:channels :count]) 1)
+                   (wasm-host/wasm-kernel
+                    module abi (:memory bundle)
+                    {:precision (:precision bundle)
+                     :mapping (fusion/runtime-mapping (:controls abi)
+                                                      (:fusion bundle))}))))))))))
 
 (defn- javascript-fused-pool-test
   "The JavaScript host: the fused instance is the generated kernel object, and its
@@ -2361,18 +2530,49 @@
 
 (defn- interpreter-bus-runner
   "A bus runner over the in-page interpreter: one state per channel, run with the
-  channel array as both input and output."
-  [bus-ir controls]
-  {:create-bus
-   (clojure.core/fn [] {:state (interpreter/create-state bus-ir)})
-   :run-bus!
-   (clojure.core/fn [bus input output frames sample-rate _controls]
-     (interpreter/process-context
-      bus-ir
-      {:input input :output output :frames frames
-       :sample-rate sample-rate :controls controls :state (:state bus)}))
-   :reset-bus!
-   (clojure.core/fn [bus] (interpreter/reset-state! bus-ir (:state bus)))})
+  channel array as both input and output.
+
+  Its regions are the instrument's, like every other host's: one lane region and
+  one shared region for the whole chain, written with `:write-lane!` /
+  `:write-shared!` and handed to the interpreter as the flat arrays it reads (H2)."
+  [bus-ir abi controls precision]
+  (let [f64? (= :f64 precision)
+        lane-stride (long (or (:lane-stride abi) 0))
+        lane-layout (mixing/region-layout (:lanes abi))
+        lane-count (clojure.core/count lane-layout)
+        shared-stride (long (or (:shared-stride abi) 0))
+        shared-layout (mixing/region-layout (:shared abi))
+        shared-count (clojure.core/count shared-layout)
+        lane-region (when (pos? lane-count)
+                      (mixing/real-array f64? (* lane-stride lane-count)))
+        shared-region (when (pos? shared-count)
+                        (mixing/real-array f64? (* shared-stride shared-count)))]
+    {:create-bus
+     (clojure.core/fn [] {:state (interpreter/create-state bus-ir)})
+     :run-bus!
+     (clojure.core/fn [bus input output frames sample-rate _controls]
+       (interpreter/process-context
+        bus-ir
+        (cond-> {:input input :output output :frames frames
+                 :sample-rate sample-rate :controls controls :state (:state bus)}
+          lane-region (assoc :lanes lane-region)
+          shared-region (assoc :shared shared-region))))
+     :reset-bus!
+     (clojure.core/fn [bus] (interpreter/reset-state! bus-ir (:state bus)))
+     :write-lane!
+     (clojure.core/fn [lane values]
+       (when lane-region
+         (mixing/write-region! lane-region
+                               (mixing/region-offset lane-layout lane :lane)
+                               lane-stride values f64?))
+       nil)
+     :write-shared!
+     (clojure.core/fn [control values]
+       (when shared-region
+         (mixing/write-region! shared-region
+                               (mixing/region-offset shared-layout control :shared-control)
+                               shared-stride values f64?))
+       nil)}))
 
 (defn- channel-concat
   "Concatenate a sequence of per-block channel vectors into one channel vector
@@ -2504,7 +2704,8 @@
                     bundle
                     (interpreter-host/interpreter-kernel
                      voice-ir (:voice-abi bundle) {:containment :off})
-                    (interpreter-bus-runner bus-ir bus-controls)
+                    (interpreter-bus-runner bus-ir (:bus-abi bundle)
+                                            bus-controls (:precision bundle))
                     bus-controls phrase))]
     (require! (all-finite? actual)
               (str name " rendered a non-finite sample"))
@@ -2578,6 +2779,167 @@
                                                  (:precision bundle))]
                   (check-reference-host "Wasm instrument host"
                                         bundle voice-kernel bus-runner nil)))))))))
+
+;; ---------------------------------------------------------------------------
+;; The post-mix chain's own regions (H2)
+;; ---------------------------------------------------------------------------
+;;
+;; A post-mix stage may declare a lane or a shared control exactly as a voice's
+;; may. The chain is one mono processor run once per output channel, so its
+;; regions are instrument-level: one lane region and one shared region for the
+;; whole instrument, handed to every channel's instance. The fixture voice renders
+;; exactly 1.0 while it sounds, so the samples *are* the chain's gain — a kernel
+;; that never got the region renders silence, which no other check would notice.
+
+(defn- render-bus-instrument
+  "One render through a fresh voice pool and the chain, after writing a region.
+
+  `region` is `[:lane values]` or `[:shared values]`, or nil to write nothing."
+  [bundle kernel bus-runner region frames]
+  (let [channels (long (or (get-in bundle [:voice-abi :channels :count]) 1))
+        voice-pool (pool/voice-pool (:runtime bundle) kernel)
+        buses (mapv (clojure.core/fn [_] ((:create-bus bus-runner))) (range channels))
+        block (render-block channels frames)]
+    (when region
+      (let [[kind values] region]
+        (if (= :lane kind)
+          ((:write-lane! bus-runner) "post-amount" values)
+          ((:write-shared! bus-runner) "post-amount" values))))
+    (pool/note-on! voice-pool 60 1.0)
+    (pool/render! voice-pool block frames 48000.0)
+    (dotimes [channel channels]
+      ((:run-bus! bus-runner) (nth buses channel)
+                              (mixing/channel-of channels block channel)
+                              (mixing/channel-of channels block channel)
+                              frames 48000.0 #js []))
+    (block->vectors block channels)))
+
+(defn- check-bus-region
+  "H2: read one of the chain's own regions back through a browser kernel.
+
+  Compares against the in-page interpreter host over the same voice and bus IR,
+  and asserts the curve itself: the fixture's voice contributes exactly 1.0, so
+  the samples *are* the gain the region carries."
+  [name bundle kernel bus-runner kind values expected]
+  (let [bus-ir (reader/read-string (:bus-ir bundle))
+        oracle-kernel (interpreter-host/interpreter-kernel
+                       (reader/read-string (:voice-ir bundle))
+                       (:voice-abi bundle) {:containment :off})
+        oracle-bus (interpreter-bus-runner bus-ir (:bus-abi bundle) #js []
+                                           (:precision bundle))
+        frames (count expected)
+        region [kind values]
+        actual (render-bus-instrument bundle kernel bus-runner region frames)
+        oracle (render-bus-instrument bundle oracle-kernel oracle-bus region frames)]
+    (require! (= actual oracle)
+              (str name " drifted from the interpreter: "
+                   (pr-str actual) " vs " (pr-str oracle)))
+    (require! (= [expected] actual)
+              (str name " should render the chain's own gain " (pr-str expected)
+                   ", not " (pr-str actual)))
+    {:name name
+     :passed? true
+     :detail (str "the chain's " (clojure.core/name kind)
+                  " region reached the instance (" frames " frames, "
+                  (pr-str (first actual)) ")")}))
+
+(defn- bus-region-cases
+  "The two regions the fixtures declare, as `[kind values expected]` triples.
+
+  The lane is a different value in every frame, which a host that wrote one
+  constant cannot pass; the shared control is the broadcast a shared region
+  usually is."
+  [precision]
+  [[:lane (real-array precision [1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0])
+    [1.0 2.0 3.0 4.0 5.0 6.0 7.0 8.0]]
+   [:shared 2.5 [2.5 2.5 2.5 2.5 2.5 2.5 2.5 2.5]]])
+
+(defn- javascript-bus-region-test
+  "The JavaScript host over a chain whose stage reads its own lane and shared
+  region. The JS kernel hands the region the host owns to every instance."
+  []
+  (-> (js/Promise.all
+       #js [(fetch-edn "/omkamra/dsp/harness/testbed/bus-lane-bundle")
+            (fetch-edn "/omkamra/dsp/harness/testbed/bus-lane-source")
+            (fetch-edn "/omkamra/dsp/harness/testbed/bus-shared-bundle")
+            (fetch-edn "/omkamra/dsp/harness/testbed/bus-shared-source")])
+      (.then
+       (clojure.core/fn [[lane-bundle lane-sources shared-bundle shared-sources]]
+         (let [blobs (clojure.core/fn [sources]
+                       [(js/Blob. #js [(:voice sources)] #js {:type "text/javascript"})
+                        (js/Blob. #js [(:bus sources)] #js {:type "text/javascript"})])
+               [lane-voice lane-bus] (blobs lane-sources)
+               [shared-voice shared-bus] (blobs shared-sources)
+               urls #js [(js/URL.createObjectURL lane-voice)
+                         (js/URL.createObjectURL lane-bus)
+                         (js/URL.createObjectURL shared-voice)
+                         (js/URL.createObjectURL shared-bus)]]
+           (-> (js/Promise.all
+                #js [(dynamic-import (aget urls 0))
+                     (dynamic-import (aget urls 1))
+                     (dynamic-import (aget urls 2))
+                     (dynamic-import (aget urls 3))])
+               (.then
+                (clojure.core/fn [[lane-voice-module lane-bus-module
+                                   shared-voice-module shared-bus-module]]
+                  (let [run (clojure.core/fn [bundle voice-module bus-module kind values expected]
+                              (check-bus-region
+                               (str "JavaScript post-mix " (clojure.core/name kind))
+                               bundle
+                               (js-host/js-kernel (gobj/get voice-module "createKernel")
+                                                  (:voice-abi bundle)
+                                                  {:precision (:precision bundle)
+                                                   :containment :off})
+                               (js-host/js-bus-kernel (gobj/get bus-module "createKernel")
+                                                      (:bus-abi bundle))
+                               kind values expected))
+                        [[lane-kind lane-values lane-expected]
+                         [shared-kind shared-values shared-expected]]
+                        (bus-region-cases (:precision lane-bundle))]
+                    [(run lane-bundle lane-voice-module lane-bus-module
+                          lane-kind lane-values lane-expected)
+                     (run shared-bundle shared-voice-module shared-bus-module
+                          shared-kind shared-values shared-expected)])))
+               (.finally (clojure.core/fn []
+                           (dotimes [index (.-length urls)]
+                             (js/URL.revokeObjectURL (aget urls index)))))))))))
+
+(defn- wasm-bus-region-test
+  "The Wasm host over the same two chains. A Wasm instance owns its memory, so the
+  host's region is copied into the instance before each call."
+  []
+  (-> (js/Promise.all
+       #js [(fetch-edn "/omkamra/dsp/harness/testbed/bus-lane-bundle?target=wasm")
+            (fetch-edn "/omkamra/dsp/harness/testbed/bus-shared-bundle?target=wasm")])
+      (.then
+       (clojure.core/fn [[lane-bundle shared-bundle]]
+         (-> (js/Promise.all
+              #js [(compile-wasm (:voice-wat lane-bundle))
+                   (compile-wasm (:bus-wat lane-bundle))
+                   (compile-wasm (:voice-wat shared-bundle))
+                   (compile-wasm (:bus-wat shared-bundle))])
+             (.then
+              (clojure.core/fn [[lane-voice-bytes lane-bus-bytes
+                                 shared-voice-bytes shared-bus-bytes]]
+                (let [run (clojure.core/fn [bundle voice-bytes bus-bytes kind values expected]
+                            (check-bus-region
+                             (str "Wasm post-mix " (clojure.core/name kind))
+                             bundle
+                             (wasm-host/wasm-kernel
+                              (js/WebAssembly.Module. voice-bytes) (:voice-abi bundle)
+                              (:voice-memory bundle)
+                              {:precision (:precision bundle) :containment :off})
+                             (wasm-host/wasm-bus-kernel
+                              (js/WebAssembly.Module. bus-bytes) (:bus-abi bundle)
+                              (:bus-memory bundle) (:precision bundle))
+                             kind values expected))
+                      [[lane-kind lane-values lane-expected]
+                       [shared-kind shared-values shared-expected]]
+                      (bus-region-cases (:precision lane-bundle))]
+                  [(run lane-bundle lane-voice-bytes lane-bus-bytes
+                        lane-kind lane-values lane-expected)
+                   (run shared-bundle shared-voice-bytes shared-bus-bytes
+                        shared-kind shared-values shared-expected)]))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The fused instrument host (F1's browser half)
@@ -2867,6 +3229,16 @@
                      (fn [] (-> (javascript-lane-test) (.then (fn [r] [r])))))
                    (when (selected? selection "Wasm lane delivery")
                      (fn [] (-> (wasm-lane-test) (.then (fn [r] [r])))))
+;; A lane beside a per-channel source (`:bend`) is a curve per channel, not per
+;; voice or for the pool (H3): the pool keeps its own copy and delivers the curve
+;; of the channel a voice is on, including when a voice moves.
+
+                   (when (selected? selection "JavaScript channel lane")
+                     (fn [] (-> (javascript-channel-lane-test)
+                                (.then (fn [r] [r])))))
+                   (when (selected? selection "Wasm channel lane")
+                     (fn [] (-> (wasm-channel-lane-test)
+                                (.then (fn [r] [r])))))
                    (when (selected? selection "JavaScript voice lane delivery")
                      (fn [] (-> (javascript-voice-lane-test)
                                 (.then (fn [r] [r])))))
@@ -2878,6 +3250,15 @@
                                 (.then (fn [r] [r])))))
                    (when (selected? selection "Wasm fused pool")
                      (fn [] (-> (wasm-fused-pool-test)
+                                (.then (fn [r] [r])))))
+;; A fused pool whose slots have no state at all (H4): each slot owns an empty
+;; call partition, so it is an identity and a reset is a no-op.
+
+                   (when (selected? selection "JavaScript stateless fused pool")
+                     (fn [] (-> (javascript-stateless-fused-test)
+                                (.then (fn [r] [r])))))
+                   (when (selected? selection "Wasm stateless fused pool")
+                     (fn [] (-> (wasm-stateless-fused-test)
                                 (.then (fn [r] [r])))))
 ;; A fused pool whose voices are automated apart (F4). A lane is per voice, so
 ;; every slot of a fused entry has to read its own slice of the one lane region:
@@ -2916,6 +3297,14 @@
                      (fn [] (-> (javascript-instrument-test) (.then (fn [r] [r])))))
                    (when (selected? selection "Wasm instrument host")
                      (fn [] (-> (wasm-instrument-test) (.then (fn [r] [r])))))
+;; The post-mix chain's own regions (H2): the chain is one processor run once
+;; per channel, so its lane and shared regions are instrument-level, written once
+;; and read by every channel's instance.
+
+                   (when (selected? selection "JavaScript post-mix")
+                     (fn [] (javascript-bus-region-test)))
+                   (when (selected? selection "Wasm post-mix")
+                     (fn [] (wasm-bus-region-test)))
                    (when (selected? selection "WAT bounded-loop module")
                      (fn [] (-> (bounded-loop-wasm-test) (.then (fn [r] [r])))))
                    (when (selected? selection "Wasm sin lookup table")

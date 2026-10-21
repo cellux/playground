@@ -241,23 +241,44 @@
   is the module's exported `createKernel`; `create-bus` makes one independent
   instance, and the host makes one per output channel.
 
-  Returns `{:create-bus, :run-bus!, :reset-bus!}`. `controls` is a JS array in
-  ABI order, reused across blocks."
+  The chain is instrument-level, so its regions are too: one lane region and one
+  shared region for the whole instrument, handed to every channel's instance in
+  its argument array. The host writes them with `:write-lane!` / `:write-shared!`
+  (one value per frame for a lane, a broadcast value or a curve for a shared
+  control), so nothing is copied on the audio path — the JS kernel reads the
+  region the host owns.
+
+  Returns `{:create-bus, :run-bus!, :reset-bus!, :write-lane!, :write-shared!}`.
+  `controls` is a JS array in ABI order, reused across blocks."
   [create abi]
-  (let [control-count (clojure.core/count (:controls abi))]
+  (let [f64? (= :f64 (:precision abi))
+        control-count (clojure.core/count (:controls abi))
+        lane-stride (long (or (:lane-stride abi) 0))
+        lane-layout (mixing/region-layout (:lanes abi))
+        lane-count (clojure.core/count lane-layout)
+        shared-stride (long (or (:shared-stride abi) 0))
+        shared-layout (mixing/region-layout (:shared abi))
+        shared-count (clojure.core/count shared-layout)
+        lane-region (when (pos? lane-count)
+                      (mixing/real-array f64? (* lane-stride lane-count)))
+        shared-region (when (pos? shared-count)
+                        (mixing/real-array f64? (* shared-stride shared-count)))
+        ;; Where each region sits in the generated argument list: the input, the
+        ;; output, frames and the sample rate, then the controls, then the
+        ;; regions.
+        lane-slot (when (pos? lane-count) (+ 4 control-count))
+        shared-slot (when (pos? shared-count)
+                      (+ 4 control-count (if (pos? lane-count) 1 0)))]
     {:create-bus
      (clojure.core/fn []
-       ;; A post-mix chain that declares a lane needs the same delivery the
-       ;; voices now get. Until it has it, refuse once here rather than on every
-       ;; block in the audio path.
-       (when (or (seq (:lanes abi)) (seq (:shared abi)))
-         (throw (ex-info "this target cannot deliver lanes or a shared region to a bus yet"
-                         {:lanes (mapv :name (:lanes abi))
-                          :shared (mapv :name (:shared abi))
-                          :target :js})))
-       (let [object (create)]
+       (let [object (create)
+             arguments (js/Array. (+ 4 control-count
+                                     (if (pos? lane-count) 1 0)
+                                     (if (pos? shared-count) 1 0)))]
+         (when lane-slot (aset arguments lane-slot lane-region))
+         (when shared-slot (aset arguments shared-slot shared-region))
          {:object object
-          :arguments (js/Array. (+ 4 control-count))}))
+          :arguments arguments}))
      :run-bus!
      (clojure.core/fn [bus input output frames sample-rate controls]
        (let [object (:object bus)
@@ -273,4 +294,18 @@
      (clojure.core/fn [bus]
        (let [object (:object bus)
              reset (.-reset object)]
-         (when reset (.call reset object))))}))
+         (when reset (.call reset object))))
+     :write-lane!
+     (clojure.core/fn [lane values]
+       (when lane-region
+         (mixing/write-region! lane-region
+                               (mixing/region-offset lane-layout lane :lane)
+                               lane-stride values f64?))
+       nil)
+     :write-shared!
+     (clojure.core/fn [control values]
+       (when shared-region
+         (mixing/write-region! shared-region
+                               (mixing/region-offset shared-layout control :shared-control)
+                               shared-stride values f64?))
+       nil)}))

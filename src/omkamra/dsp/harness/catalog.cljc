@@ -380,7 +380,40 @@
       :body '(state-load wavetable i)
       :params [{:name 'sample :type :float}]
       :controls [{:name 'i :type :int :default 2}]
-      :input-samples sine-input-samples})]
+      :input-samples sine-input-samples})
+    ;; An array of records owning an array field (H5): a constant bank of
+    ;; wavetables, read with two dynamic indices folded into one flat index.
+    (process-case
+     {:id :constant-table-bank
+      :state [{:name 'tables
+               :size 3
+               :constant true
+               :fields [{:name :samples
+                         :type :float
+                         :size 4
+                         :init [0.0 0.25 0.5 0.75]}]}]
+      :body '(field tables bank :samples index)
+      :params [{:name 'sample :type :float}]
+      :controls [{:name 'bank :type :int :default 2}
+                 {:name 'index :type :int :default 3}]
+      :input-samples sine-input-samples})
+    ;; The writable shape: a bank of buffers plus a per-record scalar, written
+    ;; and read through the terse `aget`/`aset` spelling.
+    (process-case
+     {:id :record-array-buffer
+      :state [{:name 'lines
+               :size 2
+               :fields [{:name :buffer :type :float :size 3
+                         :init [0.1 0.2 0.3]}
+                        {:name :cursor :type :int :init 0}]}]
+      :body '(let [previous (aget lines bank index)]
+               (do (aset lines bank index sample)
+                   (set-field! lines bank :cursor
+                               (+ (field lines bank :cursor) 1))
+                   previous))
+      :params [{:name 'sample :type :float}]
+      :controls [{:name 'bank :type :int :default 1}
+                 {:name 'index :type :int :default 2}]})]
    [(unary-float-case :abs '(abs sample))
     (unary-float-case :floor '(floor sample))
     (unary-float-case :ceil '(ceil sample))

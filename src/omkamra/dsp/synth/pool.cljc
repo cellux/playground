@@ -74,9 +74,15 @@
     `voice`'s own lane region (D28).
 
     Every voice has its own region, so a `:shared` parameter's lane is written
-    once per voice by `pool/set-lane!`, while a `:per-voice` one is written for
-    a single voice by `pool/set-voice-lane!`. `lane` may be spelled as a symbol,
-    a keyword, or a string; a name the process does not declare is an error.")
+    once per voice by `pool/set-lane!`, a `:per-voice` one for a single voice by
+    `pool/set-voice-lane!`, and a per-channel one for one channel's voices by
+    `pool/set-channel-lane!`. `lane` may be spelled as a symbol, a keyword, or a
+    string; a name the process does not declare is an error.
+
+    `values` are what the *kernel* reads, not the source units a scalar is
+    published in: a scalar `:bend` is a normalized wheel the pool scales by
+    `:bend-range`, while a lane is passed through, so a bend lane is in cents
+    (D69). The pool never interprets a curve.")
   (write-shared! [kernel control values]
     "Publish `values` — one real per frame of the next block — as shared
     `control`, the pool-wide region every voice reads (M5).
@@ -171,6 +177,37 @@
   #?(:clj (object-array length)
      :cljs (object-array length)))
 
+(defn- value-count
+  "How many values a host-supplied real sequence holds.
+
+  A host hands over a primitive real array — a typed array on the browser — but a
+  test or a slow host may hand over an ordinary sequence, so the pool accepts
+  both where it copies one (the channel-curve banks)."
+  [values]
+  #?(:clj (count values)
+     :cljs (if (some? (.-length values))
+             (.-length values)
+             (clojure.core/count values))))
+
+(defn- value-at
+  "One value of a host-supplied real sequence, however it is stored."
+  [values index]
+  #?(:clj (nth values index)
+     :cljs (if (some? (.-length values))
+             (aget values index)
+             (nth values index))))
+
+(defn- copy-values!
+  "Copy `values` into `target`, up to whichever is shorter.
+
+  The tail of a slice is left as it was, which is what a later, shorter block
+  wants: it reads only its own frames."
+  [^doubles target values]
+  (let [length (min (long (value-count values)) (long (alength target)))]
+    (dotimes [index length]
+      (aset target index (double (value-at values index))))
+    target))
+
 ;; A hinted array read and write are direct: with the array's type known and a
 ;; primitive index, `aget`/`aset` compile to the primitive overload, which is
 ;; what keeps a counter off the reflective path (see `omkamra.dsp.event`).
@@ -200,6 +237,7 @@
          [config kernel capacity max-block-frames handles states notes channels ages
           velocities frequencies kinds indices values stats mode
           per-voice-params pv-count shared-params parameter-slots lane-scopes
+          channel-lane-names channel-lane-banks
           shared-controls shared-buffer slot-owner instance-mixed
           held-notes held-channels held-depth
           detunes bends pans bend-range special-mask activity-position special-values live?])
@@ -221,8 +259,9 @@
 
   A lane belongs to a *control* (D46), and the control's storage decides whose
   values those are: a `:shared` parameter's lane is shared, a `:per-voice` one is
-  per voice. A runtime control is resolved per voice, so its lane is per voice
-  too — except `:bend`, which is per channel and has no per-lane delivery yet.
+  per voice, and a runtime control resolved from a *per-channel* source
+  (`:bend`) is per channel — one curve each, so a voice reads the curve for the
+  channel it is on, exactly as it reads that channel's bend.
 
   A lane-only (`:lane`) control leaves the ABI's scalar list, so it has no plan
   entry at all; its scope comes from its own parameter declaration, and an
@@ -240,10 +279,7 @@
         :per-voice)
 
       (= :runtime (:kind (:storage entry)))
-      (if (= :bend (:parameter entry))
-        (synth/fail "a lane on a per-channel control has no per-lane delivery yet"
-                    {:lane name :parameter :bend})
-        :per-voice)
+      (if (= :bend (:parameter entry)) :channel :per-voice)
 
       (= :shared (:kind (:storage entry))) :shared
       :else :per-voice)))
@@ -274,6 +310,20 @@
         lane-scopes (into {}
                           (map (fn [lane] [(:name lane) (lane-scope config lane)]))
                           (:lanes config))
+        ;; A lane on a *per-channel* source (`:bend`) is a curve per channel, not
+        ;; per voice — the source it sits beside is one value per channel, and a
+        ;; voice reads its own channel's. So the pool keeps one curve bank per
+        ;; such lane (`channel-lane-count` channels of `lane-stride` frames) and
+        ;; delivers the channel's curve into each voice that is on it: when a host
+        ;; writes one, and again whenever a voice starts, because a voice's
+        ;; channel can change and the curve it must read is the one for the
+        ;; channel it is on now.
+        channel-lanes (vec (filter (fn [lane]
+                                     (= :channel (get lane-scopes (:name lane))))
+                                   (:lanes config)))
+        channel-lane-names (make-handles (count channel-lanes))
+        channel-lane-banks (make-handles (* (count channel-lanes) channel-count))
+        lane-stride (long (or (:lane-stride config) max-block-frames))
         ;; A `:shared` control reads the pool-wide region the kernel owns, so the
         ;; pool remembers which *parameter* fills which control, and keeps one
         ;; buffer for writing a broadcast value into the whole slice (M5).
@@ -350,6 +400,13 @@
       (write-shared! kernel control
                      (fill-broadcast! shared-buffer
                                       (double (:default (get parameters parameter) 0.0)))))
+    ;; The channel banks are allocated once, here, like every other array the
+    ;; pool owns: a curve is copied in, never allocated on the audio path.
+    (dotimes [index (count channel-lanes)]
+      (aset ^objects channel-lane-names index (:name (nth channel-lanes index)))
+      (dotimes [channel channel-count]
+        (aset ^objects channel-lane-banks (+ (* index channel-count) channel)
+              (make-doubles lane-stride))))
     (VoicePool. config kernel capacity max-block-frames
                 handles
                 states (make-longs capacity) (make-longs capacity) (make-longs capacity)
@@ -357,6 +414,7 @@
                 kinds indices values (make-longs stat-count)
                 (long mode)
                 per-voice-params pv-count shared-params parameter-slots lane-scopes
+                channel-lane-names channel-lane-banks
                 shared-controls shared-buffer slot-owner
                 ;; One "already mixed this block" mark per *owner slot*.
                 (make-longs capacity)
@@ -503,6 +561,45 @@
   [^VoicePool pool index ^double gate]
   (write-voice-controls! (.-kernel pool) (aget ^objects (.-handles pool) index)
                          (resolve-controls! pool index gate (.-values pool))))
+
+;; ---------------------------------------------------------------------------
+;; Channel-scoped lanes
+;; ---------------------------------------------------------------------------
+
+(defn- channel-lane-index
+  "The bank index of a channel-scoped `lane`, or -1.
+
+  Resolved by a short scan at the host's write, never on the audio path: the pool
+  keeps at most a few channel lanes (`:bend` is the only per-channel runtime
+  source the plan can produce)."
+  [^VoicePool pool lane]
+  (let [key (if (string? lane) lane (clojure.core/name lane))
+        ^objects names (.-channel-lane-names pool)]
+    (loop [index 0]
+      (if (>= index (alength names))
+        -1
+        (if (= key (aget names index)) index (recur (inc index)))))))
+
+(defn- channel-lane-bank
+  "The pool's own copy of `channel`'s curve for the channel lane at `index`."
+  [^VoicePool pool index channel]
+  (aget ^objects (.-channel-lane-banks pool)
+        (+ (* (long index) channel-count) (long channel))))
+
+(defn- deliver-channel-lanes!
+  "Write every channel-scoped lane's curve for `channel` into `voice`.
+
+  A voice reads the curves of the channel it is on, so this runs when a host
+  writes one and when a voice starts: a voice may have last sounded on another
+  channel, and its region still holds that channel's curve."
+  [^VoicePool pool voice channel]
+  (let [^objects names (.-channel-lane-names pool)
+        lanes (alength names)
+        channel (long channel)]
+    (dotimes [index lanes]
+      (write-voice-lane! (.-kernel pool) voice (aget names index)
+                         (channel-lane-bank pool index channel)))
+    nil))
 
 ;; ---------------------------------------------------------------------------
 ;; Host control delivery
@@ -756,6 +853,10 @@
     (aset ages index (long (stat-bump! stats stat-activations)))
     (aset states index (long voice-active))
     (write-controls! pool index 1.0)
+    ;; A voice reads its channel's curves, and the channel it is on may have
+    ;; changed since that voice last sounded, so the delivery is (re)done here
+    ;; rather than relying on whatever its region happens to hold.
+    (deliver-channel-lanes! pool handle channel)
     index))
 
 (defn- update-high-water!
@@ -1084,12 +1185,14 @@
   `values` is a primitive real array or any sequence of the block's frames; a
   real-time host writes the region directly instead (M4). A name the process does
   not declare, or a `:per-voice` one, is refused here: the latter belongs to
-  `set-voice-lane!`."
+  `set-voice-lane!`, and a per-channel one to `set-channel-lane!`."
   [^VoicePool pool lane values]
   (check-live! pool)
   (let [scope (lane-scope! pool lane)]
     (when-not (= :shared scope)
-      (synth/fail "this lane is not shared: write it per voice"
+      (synth/fail (if (= :channel scope)
+                    "this lane is per channel, not shared: write it for the channel"
+                    "this lane is not shared: write it per voice")
                   {:lane lane :scope scope}))
     (let [kernel (.-kernel pool)
           capacity (long (.-capacity pool))
@@ -1104,19 +1207,60 @@
 
   `:per-voice` is the scope a control has by default, so this is the setter for
   most lanes: each voice gets its own curve, and an unsounding voice keeps the
-  values it was given until it sounds. A `:shared` lane belongs to `set-lane!`."
-  [^VoicePool pool index lane values]
+  values it was given until it sounds. A `:shared` lane belongs to `set-lane!`,
+  and a per-channel one (`:bend`) to `set-channel-lane!`."  [^VoicePool pool index lane values]
   (check-live! pool)
   (let [scope (lane-scope! pool lane)
         voice (long index)]
     (when-not (= :per-voice scope)
-      (synth/fail "this lane is shared: write it for the whole pool"
+      (synth/fail (if (= :shared scope)
+                    "this lane is shared: write it for the whole pool"
+                    "this lane is per channel: write it for the channel")
                   {:lane lane :scope scope}))
     (when-not (and (>= voice 0) (< voice (long (.-capacity pool))))
       (synth/fail "a voice pool has no voice at that index"
                   {:index index :capacity (.-capacity pool)}))
     (write-voice-lane! (.-kernel pool)
                        (aget ^objects (.-handles pool) voice) lane values))
+  nil)
+
+(defn set-channel-lane!
+  "Publish `values`, one real per frame of the next block, as `channel`'s `lane`.
+
+  This is the per-channel scope, the one a lane beside a per-channel source has:
+  `:bend` is the pool's global source bank indexed by *channel*, so its lane is a
+  curve per channel and every voice on that channel reads it — exactly as the
+  voices on a channel share that channel's bend.
+
+  The pool keeps its own copy, because a voice that starts on the channel later,
+  or moves to it, has to read the curve the host published, and the host may
+  reuse its buffer. The voices already on the channel are written at once, and
+  every voice that starts on it is written as it starts — a voice never reads the
+  channel it was last on.
+
+  `values` is a primitive real array or any sequence of the block's frames, in the
+  units the kernel reads: a bend lane is cents, not the normalized wheel a scalar
+  `:bend` is published as (D69). A name the process does not declare, or a lane
+  whose scope is not `:channel`, is refused here."
+  [^VoicePool pool channel lane values]
+  (check-live! pool)
+  (let [scope (lane-scope! pool lane)
+        channel (long channel)]
+    (when-not (= :channel scope)
+      (synth/fail "this lane is not per channel: write it per voice or for the pool"
+                  {:lane lane :scope scope}))
+    (when-not (and (>= channel 0) (< channel channel-count))
+      (synth/fail "a voice pool has no such channel"
+                  {:channel channel :channels channel-count}))
+    (let [index (long (channel-lane-index pool lane))
+          bank (channel-lane-bank pool index channel)
+          ^objects handles (.-handles pool)
+          ^longs channels (.-channels pool)
+          capacity (long (.-capacity pool))]
+      (copy-values! bank values)
+      (dotimes [voice capacity]
+        (when (== channel (aget channels voice))
+          (write-voice-lane! (.-kernel pool) (aget handles voice) lane bank)))))
   nil)
 
 (defn- instance-already-mixed?

@@ -382,9 +382,6 @@
     (when (contains? state :init)
       (fail "DSP record state does not take a top-level :init"
             source (conj path :init) {:state (:name state)}))
-    (when (and (> size 1) (some #(> (or (:size %) 1) 1) fields))
-      (fail "DSP arrays of records cannot contain array fields yet"
-            source (conj path :fields) {:state (:name state)}))
     (cond-> {:name (:name state) :fields fields}
       (> size 1) (assoc :size size)
       (:constant state) (assoc :constant true)

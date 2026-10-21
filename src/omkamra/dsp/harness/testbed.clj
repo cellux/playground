@@ -374,6 +374,55 @@
                      (assoc :wat (:wat fused-artifact)
                             :memory (:memory fused-artifact))))}))
 
+(defn- browser-unguarded-fused-pair
+  "A fused pair for a voice that must fuse *without* a guard: `:guard false` means
+  nothing supplies a per-call-site latch, so a voice with no state of its own has
+  slots that are only identities (H4)."
+  [target precision slots description]
+  (let [description (assoc description :capacity slots :max-block-frames 16)]
+    {:base (hosts/synth-bundle description {:target target :precision precision})
+     :fused (hosts/synth-bundle description {:target target :precision precision
+                                             :fusion {:slots slots :guard false}})}))
+
+(def ^:private stateless-fused-slots 2)
+
+(defn stateless-fused-bundle
+  "Serve what the browser fused pool host needs for a *stateless* voice (H4): the
+  base artifact's ABI and IR for the interpreter oracle, the fused artifact's ABI
+  and `:fusion` mapping, and, for a Wasm target, the module's WAT and layout. Its
+  slots own empty call partitions, which is what the Wasm host's range resolution
+  has to accept rather than refuse."
+  [request]
+  (let [target (requested-target request)
+        precision (requested-precision request)
+        {:keys [base fused]} (browser-unguarded-fused-pair
+                              target precision stateless-fused-slots
+                              fixtures/stateless-voice-description)
+        base-artifact (:artifact base)
+        fused-artifact (:artifact fused)]
+    {:status 200
+     :headers {"content-type" "application/edn; charset=utf-8"
+               "cache-control" "no-store"}
+     :body (pr-str (cond-> {:runtime (:runtime base)
+                            :fusion (:fusion (:runtime fused))
+                            :base-abi (:abi base-artifact)
+                            :base-ir (pr-str (:ir base-artifact))
+                            :abi (:abi fused-artifact)
+                            :precision precision
+                            :target target}
+                     (= :wasm target)
+                     (assoc :wat (:wat fused-artifact)
+                            :memory (:memory fused-artifact))))}))
+
+(defn stateless-fused-source
+  "Serve the stateless fused voice as a JavaScript ES module."
+  [request]
+  (javascript-response
+   (:source (:artifact (:fused (browser-unguarded-fused-pair
+                                :js (requested-precision request)
+                                stateless-fused-slots
+                                fixtures/stateless-voice-description))))))
+
 (defn fused-reference-bundle
   "Serve what the browser fused pool host needs for the *reference instrument's
   voice*: stereo and process-shaped, so fusing it exercises a per-slot region, the
@@ -461,6 +510,79 @@
                                 :js (requested-precision request)
                                 (requested-slots request)
                                 fixtures/gated-lane-only-description))))))
+
+;; ---------------------------------------------------------------------------
+;; The post-mix chain's own regions (H2)
+;; ---------------------------------------------------------------------------
+;;
+;; A post-mix stage may declare a lane or a shared control exactly as a voice's
+;; may. The chain is one mono processor run once per output channel, so its
+;; regions are instrument-level: one lane region and one shared region for the
+;; whole instrument, handed to every channel's instance. The fixture voice renders
+;; exactly 1.0 while it sounds, so the samples *are* the chain's gain — the page
+;; writes the region and reads the curve back frame for frame.
+
+(defn- browser-bus-instrument
+  [instrument target precision]
+  (instrument-host/compile-instrument instrument {:target target
+                                                  :precision precision}))
+
+(defn- bus-instrument-bundle
+  [request instrument]
+  (let [target (requested-target request)
+        precision (requested-precision request)
+        program (browser-bus-instrument instrument target precision)
+        voice (:artifact (:bundle program))
+        bus (:bus program)]
+    {:status 200
+     :headers {"content-type" "application/edn; charset=utf-8"
+               "cache-control" "no-store"}
+     :body (pr-str
+            (cond-> {:runtime (get-in program [:bundle :runtime])
+                     :voice-abi (:abi voice)
+                     :voice-ir (pr-str (:ir voice))
+                     :bus-abi (:abi bus)
+                     :bus-ir (pr-str (:ir bus))
+                     :precision precision
+                     :target target}
+              (= :wasm target)
+              (assoc :voice-wat (:wat voice)
+                     :voice-memory (:memory voice)
+                     :bus-wat (:wat bus)
+                     :bus-memory (:memory bus))))}))
+
+(defn- bus-instrument-source
+  [request instrument]
+  (let [program (browser-bus-instrument instrument :js (requested-precision request))
+        voice (:artifact (:bundle program))
+        bus (:bus program)]
+    {:status 200
+     :headers {"content-type" "application/edn; charset=utf-8"
+               "cache-control" "no-store"}
+     :body (pr-str {:voice (:source voice) :bus (:source bus)})}))
+
+(defn bus-lane-bundle
+  "Serve the post-mix-lane fixture: a voice plus a chain stage whose gain is a
+  per-frame lane (H2)."
+  [request]
+  (bus-instrument-bundle request fixtures/bus-lane-instrument))
+
+(defn bus-lane-source
+  "Serve the post-mix-lane fixture's JavaScript modules as EDN text: the voice's
+  and the bus's."
+  [request]
+  (bus-instrument-source request fixtures/bus-lane-instrument))
+
+(defn bus-shared-bundle
+  "Serve the post-mix-shared fixture: the same chain, its stage reading the bus's
+  shared region instead (H2)."
+  [request]
+  (bus-instrument-bundle request fixtures/bus-shared-instrument))
+
+(defn bus-shared-source
+  "Serve the post-mix-shared fixture's JavaScript modules as EDN text."
+  [request]
+  (bus-instrument-source request fixtures/bus-shared-instrument))
 
 ;; ---------------------------------------------------------------------------
 ;; The fused worklet: one node, `slots` voices (F5)
@@ -577,6 +699,22 @@
   (javascript-response
    (:source (:artifact (browser-synth-bundle :js (requested-precision request)
                                              fixtures/lane-voice-description)))))
+
+(defn bend-lane-bundle
+  "Serve the voice whose lane sits beside a *per-channel* source (`:bend`), so the
+  browser pool hosts can be checked on per-channel lane delivery (H3)."
+  [request]
+  (let [target (requested-target request)]
+    (bundle-response target
+                     (browser-synth-bundle target (requested-precision request)
+                                           fixtures/lane-bend-description))))
+
+(defn bend-lane-source
+  "Serve the per-channel-lane voice as a JavaScript ES module."
+  [request]
+  (javascript-response
+   (:source (:artifact (browser-synth-bundle :js (requested-precision request)
+                                             fixtures/lane-bend-description)))))
 
 (defn voice-lane-bundle
   "Serve the automation-lane voice with a *per-voice* lane, so the browser pool

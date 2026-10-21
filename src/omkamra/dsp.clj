@@ -899,13 +899,23 @@
   (check-live! holder)
   (apply (:invoke holder) args))
 
+(clojure.core/defn- real-region?
+  "True for a primitive float/double array: a region the host built itself.
+
+  A real-time host writes its regions in place, so the context may carry the
+  region *itself* rather than the named values this adapter would flatten into
+  one. Both are accepted; the difference is who owns the copy."
+  [value]
+  (or (instance? (class (double-array 0)) value)
+      (instance? (class (float-array 0)) value)))
+
 (clojure.core/defn- lane-region
   "Flatten a `{:lane-name values}` context map into the ABI's single lane region.
 
   The kernel sees one flat region with compile-time offsets; the host supplies
   one named sequence per lane. This is the whole of the impedance mismatch, and
   it costs one copy per call — a real-time host writes the region directly and
-  skips this path."
+  skips this path, passing the region it already owns as `:lanes`."
   [artifact context]
   (let [abi (:abi artifact)
         lanes (:lanes abi)]
@@ -916,8 +926,11 @@
       ;; built zeroed, so it reads as "no automation" and the scalar stands.
       (throw (ex-info "this DSP process declares per-frame lanes"
                       {:lanes (mapv :name lanes)})))
-    (if (empty? lanes)
-      context
+    (cond
+      (empty? lanes) context
+      ;; The region is already built: the host owns it and wrote it itself.
+      (real-region? (:lanes context)) context
+      :else
       (let [stride (long (:lane-stride abi))
             supplied (:lanes context)
             f64? (= :f64 (get-in abi [:precision]))
@@ -949,12 +962,16 @@
   `:shared-stride` slice and a sequence is written as it comes — which is also
   what a host writing a per-frame *global* curve wants. The region is one for the
   whole pool, not one per voice (M5), so this is the copy that a real-time host
-  skips by writing the region directly."
+  skips by writing the region directly, passing the region it already owns as
+  `:shared`."
   [artifact context]
   (let [abi (:abi artifact)
         shared (:shared abi)]
-    (if (empty? shared)
-      context
+    (cond
+      (empty? shared) context
+      ;; The region is already built: the host owns it and wrote it itself.
+      (real-region? (:shared context)) context
+      :else
       (let [stride (long (:shared-stride abi))
             supplied (:shared context)
             f64? (= :f64 (get-in abi [:precision]))
@@ -1000,7 +1017,9 @@
 
   `:lanes` carries a per-frame automation region (D28); `:shared` carries the
   pool-wide shared controls (M5). Either may be absent when the process declares
-  none of that kind."
+  none of that kind, may be a map of control name to values (this adapter then
+  flattens it), or may be the region itself, for a host that already owns and
+  writes one."
   [holder context]
   (let [artifact (or (:artifact holder) holder)]
     (when-not (= :process (:entry artifact))

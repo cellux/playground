@@ -210,15 +210,19 @@
        :value (if (= :const (:op value)) (:value value) value)})))
 
 (defn- record-array-ref
-  "The `:array-ref` for a record's single array field, or nil."
+  "The `:array-ref` for a scalar record's single array field, or nil.
+
+  An array of records is not one array place: its rows are strided, so
+  `(aget voices i k)` resolves through the record accessors instead."
   [binding]
-  (let [buffers (filterv #(> (:size %) 1) (:leaves binding))]
-    (when (= 1 (count buffers))
-      (let [leaf (first buffers)]
-        {:op :array-ref :type :array :region :state
-         :state-id (:name binding)
-         :base (:offset leaf) :element (:type leaf) :size (:size leaf)
-         :constant (boolean (:constant binding))}))))
+  (when (= 1 (or (:size binding) 1))
+    (let [buffers (filterv #(> (:size %) 1) (:leaves binding))]
+      (when (= 1 (count buffers))
+        (let [leaf (first buffers)]
+          {:op :array-ref :type :array :region :state
+           :state-id (:name binding)
+           :base (:offset leaf) :element (:type leaf) :size (:size leaf)
+           :constant (boolean (:constant binding))})))))
 
 (defn- binding-expression
   [binding]
@@ -1073,61 +1077,117 @@
             {:form form :target target}))
     value))
 
+(declare field-element-count field-leaf! leaf-load leaf-store)
+
+(defn- record-array-binding
+  "The `:record` binding named `name` when it is an array of records, else nil.
+
+  Such a binding is not one array place (`record-array-ref` declines it), so
+  `aget`/`aset` resolve the two indices through the record accessors."
+  [env name]
+  (when (symbol? name)
+    (let [binding (get-in env [:bindings name])]
+      (when (and (= :record (:kind binding)) (> (or (:size binding) 1) 1))
+        binding))))
+
+(defn- record-array-field!
+  "The single array field of a record array, or fail naming the candidates."
+  [form binding]
+  (let [fields (filterv #(> (field-element-count true %) 1) (:leaves binding))]
+    (when-not (= 1 (count fields))
+      (fail "a record array's array access needs exactly one array field; name one with field"
+            {:form form :state (:name binding)
+             :array-fields (mapv :path fields)}))
+    (first fields)))
+
 (defn- lower-array-load
   [form env]
-  (let [[_ target index-form & extra] form]
-    (when (or (nil? target) (nil? index-form) extra)
+  (let [[_ target & arguments] form]
+    (when (nil? target)
       (fail (str (first form) " requires an array place and one integer index")
             {:form form}))
-    (let [place (array-place form env target)
-          ref (:value place)
-          index (place-index form ref index-form env)]
-      (fragment (concat (:statements place) (:statements index))
-                (if (= :scratch (:region ref))
-                  {:op :array-load
-                   :index (:base ref)
-                   :element-index (:value index)
-                   :size (:size ref)
-                   :type (:element ref)
-                   :effects #{:read-memory}}
-                  {:op :state-load
-                   :state-id (:state-id ref)
-                   :index (:base ref)
-                   :element-index (:value index)
-                   :size (:size ref)
-                   :type (:element ref)
-                   :effects #{:read-state}})))))
+    (if-let [binding (record-array-binding env target)]
+      ;; `(aget voices i k)` — the terse spelling of `(field voices i :field k)`.
+      (let [[record-index element-index & extra] arguments]
+        (when (or (nil? element-index) extra)
+          (fail "a record array's array access takes a record index and an element index"
+                {:form form :state (:name binding)}))
+        (leaf-load binding (field-leaf! form env binding
+                                        {:record-index record-index
+                                         :path (:path (record-array-field! form binding))
+                                         :element-index element-index})))
+      (let [[index-form & extra] arguments]
+        (when (or (nil? index-form) extra)
+          (fail (str (first form) " requires an array place and one integer index")
+                {:form form}))
+        (let [place (array-place form env target)
+              ref (:value place)
+              index (place-index form ref index-form env)]
+          (fragment (concat (:statements place) (:statements index))
+                    (if (= :scratch (:region ref))
+                      {:op :array-load
+                       :index (:base ref)
+                       :element-index (:value index)
+                       :size (:size ref)
+                       :type (:element ref)
+                       :effects #{:read-memory}}
+                      {:op :state-load
+                       :state-id (:state-id ref)
+                       :index (:base ref)
+                       :element-index (:value index)
+                       :size (:size ref)
+                       :type (:element ref)
+                       :effects #{:read-state}})))))))
 
 (defn- lower-array-store
   [form env]
-  (let [[_ target index-form value-form & extra] form]
-    (when (or (nil? target) (nil? index-form) (nil? value-form) extra)
+  (let [[_ target & arguments] form]
+    (when (nil? target)
       (fail (str (first form) " requires an array place, integer index, and value")
             {:form form}))
-    (let [place (array-place form env target)
-          ref (:value place)
-          index (place-index form ref index-form env)
-          value (lower-value value-form env)]
-      (reject-constant-place! form ref)
-      (expect-type! (:element ref) (:value value) form)
-      (void-fragment
-       (concat (:statements place) (:statements index) (:statements value)
-               (if (= :scratch (:region ref))
-                 [{:op :array-store
-                   :index (:base ref)
-                   :element-index (:value index)
-                   :size (:size ref)
-                   :type (:element ref)
-                   :value (:value value)
-                   :effects #{:write-memory}}]
-                 [{:op :state-store
-                   :state-id (:state-id ref)
-                   :index (:base ref)
-                   :element-index (:value index)
-                   :size (:size ref)
-                   :type (:element ref)
-                   :value (:value value)
-                   :effects #{:write-state}}]))))))
+    (if-let [binding (record-array-binding env target)]
+      ;; `(aset voices i k v)` — the terse spelling of `(set-field! ...)`.
+      (let [[record-index element-index value-form & extra] arguments]
+        (when (or (nil? value-form) extra)
+          (fail (str "a record array's array access takes a record index, an"
+                     " element index, and a value")
+                {:form form :state (:name binding)}))
+        (let [resolved (field-leaf! form env binding
+                                    {:record-index record-index
+                                     :path (:path (record-array-field! form binding))
+                                     :element-index element-index})
+              value (lower-value value-form env)]
+          (reject-constant-store! form binding)
+          (expect-type! (:type (:leaf resolved)) (:value value) form)
+          (leaf-store binding resolved value)))
+      (let [[index-form value-form & extra] arguments]
+        (when (or (nil? index-form) (nil? value-form) extra)
+          (fail (str (first form) " requires an array place, integer index, and value")
+                {:form form}))
+        (let [place (array-place form env target)
+              ref (:value place)
+              index (place-index form ref index-form env)
+              value (lower-value value-form env)]
+          (reject-constant-place! form ref)
+          (expect-type! (:element ref) (:value value) form)
+          (void-fragment
+           (concat (:statements place) (:statements index) (:statements value)
+                   (if (= :scratch (:region ref))
+                     [{:op :array-store
+                       :index (:base ref)
+                       :element-index (:value index)
+                       :size (:size ref)
+                       :type (:element ref)
+                       :value (:value value)
+                       :effects #{:write-memory}}]
+                     [{:op :state-store
+                       :state-id (:state-id ref)
+                       :index (:base ref)
+                       :element-index (:value index)
+                       :size (:size ref)
+                       :type (:element ref)
+                       :value (:value value)
+                       :effects #{:write-state}}]))))))))
 
 (defn- record-binding!
   [form env name]
@@ -1177,35 +1237,145 @@
             {:form form :selectors selectors}))
     {:record-index record-index :path selectors :element-index element-index}))
 
-(defn- field-leaf!
-  "Resolve a parsed field access to `{:leaf ... :index ...}`.
+(defn- field-element-count
+  "The number of elements one record owns of `leaf`'s field.
 
-  For an array of records the index is the record index; for a scalar record
-  owning an array field it is the field's element index. An array field with no
-  element index is an array place; see `leaf-array-ref`."
+  An array of records that owns an array field carries its per-record element
+  count as `:stride` (the leaf's own size is then the whole flat block);
+  otherwise the leaf's size is the element count (a scalar record's array field)
+  or 1."
+  [record-array? leaf]
+  (if record-array?
+    (or (:stride leaf) 1)
+    (or (:size leaf) 1)))
+
+(defn- lower-index
+  "Lower a field index and check that it is an integer."
+  [form env index-form]
+  (let [index (lower-value index-form env)]
+    (expect-type! :int (:value index) form)
+    index))
+
+(defn- constant-index
+  "The integer value of a lowered index when it is constant, else nil."
+  [index]
+  (when (= :const (get-in index [:value :op]))
+    (get-in index [:value :value])))
+
+(defn- strided-index
+  "Fold a record index and an element index into one flat element index.
+
+  An array of records that owns an array field is laid out strided: record `i`
+  owns `stride` slots, so element `k` of record `i` sits at `i * stride + k`.
+  Folding here is what keeps the backends unchanged — a leaf still has one
+  constant base offset and one element index. Both dimensions are checked when
+  they are constant; a dynamic one is the interpreter's development-time check."
+  [form env binding leaf record-index element-index]
+  (let [stride (long (field-element-count true leaf))
+        records (long (:size binding))
+        record (lower-index form env record-index)
+        element (lower-index form env element-index)
+        record-value (constant-index record)
+        element-value (constant-index element)
+        statements (vec (concat (:statements record) (:statements element)))]
+    (when (and record-value (or (neg? record-value) (>= record-value records)))
+      (fail "DSP record index is outside the declared range"
+            {:form form :state (:name binding) :record-index record-value
+             :records records}))
+    (when (and element-value (or (neg? element-value) (>= element-value stride)))
+      (fail "DSP array index is outside the declared range"
+            {:form form :state (:name binding) :element-index element-value
+             :size stride}))
+    (fragment statements
+              (if (and record-value element-value)
+                ;; A fully constant access stays constant, so the host sees an
+                ;; index and the access never reports a dynamic diagnostic.
+                {:op :const :type :int
+                 :value (+ (* record-value stride) element-value)}
+                {:op :binary :operator :+
+                 :left {:op :binary :operator :*
+                        :left (:value record)
+                        :right {:op :const :type :int :value stride}
+                        :type :int}
+                 :right (:value element)
+                 :type :int}))))
+
+(defn- field-leaf!
+  "Resolve a parsed field access.
+
+  Selectors are `[record-index?] field-name+ [element-index?]`. For a scalar
+  record owning an array field the element index is the flat index and no element
+  index is an array place (see `leaf-array-ref`); for an array of records the
+  record index selects the record, and an array field takes both indices, folded
+  by `strided-index`. Returns `{:leaf ... :index ...}`, or `{:place? true}` for an
+  array place."
   [form env binding parsed]
   (let [path (:path parsed)
         leaf (get (:leaf-index binding) path)]
     (when-not leaf
       (fail "DSP field path does not exist in the record"
             {:form form :state (:name binding) :path path}))
-    (let [record-array? (> (:size binding) 1)
-          array-field? (> (:size leaf) 1)
+    (let [record-array? (> (or (:size binding) 1) 1)
+          array-field? (> (field-element-count record-array? leaf) 1)
           record-index (:record-index parsed)
           element-index (:element-index parsed)]
       (when (and (not record-array?) record-index)
         (fail "a scalar record has no record index"
               {:form form :state (:name binding) :path path}))
-      (when (and record-array? element-index)
-        (fail "an array of records has no per-field element index"
-              {:form form :state (:name binding) :path path}))
-      (when (and (not array-field?) element-index)
+      (when (and element-index (not array-field?))
         (fail "scalar field access does not take an element index"
               {:form form :state (:name binding) :path path}))
-      (let [index-form (if record-array? record-index element-index)
-            index (when index-form (lower-value index-form env))]
-        (when index (expect-type! :int (:value index) form))
-        {:leaf leaf :index index}))))
+      (when (and record-array? (nil? record-index))
+        (fail "a record array's field needs a record index"
+              {:form form :state (:name binding) :path path}))
+      (when (and record-array? array-field? (nil? element-index))
+        (fail "a record array's array field needs an element index"
+              {:form form :state (:name binding) :path path}))
+      (cond
+        ;; An array of records owning an array field: both indices, folded.
+        (and record-array? array-field?)
+        {:leaf leaf :index (strided-index form env binding leaf
+                                          record-index element-index)}
+
+        ;; A scalar record owning an array field: no element index is the whole
+        ;; field as a place.
+        (and (not record-array?) array-field?)
+        (if (nil? element-index)
+          {:leaf leaf :place? true}
+          {:leaf leaf :index (lower-index form env element-index)})
+
+        ;; An array of records with a scalar field: the record index is flat.
+        record-array?
+        {:leaf leaf :index (lower-index form env record-index)}
+
+        ;; A scalar field: there is no index to speak of.
+        :else {:leaf leaf}))))
+
+(defn- leaf-load
+  "A `:state-load` for a resolved field access."
+  [binding {:keys [leaf index]}]
+  (fragment (:statements index)
+            {:op :state-load
+             :state-id (:name binding)
+             :index (:offset leaf)
+             :element-index (:value index)
+             :size (:size leaf)
+             :type (:type leaf)
+             :effects #{:read-state}}))
+
+(defn- leaf-store
+  "A `:state-store` for a resolved field access and a lowered value."
+  [binding {:keys [leaf index]} value]
+  (void-fragment
+   (concat (:statements index) (:statements value)
+           [{:op :state-store
+             :state-id (:name binding)
+             :index (:offset leaf)
+             :element-index (:value index)
+             :size (:size leaf)
+             :type (:type leaf)
+             :value (:value value)
+             :effects #{:write-state}}])))
 
 (defn- leaf-array-ref
   "An `:array-ref` place for a record's array field."
@@ -1226,18 +1396,11 @@
           (fail "DSP record values have no record or element index" {:form form}))
         (project-record-value form binding (:path parsed)))
       (let [binding (record-binding! form env name)
-            {:keys [leaf index]} (field-leaf! form env binding
-                                              (field-selectors form selectors))]
-        (if (and (> (:size leaf) 1) (nil? index))
-          (fragment [] (leaf-array-ref binding leaf))
-          (fragment (:statements index)
-                    {:op :state-load
-                     :state-id (:name binding)
-                     :index (:offset leaf)
-                     :element-index (:value index)
-                     :size (:size leaf)
-                     :type (:type leaf)
-                     :effects #{:read-state}}))))))
+            resolved (field-leaf! form env binding
+                                  (field-selectors form selectors))]
+        (if (:place? resolved)
+          (fragment [] (leaf-array-ref binding (:leaf resolved)))
+          (leaf-load binding resolved))))))
 
 (defn- lower-set-field!
   [form env]
@@ -1251,23 +1414,14 @@
       (fail "DSP record values are immutable" {:form form :record name}))
     (let [binding (record-binding! form env name)
           parsed (field-selectors form selectors)
-          {:keys [leaf index]} (field-leaf! form env binding parsed)
+          resolved (field-leaf! form env binding parsed)
           value (lower-value value-form env)]
-      (when (and (> (:size leaf) 1) (nil? index))
+      (when (:place? resolved)
         (fail "use aset to write an array field element"
               {:form form :state (:name binding) :path (:path parsed)}))
       (reject-constant-store! form binding)
-      (expect-type! (:type leaf) (:value value) form)
-      (void-fragment
-       (concat (:statements index) (:statements value)
-               [{:op :state-store
-                 :state-id (:name binding)
-                 :index (:offset leaf)
-                 :element-index (:value index)
-                 :size (:size leaf)
-                 :type (:type leaf)
-                 :value (:value value)
-                 :effects #{:write-state}}])))))
+      (expect-type! (:type (:leaf resolved)) (:value value) form)
+      (leaf-store binding resolved value))))
 
 (defn- lower-field-read
   "Clojure-style field read for `(:field record)` and `(record :field)`."
@@ -1275,17 +1429,10 @@
   (if-let [binding (value-record-binding env record-name)]
     (project-record-value form binding path)
     (let [binding (record-binding! form env record-name)
-          {:keys [leaf index]} (field-leaf! form env binding {:path path})]
-      (if (and (> (:size leaf) 1) (nil? index))
-        (fragment [] (leaf-array-ref binding leaf))
-        (fragment (:statements index)
-                  {:op :state-load
-                   :state-id (:name binding)
-                   :index (:offset leaf)
-                   :element-index (:value index)
-                   :size (:size leaf)
-                   :type (:type leaf)
-                   :effects #{:read-state}})))))
+          resolved (field-leaf! form env binding {:path path})]
+      (if (:place? resolved)
+        (fragment [] (leaf-array-ref binding (:leaf resolved)))
+        (leaf-load binding resolved)))))
 
 (defn- lower-place-store!
   "Field write for a `set!` place: `(set! (:field record) value)`."
@@ -1294,23 +1441,14 @@
     (fail "DSP record values are immutable"
           {:form form :record record-name}))
   (let [binding (record-binding! form env record-name)
-        {:keys [leaf index]} (field-leaf! form env binding {:path path})]
-    (when (> (:size leaf) 1)
+        resolved (field-leaf! form env binding {:path path})]
+    (when (:place? resolved)
       (fail "use aset to write an array field element"
             {:form form :state (:name binding) :path path}))
     (let [value (lower-value value-form env)]
       (reject-constant-store! form binding)
-      (expect-type! (:type leaf) (:value value) form)
-      (void-fragment
-       (concat (:statements index) (:statements value)
-               [{:op :state-store
-                 :state-id (:name binding)
-                 :index (:offset leaf)
-                 :element-index (:value index)
-                 :size (:size leaf)
-                 :type (:type leaf)
-                 :value (:value value)
-                 :effects #{:write-state}}])))))
+      (expect-type! (:type (:leaf resolved)) (:value value) form)
+      (leaf-store binding resolved value))))
 
 (defn- lower-call
   [form env]
@@ -1334,21 +1472,24 @@
       ;; the enclosing arena.
       (let [callee (get (:modules env) function-id)
             partition-size (or (:state-size callee) 0)
-            ;; The call site's partition ordinal, which is its *slot* when the
-            ;; entry is fused: this call is about to take the next partition, so
-            ;; that index is the one a lane slice belongs to (F4).
+            ;; Every call site owns a partition, even when its callee has no state:
+            ;; the partition *is* the site's identity — the slot a fused host
+            ;; resets and reads a special from, and the slice a per-voice lane
+            ;; belongs to (D70). A stateless site's range is empty, which every
+            ;; host's reset already treats as a no-op, and the ordinal stays the
+            ;; *call-site* ordinal, so slot k is the k-th call site whether or not
+            ;; it carries state.
             slot (count @(:call-partitions env))
-            partition-base (when (pos? partition-size)
-                             (let [base @(:call-offset env)]
-                               (swap! (:call-offset env) + partition-size)
-                               (swap! (:call-partitions env) conj
-                                      {:function-id function-id
-                                       :base base :size partition-size})
-                               (swap! (:state-more env) into
-                                      (rebase-slots base (:state callee)))
-                               (swap! (:records-more env) into
-                                      (rebase-records base (:records callee)))
-                               base))
+            partition-base @(:call-offset env)
+            _ (swap! (:call-offset env) + partition-size)
+            _ (swap! (:call-partitions env) conj
+                     {:function-id function-id
+                      :base partition-base :size partition-size})
+            _ (when (pos? partition-size)
+                (swap! (:state-more env) into
+                       (rebase-slots partition-base (:state callee)))
+                (swap! (:records-more env) into
+                       (rebase-records partition-base (:records callee))))
             ;; A fused entry renders every voice in one call, so the lane region
             ;; it holds has one slice per voice and a lane-reading callee has to
             ;; be told which one is *this* call site's (F4). The slot is the call
@@ -1359,15 +1500,10 @@
             (when (:lane-region? callee)
               (cond
                 (:lane-slots env)
-                (if partition-base
-                  {:op :const :type :int
-                   :value (* (long slot)
-                             (long (count (:lanes env)))
-                             (long (:lane-frame-capacity env)))}
-                  (fail (str "a fused entry's lane-reading call needs a state"
-                             " partition: a slot is what a host resets a voice by,"
-                             " and what a lane slice belongs to")
-                        {:function-id function-id :lane-slots (:lane-slots env)}))
+                {:op :const :type :int
+                 :value (* (long slot)
+                           (long (count (:lanes env)))
+                           (long (:lane-frame-capacity env)))}
 
                 (:lane-base? env) {:op :lane-base :type :int}))
             [argument-statements argument-values]
@@ -1646,35 +1782,51 @@
   [record-name path]
   (symbol (str (name record-name) "." (str/join "." (map name path)))))
 
+(defn- repeat-field-init
+  "The flat initializers of one field of an array of `n` records: the field's own
+  initializers, repeated once per record."
+  [n init]
+  (vec (mapcat (fn [_] (if (vector? init) init [init])) (range n))))
+
 (defn- expand-record
   "Expand one record entry into flat leaf slots from `offset`.
 
   An array of records (`n > 1`) is laid out struct-of-arrays: each leaf is one
   flat state entry of `:size n`. A scalar record (`n = 1`) may instead own array
-  fields, in which case each field occupies its own contiguous block. Either way
-  a leaf is an ordinary state slot with a constant base offset, so the backends
-  are unchanged. Returns `[slots offset' binding]`."
+  fields, in which case each field occupies its own contiguous block. An array of
+  records may own an array field too: the leaf is then one flat block of `n * m`
+  slots, `m` per record, and carries `:stride m` so an accessor can fold a record
+  index and an element index into one flat index (`record * m + element`). Either
+  way a leaf is an ordinary state slot with a constant base offset and a single
+  element index, so the backends are unchanged. Returns
+  `[slots offset' binding]`."
   [state offset]
   (let [n (or (:size state) 1)
         scalar? (= n 1)
         leaves (vec (record-leaves (:fields state) []))
         [slots offset' leaf-list]
         (reduce (fn [[slots offset result] leaf]
-                  (let [size (if scalar? (:size leaf) n)
+                  (let [;; `m` slots per record: one for a scalar field, the
+                        ;; field's own element count for an array field.
+                        elements (or (:size leaf) 1)
+                        size (if scalar? elements (* n elements))
+                        stride (when (and (not scalar?) (> elements 1)) elements)
                         entry (cond-> {:name (record-leaf-name (:name state) (:path leaf))
                                        :type (:type leaf)
                                        :index offset}
                                 (> size 1) (assoc :size size
                                                   :init (if scalar?
                                                           (:init leaf)
-                                                          (vec (repeat n (:init leaf)))))
+                                                          (repeat-field-init
+                                                           n (:init leaf))))
                                 (= size 1) (assoc :init (:init leaf)))]
                     [(conj slots entry)
                      (+ offset size)
-                     (conj result {:path (:path leaf)
-                                   :type (:type leaf)
-                                   :offset offset
-                                   :size size})]))
+                     (conj result (cond-> {:path (:path leaf)
+                                           :type (:type leaf)
+                                           :offset offset
+                                           :size size}
+                                    stride (assoc :stride stride)))]))
                 [[] offset []]
                 leaves)
         leaf-index (into {} (map (fn [leaf] [(:path leaf) leaf])) leaf-list)

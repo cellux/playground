@@ -28,6 +28,7 @@
                      lane-voice-description
                      shared-voice-description
                      sine-voice-description
+                     stateless-voice-description
                      thread-allocation-meter]]))
 
 ;; ---------------------------------------------------------------------------
@@ -145,9 +146,19 @@
           (is (apply < values) "the lane advances the voice's own frequency")
           (is (every? #(< 261.0 % 266.0) values)
               "the note's 261.6 Hz plus a lane of 1..4, not something else"))))
-    (testing "a per-channel control's lane has no delivery, so it is refused"
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #"per-channel"
-                            (host/synth-pool (compiled lane-bend-description)))))
+    (testing "a per-channel control's lane has its own setter"
+      ;; H3: `bend` is the pool's global source bank indexed by *channel*, so its
+      ;; lane is a curve per channel and neither of the other two setters is the
+      ;; right one. The delivery is checked by the test right after this one.
+      (let [channel-pool (host/synth-pool (compiled lane-bend-description))]
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not shared"
+                              (pool/set-lane! channel-pool 'bend (float-array [1.0]))))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"per channel"
+                              (pool/set-voice-lane! channel-pool 0 'bend
+                                                    (float-array [1.0]))))
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no such channel"
+                              (pool/set-channel-lane! channel-pool 99 'bend
+                                                      (float-array [1.0]))))))
     (testing "a lane-only control is per voice unless a parameter says shared"
       (let [pool (host/synth-pool (compiled lane-only-description))
             output (float-array 4)]
@@ -171,6 +182,133 @@
                               (pool/set-voice-lane! pool 2 'amount (float-array [1.0]))))
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no such lane"
                               (pool/set-voice-lane! pool 0 'nope (float-array [1.0]))))))))
+
+(deftest a-per-channel-lane-reaches-the-voice-on-its-channel
+  ;; H3. `:bend` is the pool's global source bank indexed by *channel*, so a lane
+  ;; beside it is a curve per channel and a voice reads the one for the channel it
+  ;; is on — exactly as it reads that channel's bend. Two consequences have to be
+  ;; visible, and each is the reason the pool keeps a copy of the curve rather
+  ;; than just writing the host's: a voice that starts on a channel reads the
+  ;; curve published *before* its note, and a voice that moves to another channel
+  ;; stops reading the channel it was on.
+  (let [description (assoc lane-bend-description :capacity 2)
+        curves (fn []
+                 {0 (float-array [1.0 2.0 3.0 4.0])
+                  1 (float-array [10.0 20.0 30.0 40.0])})
+        play (fn [target channel]
+               ;; Every curve is published before the note, so the note's voice
+               ;; has to find its channel's curve already there.
+               (let [p (host/synth-pool (compiled description {:target target}))
+                     output (float-array 4)]
+                 (doseq [[channel values] (curves)]
+                   (pool/set-channel-lane! p channel 'bend values))
+                 (pool/note-on! p 60 1.0 channel)
+                 (pool/render! p output 4 48000.0)
+                 (mapv double (vec output))))]
+    (doseq [target [:jvm :interpreter]]
+      (testing (name target)
+        (testing "the curve read is the one published for the voice's channel"
+          (is (= [1.0 2.0 3.0 4.0] (play target 0))
+              "channel 0's curve, frame for frame")
+          (is (= [10.0 20.0 30.0 40.0] (play target 1))
+              "the same two curves, the other channel: the voice follows it"))
+        (testing "a channel nobody wrote reads zero"
+          (is (= [0.0 0.0 0.0 0.0] (play target 3))))
+        (testing "the host's buffer is copied, not kept"
+          ;; A host reuses its block buffer, so a curve the pool only *pointed* at
+          ;; would change under it — and a voice that starts later would read
+          ;; whatever the buffer held then.
+          (let [p (host/synth-pool (compiled description {:target target}))
+                values (float-array [1.0 1.0 1.0 1.0])
+                output (float-array 4)]
+            (pool/set-channel-lane! p 0 'bend values)
+            (aset values 0 99.0)
+            (pool/note-on! p 60 1.0 0)
+            (pool/render! p output 4 48000.0)
+            (is (= [1.0 1.0 1.0 1.0] (mapv double (vec output)))
+                "the curve the host published, not what its buffer holds now")))
+        (testing "a voice already sounding follows a curve published under it"
+          ;; The write-time delivery is what this sees: without it a sounding
+          ;; voice would keep running the old curve until its next note.
+          (let [p (host/synth-pool (compiled description {:target target}))
+                output (float-array 4)
+                read (fn []
+                       (pool/render! p output 4 48000.0)
+                       (mapv double (vec output)))]
+            (pool/set-channel-lane! p 0 'bend (float-array [1.0 1.0 1.0 1.0]))
+            (pool/note-on! p 60 1.0 0)
+            (is (= [1.0 1.0 1.0 1.0] (read)))
+            (pool/set-channel-lane! p 0 'bend (float-array [2.0 2.0 2.0 2.0]))
+            (is (= [2.0 2.0 2.0 2.0] (read))
+                "the new curve reaches the voice already on the channel")))
+        (testing "a voice that moves to another channel stops reading the old one"
+          (let [p (host/synth-pool (compiled (assoc description :capacity 1)
+                                             {:target target}))
+                output (float-array 4)
+                read (fn []
+                       (pool/render! p output 4 48000.0)
+                       (mapv double (vec output)))]
+            (doseq [[channel values] (curves)]
+              (pool/set-channel-lane! p channel 'bend values))
+            (pool/note-on! p 60 1.0 0)
+            (is (= [1.0 2.0 3.0 4.0] (read)) "on channel 0")
+            ;; One voice, so this note takes the same one over and moves it.
+            (pool/note-on! p 64 1.0 1)
+            (is (= [10.0 20.0 30.0 40.0] (read))
+                "and it reads channel 1's curve as soon as it is on it")))))))
+
+(deftest a-fused-slot-does-not-need-state-of-its-own
+  ;; H4. A slot is the *call site's* identity: what a fused host resets, reads a
+  ;; special from, and slices a lane by. It used to *be* the state partition, so a
+  ;; voice with no state had no slots at all and every host refused it -- "a slot
+  ;; cannot be reset on its own", which is not even true of a voice that has
+  ;; nothing to reset. Every call site now owns a partition, empty when the callee
+  ;; has no state, so the ordinal stays the call-site ordinal.
+  (let [fused {:fusion {:slots 2 :guard false}}
+        render (fn [target options description write]
+                 (let [pool (host/synth-pool (compiled description
+                                                       (assoc options :target target)))
+                       output (float-array 4)]
+                   (write pool)
+                   (pool/note-on! pool 60 1.0)
+                   (pool/note-on! pool 64 0.5)
+                   (pool/render! pool output 4 48000.0)
+                   (mapv double (vec output))))
+        nothing (fn [_] nil)]
+    (doseq [target [:jvm :interpreter]]
+      (testing (name target)
+        (testing "a stateless voice fuses, and its slots render what plain ones do"
+          ;; `:guard` is what usually supplies a per-call-site latch; with it off
+          ;; this voice has no state at all, so a slot is only an identity.
+          (is (= [92.0 92.0 92.0 92.0]
+                 (render target {} stateless-voice-description nothing))
+              "the plain pool is the oracle, and it is not silence (60 + 64*0.5)")
+          (is (= (render target {} stateless-voice-description nothing)
+                 (render target fused stateless-voice-description nothing))
+              "two stateless slots in one call render what two plain voices render"))
+        (testing "every call site owns a slot, so a lane has a slice without state"
+          ;; `gated-lane-only` has a per-slot `gate` and a per-voice lane, and no
+          ;; state: the two slots must still read their own slices of the region.
+          (let [description (assoc fixtures/gated-lane-only-description :capacity 2)
+                write (fn [pool]
+                        (pool/set-voice-lane! pool 0 'amount
+                                              (float-array [1.0 2.0 3.0 4.0]))
+                        (pool/set-voice-lane! pool 1 'amount
+                                              (float-array [10.0 10.0 10.0 10.0])))]
+            (is (= [22.0 24.0 26.0 28.0]
+                   (render target fused description write))
+                "2*(1+10), 2*(2+10), ...: each slot's own slice, with no state"))
+          (testing "and the artifact says so: one empty partition per slot"
+            (let [artifact (:artifact (host/compile-synth
+                                       (assoc fixtures/gated-lane-only-description
+                                              :capacity 2)
+                                       (assoc fused :target target)))]
+              (is (= [{:base 0 :size 0} {:base 0 :size 0}]
+                     (mapv (fn [partition]
+                             {:base (long (:base partition))
+                              :size (long (:size partition))})
+                           (:call-partitions (:ir artifact))))
+                  "the slots are call sites, not state ranges"))))))))
 
 (deftest a-fused-pool-gives-each-slot-its-own-lane
   ;; F4. A fused entry renders every slot in one call, so it owns *one* lane
@@ -1467,6 +1605,78 @@
         "a fused instrument renders the plain instrument's samples")
     (is (some (fn [sample] (not (zero? sample))) plain)
         "and the instrument actually sounds, so the comparison is not silence")))
+
+(deftest a-post-mix-lane-reaches-the-bus
+  ;; H2. A post-mix control may be declared a lane, exactly as a voice's may. Two
+  ;; things have to hold: the declaration has to survive `chain-effect`, which
+  ;; rebuilds the chain's interface out of bare parameter names at every stage,
+  ;; and the bus host has to hand the region to each channel's instance. The
+  ;; fixture voice renders exactly 1.0 while it sounds, so the samples *are* the
+  ;; lane -- the check cannot pass vacuously.
+  (doseq [target [:interpreter :jvm]]
+    (testing (name target)
+      (let [program (instrument-host/compile-instrument fixtures/bus-lane-instrument
+                                                        {:target target
+                                                         :containment :off})
+            bus-abi (:abi (:bus program))]
+        (is (= '[post-amount] (mapv :name (:lanes bus-abi)))
+            "the chain declares the lane the stage was written with")
+        (is (empty? (:controls bus-abi))
+            "and a lane-only control leaves the scalar list")
+        (let [live (instrument-host/instrument-pool program {:containment :off})
+              lane (mapv double (range 1 9))
+              block (float-array 8)]
+          (instrument-host/note-on! live 60 1.0)
+          (instrument-host/set-bus-lane! live 'post-amount lane)
+          (instrument-host/render! live block 8)
+          (is (= lane (mapv double (vec block)))
+              "every frame reads the lane written into the chain's region")
+          (testing "and the refusals are loud"
+            (is (thrown-with-msg?
+                 clojure.lang.ExceptionInfo #"declares no such lane"
+                 (instrument-host/set-bus-lane! live 'nope lane))
+                "a name the chain does not declare is refused")
+            (is (thrown-with-msg?
+                 clojure.lang.ExceptionInfo #"has no such control"
+                 (instrument-host/set-bus-control! live 'post-amount 1.0))
+                "a lane-only control has no scalar for `set-bus-control!` to set"))))
+      (testing "an instrument whose chain has no lane refuses one"
+        (let [program (instrument-host/compile-instrument
+                       (inst/instrument fixtures/bus-lane-description)
+                       {:target target :containment :off})
+              live (instrument-host/instrument-pool program {:containment :off})]
+          (is (thrown-with-msg?
+               clojure.lang.ExceptionInfo #"declares no lanes"
+               (instrument-host/set-bus-lane! live 'amount [1.0]))))))))
+
+(deftest a-post-mix-shared-control-follows-its-parameter
+  ;; H2, the shared half. A `:shared` post-mix control reads the bus's own
+  ;; per-frame region rather than a block-rate scalar, so the region has to be
+  ;; delivered too -- and its value has to come from the instrument parameter of
+  ;; the same name, which is the rule a scalar bus control already follows. The
+  ;; region is one for the instrument, so setting the parameter once reaches every
+  ;; channel's instance.
+  (doseq [target [:interpreter :jvm]]
+    (testing (name target)
+      (let [program (instrument-host/compile-instrument
+                     fixtures/bus-shared-instrument
+                     {:target target :containment :off})
+            bus-abi (:abi (:bus program))]
+        (is (= '[post-amount] (mapv :name (:shared bus-abi)))
+            "the chain declares the shared control the stage was written with")
+        (is (empty? (:controls bus-abi))
+            "and it leaves the scalar list, so no block-rate value stands beside it")
+        (let [live (instrument-host/instrument-pool program {:containment :off})
+              render (fn [frames]
+                       (let [block (float-array frames)]
+                         (instrument-host/render! live block frames)
+                         (mapv double (vec block))))]
+          (instrument-host/note-on! live 60 1.0)
+          (is (= [1.0 1.0 1.0 1.0] (render 4))
+              "the parameter's default fills the region from construction")
+          (instrument-host/set-parameter! live 'post-amount 2.5)
+          (is (= [2.5 2.5 2.5 2.5] (render 4))
+              "and setting it reaches the bus, not only the voices"))))))
 
 (deftest a-fused-instrument-holds-exactly-its-slots
   ;; F1. A fused artifact *is* `slots` voices, so the pool's capacity has to be the

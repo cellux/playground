@@ -9,6 +9,7 @@
             [omkamra.dsp.library.envelope]
             [omkamra.dsp.library.filter :as filter]
             [omkamra.dsp.library.oscillator]
+            [omkamra.dsp.instrument :as inst]
             [omkamra.dsp.harness.catalog :as catalog]
             [omkamra.dsp.event :as event]
             [omkamra.dsp.schedule :as schedule])
@@ -465,9 +466,9 @@
   (+ frequency (lane frequency)))
 
 (omkamra.dsp/defn lane-on-bend
-  "A lane beside a per-channel runtime control, which has no per-lane delivery
-  yet: a pool over this refuses it at construction rather than fanning channels
-  into voices."
+  "A lane beside a *per-channel* runtime control: `bend` is the pool's global
+  source bank indexed by channel, so its lane is a curve per channel and each
+  voice reads the curve of the channel it is on (H3)."
   [bend]
   {:process {:input false :controls [{:name bend :has-lane true}]}}
   (+ bend (lane bend)))
@@ -527,6 +528,64 @@
    :max-block-frames 8
    :parameters {:amount {:scope :per-voice :default 10.0}}
    :voice {:definition #'gated-lane-carried}})
+
+(omkamra.dsp/defn bus-gain-voice
+  "A voice whose whole output *is* its gate, so it renders exactly 1.0 for every
+  frame it sounds. A post-mix stage's gain is then the output itself, which is
+  what makes the chain's per-frame delivery legible in the samples (H2)."
+  [gate]
+  {:process {:input false :controls [{:name gate}]}}
+  gate)
+
+(def bus-lane-description
+  "A synth description over `bus-gain-voice`: one voice, and the instrument
+  parameter a post-mix stage is driven by."
+  {:id :bus-lane
+   :capacity 2
+   :max-block-frames 8
+   :parameters {:post-amount {:scope :shared :default 1.0}}
+   :voice {:definition #'bus-gain-voice}})
+
+(omkamra.dsp/defn shared-post-gain
+  "A post-mix stage whose gain is read from the bus's *shared* region rather than
+  as a block-rate scalar: one region for the whole instrument, so a global curve
+  reaches every channel's instance without being written once per channel (M5,
+  one level up from the voices)."
+  [sample amount]
+  {:process {:controls [{:name amount :shared true}]}}
+  (* sample amount))
+
+(def bus-lane-instrument
+  "An instrument whose *post-mix chain* declares a lane (H2).
+
+  The chain is one mono processor run once per output channel, and this stage's
+  gain arrives one float per frame from the instrument's lane region — so it is
+  the chain's own delivery the samples show, with the voice contributing exactly
+  1.0 while it sounds."
+  (-> (inst/instrument bus-lane-description)
+      (inst/with-effect lane-gain [:post-amount])))
+
+(def bus-shared-instrument
+  "The same chain with its stage reading a shared control instead: the bus's own
+  per-frame region, filled from the instrument parameter of the same name (H2)."
+  (-> (inst/instrument bus-lane-description)
+      (inst/with-effect shared-post-gain [:post-amount])))
+
+(omkamra.dsp/defn stateless-voice
+  "A voice with *no state at all*: it renders the note it was started on, scaled
+  by its velocity, so a fused pool of them is legible in the samples and there is
+  nothing a slot's reset could restore (H4)."
+  [note velocity]
+  {:process {:input false}}
+  (* note velocity))
+
+(def stateless-voice-description
+  "A synth description over `stateless-voice`: two of them can share one instance
+  without either having anything of its own."
+  {:id :stateless
+   :capacity 2
+   :max-block-frames 8
+   :voice {:definition #'stateless-voice}})
 
 (omkamra.dsp/defn lane-in-callee
   "A callee that reaches for a lane. A callee has no lane region of its own, so
