@@ -86,7 +86,9 @@ rather than silently falling back.
 
 ## D5 — Wasm stays WAT-only until P12
 
-**Status.** In force.
+**Status.** Superseded by D73: WAT plus a named, version-pinned assembler is the
+Wasm artifact's form *by design*, not a deferral, and the assembly step lives in the
+browser's world rather than in this compiler's.
 
 **Decision.** The Wasm backend continues to emit WAT plus linear-memory ABI
 metadata; binary bytes and instance regions are delivered by P12.
@@ -3677,3 +3679,134 @@ shape refusals; a wrong stride in the fold → `[4.0 13.0 23.0]` instead of
 the initializers not repeated → "state has the wrong size {:expected 12, :actual
 4}" and a broken pre-existing record-array case; constant folding removed → the
 folded-node assertion and both per-dimension refusals fail.
+
+---
+
+## D72 — the JVM's WAT→binary step is a pinned WABT, not an encoder we write (P12)
+
+**Status.** Superseded by D73. The pin and the measurements below stand — they are
+what any future encoder would be checked against — but the compiler does not invoke a
+host binary: the artifact names the assembler and the consumer that has it produces
+the module.
+
+**The question.** P12's first deliverable asks for "a defined WAT → WABT → binary
+compilation step producing validated `:bytes`". Since Wasm is only ever *executed*
+in the browser, and the page already compiles WAT with WABT (`wabt` 1.0.39 in
+`package.json`, wired through `omkamra.dsp.harness.testbed`), that step can look
+like a second, pointless implementation of something we already have.
+
+**Decision.** The step *invokes* WABT. We write no WAT parser, no binary encoder, no
+validator. The JVM looks for a native `wat2wasm` — the pinned release below — and
+falls back to the page's own pinned npm CLI (`node_modules/wabt/bin/wat2wasm`). Both
+were measured to produce **byte-identical** modules for every Wasm artifact the
+catalog compiles, so the fallback is a performance choice, not a semantic one.
+
+The pin: `wabt-1.0.39-linux-x64.tar.gz`, sha256
+`1df1254b6639f5f1f89665907ee8cd0cd30114f40483515e583cccb86240840f`, from the
+upstream 1.0.39 release — deliberately the *same version* the browser pins, because
+the artifact's bytes and the page's bytes must agree.
+
+**Why the JVM needs it at all.** `:bytes` is part of the artifact, and the artifact
+is a JVM value. PLAN.md §6 and completion criterion 9 require validated binary bytes
+in it; D5's placeholder (`:bytes nil`, `:generator :browser-wabt`) exists precisely
+so that nothing depends on bytes until P12; and nothing on the JVM parses the module
+today — the page's WABT is the only validator, so the fast loop cannot see a
+malformed module at all. The step therefore buys **completeness and JVM-side
+validation**, not execution: there is no Wasm runtime here, and Wasm still only runs
+in the browser. P13 keeps WABT in the browser on purpose (source → SCI → … → WAT →
+WABT → worklet), so the two paths coexist: the JVM's for artifacts, the page's for
+editing source.
+
+**Evidence.** 179 modules — every process case × its precisions, compiled for
+`:wasm` — assembled with the 1.0.39 tools. Native: 0 failures, 0 byte-differences
+against the npm CLI, the whole corpus in under a second, slowest module 143 ms. npm
+CLI: 0 failures, ~535 ms per module (node start-up per invocation; ~96 s for the
+corpus). DSP compilation itself is ~9 ms per module. Native `wasm-validate` accepts
+every module, so the emitted WAT is already WABT-clean: P12's binary step is wiring,
+not emitter repair.
+
+**Rejected.** A JVM WABT binding: `org.bytedeco:wabt` does not exist (404), and no
+other candidate was found. The distribution's `wabt` (1.0.36): version skew against
+the page is exactly what would make artifact bytes unreproducible. `cargo install
+wasm-tools`: a different tool with the same skew. Writing an encoder driven from our
+own S-expression module form: smaller than a WAT compiler — we would translate our
+forms and never parse text — but still real work that duplicates WABT while a pinned
+tool exists.
+
+**Consequences.** P12's binary step needs no JVM library; the artifact can carry real
+`:bytes`; the JVM suite can validate modules; `:wat` stays in the artifact as the
+debugging form; the page's WABT stays exactly where it is. One cost to respect: the
+npm fallback is ~0.5 s per module and the testbed compiles a Wasm artifact per
+request, so a build that always assembles should use the native tool (or cache by
+WAT hash) rather than silently paying node start-up 200 times per browser run.
+
+---
+
+## D73 — lowering is portable up to the target's final step, which lives in the target's world
+
+**Status.** Decided; the artifact side is implemented.
+
+**The principle.** A target's compilation splits in two: everything that can be
+written once is, in `.cljc`, so the same code runs on the JVM and — after P13 —
+in the browser under SCI (descriptor, linking, portable IR, and the target-shaped
+code or data each backend produces). What remains is the final lowering to the
+target's native format, and that step uses a tool from the world the format belongs
+to:
+
+| target | final step | tool | where it lives | pinned in |
+|---|---|---|---|---|
+| JVM | JVM bytecode | `insn` | a Maven library | `deps.edn` |
+| JS | native JS | `squint.compiler` | a cljc library, so it runs on the JVM today and under SCI later | `deps.edn` |
+| Wasm | binary module | WABT | native C++ / the JS world | `package.json` |
+
+**Decision.** The Wasm artifact does **not** carry assembled bytes and the compiler
+does not assemble them. It carries WAT, the ABI and memory layout, and the *name and
+version of the assembler* its consumer must use:
+
+```clojure
+:binary {:format :wasm :source :wat :generator :browser-wabt :version "1.0.39" :bytes nil}
+```
+
+The host that has that assembler produces the module. P12's deliverable 1 (a
+WAT → WABT → binary step on the JVM) is dropped; P13 and P14, which already describe
+the browser-side pipeline `… → WAT → WABT → worklet`, own that step.
+
+**Why.** The tool for the other two targets is a *library the compiler can load*, so
+their final lowering happens wherever the compiler happens to run — including, for
+JS, on the JVM today. WABT is the one assembler that is not available in this
+compiler's world, and bridging that gap on the JVM would mean a host binary, a JVM
+binding (none exists: `org.bytedeco:wabt` is a 404), or an encoder of our own. None
+of those follows from the architecture; the plan's deliverable assumed a JVM-only
+compiler, where an artifact could only mean a JVM value, and P13 contradicts that
+assumption anyway. Three things that looked like reasons for the JVM step do not
+survive the principle:
+
+- **Binary identity** is pinned by the *tool's version in the repository* —
+  `insn 0.5.4`, `squint 0.14.211`, `wabt 1.0.39` — never by where the lowering runs.
+- **Validation** happens by *executing a target in its own world*: JVM kernels in the
+  JVM suite, JavaScript and Wasm kernels in the browser suite, which assembles and
+  runs every catalog module on every run.
+- **Completeness**: a Wasm engine takes bytes and nothing else. That is a property of
+  the platform, not a defect in the artifact — and the artifact stays self-describing
+  because it names the step.
+
+**What this supersedes.** D5's "Wasm stays WAT-only *until P12*": WAT plus a named
+assembler is now the Wasm artifact's form by design, not a deferral. D72's decision
+to invoke a pinned WABT **from the JVM** — its pin and its measurements stay on the
+record as evidence, and they are what a future hand-written encoder would be checked
+against, but the invocation does not happen. PLAN.md §6 and completion criterion 9
+are amended accordingly: the artifact names its toolchain rather than carrying bytes.
+
+**Rejected.** A host binary or a JVM binding (the first is a dependency this project
+does not want; the second does not exist). A binary encoder of our own: it would
+duplicate WABT and would need a validation path of its own, and nothing needs bytes
+outside the browser world today. It stays the fallback of record if that ever
+changes — the spike sized it at 97 distinct forms across all 179 artifacts, so it is
+bounded work, and the page's WABT would validate its output for free.
+
+**Consequences.** `:bytes nil` now means "the consumer assembles this with the named
+tool" rather than "not implemented yet". `omkamra.dsp.tests.wasm` reads the version
+out of `package.json` and asserts the artifact reports it, so the name cannot drift
+from the tool the browser actually loads. P12 is left with the memory layout and the
+state-initializer blob — the parts that make the module *smaller and faster* on every
+host.

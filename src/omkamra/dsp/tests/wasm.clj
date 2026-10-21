@@ -74,8 +74,23 @@
     (is (= :f64 (get-in artifact [:memory :element-type])))
     (is (= 8 (get-in artifact [:memory :element-bytes])))
     (is (= 512 (get-in artifact [:memory :frame-capacity])))
-    (is (= {:format :wasm :source :wat :generator :browser-wabt :bytes nil}
+    (is (= {:format :wasm :source :wat :generator :browser-wabt :version "1.0.39"
+            :bytes nil}
            (:binary artifact)))))
+
+(deftest the-recorded-wasm-assembler-is-the-pinned-one
+  ;; A Wasm artifact names the step that assembles it (D73) rather than carrying
+  ;; bytes, so the name and version are part of the artifact's contract: the browser
+  ;; loads the `wabt` pin from `package.json`, and an artifact that claimed a
+  ;; different toolchain would describe a tool nobody has. Read the pin from its one
+  ;; home rather than restating it, so the two can only agree.
+  (let [package (slurp "package.json")
+        version (second (re-find #"\"wabt\"\s*:\s*\"([^\"]+)\"" package))]
+    (is (some? version) "package.json pins a wabt version")
+    (is (= {:generator :browser-wabt :version version}
+           (select-keys (:binary (dsp/compile one-pole {:target :wasm
+                                                        :entry :process}))
+                        [:generator :version])))))
 
 (deftest wasm-lowers-loop-control
   (let [definition {:dsp/kind :function

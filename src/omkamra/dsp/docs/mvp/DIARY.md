@@ -5048,3 +5048,92 @@ and f64 and leaves Wasm untouched: `:gaps` reads `{:case :region-buffers … :ta
 stereo case is shown to be load-bearing rather than decorative. That a *lowering*
 stub still cannot be seen this way is unchanged and by design: these rows pin
 parity between targets, not the value of an expression all four compute.
+
+### P12 readiness spike: what the binary step actually is
+
+Before committing to P12 I went looking for the one thing the phase's first
+deliverable depends on and the plan does not name: *which* WABT — and whether
+"WAT → WABT → binary" hides a compiler we would have to write. It does not. WABT is
+an existing tool; the work is picking, pinning and invoking it (D72).
+
+The page already depends on `wabt` 1.0.39 through `package.json`, and that package
+ships **CLIs** (`wat2wasm`, `wasm-validate`, `wasm-interp`, `wasm-objdump`), so the
+zero-install answer was sitting in `node_modules`: `node_modules/wabt/bin/wat2wasm`
+runs under the installed node and needs no new dependency. It is also slow — node
+starts up per invocation, ~535 ms a module, ~96 s for the 179 Wasm artifacts the
+catalog compiles. The upstream 1.0.39 release has a native Linux x64 tarball with a
+`.sha256` next to it, so the second answer is a pinned download: the checksum
+verifies, and the native tool assembles the same 179 modules with **zero
+byte-differences** against the npm CLI, the whole corpus in under a second and the
+largest (768 KB) module in 143 ms. So the JVM gets a native `wat2wasm` when it is
+present and the npm CLI when it is not, and the two are interchangeable by
+measurement rather than by hope. Two rejected candidates are worth remembering: the
+distribution's `wabt` is 1.0.36, which is a version skew against the browser and
+therefore a reproducibility hazard, and `org.bytedeco:wabt` does not exist (404) —
+there is no JVM binding to reach for.
+
+The spike's side findings are as valuable as the pin. **Every module validates**, so
+P12's binary step is wiring, not emitter repair: the emitted WAT is already
+WABT-clean across both precisions and every case. And **the size is in the
+initializers**: `feedback-delay-f64` is a 768 KB module because its state
+initializers are emitted as 48 002 separate `f64.store` instructions — all of them
+`0.0`, which is what linear memory already contains. A data segment for the non-zero
+part (and nothing at all for the zeros) turns that into a few KB, so state
+initialization became deliverable 5 and the third slice.
+
+P12 is re-scoped in `PHASES.md` around that ordering: the layout first (no new
+dependency, verifiable with today's tooling), the binary step second, the init blob
+third. No DSP code changed for this spike.
+
+### The final lowering belongs to the target's world (D73)
+
+I had recommended compiling WAT on the JVM, with a pinned WABT release, on the
+grounds that a complete artifact should carry its binary. The user pushed back twice
+and then named the principle that settles it: each backend does as much lowering as
+it can in portable Clojure — the same code on the JVM and, after P13, in the browser
+under SCI — and then hands the result to a *target-specific* final step, which uses a
+tool from that target's world. `insn` produces JVM bytecode and lives on the JVM;
+`squint` produces native JS and is cljc, so it runs wherever the compiler runs;
+WABT produces a Wasm binary and lives in the browser's world. Asking the JVM to
+assemble Wasm is the mirror image of asking JavaScript to assemble JVM class files.
+
+My three arguments did not survive that reframing, and it is worth writing down why,
+because they looked strong:
+
+- *Identity must be pinned by the compiler.* For the other two targets the identity
+  is pinned by the tool's **version in this repository** — `insn 0.5.4`,
+  `squint 0.14.211`, `wabt 1.0.39` — never by where the lowering runs.
+- *The JVM suite cannot validate modules.* Each target is validated by **executing it
+  in its own world**: JVM kernels in the JVM suite, JS and Wasm kernels in the browser
+  suite, which assembles and runs all 179 catalog modules on every run.
+- *A complete artifact has bytes.* A JS artifact's payload is source, and that is
+  fine because a JS engine takes source. A Wasm engine takes bytes and nothing else —
+  a fact about the platform, not a defect in our artifact.
+
+So D5 and D72 are superseded: the Wasm artifact stays WAT plus ABI plus the **name and
+version of its assembler**, `:bytes nil` now means *assemble this with the named
+tool* rather than *not implemented yet*, and P13/P14 — which already describe
+`… → WAT → WABT → worklet` — own the step. The artifact change is two lines and a
+drift guard: `omkamra.dsp.tests.wasm` reads the `wabt` version out of `package.json`
+and asserts the artifact reports it, so the name cannot go stale. P12 is left with the
+memory layout and the state-initializer blob, and the blob slice is worth more under
+this decision than it was before, because those 48 002 redundant stores are 2.2 MB of
+WAT *text* that the page otherwise assembles on every request.
+
+### The original monolith is gone as well
+
+`src/omkamra/dsp_test.clj` — the 2 800-line suite that preceded the split into
+`omkamra.dsp.tests.*` — is deleted. It had been "kept for reference" since the split,
+but its assertions pin the generated shapes *of the time* (Squint's output spelling,
+state naming, ABI fields added by later phases), so it failed 31 assertions and could
+only mislead: a reader who ran it would see red and have no way to tell design history
+from regression. The split had already carried every one of its subjects across — 82
+of its 85 test names survive verbatim, and the three that do not were renamed
+(`javascript-backend-emits-es-module` → `…emits-standalone-es-module`,
+`…emit-conditionals` → `javascript-backend-emits-conditionals`,
+`…emit-all-comparisons` → `javascript-and-wasm-backends-lower-all-comparisons`), which
+is why the file was worth checking against the current namespaces before deleting
+rather than counting tests. Nothing else referenced the namespace: the only remaining
+mentions are historical (this diary, `PLAN.md`'s original file tree, and one old
+decision's prose), and the two *live* references — the file table and a CI snippet in
+`TESTING.md` — are fixed.

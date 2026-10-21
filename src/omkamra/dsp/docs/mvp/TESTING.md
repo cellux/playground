@@ -17,7 +17,6 @@ below evaluates in it.
 | `src/omkamra/dsp/harness/catalog.cljc` | Shared semantic catalog (pure data). Both testbeds read it. |
 | `src/omkamra/dsp/harness/conformance.clj` | Builds target-neutral plans; JVM differential driver; plan serialization. |
 | `src/omkamra/dsp/targets/interpreter.cljc` | Portable reference interpreter (the oracle), runs on JVM and in the browser. |
-| `src/omkamra/dsp_test.clj` | The original monolith, since split into `omkamra.dsp.tests.*` (see `DIARY.md`); kept for reference, and no longer part of the suite. |
 | `src/omkamra/dsp/harness/testbed.cljs` | Browser differential suite; runs the in-page interpreter against JavaScript/Wasm kernels. |
 | `src/omkamra/dsp/harness/testbed.clj` | On-demand HTTP endpoints: `source`, `wasm-source`, `wasm-metadata`, and `plan`. |
 | `src/omkamra/dsp/harness/browser.clj` | Clojure-side browser driver (spel + `:on-demand-http`). |
@@ -65,9 +64,9 @@ once both are done:
 (require '[omkamra.dsp.tests.suite :as suite])
 (suite/run-everything)
 ;; prints the JVM suite's own report under a header, then:
-;;   === browser: 50/50 checks passed (73.4s total) ===
+;;   === browser: 50/50 checks passed (73.3s total) ===
 ;;   === all green ===
-;; => {:jvm {:test 238, :pass 2061, :fail 0, :error 0, :passed? true}
+;; => {:jvm {:test 239, :pass 2063, :fail 0, :error 0, :passed? true}
 ;;     :browser {:passed? true, :passed 50, :total 50, :failed []}
 ;;     :seconds 73.4, :passed? true}
 ```
@@ -140,7 +139,7 @@ Notable groups:
   cover four targets. They run in the JVM suite because they are pure functions
   over a row map, needing no browser.
 
-Expected baseline: **238 tests, 2061 assertions, 0 failures**.
+Expected baseline: **239 tests, 2063 assertions, 0 failures**.
 
 ---
 
@@ -528,7 +527,7 @@ only; for local work use the nREPL commands above.
 ```bash
 # JVM / interpreter suite
 clojure -M:dev -e "
-  (require 'omkamra.dsp-test '[clojure.test :as t])
+  (require 'omkamra.dsp.tests.suite)
   (let [r (omkamra.dsp.tests.suite/run-all)]
     (shutdown-agents)
     (System/exit (if (zero? (+ (long (:fail r)) (long (:error r)))) 0 1)))"

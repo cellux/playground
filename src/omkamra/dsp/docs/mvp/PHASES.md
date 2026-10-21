@@ -464,27 +464,65 @@ round over D42's graph and D34's matrix.
 
 **Goal.** Turn WAT-only Wasm output into a complete, instance-oriented artifact.
 
-**Entry state.** Parity across JVM, JavaScript and Wasm was audited before this
-phase, because P12 is what changes the Wasm memory ABI and nothing in the spine
-should have to wonder whether a target is behind. The outcome: identical builtin
-surfaces, no target-specific refusal left in any host, 93 process cases with no
-parity gap in f32 or f64, and one verification hole closed (`with-buffers` regions,
-now a shared catalog case). The one standing asymmetry is architectural and
-unchanged by P12: Wasm has no function-entry form, so its operators are covered
-through process cases. See the diary entry *Parity audit before P12*.
+**Entry state — audited.** Parity across JVM, JavaScript and Wasm was verified
+first, because P12 changes the Wasm memory ABI and nothing in the spine should have
+to wonder whether a target is behind: identical builtin surfaces, no target-specific
+refusal left in any host, 93 process cases with no parity gap in f32 or f64, and one
+verification hole closed (`with-buffers` regions, now a shared catalog case). The one
+standing asymmetry is architectural and untouched here: Wasm has no function-entry
+form, so its operators are covered through process cases. See the diary entry *Parity
+audit before P12*.
+
+**Entry state — the binary step was spiked, then moved out of this phase** (D72 →
+D73). WABT 1.0.39 was pinned and measured (byte-identical output from the native
+release and the page's npm CLI, all 179 artifacts valid, the corpus in under a
+second), and that is what settled the question the other way: the assembler belongs
+to the browser's world, like `insn` belongs to the JVM's and `squint` to the JS
+one, so the artifact *names* it (`:generator :browser-wabt`, `:version "1.0.39"`)
+instead of carrying bytes, and the consumer that has it assembles. P13/P14 already
+describe that pipeline. The spike also found where the size is:
+`feedback-delay-f64` is a 768 KB module because its 48 000 zero initializers are
+emitted one `f64.store` each, while Wasm linear memory already starts zeroed. That is
+deliverable 5 below.
 
 **Depends on.** P0; benefits from P8 (instance regions) and P4 (layout).
 
 **Deliverables.**
 
-1. A defined WAT → WABT → binary compilation step producing validated
-   `:bytes`, with WABT version pinning recorded.
+1. ~~A defined WAT → WABT → binary compilation step producing validated
+   `:bytes`.~~ **Dropped (D73)**: the artifact names the assembler its consumer
+   uses (`:generator`, `:version`, both pinned) and the browser assembles, as P13's
+   pipeline already says. `:bytes nil` means "assemble this with the named tool",
+   not "not implemented".
 2. Persistent state moved from globals into explicit linear-memory instance
-   regions; reusable independent instances.
+   regions; reusable independent instances. *Already true since P8*: the emitter
+   has no globals, instance independence is proven on Wasm, and this phase should
+   confirm it rather than rebuild it.
 3. Removal of the fixed 4096-byte channel stride in favor of ABI-declared
    layout, with validated alignment, capacity, and non-overlap.
-4. An artifact exposing `:bytes`, `:wat`, `:exports`, `:memory`, `:abi`, and
-   `:metadata`.
+4. An artifact exposing `:wat`, `:exports`, `:memory`, `:abi`, `:metadata`, and
+   the named, version-pinned assembler — the shape PLAN.md's criterion 9 asks for,
+   amended by D73 from "contains validated binary bytes" to "names the step that
+   produces them".
+5. **State initialization as a blob, not one store per initializer.** The
+   initializers become a data segment (or nothing at all where they are zero,
+   which linear memory already guarantees), so module size follows the *non-zero*
+   part of a state region instead of its capacity. Measured today: 48 002 stores,
+   768 KB module, for a buffer that needs no initialization whatsoever.
+
+**Slices.** Two, and neither needs a new dependency or a new tool.
+
+- **P12a — the layout.** Remove the fixed channel stride; pack the regions; declare
+  alignment, capacity and non-overlap in the ABI and *validate* them; make every
+  reader (`hosts/wasm.cljs`, the conformance runners, `tests/wasm.clj`) take the
+  numbers from the ABI rather than recomputing them. Verified exactly as today:
+  WAT through the page's WABT, plus the four-target parity table.
+- **P12b — the init blob (deliverable 5).** Emit the non-zero initializers as one
+  data segment and drop the zero ones, pinning the size delta on the case that has
+  it (`feedback-delay-f64`). This slice matters *more* under D73 than it did before:
+  the 48 002 redundant stores are 2.2 MB of WAT **text** that the page otherwise
+  assembles on every request, so the data segment shrinks the artifact, the module
+  and the compile time at once.
 
 ---
 

@@ -2,7 +2,7 @@
   "Run the shared DSP conformance catalog in a real browser.
 
   The catalog lives in `omkamra.dsp.harness.catalog` (`.cljc`), so the same cases
-  drive the interpreter/JVM suite in `omkamra.dsp-test` and the browser
+  drive the interpreter/JVM suite in `omkamra.dsp.tests.*` and the browser
   JavaScript/Wasm suite in `omkamra.dsp.harness.testbed`.
 
   This namespace is the Clojure-side driver.  It starts the `:on-demand-http`

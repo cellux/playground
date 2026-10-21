@@ -18,6 +18,19 @@
             [omkamra.dsp.targets.jvm :as jvm]
             [omkamra.dsp.targets.wasm :as wasm-backend]))
 
+(def ^:private wasm-assembler
+  "The step that turns a Wasm artifact's WAT into the module a Wasm engine loads.
+
+  A Wasm engine takes bytes and nothing else, so *someone* has to assemble them.
+  That assembler lives in the browser's world (WABT, the pinned npm package), not
+  in this compiler's, so the artifact names the step instead of carrying it: `:bytes`
+  stays nil by design and the consumer that has the named assembler produces the
+  module (D73). The version is recorded so an artifact says which assembler it was
+  compiled for — keep it in step with `package.json`, which
+  `omkamra.dsp.tests.wasm` checks."
+  {:generator :browser-wabt
+   :version "1.0.39"})
+
 (clojure.core/defn- valid-definition-name?
   [name]
   (and (symbol? name)
@@ -691,10 +704,10 @@
                   :exports (:exports artifact)}
        :wasm-abi (assoc (:abi artifact) :physical-type physical-type
                         :instance (:instance abi))
-       :binary {:format :wasm
-                :source :wat
-                :generator :browser-wabt
-                :bytes nil}})
+       :binary (assoc wasm-assembler
+                      :format :wasm
+                      :source :wat
+                      :bytes nil)})
 
     (throw (ex-info "unsupported DSP compilation target"
                     {:target target
