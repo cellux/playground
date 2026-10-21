@@ -285,7 +285,10 @@ every lookup by case ID quietly found nothing.
 unknown view name throws rather than attaching nothing), and `:executable-path`
 (explicit browser binary).
 The first run also compiles the Shadow build and can take longer than later
-runs; raise `:timeout` on a cold cache.
+runs; raise `:timeout` on a cold cache. One caveat from a full cache wipe: the very
+first suite run afterwards can report `events did not reach the worklet` while the
+worker and worklet modules are still being written, and passes in isolation and on
+every run after it.
 
 ### The JavaScript target emits through Squint
 

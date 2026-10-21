@@ -17,8 +17,8 @@
   org.slf4j/slf4j-simple {:mvn/version "2.0.17"}
   overtone/overtone {:mvn/version "0.16.3331"}
 
-  io.github.squint-cljs/squint {:mvn/version "0.14.211"}
-  org.babashka/sci {:mvn/version "0.15.58"}
+  io.github.squint-cljs/squint {:mvn/version "0.15.212"}
+  org.babashka/sci {:mvn/version "0.15.59"}
 
   backtick/backtick {:mvn/version "0.4.0"}
   com.rpl/specter {:mvn/version "1.1.6"}

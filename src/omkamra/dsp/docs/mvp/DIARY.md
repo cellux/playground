@@ -5137,3 +5137,34 @@ rather than counting tests. Nothing else referenced the namespace: the only rema
 mentions are historical (this diary, `PLAN.md`'s original file tree, and one old
 decision's prose), and the two *live* references — the file table and a CI snippet in
 `TESTING.md` — are fixed.
+
+### Dependency refresh: squint and SCI, with insn already current
+
+`squint` 0.14.211 → **0.15.212**, `sci` 0.15.58 → **0.15.59**, and `insn` stays at
+**0.5.4**, which is the newest stable release Clojars has (checked, not assumed).
+The two that moved are the ones this compiler actually runs: `squint.compiler`
+produces the JavaScript target's modules *and* is a macro library the page itself
+compiles against (`squint.defclass` in the worklet adapters), and SCI is the reader
+P13 will compile source with in the browser. `insn` assembles the JVM target's
+bytecode and did not need touching.
+
+Squint's minor bump is the interesting one, because it includes *Boolean return tags*
+— the exact area D41 fences off with the rule that nothing may lower to a
+`squint_core` reference and that `and`/`or`/`not`/`=` stay provably boolean. That rule
+is already a functional test (`every-catalog-case-is-a-standalone-javascript-module`
+plus `tests/js.clj`'s contract assertions), so the upgrade was checked the way the
+project checks everything: by running the suite, not by diffing generated text.
+
+Results, all functional: JVM 239 tests / 2 063 assertions, browser 50/50 — including
+the Squint and Wasm worklet adapter checks — and, because squint is shared with a
+neighbouring project in this repository, `omkamra.vice.assembler-test` as well (82
+tests / 208 assertions). The page needed a real rebuild rather than Shadow's cached
+compilation: a dependency bump does not invalidate Shadow's per-namespace cache, so
+the suite would otherwise have tested a worklet adapter compiled by the *old* macro
+library while everything else came from the new one. `.shadow-cljs` was wiped, the
+page rebuilt from scratch (142 files, 0 warnings), and the suite ran again warm.
+
+One observation worth keeping: the first run after that wipe failed a single check,
+`events did not reach the worklet`, and passed on every run after it and in isolation.
+It is a cold-build timing artefact of the worker/worklet paths, not a regression from
+either bump — but it is recorded in `TESTING.md` so the next person does not chase it.
