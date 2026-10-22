@@ -66,6 +66,23 @@
 (defn- local-name [name] (wat-symbol (str "$" (identifier name))))
 (defn- loop-counter-name [index] (wat-symbol (str "$source-loop-count-" index)))
 
+(defn- negative-zero-bits
+  "The bit pattern of negative zero at the kernel's width."
+  []
+  (if (f64?) Long/MIN_VALUE Integer/MIN_VALUE))
+
+(defn- float-bits
+  "The raw bits of a float at the kernel's width.
+
+  Sign and zero are bit questions here. `=` says `-0.0` and `0.0` are the same number,
+  and `neg?` agrees with `=` — so neither can tell them apart, while a sample is
+  compared bit for bit across targets and across `reset`, and the interpreter
+  preserves the difference (P12b)."
+  [value]
+  (if (f64?)
+    (Double/doubleToRawLongBits (double value))
+    (long (Float/floatToRawIntBits (float value)))))
+
 (defn- wat-number
   [value]
   (let [value (if (f64?)
@@ -75,7 +92,9 @@
       (Double/isNaN (double value)) (wat-symbol "nan")
       (Double/isInfinite (double value))
       (wat-symbol (if (pos? value) "inf" "-inf"))
-      (zero? value) (wat-symbol (if (neg? (double value)) "-0.0" "0.0"))
+      (zero? value) (wat-symbol (if (= (negative-zero-bits) (float-bits value))
+                                  "-0.0"
+                                  "0.0"))
       :else (wat-symbol (if (f64?)
                           (Double/toString value)
                           (Float/toString (float value)))))))
@@ -608,7 +627,12 @@
     (cond
       (Double/isNaN value) (wat-symbol "nan")
       (Double/isInfinite value) (wat-symbol (if (pos? value) "inf" "-inf"))
-      (zero? value) (wat-symbol (if (neg? value) "-0.0" "0.0"))
+      ;; Always the f64 width, whatever the kernel's is — so the sign bit is read
+      ;; from f64 bits here rather than through the kernel's `float-bits`.
+      (zero? value) (wat-symbol (if (= Long/MIN_VALUE
+                                       (Double/doubleToRawLongBits value))
+                                  "-0.0"
+                                  "0.0"))
       :else (wat-symbol (Double/toString value)))))
 
 (def ^:private ln2 0.6931471805599453)
@@ -1119,23 +1143,56 @@
                             (if value 1 0)
                             (int value)))))
 
+(defn- zero-initializer?
+  "True when `value` is the bit pattern linear memory already holds for its slot.
+
+  The test is on the *bits*, not on numeric equality: `-0.0` equals `0.0` but is not
+  what a zeroed region contains, and samples are compared bit for bit across the
+  interpreter and every host. A `NaN` and an infinity are non-zero by the same
+  measure, which is what they should be."
+  [type value]
+  (case type
+    :float (zero? (float-bits value))
+    :int (zero? (long value))
+    :boolean (not value)))
+
 (defn- emit-init
-  [state]
-  (apply list
-         (concat [(wat-symbol "func") (wat-symbol "$init")
-                  (wat-form "export" "init")]
-                 (mapcat
-                  (fn [{:keys [index init type size]}]
-                    (let [{:keys [offset element-bytes]} (get *state-layout* index)
-                          values (if (= 1 (or size 1)) [init] init)]
-                      (map-indexed
-                       (fn [element-index value]
-                         (wat-form (str (wasm-type type) ".store")
-                                   (wat-form "i32.const"
-                                             (+ offset (* element-index element-bytes)))
-                                   (state-constant type value)))
-                       values)))
-                  state))))
+  "Emit `$init`: the state region's initial values.
+
+  Linear memory starts zeroed and so does a fresh instantiation, so the zero
+  initializers need no instruction at all — but `$init` is also what `reset` calls,
+  and a reset has to put the zeros *back*, whatever the state has become since. One
+  `memory.fill` says that in constant space; only the non-zero initializers are then
+  written element by element, so module size follows the non-zero part of a state
+  region instead of its capacity. Before this, every initializer was its own store:
+  `feedback-delay` at f64 was 48 004 of them, 2.2 MB of WAT text and a ~750 KB module
+  for a delay line whose entire initial state is zero (P12b)."
+  [state region]
+  (let [offset (long (or (:offset region) 0))
+        bytes (long (or (:bytes region) 0))
+        writes (into []
+                     (mapcat
+                      (fn [{:keys [index init type size]}]
+                        (let [{:keys [offset element-bytes]} (get *state-layout* index)
+                              values (if (= 1 (or size 1)) [init] init)]
+                          (keep-indexed
+                           (fn [element-index value]
+                             (when-not (zero-initializer? type value)
+                               (wat-form (str (wasm-type type) ".store")
+                                         (wat-form "i32.const"
+                                                   (+ offset (* element-index element-bytes)))
+                                         (state-constant type value))))
+                           values)))
+                      state))]
+    (apply list
+           (concat [(wat-symbol "func") (wat-symbol "$init")
+                    (wat-form "export" "init")]
+                   (when (pos? bytes)
+                     [(wat-form "memory.fill"
+                                (wat-form "i32.const" offset)
+                                (wat-form "i32.const" 0)
+                                (wat-form "i32.const" bytes))])
+                   writes))))
 
 (defn- emit-reset
   []
@@ -1374,7 +1431,9 @@
                        (when data-form [data-form])
                        emulation-functions
                        callee-functions
-                       [(emit-init (:state ir)) (emit-reset) (emit-process ir)]))))))
+                       [(emit-init (:state ir) (get-in memory [:regions :state]))
+                        (emit-reset)
+                        (emit-process ir)]))))))
 
 (defn emit-module [ir]
   (binding [*precision* (:precision ir)

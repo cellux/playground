@@ -3910,3 +3910,55 @@ The wire decode had to learn `:target`: it arrives as the string `":wasm"`, and
 equal to nothing while still printing as `:wasm`. That is the trap this harness exists
 to prevent, so every place a target can now appear is listed in `normalize-value`, and
 the harness test pins `#{:wasm}` rather than the string.
+
+
+## D76 — initialization is constant space, and signed zero is a bit, not a number (P12b)
+
+**The state was written one store per element.** `feedback-delay` at f64 was 48 004
+stores — 2 251 108 bytes of WAT text, 99.8% of the module, for a delay line whose
+entire initial state is zero, and the page assembles that text on every request. The
+zero initializers were the whole cost: across the entire catalog there are 54 839
+initializer elements and exactly **27** of them are non-zero.
+
+**One `memory.fill`, then only what is non-zero.** `$init` clears the state region in
+constant space and then writes the non-zero initializers element by element, so module
+size follows the non-zero part of the state rather than its capacity. Measured on
+`feedback-delay` at f64, assembled with the pinned WABT: **768 644 bytes → 645 bytes of
+module**, and 2 251 090 → 5 562 bytes of the WAT text the page assembles per request,
+in 0.52 s → nothing. 48 004 stores became one instruction. `reset` still calls `$init`, and that is
+the crux: an **active data segment cannot serve `reset`** (it applies at instantiation
+and never again), so the zeros could not simply be dropped, and the non-zero part had
+to stay re-appliable. The zeroing is load-bearing and was proven so — removing the fill
+fails eight catalog cases on Wasm alone, because `reset` then leaves the previous
+note's state behind.
+
+**What "zero" means is the bit pattern, not the number.** `-0.0` equals `0.0` and is not
+the same bytes, and the interpreter preserves the difference; so the test for "needs no
+store" compares raw bits at the kernel's width. Writing that test found a real bug: both
+Wasm constant formatters decided the sign of a zero with `neg?`, which is defined
+through `<` — where `-0.0` and `0.0` are equal — so `-0.0` was emitted as `0.0` in every
+constant, not only in initializers. Fixed by reading the sign bit, and pinned in
+`omkamra.dsp.tests.wasm`, because the differential suite *cannot* see it: the Wasm half
+allows transcendental emulations a documented tolerance (D14), and a sign flip on an
+exact zero is inside that tolerance. The pin is the guard, and it was bite-checked.
+
+**Rejected.** A data segment for the initializers (an active one cannot be re-applied on
+`reset`, which is the whole point of `$init`; a passive one costs a segment and a
+`memory.init` per contiguous run, and at 27 non-zero elements across the catalog there
+are no runs worth a segment). Skipping the zeros without a fill (breaks `reset`).
+Treating `-0.0` as zero (loses a bit the interpreter keeps).
+
+**Recorded, not fixed: a signed zero *computed* by an emulation.** Tightening the Wasm
+comparison to require equal signs on equal zeros turned up `sin(-0.0)`, which the Wasm
+polynomial emulation returns as `+0.0` where `Math/sin` returns `-0.0`. That lives
+inside D14's documented tolerance, so the tightening was reverted rather than the
+emulation changed: expanding a documented contract is a decision about the numerical
+policy, not a side effect of a phase about module size. Two consequences are recorded
+in the code: the comparison rule now carries a comment saying *why* it forgives this,
+and `conformance.clj`'s `:wasm` `scalar-match?` method is marked as not reached from the
+JVM-side runner — the live copy is the page's, so an edit to the tolerance has to be
+made in `testbed.cljs` or it changes nothing.
+
+**Also found while working here:** the two-matrices' check names (from D75) made the
+bit-exactness question visible at a glance; the catalog case written to exercise the
+signed zero was dropped, because a case that cannot fail is not coverage.

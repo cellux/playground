@@ -5229,3 +5229,46 @@ check only when the selection asks for it, so a stray needle leaves nothing to l
 The report is factual again and names the needles as data; making the vocabulary
 available there would mean building the check list as data before running it, which is
 a larger change to that dispatch than this session should make uninvited.
+
+### P12b — initialization in constant space, and a signed zero that was not one
+
+`$init` was one store per initializer element, and for `feedback-delay` at f64 that was
+48 004 stores: 2 251 108 bytes of WAT text, 99.8% of the module, for a delay line whose
+entire initial state is zero — and the page assembles that text on every request. Across
+the whole catalog there are 54 839 initializer elements and exactly 27 of them are
+non-zero, so the zeros *were* the cost.
+
+`$init` now clears the state region with one `memory.fill` and writes only the non-zero
+initializers. Assembled with the pinned WABT, the same delay line went from 2 251 090 to
+5 562 bytes of WAT and from **768 644 to 645 bytes of module** — a 1 192× smaller
+artifact, assembled in 0.52 s before and nothing after. The phase note had suggested a data segment; working it
+through showed why that cannot be the whole answer — an *active* segment applies at
+instantiation and never again, so it cannot serve `reset`, which is exactly why `$init`
+exists and why `reset` calls it. The zeros therefore still need the fill, and the
+non-zero part still needs to be re-appliable. Bitten both ways: removing the fill fails
+eight catalog cases on **Wasm alone** (`:one-pole`, `:one-pole-record`, `:one-pole-voice`,
+`:one-pole-pair-voice`, both precisions) because `reset` then leaves the previous note's
+state in place; going back to one store per initializer fails the new size and structure
+pins, one of which reports the old 2 251 108-byte number as its expectation.
+
+Writing "zero means the zero *bits*" for the skip test found a real bug elsewhere: both
+Wasm constant formatters decided the sign of a zero with `neg?`, which is defined through
+`<` — where `-0.0` and `0.0` are equal — so `-0.0` was emitted as `0.0` in *every*
+constant, not only in initializers. The fix reads the sign bit. Its pin lives in the Wasm
+tests rather than in the catalog, and the reason is worth keeping: the differential suite
+*cannot* see this class, because the Wasm half allows its transcendental emulations the
+tolerance D14 documents, and a sign flip on an exact zero sits inside it.
+
+That tolerance is also the honest answer to a finding this work turned up. Tightening the
+Wasm comparison to demand equal signs on equal zeros made `:sin` fail — the polynomial
+emulation returns `+0.0` where `Math/sin` returns `-0.0` — and the right response was to
+revert the tightening, not to chase the emulation: expanding a documented numerical
+contract is a decision about the numerical policy, not a side effect of a phase about
+module size. What is left behind is the reason, written where it can be found: the page's
+comparison says why it forgives this, and `conformance.clj`'s `:wasm` `scalar-match?`
+method is marked as never reached from the JVM runner, so nobody edits the copy that
+changes nothing. The catalog case written for the signed zero was dropped instead of
+kept as a case that cannot fail.
+
+**P12 is complete** — both slices, the layout and the initializers, with the target
+parity table at 211 case/precision pairs and no gaps.

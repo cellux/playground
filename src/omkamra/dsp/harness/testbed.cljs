@@ -88,7 +88,12 @@
 
   Exact by default; `:wasm` additionally allows the documented tolerance
   because its transcendental emulations cannot reproduce the host `Math`
-  bit-for-bit (DECISIONS.md D14)."
+  bit-for-bit (DECISIONS.md D14). That tolerance is why a signed-zero difference in
+  an emulated result is not a failure here: `sin(-0.0)` is `+0.0` on Wasm and the
+  tolerance accepts it, which is the documented policy and not an oversight. A
+  constant or a stored value that loses its sign is caught where it is emitted, by
+  `omkamra.dsp.tests.wasm`'s initialization tests, because no differential check can
+  see through this tolerance."
   [target precision actual expected]
   (if (= :wasm target)
     (or (matches-value? actual expected)

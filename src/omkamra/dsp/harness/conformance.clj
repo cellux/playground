@@ -230,6 +230,12 @@
   (matches? actual expected))
 
 (defmethod scalar-match? :wasm
+  ;; No caller on this side passes `:wasm`: the JVM-side runner compares the
+  ;; interpreter with the JVM, and the browser half compares the Wasm *values* in
+  ;; `omkamra.dsp.harness.testbed`, with its own copy of this rule. The method stays
+  ;; because `results-match?` is target-generic, but the live copy is the page's —
+  ;; so a change to what the Wasm tolerance forgives belongs there, and changing
+  ;; only this one would change nothing at all.
   [_target precision actual expected]
   (or (matches? actual expected)
       (and (number? actual)

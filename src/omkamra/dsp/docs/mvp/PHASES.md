@@ -464,6 +464,8 @@ round over D42's graph and D34's matrix.
 
 **Goal.** Turn WAT-only Wasm output into a complete, instance-oriented artifact.
 
+**Status.** Both slices are done: P12a (D74) and P12b (D76).
+
 **Entry state — audited.** Parity across JVM, JavaScript and Wasm was verified
 first, because P12 changes the Wasm memory ABI and nothing in the spine should have
 to wonder whether a target is behind: identical builtin surfaces, no target-specific
@@ -526,12 +528,21 @@ deliverable 5 below.
   targets — bitten by restoring the old stride, it fails on Wasm f64 from sample
   512. Verified as today: WAT through the page's WABT, plus the four-target parity
   table (211 pairs, no gaps).
-- **P12b — the init blob (deliverable 5).** Emit the non-zero initializers as one
-  data segment and drop the zero ones, pinning the size delta on the case that has
-  it (`feedback-delay-f64`). This slice matters *more* under D73 than it did before:
-  the 48 002 redundant stores are 2.2 MB of WAT **text** that the page otherwise
-  assembles on every request, so the data segment shrinks the artifact, the module
-  and the compile time at once.
+- **P12b — the init blob. DONE** (D76). `$init` clears the state region with one
+  `memory.fill` and writes only the *non-zero* initializers, so module size follows
+  the non-zero part of the state rather than its capacity: measured on
+  `feedback-delay` at f64, assembled with the pinned WABT, the artifact went from
+  48 004 stores to one instruction, from 2 251 090 to 5 562 bytes of WAT, and from
+  **768 644 to 645 bytes of module** (assembly time 0.52 s → nothing). A data
+  segment was rejected for a reason the phase note above did not anticipate: an
+  *active* segment applies at instantiation and never again, so it cannot serve
+  `reset` — which is why the zeros still need one `memory.fill` and the non-zero
+  part still needs to be re-appliable. Writing "zero means the zero *bits*" for that
+  found and fixed a real bug (`-0.0` was emitted as `0.0` in every Wasm constant,
+  because `neg?` is defined through `<`), pinned in `tests/wasm.clj` because D14's
+  Wasm tolerance hides it from the differential suite. Bites: removing the fill
+  fails eight cases on Wasm alone; reverting the emission fails the size and
+  structure pins; reverting the sign-bit fix fails the `-0.0` pin.
 
 ---
 

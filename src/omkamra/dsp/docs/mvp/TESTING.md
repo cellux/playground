@@ -66,7 +66,7 @@ once both are done:
 ;; prints the JVM suite's own report under a header, then:
 ;;   === browser: 50/50 checks passed (73.3s total) ===
 ;;   === all green ===
-;; => {:jvm {:test 244, :pass 2396, :fail 0, :error 0, :passed? true}
+;; => {:jvm {:test 246, :pass 2412, :fail 0, :error 0, :passed? true}
 ;;     :browser {:passed? true, :passed 50, :total 50, :failed []}
 ;;     :seconds 73.4, :passed? true}
 ```
@@ -139,7 +139,7 @@ Notable groups:
   cover four targets. They run in the JVM suite because they are pure functions
   over a row map, needing no browser.
 
-Expected baseline: **244 tests, 2 396 assertions, 0 failures**.
+Expected baseline: **246 tests, 2 412 assertions, 0 failures**.
 
 ---
 
@@ -247,6 +247,15 @@ a key that has to be asked for by name is a key that a reader will miss and read
 ;; => {:cases 211 :gaps []}
 ;;    the case/precision/target triples that missed a target their check declares
 ```
+
+Two copies of the tolerance rule exist, and only one is live. The page's
+`scalar-match?` in `testbed.cljs` compares the Wasm values; `conformance.clj` has a
+`:wasm` method of its own for symmetry, but no JVM-side caller passes `:wasm` — the
+JVM runner compares the interpreter with the JVM. Changing the tolerance in
+`conformance.clj` alone therefore changes nothing, which is noted at that method. The
+same tolerance is why a *computed* signed zero cannot be pinned differentially:
+`sin(-0.0)` is `+0.0` on Wasm and D14 accepts it, so constants and stored values are
+pinned where they are emitted instead (`omkamra.dsp.tests.wasm`).
 
 A target's boolean in a row means *ran it and matched the interpreter*, and a
 case that never ran is simply absent — which is why these queries exist: a case

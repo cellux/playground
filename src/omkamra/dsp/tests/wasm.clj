@@ -286,3 +286,77 @@
                           (validate (update memory :channel-stride inc))))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo #"smaller than the regions"
                           (validate (update memory :required-bytes dec))))))
+
+(defn- init-form
+  "The emitted `$init` function's text, for a test that is about initialization.
+
+  Reading the function rather than the module matters: the process body writes the
+  same state slots, so `(f32.store (i32.const <offset>)` appears in a module whose
+  initializer no longer writes anything at all."
+  [wat]
+  (or (re-find #"(?s)\(func \$init.*?\(func \$reset" wat)
+      (throw (ex-info "the module has no $init function" {:wat (subs wat 0 200)}))))
+
+(deftest wasm-initialization-is-constant-space
+  ;; P12b. Linear memory starts zeroed, so a zero initializer needs no instruction —
+  ;; but `reset` calls `$init` too, and a reset has to put the zeros *back*, whatever
+  ;; the state has become since. One `memory.fill` over the state region says that in
+  ;; constant space, and only non-zero initializers are then written element by
+  ;; element.
+  (let [artifact (dsp/compile one-pole {:target :wasm :entry :process})
+        init (init-form (:wat artifact))
+        region (get-in (:memory artifact) [:regions :state])]
+    (is (str/includes? init "memory.fill"))
+    (is (str/includes? init (str "(i32.const " (:offset region) ")"))
+        "the fill starts where the ABI says the state region starts")
+    (is (str/includes? init (str "(i32.const " (:bytes region) ")"))
+        "and clears exactly its bytes")
+    (is (not (str/includes? init ".store"))
+        "a zero initializer needs no store"))
+
+  (testing "a module whose state is all initializers is not a large module"
+    (let [artifact (dsp/compile (requiring-resolve
+                                 'omkamra.dsp.library.delay/feedback-delay)
+                                {:target :wasm :entry :process :precision :f64})
+          wat (:wat artifact)
+          elements (reduce + 0 (map #(count (let [v (:init %)]
+                                              (if (vector? v) v [v])))
+                                    (:state (:ir artifact))))]
+      (is (= 48001 elements) "the delay line's entire state is initializer elements")
+      (is (not (str/includes? (init-form wat) ".store"))
+          "and every one of them is zero")
+      (is (< (count wat) 20000)
+          (str "module size follows the non-zero part of the state, not its capacity:"
+               " one store per initializer made this 2 251 108 bytes of WAT")))))
+
+(deftest wasm-initialization-writes-only-the-non-zero-part
+  ;; The non-zero initializers are the ones a `memory.fill` cannot express, so they
+  ;; are still written — and what counts as zero is the *bit pattern* memory starts
+  ;; with, not numeric equality, because `-0.0` equals `0.0` and is not the same
+  ;; sixteen bytes.
+  (let [definition {:dsp/kind :function
+                    :name 'wasm-init-shapes
+                    :params ['sample]
+                    :state [{:name 'zero :init 0.0 :next 'zero}
+                            {:name 'half :init 0.5 :next 'half}
+                            {:name 'neg-zero :init -0.0 :next 'neg-zero}
+                            {:name 'flag :type :boolean :init true :next 'flag}
+                            {:name 'count :type :int :init 3 :next 'count}
+                            ;; An aggregate slot is written explicitly in the
+                            ;; body, so it has no `:next` — it just carries its init.
+                            {:name 'elems :size 3 :init [1.0 0.0 2.0]}]
+                    :return-type :float
+                    :body ['(+ zero half)]}
+        init (init-form (:wat (dsp/compile definition {:target :wasm
+                                                       :entry :process})))]
+    (is (str/includes? init "(f32.const 0.5)") "a non-zero float is written")
+    (is (str/includes? init "(f32.const -0.0)") "negative zero is not zero bytes")
+    (is (str/includes? init "(i32.store") "a boolean and an int are written")
+    (is (str/includes? init "(i32.const 1)") "`true` initializes to one")
+    (is (str/includes? init "(i32.const 3)") "an int initializer keeps its value")
+    (is (str/includes? init "(f32.const 1.0)") "an array element is written")
+    (is (str/includes? init "(f32.const 2.0)") "and so is the next one")
+    (is (not (str/includes? init "(f32.const 0.0)"))
+        "a zero element of the same array is not")
+    ;; half, -0.0, flag, count, and two of the array's three elements.
+    (is (= 6 (count (re-seq #"\.store" init))))))
