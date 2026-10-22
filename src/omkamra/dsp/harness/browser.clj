@@ -103,11 +103,18 @@
   Each row carries the targets its check declares and the name of that check, so
   the rows are self-describing: `conformance/coverage` and `conformance/parity`
   read them the same way they read the interpreter/JVM rows, which is what lets
-  one table cover all four targets."
+  one table cover all four targets.
+
+  A check that declares no targets contributes no rows, however many cases it
+  reports. Comparing the compiler with itself has cases but no target — nothing
+  ran a kernel — and a case that was never run must not look like one that was
+  and failed. Those rows stay where they belong: in the check, and in
+  `case-failures` when one of them fails."
   [result]
   (into [] (mapcat (fn [check]
-                     (map #(assoc % :targets (:targets check) :check (:name check))
-                          (:cases check))))
+                     (when (seq (:targets check))
+                       (map #(assoc % :targets (:targets check) :check (:name check))
+                            (:cases check)))))
         (:results result)))
 
 (defn case-results
@@ -190,7 +197,7 @@
                                                                       :failures])
                                                     :check (:name check))]
                                      (assoc row :targets
-                                            (into #{} (map :target) (:failures row)))))
+                                            (into #{} (keep :target) (:failures row)))))
                                  failed)
                             (when-not (true? (:passed? check))
                               [{:check (:name check)}])))))

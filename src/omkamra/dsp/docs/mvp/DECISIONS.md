@@ -3962,3 +3962,194 @@ made in `testbed.cljs` or it changes nothing.
 **Also found while working here:** the two-matrices' check names (from D75) made the
 bit-exactness question visible at a glance; the catalog case written to exercise the
 signed zero was dropped, because a case that cannot fail is not coverage.
+
+## D77 — the compiler is compiled, SCI evaluates source, and a float is its type (P13)
+
+**The fork, decided.** The plan's toolchain note says SCI is how *our* Clojure code
+is meant to run in the browser, and that squint runs inside SCI there. Read
+literally that means the browser interprets the compiler's source, and two things
+make that the wrong reading. SCI reads `.cljc` in its `:clj` mode unless it is told
+`:features #{:cljs}`, so malli and squint would take their JVM branches — and every
+dependency's source (~250 KB for squint's compiler, ~10 k lines for malli) would have
+to be served to the browser and interpreted at page load.
+
+So: **the compiler is AOT-compiled by Shadow, and SCI evaluates the user's DSP source
+and nothing else.** The `.cljc` ports deliverable 3 names are the mechanism; SCI keeps
+the job it is uniquely good at, and the macros that register descriptors call into the
+compiled functions rather than reimplementing them.
+
+Measured before deciding. Shadow compiles `squint.compiler` + `malli` + `edamame` for
+the browser — 87 files, 0 warnings, 12 s — and they *run*: `compile-string` returns
+JavaScript, `m/validate` and `me/humanize` work. A cold page load that compiled ten
+real DSP kernels took under a second, browser launch included. The rejected reading
+would have cost seconds per load and a source-serving server, to reach the same place.
+
+**The bundling consequence.** A CLJS consumer that requires the compiler gets malli,
+squint and edamame in its bundle, transitively, because that is what requiring a
+namespace means. That is the right default for a project that wants to compile in the
+browser, and the wrong one for a project that only wants to *run* kernels — so the
+split is a rule, not an accident: **the runtime half never requires the compiler.**
+It already holds (`hosts/js`, `hosts/wasm` → `hosts/fusion`, `hosts/mixing` → `synth`
+and `synth/pool`, whose docstring already says it works 'without the compiler in
+reach'), and P13 must not break it while adding the compiler to the same build.
+
+**A float is its declared type, never its printed value.** Two measured facts make
+this a platform rule. First, `pr-str` is not platform-independent for numbers:
+ClojureScript has one number type, so `(pr-str 0.0)` is `0`, and the JS emitter's
+source text — built by `pr-str` — differed between the JVM and the browser on seven of
+ten real kernels, in every case an integral float literal (`0.0` → `0`, `2.0` → `2`,
+`1.0` → `1`). Second, equality is not platform-independent either: `(= 0 0.0)` is
+false in Clojure and true in ClojureScript, because there is no integer type to
+compare against. So nothing may *infer* floatness from a value: the JS emitter formats
+float literals from the IR's declared type, and the IR's canonical form does the same.
+
+**The canonical form.** A cross-platform comparison of the phase's deliverable 4 needs
+one serialization that is stable in order (map keys sorted, sets sorted) and explicit
+about numbers. It lives with the IR, because the IR is what knows the types. It is
+also the cache key deliverable 5 asks for — the same property serves both, which is
+part of why it is the IR's business and not the test's.
+
+**Stays JVM-only, deliberately.** `targets/jvm` (it uses `insn`), `hosts/jvm`,
+`hosts/instrument`, `harness/*.clj`, and the JVM side of `dsp.clj`'s target dispatch,
+which currently requires every target unconditionally and must be reader-conditioned.
+
+**Verified by the spike, not assumed:** metadata survives the round trip to squint
+(`^:mutable` was honoured in the browser build, so `*print-meta*` works under CLJS);
+D41's rules hold for real kernels, and the only `squint_core` reference seen came from
+a synthetic source that deliberately omitted type hints; the Var/`ns-resolve` seam was
+already anticipated — `synth.cljc` carries `#?(:clj (var? definition) :cljs false)`
+with a comment about the browser registry.
+
+## D78 — a numeric literal carries its type, and the type is data (P13)
+
+**The hole.** `descriptor.cljc:489` and `ir.cljc:144` both decide a numeric
+literal's type with `(integer? form)`. That is a host-type rule: on the JVM
+`(integer? 1.0)` is false and `1.0` is a `:float`, while ClojureScript has one
+number type, `(integer? 1.0)` is true, and `1.0` becomes an `:int`. Everything
+else in the descriptor is already typed — params, state, control ranges,
+`:return-type`, record and struct fields — and every IR node carries `:type`, so
+literals are the single place where a type is *guessed* rather than declared.
+
+**It is not a browser-only problem, which is what settled the design.** A
+JVM-produced descriptor does not survive transport either: P13a's browser check
+fed the browser descriptors as EDN and `(+ sample 1.0)` came back as
+`(+ sample 1)`, failing the type checker in four catalog cases. The same fate
+awaits `dsp/defn` in a `.cljc` file compiled by Shadow: the macro runs on the
+JVM, sees a real `Double`, and the descriptor's numbers are emitted into the
+compiled JS as JS numbers — and a JS number has no memory of having been written
+`1.0`. Nothing can be recovered from a value, because the distinction is
+destroyed where the text is read: Clojure's reader, `clojure.edn`,
+`cljs.reader`, edamame and JSON all give one number type on the browser side.
+
+So the type must be **in the data**.
+
+**The representation is a plain map; the tag is sugar.** A float literal is
+`{:dsp/float 1.0}`. The tag `#dsp/float` reads to exactly that map and nothing
+more, so a descriptor stays plain EDN: `clojure.edn` and `cljs.reader` read it
+with no registration at all, which is what matters, because that is how
+descriptors travel. There is no `#dsp/int` — an unboxed literal is an `:int`, so
+the default needs no spelling and gets none. The tag is registered in
+`resources/data_readers.cljc`, which both Clojure and Shadow read; SCI gets it
+through `:readers` (or its `*data-readers*`), verified in `sci.impl.parser`.
+
+**Who writes the box, and where recovery happens.** The capture synthesizes it:
+on the JVM from the host type, so the 82 macro-captured definitions in the repo's
+library, fixtures and examples need no edit; and in the browser's SCI capture
+from the *source text*, consulting the line and column that `&form` carries
+(verified: SCI supplies `:line` and `:column`), so a user who writes `1.0` gets a
+float and never has to write a box. **Recovery needs text, so it cannot cover
+everything**: a descriptor crossing as data, and a hand-written quoted body in a
+`.cljc` file — the acceptance catalog's seventeen — have no text to consult. There
+the box must already be in the data, and a bare float value in a hand-written
+descriptor is an error naming the literal, so the JVM points at exactly the eight
+public spellings a human has to fix, and can never point at macro-captured code.
+
+**Rejected: literals that take their type from context.** A numeric literal that
+is an untyped constant, adapting to the expected type of the operation around it
+and defaulting to `:int`, would make the problem vanish — context is
+platform-independent, so both worlds would agree by construction, and the 142
+integral-valued floats in the repo's bodies would stop being dangerous. It is
+incomplete, and the gap is not marginal: a literal with no context, as in
+`(let [x 1.0] (float-use x))`, has no expected type at the binding, so it would
+default to `:int` and silently change the meaning of code that works on the JVM
+today — making the browser's current *wrong* behaviour the *defined* behaviour.
+Completing it needs a real inference engine over a local's uses, which would
+replace the explicit-type spine the IR, the targets and the conformance work are
+built on. That is a different project, not a slice of P13. The hybrid — adapt
+where a context exists, box where it does not — is possible and would need fewer
+boxes, but it is more machinery than the box plus recovery, and it changes
+diagnostics that currently fire.
+
+**Verified, not assumed, in four readers.** Clojure via
+`resources/data_readers.cljc`; SCI via `:readers`; Shadow's ClojureScript reader
+via the same file; and `clojure.edn` plus `cljs.reader` reading the *map* with no
+registration. Two operational facts came out of it: `data_readers.cljc` is read
+**once per process** by both Clojure and Shadow — Shadow computes
+`cljs-data-readers` in a `def` in `shadow/build/data.clj` — so a running dev
+server does not see a reader file that appeared after it started, and must be
+restarted; and the box's *printed* form differs by platform, because Clojure
+abbreviates a map whose keys all share a namespace (`{:dsp/float 1}` prints as
+`#:dsp{:float 1}`) and ClojureScript does not. The values are equal and the text
+is not, which is a second independent reason the canonical form of D77 cannot be
+`pr-str` and must write keys itself.
+
+## D79 — generated names are deterministic, and the compiler equivalence is a check (P13a)
+
+**The box reaches further than the capture.** D78 said the capture synthesizes a
+float literal's box, and that is where author-written source is canonicalized. It
+is not the only place a float enters a DSP form, and the browser found the others:
+`sign`'s expansion in the builtin table generates `(> x 0.0)` with `0.0`, `1.0`
+and `-1.0` in it, and `combinators/guard` and `combinators/unison` generate `0.0`
+comparisons, `0.0` branches and computed detune offsets. Those are *forms built by
+code*, and the code is compiled into the page, so a bare float there is read as the
+integer it looks like — the equivalence check reported `sign` as *binary operands
+have the wrong type*, and the browser was right to refuse it. Generated forms are
+source too. So the box vocabulary lives in one place, `omkamra.dsp.literals`, and
+three kinds of code use it: the capture, the builtin expansions, and the
+description transformers. A test holds the line — every builtin's expansion, every
+library and fixture definition, every transformer output and every catalog
+definition is walked for a bare float, and the message names the operator and the
+path. Bites: unboxing `sign` fails it on all four of its literals; unboxing
+`guard` fails it on the body's two and the transition's one.
+
+**Generated names must not come from the process.** The IR the browser produces
+for a definition has to be the IR the JVM produces for it, and `gensym` reads a
+process-global counter, so the same `(mod a b)` lowered here was
+`mod_remainder66419` and in the page `mod_remainder1` — the same program, a
+different IR, and no exact comparison of the two possible. Lowering now binds a
+counter of its own (`omkamra.dsp.names`), and a generator asks it for the next
+name; outside a lowering the fallback is still `gensym`, because there is nothing
+to be deterministic within. Three cases (`:mod-zero`, `:mod-neg`, `:mod-flip`)
+stopped differing when this landed, and un-binding the counter makes the check
+fail on exactly those three, naming the path into the IR and both names. The JS
+emitter's own names (`__iter`, `__reached`) are the same question one layer down
+and belong to P13b, where the emitted-text comparison will need them.
+
+**The equivalence is a check in the suite, not a claim.** `compiler equivalence`
+has the page compile every catalog definition it can with the compiler compiled
+into it and compare, per definition, the normalized descriptor, the linked unit
+and the portable IR with the JVM's — 60 definitions, 52 compared and bit-exact,
+and the check is part of every browser run. A case whose unit reaches a library
+definition is *skipped* rather than failed, and the count is in the check's detail
+and its `:skipped`: the page has not been given those definitions yet, which is
+P13d's registry, and a check that says how much of the catalog is waiting for it
+is more honest than one that fails on something it was never told how to do. The
+expected values for those cases ship anyway, so closing the gap needs no change on
+the server side.
+
+**Two harness contracts follow from that.** A check that declares no `:targets`
+contributes no rows to `case-rows`, however many cases it reports: comparing the
+compiler with itself ran no kernel, and a case that was never run must not look
+like one that ran and failed, or the parity table would gain a gap for every
+definition. Those rows are still reported by `case-failures` when they fail, one
+per case, with an empty `:targets` — a failure without a target used to put a
+`nil` in that set, which is a target that does not exist.
+
+**A tooling lesson worth keeping.** `cljfmt fix` rewrote three files and the reload
+tool then *refused* to reload, reporting `:status :refused` with "the whole session
+changed, a replaced baseline rather than an edit". That is the design working: a
+bulk rewrite invalidates a content-based baseline, and silently reloading would
+have hidden it. The cost is one explicit `(tools/reload :all)`, and the reason it
+mattered here is that the stale session kept a *bite* in place, so the equivalence
+check failed with names from a broken JVM — a failure that was true about the
+session and false about the code.

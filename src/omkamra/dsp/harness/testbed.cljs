@@ -14,6 +14,7 @@
             [omkamra.dsp.harness.catalog :as catalog]
             [omkamra.dsp.event :as event]
             [omkamra.dsp.hosts.fusion :as fusion]
+            [omkamra.dsp.harness.equivalence :as equivalence]
             [omkamra.dsp.hosts.interpreter :as interpreter-host]
             [omkamra.dsp.hosts.js :as js-host]
             [omkamra.dsp.hosts.mixing :as mixing]
@@ -3315,7 +3316,12 @@
                  summary results-list matrix-results
                  (filter
                   identity
-                  [(when (selected? selection "JavaScript pool host")
+                  [;; The compiler equivalence check: the page compiles the
+                   ;; catalog with the compiler compiled into it and compares
+                   ;; with what the JVM compiled (P13, D79).
+                   (when (selected? selection "compiler equivalence")
+                     (fn [] (-> (equivalence/check!) (.then (fn [r] [r])))))
+                   (when (selected? selection "JavaScript pool host")
                      (fn [] (-> (javascript-pool-test) (.then (fn [r] [r])))))
                    (when (selected? selection "Wasm pool host")
                      (fn [] (-> (wasm-pool-test) (.then (fn [r] [r])))))

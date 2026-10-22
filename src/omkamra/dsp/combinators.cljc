@@ -11,7 +11,8 @@
   A combinator that emits a call records the callee in the derived value's
   `:dsp/dependencies`, so the result links even when the callee is an anonymous
   `dsp/fn` (D37). The hand-written equivalent is always the structural oracle."
-  (:require [omkamra.dsp.graph :as graph]))
+  (:require [omkamra.dsp.graph :as graph]
+            [omkamra.dsp.literals :as literals]))
 
 ;; ---------------------------------------------------------------------------
 ;; Control names and modes
@@ -107,8 +108,9 @@
                         :params (graph/parameter-symbols voice)})))
      (let [params (graph/parameter-symbols voice)
            live (gensym "live")
-           open (list 'or live (list '> gate 0.0))
-           body (list 'if open (graph/definition-call voice params) 0.0)]
+           open (list 'or live (list '> gate (literals/float-literal 0.0)))
+           body (list 'if open (graph/definition-call voice params)
+                      (literals/float-literal 0.0))]
        (assoc (graph/derived-definition voice body)
               :state [{:name live :type :boolean :init false :next open}])))))
 
@@ -144,12 +146,14 @@
           args (fn [offset]
                  (map-indexed (fn [position param]
                                 (if (and (= position index) (not (zero? offset)))
-                                  (list '+ param offset)
+                                  (list '+ param (literals/float-literal offset))
                                   param))
                               params))
           calls (mapv (fn [offset] (graph/definition-call voice (args offset))) offsets)
           mixed (reduce (fn [left right] (list '+ left right)) calls)
-          body (if (= 1.0 (double gain)) mixed (list '* gain mixed))]
+          body (if (= 1.0 (double gain))
+                 mixed
+                 (list '* (literals/float-literal (double gain)) mixed))]
       (-> (graph/derived-definition voice body)
           (assoc :doc (str "unison of " (graph/definition-id voice)))))))
 

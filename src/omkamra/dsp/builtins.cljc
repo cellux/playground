@@ -14,7 +14,9 @@
 
   The linker, descriptor type inference, and IR lowering all read this table so
   they cannot drift.  It is deliberately data plus small pure functions so the
-  browser compiler (P13) can port it to `.cljc` unchanged.")
+  browser compiler (P13) can port it to `.cljc` unchanged."
+  (:require [omkamra.dsp.literals :as literals]
+            [omkamra.dsp.names :as names]))
 
 (defn- form
   [op & args]
@@ -122,7 +124,7 @@
              ;; have opposite signs, where `r + b` cannot overflow because
              ;; `|r| < |b|`.  The remainder itself is total and wrapping (D12).
              :expand (fn [[a b]]
-                       (let [r (gensym "mod_remainder")]
+                       (let [r (names/fresh "mod_remainder")]
                          (form 'let [r (form 'rem a b)]
                                (form 'if (form 'and
                                                (form 'not= r 0)
@@ -149,9 +151,11 @@
              :signatures [{:params [:float] :return :float}]
              ;; IEEE signum: +0/-0 for zero, +/-1 elsewhere, NaN for NaN.
              :expand (fn [[x]]
-                       (form 'if (form '> x 0.0)
-                             1.0
-                             (form 'if (form '< x 0.0) -1.0 x)))}
+                       (form 'if (form '> x (literals/float-literal 0.0))
+                             (literals/float-literal 1.0)
+                             (form 'if (form '< x (literals/float-literal 0.0))
+                                   (literals/float-literal -1.0)
+                                   x)))}
 
    'round   {:operator :round
              :kind :derived
@@ -160,7 +164,8 @@
              ;; Half away from zero (D10).
              :expand (fn [[x]]
                        (form 'copysign
-                             (form 'floor (form '+ (form 'abs x) 0.5))
+                             (form 'floor (form '+ (form 'abs x)
+                                                (literals/float-literal 0.5)))
                              x))}})
 
 (def operators

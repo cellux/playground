@@ -568,6 +568,41 @@ otherwise.
 5. Incremental recompilation, descriptor/IR caching, and error classification
    separating SCI, validation, and backend errors.
 
+**Slices** (D77 records the architecture and the evidence for it).
+
+- **P13a — the portable core. DONE** (D78, D79). `builtins`, `descriptor`,
+  `linker` and `ir` are `.cljc`, and the Var/`ns-resolve` seam is an injectable
+  resolver: the linker deals in descriptors, and Var-to-descriptor conversion
+  stayed on the JVM's side of the boundary. `omkamra.dsp.literals` holds the box
+  a float literal's type travels in, `omkamra.dsp.names` makes generated names a
+  function of what was lowered rather than of when it ran, and the capture, the
+  builtin expansions and the description transformers all box the floats they put
+  into a form. Verified by the suite *and* by the `compiler equivalence` browser
+  check, which compiles the catalog in the page and compares per definition:
+  sixty definitions, fifty-two bit-exact, eight skipped pending P13d's registry.
+  Byte-identical artifacts throughout — the whole box apparatus lowers to the
+  constants it boxed.
+- **P13b — the emitters.** `targets/js` and `targets/wasm` move to `.cljc`,
+  including the float-bit abstraction and the D77 number rule: float literals
+  are formatted from the IR's declared type, so the same case compiles to the
+  same bytes in either world. Verified by a source-text equality test across
+  platforms over the whole catalog — which is what catches both measured
+  surprises exhaustively, instead of the ten kernels the spike sampled.
+- **P13c — the browser half.** The page build requires the compiler; the page
+  compiles descriptors to artifacts itself and the harness compiles the whole
+  catalog in-browser, checking it against the in-browser interpreter *and*
+  against the JVM's descriptors, IR and behaviour. The runtime half must stay
+  compiler-free (D77): only the compile entry point pulls malli, squint and
+  edamame in. WABT is already in the page (D73), so Wasm needs no new browser
+  dependency, and the canonical IR form (D77) lands here because this is where
+  it is needed.
+- **P13d — the SCI layer.** The SCI-compatible capture macros, the browser
+  registry with aliases, refers, source locations and diagnostics, and the
+  bridge where SCI calls compiled functions.
+- **P13e — deliverable 5.** Incremental recompilation, caching keyed on the
+  canonical form, and error classification separating SCI, validation and
+  backend errors. The least-scoped deliverable; no existing precedent to lean on.
+
 ---
 
 ## P14 — Artifact-driven worklet installation

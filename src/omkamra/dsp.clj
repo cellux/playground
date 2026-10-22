@@ -9,6 +9,8 @@
   expressions."
   (:refer-clojure :exclude [compile defn defstruct fn reset!])
   (:require [clojure.string :as str]
+            [omkamra.dsp.literals :as literals]
+            [omkamra.dsp.readers]
             [omkamra.dsp.targets.capability :as capability]
             [omkamra.dsp.descriptor :as descriptor]
             [omkamra.dsp.targets.interpreter :as interpreter]
@@ -54,6 +56,18 @@
               (coll? form) (mapcat walk form)
               :else []))]
     (set (mapcat walk forms))))
+
+(clojure.core/defn- box-state-literals
+  "Box the float literals of every `:next` state transition, and of nothing else
+  in the state declaration: an `:init` is a declared value, typed by the slot it
+  initializes, and needs no box."
+  [states]
+  (when states
+    (mapv (clojure.core/fn [state]
+            (if (contains? state :next)
+              (update state :next literals/box-float-literals)
+              state))
+          states)))
 
 (clojure.core/defn- macro-resolution
   "Capture only namespace mappings used by ordinary call forms at the
@@ -151,11 +165,12 @@
                :name name
                :params params
                :return-type (or (:return-type spec) :float)
-               :state (:state spec)
+               :state (box-state-literals (:state spec))
                ;; Like `clojure.core/defn`, several body forms are an implicit
                ;; `(do ...)`. A single form is left exactly as written, so a
                ;; captured descriptor's `[:body 0]` is still the author's form.
-               :body (vec (if (= 1 (count body)) body [(cons 'do body)]))
+               :body (mapv literals/box-float-literals
+                           (if (= 1 (count body)) body [(cons 'do body)]))
                :source source
                :resolution (macro-resolution *ns* body)}
         (some? doc) (assoc :doc doc)

@@ -96,6 +96,20 @@
                "cache-control" "no-store"}
      :body body}))
 
+(defn equivalence
+  "Serve the compiler equivalence payload (P13, D79).
+
+  The catalog's definitions and the JVM's own normalization, linked unit and
+  portable IR for each, so the page can compile the same definitions with the
+  compiler compiled into it and compare. EDN rather than JSON because it is data
+  to read back, boxes and all."
+  [_request]
+  (let [payload (conformance/equivalence-payload)]
+    {:status 200
+     :headers {"content-type" "application/edn; charset=utf-8"
+               "cache-control" "no-store"}
+     :body (pr-str payload)}))
+
 (defn- wasm-artifact
   ([case precision] (wasm-artifact case precision :polynomial))
   ([case precision wasm-math]

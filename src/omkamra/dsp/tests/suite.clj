@@ -13,6 +13,7 @@
             [omkamra.dsp.tests.composition]
             [omkamra.dsp.tests.conformance]
             [omkamra.dsp.tests.descriptor]
+            [omkamra.dsp.tests.equivalence]
             [omkamra.dsp.tests.harness]
             [omkamra.dsp.tests.interpreter]
             [omkamra.dsp.tests.ir]
@@ -20,6 +21,7 @@
             [omkamra.dsp.tests.jvm]
             [omkamra.dsp.tests.library]
             [omkamra.dsp.tests.linker]
+            [omkamra.dsp.tests.literals]
             [omkamra.dsp.tests.memory]
             [omkamra.dsp.tests.modulation]
             [omkamra.dsp.tests.process]
@@ -29,8 +31,9 @@
             [omkamra.dsp.tests.wasm]))
 
 (def test-namespaces
-  "The namespaces `run-all` runs, in the order a failure is worth reading."
+  "The namespaces `run-jvm` runs, in the order a failure is worth reading."
   '[omkamra.dsp.tests.descriptor
+    omkamra.dsp.tests.equivalence
     omkamra.dsp.tests.linker
     omkamra.dsp.tests.ir
     omkamra.dsp.tests.interpreter
@@ -42,6 +45,7 @@
     omkamra.dsp.tests.composition
     omkamra.dsp.tests.combinators
     omkamra.dsp.tests.library
+    omkamra.dsp.tests.literals
     omkamra.dsp.tests.conformance
     omkamra.dsp.tests.automation
     omkamra.dsp.tests.modulation
@@ -50,10 +54,22 @@
     omkamra.dsp.tests.sequencer
     omkamra.dsp.tests.harness])
 
-(defn run-all
-  "Run every DSP test namespace and return the `clojure.test` summary."
+(defn run-jvm
+  "Run every DSP test namespace and return the `clojure.test` summary.
+
+  This is the half that needs neither a browser nor a dev server. The other half
+  is `run-browser`, and `run-everything` runs both."
   []
   (apply test/run-tests test-namespaces))
+
+(defn run-browser
+  "Run the browser conformance suite and return `browser/run!`'s result.
+
+  Separate from `run-jvm` because it needs a browser and a dev server, and a
+  green JVM run says nothing about either. Options are `browser/run!`'s — `:only`
+  and `:views` — so one case can be looked at while the rest stays out of the way."
+  ([] (run-browser {}))
+  ([options] (browser/run! options)))
 
 (defn parity
   "The four-target parity table, in one call.
@@ -63,7 +79,7 @@
   proved *together*: `{:cases n :coverage {...} :gaps [...]}`, where a gap is a
   declared target a row never reached — a mismatch or a case that did not run.
   `:passed?` is true only when the browser suite passed and no row has a gap. The
-  JVM *test* namespaces are `run-all`'s business, not this report's.
+  JVM *test* namespaces are `run-jvm`'s business, not this report's.
 
   With no argument it runs the browser suite itself; pass a result from
   `browser/run!` to reuse one that already ran. This is the check to make before a
@@ -114,7 +130,7 @@
          jvm-output (java.io.StringWriter.)
          jvm (future (binding [test/*test-out* jvm-output
                                *out* jvm-output]
-                       (run-all)))
+                       (run-jvm)))
          browser (future (browser/run! (cond-> {} only (assoc :only only))))
          jvm-result (deref jvm timeout ::timeout)
          browser-result (deref browser timeout ::timeout)

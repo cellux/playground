@@ -5,6 +5,7 @@
   the two source-level descriptor forms into one stable descriptor shape and
   reports source-aware errors before IR lowering begins."
   (:require [clojure.string :as str]
+            [omkamra.dsp.literals :as literals]
             [malli.core :as m]
             [malli.error :as me]
             [omkamra.dsp.builtins :as builtins]))
@@ -486,6 +487,7 @@
   will provide the more specific unsupported-expression diagnostic."
   [form env source path]
   (cond
+    (literals/float-literal? form) :float
     (number? form) (if (integer? form) :int :float)
     (boolean? form) :boolean
     (symbol? form) (get env form)

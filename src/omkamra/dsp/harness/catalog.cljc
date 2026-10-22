@@ -14,6 +14,11 @@
 
   Add a case by adding data here; it is exercised by the JVM suite and by the
   browser JavaScript/Wasm matrix with no further wiring."
+  ;; The tag `#dsp/float` reads to the box a float literal's type survives in
+  ;; (D78). A data reader's Var is not loaded by the reader in Clojure, only
+  ;; resolved, so whoever uses the tag has to have the namespace loaded.
+  (:require [omkamra.dsp.readers])
+
   ;; Some cases call DSP library functions by fully-qualified name.  The JVM
   ;; side links those definitions, so it must have the library loaded; the
   ;; browser receives compiled IR instead and never needs the namespace.
@@ -205,13 +210,13 @@
                   :params ['sample 'coefficient]
                   :state [{:name 'previous
                            :init 0.0
-                           :next '(if (> sample 0.0)
+                           :next '(if (> sample #dsp/float 0.0)
                                     (+ sample (* coefficient previous))
                                     previous)}]
                   :return-type :float
-                  :body ['(if (> sample 0.0)
+                  :body ['(if (> sample #dsp/float 0.0)
                             (+ sample (* coefficient previous))
-                            0.0)]}
+                            #dsp/float 0.0)]}
      :precisions [:f32 :f64]
      :controls [0.5]
      :input-samples sine-input-samples}
@@ -294,7 +299,7 @@
      {:id :local-array
       :body '(let [buf (array :float 4)]
                (do (array-store buf 0 sample)
-                   (array-store buf 2 (+ sample 1.0))
+                   (array-store buf 2 (+ sample #dsp/float 1.0))
                    (array-store buf 3 (* sample sample))
                    (+ (array-load buf 0) (array-load buf 3))))
       :params [{:name 'sample :type :float}]
@@ -316,7 +321,7 @@
       ;; Uses the `aget`/`aset` aliases of `array-load`/`array-store`.
       :body '(let [buf (array :float 4)]
                (do (aset buf i sample)
-                   (* 2.0 (aget buf i))))
+                   (* #dsp/float 2.0 (aget buf i))))
       :params [{:name 'sample :type :float}]
       :controls [{:name 'i :type :int :default 2}]
       :input-samples sine-input-samples})
@@ -329,7 +334,7 @@
       :params [{:name 'sample :type :float}]
       :state [{:name 'previous
                :init 0.0
-               :next '(+ sample (* 0.5 previous))}]
+               :next '(+ sample (* #dsp/float 0.5 previous))}]
       :input-samples sine-input-samples})
     (process-case
      {:id :state-record
@@ -568,11 +573,11 @@
     ;; pinning it to one control value. Two cases, one per channel, so a swap or
     ;; a sign error cannot hide in the projection.
     (process-case {:id :pan-left
-                   :body '(let [pair (omkamra.dsp.library.effect/pan 1.0 position)]
+                   :body '(let [pair (omkamra.dsp.library.effect/pan #dsp/float 1.0 position)]
                             (:left pair))
                    :params [{:name 'position :type :float}]})
     (process-case {:id :pan-right
-                   :body '(let [pair (omkamra.dsp.library.effect/pan 1.0 position)]
+                   :body '(let [pair (omkamra.dsp.library.effect/pan #dsp/float 1.0 position)]
                             (:right pair))
                    :params [{:name 'position :type :float}]})
     ;; P3 done-when: a sine oscillator and an exponential ADSR envelope,

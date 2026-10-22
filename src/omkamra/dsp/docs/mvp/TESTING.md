@@ -21,7 +21,7 @@ below evaluates in it.
 | `src/omkamra/dsp/harness/testbed.clj` | On-demand HTTP endpoints: `source`, `wasm-source`, `wasm-metadata`, and `plan`. |
 | `src/omkamra/dsp/harness/browser.clj` | Clojure-side browser driver (spel + `:on-demand-http`). |
 | `src/omkamra/dsp/harness/fixtures.clj` | Shared `dsp/defn` fixtures and measuring helpers the tests use. |
-| `src/omkamra/dsp/tests/suite.clj` | Requires every test namespace; `run-all` runs the language suite, `run-everything` runs it and the browser suite together. |
+| `src/omkamra/dsp/tests/suite.clj` | Requires every test namespace; `run-jvm` runs the language suite, `run-browser` the browser suite, `run-everything` both at once. |
 | `src/omkamra/dsp/synth.cljc` | The synth description and the pure-data runtime configuration (P10). |
 | `src/omkamra/dsp/synth/pool.cljc` | Preallocated voices, allocation/stealing, the note lifecycle, block rendering. |
 | `src/omkamra/dsp/hosts.clj` | The assembler: `synth-bundle`, `compile-synth`, and which kernel a target gets. |
@@ -64,10 +64,10 @@ once both are done:
 (require '[omkamra.dsp.tests.suite :as suite])
 (suite/run-everything)
 ;; prints the JVM suite's own report under a header, then:
-;;   === browser: 50/50 checks passed (73.3s total) ===
+;;   === browser: 51/51 checks passed (79.1s total) ===
 ;;   === all green ===
 ;; => {:jvm {:test 246, :pass 2412, :fail 0, :error 0, :passed? true}
-;;     :browser {:passed? true, :passed 50, :total 50, :failed []}
+;;     :browser {:passed? true, :passed 51, :total 51, :failed []}
 ;;     :seconds 73.4, :passed? true}
 ```
 
@@ -101,8 +101,8 @@ Evaluate in the dev nREPL:
 
 ```clojure
 (require 'omkamra.dsp.tests.suite)
-(omkamra.dsp.tests.suite/run-all)
-;; => {:test 208, :pass 1840, :fail 0, :error 0}
+(omkamra.dsp.tests.suite/run-jvm)
+;; => {:test 263, :pass 2456, :fail 0, :error 0}
 ```
 
 With `clojure_eval`, send that whole form as one expression.
@@ -113,7 +113,7 @@ namespaces explicitly — **avoid `:reload-all`**, which can reload
 
 ```clojure
 (require 'omkamra.dsp.ir 'omkamra.dsp.interpreter 'omkamra.dsp.jvm :reload)
-(omkamra.dsp.tests.suite/run-all)
+(omkamra.dsp.tests.suite/run-jvm)
 ```
 
 ### A single test
@@ -139,7 +139,35 @@ Notable groups:
   cover four targets. They run in the JVM suite because they are pure functions
   over a row map, needing no browser.
 
-Expected baseline: **246 tests, 2 412 assertions, 0 failures**.
+### The compiler equivalence check
+
+One browser check is not about a target at all: **`compiler equivalence`** has
+the page compile the catalog's definitions with the compiler compiled *into the
+page* — `descriptor/normalize`, `linker/link` and `ir/lower-*` as real
+ClojureScript — and compare each with what the JVM compiled, exactly
+(`omkamra.dsp.harness.diff`, which compares numbers by bit pattern for the
+reasons D78 gives). The JVM payload is `/omkamra/dsp/harness/testbed/equivalence`
+(`conformance/equivalence-payload`).
+
+```clojure
+(browser/run! {:only ["compiler equivalence"]})
+;; => one check, one case row per catalog definition it could compile
+```
+
+Two properties are deliberate and worth knowing when reading it:
+
+- a case whose linked unit reaches a *library* definition is **skipped**, not
+  failed, and counted in the check's `:detail` and `:skipped`: the page has not
+  been given those definitions yet. That is P13d's browser definition registry,
+  and the check says how much of the catalog is waiting for it rather than
+  failing on something it was never told how to do;
+- the check reports cases but declares no `:targets`, because no kernel ran. Only
+  a check that declares targets contributes rows to `case-rows`, so the parity
+  table is untouched by it — while `case-failures` still reports its failures,
+  one row per case, with an empty `:targets` because nothing was a target's
+  fault.
+
+Expected baseline: **263 tests, 2 456 assertions, 0 failures**.
 
 ---
 
@@ -155,7 +183,11 @@ Evaluate in the dev nREPL:
 ```clojure
 (require '[omkamra.dsp.harness.browser :as browser])
 (browser/run!)
-;; => {:passed? true, :passed 50, :total 50, :results [...]}
+;; => {:passed? true, :passed 51, :total 51, :results [...]}
+
+;; or through the suite, which is the same call
+(require '[omkamra.dsp.tests.suite :as suite])
+(suite/run-browser)
 ```
 
 Run one check while iterating — `:only` matches check names, and the result
@@ -291,7 +323,7 @@ all four targets:
 `conformance/parity`, so a target that mismatched — or a case that never reached
 it — is an entry in `:gaps` rather than an absent line in a table. `:passed?` is
 true only when the browser suite passed and no row has a gap; the JVM *test*
-namespaces stay `run-all`'s business. With no argument `suite/parity` runs the
+namespaces stay `run-jvm`'s business. With no argument `suite/parity` runs the
 browser suite itself; pass a `browser/run!` result to reuse one that already ran.
 
 The row vocabulary is the whole contract: `conformance/target-row-keys` says which
@@ -565,13 +597,13 @@ only; for local work use the nREPL commands above.
 # JVM / interpreter suite
 clojure -M:dev -e "
   (require 'omkamra.dsp.tests.suite)
-  (let [r (omkamra.dsp.tests.suite/run-all)]
+  (let [r (omkamra.dsp.tests.suite/run-jvm)]
     (shutdown-agents)
     (System/exit (if (zero? (+ (long (:fail r)) (long (:error r)))) 0 1)))"
 
 # Browser suite (nothing else may own port 8080)
 clojure -M:dev:linux -e "
-  (require '[omkamra.dsp.browser :as b])
+  (require '[omkamra.dsp.harness.browser :as b])
   (let [r (b/run! {:timeout 180000})]
     (println (select-keys r [:passed? :passed :total]))
     (shutdown-agents)
@@ -586,7 +618,7 @@ clojure -M:dev:linux -e "
   Just evaluate `browser/run!` there instead of starting another.
 - **`Executable doesn't exist at .../chromium_headless_shell-<rev>`:** spel's
   bundled Playwright expects a browser revision that is not installed.
-  `omkamra.dsp.browser/installed-headless-shell` picks the installed revision
+  `omkamra.dsp.harness.browser/installed-headless-shell` picks the installed revision
   automatically; if the layout differs, pass `:executable-path` explicitly.
 - **The browser build does not pick up an edit:** recompile synchronously with
   `(omkamra.dev.frontend/recompile! :omkamra.dsp.testbed)`. The on-demand HTTP

@@ -12,7 +12,10 @@
   serves the serialized plan and compares the JS/Wasm kernel with the
   interpreter it runs locally."
   (:require [omkamra.dsp :as dsp]
-            [omkamra.dsp.harness.catalog :as catalog]))
+            [omkamra.dsp.descriptor :as descriptor]
+            [omkamra.dsp.harness.catalog :as catalog]
+            [omkamra.dsp.ir :as ir]
+            [omkamra.dsp.linker :as linker]))
 
 (def process-blocks
   "Block lengths exercised per process case, in order."
@@ -377,3 +380,67 @@
                                                          (mapv encode-value values)]))
                                               lanes)))))
                           invocations)))))))
+
+;; ---------------------------------------------------------------------------
+;; Compiler equivalence (P13, D79)
+
+(defn- equivalence-entry
+  "How a case's entry is lowered: a function case lowers a whole unit, a process
+  case lowers a process with its channel count."
+  [case definition]
+  (if (catalog/function-case? case)
+    {:entry :function :channels 1}
+    {:entry :process
+     :channels (long (or (get-in definition [:process :channels])
+                         (:channels case) 1))}))
+
+(defn equivalence-payload
+  "The JVM's half of the compiler equivalence check, as data.
+
+  One entry per catalog definition the browser can compile on its own: the raw
+  definition, how to lower it, and the JVM's own normalization, linked unit and
+  portable IR for it. The browser compiles the same definition with the compiler
+  compiled into the page and compares (`omkamra.dsp.harness.diff`), which is what
+  makes the phase's equivalence claim a test rather than a claim.
+
+  A case whose unit pulls in a definition from outside the case's own data is
+  marked `:library?`. The JVM links it — it resolves a Var through `find-ns` —
+  and the browser cannot, because it has not been given those definitions: they
+  are what P13d's browser definition registry will supply. The expected values
+  are shipped for those cases too, so that closing the gap needs no change here;
+  the page decides whether it *can* compile them, and says which it skipped
+  rather than failing on something it was never told how to do.
+
+  A definition the JVM itself cannot link is reported separately as
+  `:uncompilable`, which is a JVM-side surprise and not the browser's business.
+
+  EDN, not JSON: this is data to read back, boxes and all (D78), and the
+  comparison is of values rather than of JSON-encoded strings."
+  []
+  (let [cases (filter #(and (nil? (:definition-var %)) (:definition %))
+                      catalog/cases)
+        compiled
+        (mapv (fn [case]
+                (let [definition (:definition case)
+                      {:keys [entry channels]} (equivalence-entry case definition)]
+                  (try
+                    (let [unit (linker/link definition)]
+                      [(name (:id case))
+                       {:definition definition
+                        :entry entry
+                        :channels channels
+                        ;; More than the entry means the linker reached a
+                        ;; definition the case's own data does not carry.
+                        :library? (> (count (:definitions unit)) 1)
+                        :normalized (descriptor/normalize definition)
+                        :unit unit
+                        :ir (if (= entry :function)
+                              (ir/lower-unit unit)
+                              (ir/lower-process unit {:channels channels}))}])
+                    (catch clojure.lang.ExceptionInfo error
+                      {::skipped (name (:id case))
+                       ::message (.getMessage error)}))))
+              cases)]
+    {:cases (into {} (remove ::skipped compiled))
+     :uncompilable (mapv (fn [entry] [(::skipped entry) (::message entry)])
+                         (filter ::skipped compiled))}))

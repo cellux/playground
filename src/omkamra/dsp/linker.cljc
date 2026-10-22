@@ -31,33 +31,73 @@
       (some? ns-name) (symbol (str ns-name) (clojure.core/name name))
       :else name)))
 
-(defn- var-id
-  [v]
-  (symbol (str (-> v meta :ns ns-name)) (str (-> v meta :name))))
+#?(:clj
+   (defn- var-id
+     [v]
+     (symbol (str (-> v meta :ns ns-name)) (str (-> v meta :name)))))
 
 (declare resolve-structs)
 
-(defn- dsp-var-definition
-  [v]
-  (when-not (var? v)
-    (fail "DSP reference does not resolve to a Var" {:reference v}))
-  (let [value @v]
-    (when-not (and (map? value) (= :function (:dsp/kind value)))
-      (fail "DSP reference must resolve to a value defined with dsp/defn"
-            {:var v :value value}))
-    (descriptor/normalize (resolve-structs value))))
+#?(:clj
+   (defn- var-value
+     "The value a Var holds, for a caller that resolved one."
+     [v]
+     (when-not (var? v)
+       (fail "DSP reference does not resolve to a Var" {:reference v}))
+     @v))
+
+(defn- definition-value
+  "Normalize a definition value: it must be a `:function` descriptor, with its
+  struct references inlined. `runtime` is the failure data, so a caller can say
+  what it resolved."
+  [resolve-id value runtime]
+  (when-not (and (map? value) (= :function (:dsp/kind value)))
+    (fail "DSP reference must resolve to a value defined with dsp/defn" runtime))
+  (descriptor/normalize (resolve-structs resolve-id value)))
+
+#?(:clj
+   (defn- jvm-resolver
+     "The default resolver: the value of the Var a fully-qualified id names in a
+     loaded namespace, as `[canonical-id value]`, or nil.
+
+     The canonical id is the Var's own, so a definition reachable through a refer
+     resolves to the namespace that defines it rather than the one that referred
+     it. The browser has no Vars to look in, so it hands `link` a `:resolve` of its
+     own (P13, D77) — and `synth` already accepts a symbol where the JVM accepts a
+     Var."
+     [id]
+     (when-let [ns-part (namespace id)]
+       (when-let [target-ns (find-ns (symbol ns-part))]
+         (when-let [v (ns-resolve target-ns (symbol (name id)))]
+           (when (var? v) [(var-id v) @v])))))
+
+   :cljs
+   (defn- jvm-resolver
+     "There is no JVM to look a name up in: a browser always supplies `:resolve`."
+     [_id]
+     nil))
+
+(defn- id-resolver
+  "The resolver to use: the caller's, or the JVM's Var lookup."
+  [options]
+  (or (:resolve options) jvm-resolver))
 
 (defn- as-definition
-  [entry]
+  [entry resolve-id]
   (cond
-    (var? entry) [(var-id entry) (dsp-var-definition entry)]
-    (map? entry) (let [definition (descriptor/normalize (resolve-structs entry))]
+    #?@(:clj
+        [(var? entry)
+         (let [value (var-value entry)]
+           [(var-id entry)
+            (definition-value resolve-id value {:var entry :value value})])]
+        :cljs [])
+    (map? entry) (let [definition (descriptor/normalize (resolve-structs resolve-id entry))]
                    [(definition-id definition) definition])
     :else (fail "DSP linking expects a descriptor map or Var"
                 {:entry entry})))
 
 (defn- normalize-definitions
-  [definitions]
+  [definitions resolve-id]
   (when-not (or (nil? definitions) (map? definitions))
     (fail "DSP linker :definitions must be a map" {:definitions definitions}))
   (reduce-kv
@@ -65,7 +105,7 @@
      (when-not (symbol? supplied-id)
        (fail "DSP linker definition keys must be symbols"
              {:definition-id supplied-id :definition entry}))
-     (let [[actual-id definition] (as-definition entry)
+     (let [[actual-id definition] (as-definition entry resolve-id)
            id (if (namespace supplied-id) supplied-id actual-id)]
        (when (and (namespace supplied-id)
                   (namespace actual-id)
@@ -168,18 +208,16 @@
     id))
 
 (defn- resolve-struct-var
-  [id]
-  (when-let [ns-part (namespace id)]
-    (when-let [target-ns (find-ns (symbol ns-part))]
-      (when-let [v (ns-resolve target-ns (symbol (name id)))]
-        (descriptor/normalize-struct @v)))))
+  [resolve-id id]
+  (when-let [[_ value] (resolve-id id)]
+    (descriptor/normalize-struct value)))
 
 (def ^:private logical-return-types #{:float :int :boolean :void})
 
 (defn- resolve-return-struct
   "Resolve a struct-typed `:return-type` into `:record` plus the struct's fields,
   so a module can return several typed values (multi-output)."
-  [definition]
+  [resolve-id definition]
   (let [return-type (:return-type definition)]
     (if (or (nil? return-type) (contains? logical-return-types return-type))
       definition
@@ -187,7 +225,7 @@
                         (second return-type)
                         return-type)
             id (resolve-symbol-id definition reference)
-            resolved (or (resolve-struct-var id)
+            resolved (or (resolve-struct-var resolve-id id)
                          (fail "DSP :return-type refers to a missing struct"
                                (merge (source-data definition [:return-type] return-type)
                                       {:reference reference :resolved-id id})))]
@@ -201,8 +239,8 @@
   A struct reference resolves through the same captured namespace resolution
   used for calls, so an aliased struct from another namespace resolves
   identically. The struct's fully-qualified id is retained as `:struct-name`."
-  [definition]
-  (let [definition (resolve-return-struct definition)]
+  [resolve-id definition]
+  (let [definition (resolve-return-struct resolve-id definition)]
     (if (seq (:state definition))
       (update
        definition
@@ -215,7 +253,7 @@
                                      (second reference)
                                      reference)
                          id (resolve-symbol-id definition reference)
-                         resolved (or (resolve-struct-var id)
+                         resolved (or (resolve-struct-var resolve-id id)
                                       (fail "DSP :struct refers to a missing struct"
                                             (merge (source-data definition [:state] state)
                                                    {:reference reference
@@ -230,11 +268,10 @@
       definition)))
 
 (defn- resolve-var-definition
-  [id]
-  (when-let [ns-part (namespace id)]
-    (when-let [target-ns (find-ns (symbol ns-part))]
-      (when-let [v (ns-resolve target-ns (symbol (name id)))]
-        [(var-id v) (dsp-var-definition v)]))))
+  "Resolve a fully-qualified id to `[canonical-id definition]`, or nil."
+  [resolve-id id]
+  (when-let [[resolved-id value] (resolve-id id)]
+    [resolved-id (definition-value resolve-id value {:reference id :value value})]))
 
 (defn- buffer-access?
   [form]
@@ -252,10 +289,10 @@
       (some #(some buffer-access? [(:next %)]) (:state definition))))
 
 (defn- resolve-definition
-  [definitions definition call]
+  [definitions definition call resolve-id]
   (let [id (resolve-symbol-id definition (:symbol call))
         resolved (or (when-let [candidate (get definitions id)] [id candidate])
-                     (resolve-var-definition id)
+                     (resolve-var-definition resolve-id id)
                      (fail "DSP call refers to a missing definition"
                            (merge (source-data definition (:path call) (:form call))
                                   {:reference (:symbol call)
@@ -321,10 +358,11 @@
   automatically."
   ([entry] (link entry {}))
   ([entry {:keys [definitions] :as options}]
-   (when-not (every? #{:definitions} (keys options))
+   (when-not (every? #{:definitions :resolve} (keys options))
      (fail "DSP linker received unsupported options" {:options options}))
-   (let [[entry-id entry-definition] (as-definition entry)
-         supplied (normalize-definitions definitions)
+   (let [resolve-id (id-resolver options)
+         [entry-id entry-definition] (as-definition entry resolve-id)
+         supplied (normalize-definitions definitions resolve-id)
          supplied (if-let [existing (get supplied entry-id)]
                     (if (= existing entry-definition)
                       supplied
@@ -339,7 +377,8 @@
          visiting (atom [])
          visited (atom #{})]
      (letfn [(resolve-call [definition call]
-               (let [[id resolved] (resolve-definition @definitions definition call)]
+               (let [[id resolved] (resolve-definition @definitions definition call
+                                                       resolve-id)]
                  (when-let [existing (get @definitions id)]
                    (when-not (= existing resolved)
                      (fail "DSP linker found duplicate fully-qualified names"

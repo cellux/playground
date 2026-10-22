@@ -168,3 +168,36 @@
     (is (= [{:case :gain :precision :f64 :target :jvm}]
            (:gaps (conformance/parity jvm-rows))))
     (is (= 2 (:cases (conformance/parity jvm-rows))))))
+
+(def ^:private page-result-with-a-targetless-check
+  "A result carrying the compiler equivalence check beside a matrix: the
+  equivalence check reports cases but no targets, because no kernel ran."
+  (update page-result
+          :results
+          conj
+          {:name "compiler equivalence"
+           :passed? false
+           :case-count 1
+           :case-failures 1
+           :skipped []
+           :cases [{:case ":gain" :passed? false
+                    :failures [{:detail "{:path [:locals 2 :name]}"}]}]}))
+
+(deftest only-a-check-that-declares-targets-contributes-parity-rows
+  ;; A case that was never run and a case that ran and failed must not look
+  ;; alike, and the compiler-equivalence rows ran no kernel at all.
+  (let [decoded (browser/decode-result page-result-with-a-targetless-check)
+        rows (browser/case-rows decoded)]
+    (is (= ["shared process matrix f32" "shared process matrix f64"]
+           (distinct (map :check rows))))
+    (is (every? seq (map :targets rows)))))
+
+(deftest a-failure-without-a-target-reports-no-targets
+  ;; The equivalence check's rows name a case and a path; they have no target to
+  ;; name, and a nil in the set would be a target that does not exist.
+  (let [decoded (browser/decode-result page-result-with-a-targetless-check)
+        rows (browser/case-failures decoded)
+        row (first (filter #(= "compiler equivalence" (:check %)) rows))]
+    (is (= :gain (:case row)))
+    (is (= #{} (:targets row)))
+    (is (= 1 (count (:failures row))))))

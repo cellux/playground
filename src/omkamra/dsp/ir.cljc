@@ -8,6 +8,8 @@
   (:require [clojure.string :as str]
             [clojure.walk :as walk]
             [omkamra.dsp.builtins :as builtins]
+            [omkamra.dsp.literals :as literals]
+            [omkamra.dsp.names :as names]
             [omkamra.dsp.descriptor :as descriptor]))
 
 (def ^:private arithmetic-operators
@@ -141,12 +143,20 @@
 (defn- constant
   [form]
   (cond
+    (literals/float-literal? form)
+    {:op :const :type :float :value (double (literals/float-literal-value form))}
+
     (integer? form) {:op :const :type :int :value (int form)}
     ;; Keep the full double. Narrowing happens per precision at use: the
     ;; interpreter's `:const` and each backend's constant emission. Narrowing
     ;; here would lose f64 precision and, because a Clojure `Float` prints a
     ;; short decimal, would not round-trip through the EDN served to the
     ;; browser.
+    ;;
+    ;; An unboxed number is typed by its value, which is what the browser can
+    ;; see: one that is not an integer is a float there too (D78). A float whose
+    ;; value *is* integral has to arrive boxed, or the browser would read it as
+    ;; the integer it looks like.
     (number? form) {:op :const :type :float :value (double form)}
     (boolean? form) {:op :const :type :boolean :value form}
     :else nil))
@@ -2116,8 +2126,9 @@
                 state-bindings))
          (context-bindings definition)))
 
-(defn lower
-  "Lower one normalized descriptor to explicit function IR.
+(defn- lower*
+  "Lower one normalized descriptor to explicit function IR. The public entry
+  point of this name binds the counter its generated names come from (D79).
 
   `:lanes` and `:lane-capacity` are the *entry process's* lane layout, not
   this definition's: every `(lane control)` in an artifact resolves against it,
@@ -2130,7 +2141,7 @@
   voice's slice of it and its lane reads resolve against the base the call site
   supplies (`:lane-frame-offset`). The entry's own env instead carries
   `:lane-slots`, which is the fact that its slices belong to its call sites."
-  ([definition] (lower definition {}))
+  ([definition] (lower* definition {}))
   ([definition {:keys [functions definition-id options modules
                        lanes lane-capacity lane-base?]}]
    (normalized-definition! definition)
@@ -2329,6 +2340,11 @@
              :body body}]
      (assoc ir :effects (collect-effects body)))))
 
+(defn lower
+  "Lower one normalized descriptor, with deterministic generated names (D79)."
+  ([definition] (lower* definition))
+  ([definition opts] (names/with-fresh-names (fn [] (lower* definition opts)))))
+
 (defn- called-ids
   "Every definition id a lowered body calls, at any depth in the IR."
   [ir]
@@ -2388,13 +2404,15 @@
   ([unit {:keys [options]}]
    (when-not (= :compilation-unit (:dsp/kind unit))
      (fail "DSP IR lowering expects a linked compilation unit" {:unit unit}))
-   (let [definitions (:definitions unit)
-         lowered (lower-definitions definitions (dependency-order unit) options nil)
-         entry (:entry unit)]
-     (assoc (get lowered entry)
-            :definitions lowered
-            :entry-id entry
-            :graph (:graph unit)))))
+   (names/with-fresh-names
+     (fn []
+       (let [definitions (:definitions unit)
+             lowered (lower-definitions definitions (dependency-order unit) options nil)
+             entry (:entry unit)]
+         (assoc (get lowered entry)
+                :definitions lowered
+                :entry-id entry
+                :graph (:graph unit)))))))
 
 (defn- memory-requirements
   "Summarize frame-relative buffer accesses for ABI validation.
@@ -2697,8 +2715,9 @@
       (walk form)
       {:max-channel @max-channel :dynamic? @dynamic?})))
 
-(defn lower-process
-  "Lower the entry descriptor directly to explicit process IR.
+(defn- lower-process*
+  "Lower the entry descriptor directly to explicit process IR. The public entry
+  point of this name binds the counter its generated names come from (D79).
 
   The sample parameter is bound to a canonical input-buffer load while controls
   and state retain their own binding kinds. No scalar IR rewriting is involved.
@@ -2706,7 +2725,7 @@
   The audio width is the declared `:channels`, or otherwise **counted** from the
   body's `:input`/`:output` accesses (highest channel + 1), so a stereo body
   needs no declaration (D40)."
-  ([unit] (lower-process unit {}))
+  ([unit] (lower-process* unit {}))
   ([unit {:keys [channels options]}]
    (when-not (= :compilation-unit (:dsp/kind unit))
      (fail "DSP process lowering expects a linked compilation unit" {:unit unit}))
@@ -2875,6 +2894,11 @@
              :graph (:graph unit)
              :frame-body frame-body}]
      (assoc ir :effects (collect-effects frame-body)))))
+
+(defn lower-process
+  "Lower the entry descriptor directly, with deterministic generated names."
+  ([unit] (lower-process* unit))
+  ([unit opts] (names/with-fresh-names (fn [] (lower-process* unit opts)))))
 
 (def ^:private inlining-statement-limit
   "Conservative bound on the statements an expansion may add. Composition is
