@@ -66,7 +66,7 @@ once both are done:
 ;; prints the JVM suite's own report under a header, then:
 ;;   === browser: 50/50 checks passed (73.3s total) ===
 ;;   === all green ===
-;; => {:jvm {:test 239, :pass 2063, :fail 0, :error 0, :passed? true}
+;; => {:jvm {:test 244, :pass 2396, :fail 0, :error 0, :passed? true}
 ;;     :browser {:passed? true, :passed 50, :total 50, :failed []}
 ;;     :seconds 73.4, :passed? true}
 ```
@@ -139,7 +139,7 @@ Notable groups:
   cover four targets. They run in the JVM suite because they are pure functions
   over a row map, needing no browser.
 
-Expected baseline: **239 tests, 2063 assertions, 0 failures**.
+Expected baseline: **244 tests, 2 396 assertions, 0 failures**.
 
 ---
 
@@ -202,39 +202,64 @@ only run. `run!` starts and stops its own browser; no connected runtime or
 ### Reading a result
 
 `run!` returns the page's own report: `{:passed? :passed :total :results}`, where
-each result is one check with `:name`, `:passed?`, `:detail`, and — for the two
-shared matrices — `:targets` and a per-case `:cases` breakdown. Five functions
-answer the questions that breakdown invites, and `:views` attaches any of them to
-the result in the same call:
+`:passed` and `:total` count **checks** — not cases, and not targets — and each
+result is one check with `:name`, `:passed?`, `:detail`, and, for the two shared
+matrices, `:targets`, `:case-count`, `:case-failures` and a per-case `:cases`
+breakdown. A matrix check runs one case per catalog case at one precision, so its
+case count is not comparable with the suite's check count; both are reported so
+that 95 and 50 do not have to be reconciled by hand.
+
+Seven functions answer the questions that breakdown invites, and `:views` attaches
+any of them to the result in the same call. `:failures` is always attached, because
+a key that has to be asked for by name is a key that a reader will miss and read as
+*nothing failed*:
 
 ```clojure
 (browser/failures (browser/run!))
 ;; => []          ; the checks that did not pass, with their :detail (only `true`
 ;;                ; counts as passed, so a missing verdict is reported too)
 
-(browser/run! {:views [:failures :parity]})
-;; => {:passed? true :failures [] :parity {:cases 207 :gaps []} ...}
+(browser/case-failures result)
+;; => [{:check "shared process matrix f64" :case :long-block :precision :f64
+;;      :targets #{:wasm} :failures [{:target :wasm :detail "… sample 512 …"}]}]
+;;    the same run one level down: a failing case names its target as a field,
+;;    not inside a message that also carries a stack trace
+
+(browser/check-names result)
+;; => ["shared process matrix f32" ... "AudioWorklet"]
+;;    the vocabulary `:only` selects from
+
+(browser/run! {:views [:parity]})
+;; => {:passed? true :failures [] :parity {:cases 211 :gaps []} ...}
 
 (browser/check-results result "post-mix")
 ;; => the checks whose name contains the needle, the way `:only` selects them
 
 (browser/case-results result :region-buffers)
 ;; => [{:case :region-buffers :precision :f32 :javascript false :wasm true
-;;      :passed? false} {... :f64 ...}]   ; every matrix row for one case
+;;      :passed? false :failures [...] :check "…" :targets [:js :wasm]}]
 
 (browser/coverage result)
 ;; => {:gain {:f32 #{:js :wasm} :f64 #{:js :wasm}} ...}
 ;;    each precision maps to the targets that ran the case *and* matched
 
 (browser/parity result)
-;; => {:cases 207 :gaps []}
+;; => {:cases 211 :gaps []}
 ;;    the case/precision/target triples that missed a target their check declares
 ```
 
 A target's boolean in a row means *ran it and matched the interpreter*, and a
 case that never ran is simply absent — which is why these queries exist: a case
 that passed and a case that ran nowhere produce the same green run, so a bite
-check has to ask where a case went rather than whether the suite passed.
+check has to ask where a case went rather than whether the suite passed. A case
+row's own verdict is likewise the fact, not its check's summary: `case-failures`
+reports a failing case even when the check around it claims success.
+
+A stray `:only` needle is reported as a failed check carrying `:needles`, so a typo
+cannot silently run nothing. That report deliberately does not list the check names:
+the page builds a check only when the selection asks for one, so a stray needle
+leaves no vocabulary to list — `check-names` reads it off any run that selected
+something.
 
 ### All four targets in one call
 
@@ -246,7 +271,7 @@ all four targets:
 ```clojure
 (suite/parity)
 ;; => {:passed? true
-;;     :cases 209   ; process and function cases, f32 and f64, across four targets
+;;     :cases 211   ; process and function cases, f32 and f64, across four targets
 ;;     :gaps []
 ;;     :coverage {:stereo-region-buffers {:f32 #{:interpreter :jvm :js :wasm}
 ;;                                        :f64 #{:interpreter :jvm :js :wasm}}

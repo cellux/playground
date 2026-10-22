@@ -512,11 +512,20 @@ deliverable 5 below.
 
 **Slices.** Two, and neither needs a new dependency or a new tool.
 
-- **P12a — the layout.** Remove the fixed channel stride; pack the regions; declare
-  alignment, capacity and non-overlap in the ABI and *validate* them; make every
-  reader (`hosts/wasm.cljs`, the conformance runners, `tests/wasm.clj`) take the
-  numbers from the ABI rather than recomputing them. Verified exactly as today:
-  WAT through the page's WABT, plus the four-target parity table.
+- **P12a — the layout. DONE** (D74). The fixed stride is gone: capacity is a
+  *declared frame count* (1024 by default, `:frame-capacity` a validated option),
+  every backend derives its strides from it, and the Wasm layout publishes
+  alignment, capacity and channel counts per region and *validates* them
+  (alignment, whole blocks, non-overlap, state slots inside their regions, pages
+  covering what the regions need). Every reader takes the numbers from the ABI:
+  `hosts/wasm.cljs` (which now also refuses a block longer than the declared
+  capacity), the page's process runner and its standalone WAT fixtures, which fetch
+  the fixture's metadata instead of assuming 4096. The f32 layout is unchanged
+  (1024 frames × 4 bytes *is* the old 4096), f64 gains the frames it should always
+  have had, and the shared case `:long-block` proves both widths on all four
+  targets — bitten by restoring the old stride, it fails on Wasm f64 from sample
+  512. Verified as today: WAT through the page's WABT, plus the four-target parity
+  table (211 pairs, no gaps).
 - **P12b — the init blob (deliverable 5).** Emit the non-zero initializers as one
   data segment and drop the zero ones, pinning the size delta on the case that has
   it (`feedback-delay-f64`). This slice matters *more* under D73 than it did before:

@@ -254,23 +254,28 @@
              (render-on #'two-lane-mix :jvm precision
                         {'a [1.0 1.0 1.0 1.0] 'b [0.5 0.25 0.0 -0.5]} 4))
           (name precision))))
-  (testing "a lane's stride is a byte count, so f64 fits fewer frames per lane"
-    ;; This is the assertion that caught a real f64 bug: the region is sized in
-    ;; bytes, but a lane offset is a compile-time *element* index.
-    (is (= 1024 (:lane-stride (:abi (dsp/compile #'two-lane-mix {:target :interpreter
-                                                                 :entry :process
-                                                                 :precision :f32})))))
-    (is (= 512 (:lane-stride (:abi (dsp/compile #'two-lane-mix {:target :interpreter
-                                                                :entry :process
-                                                                :precision :f64})))))
-    (is (= [0 1024] (mapv :offset
-                          (:lanes (:abi (dsp/compile #'two-lane-mix {:target :interpreter
-                                                                     :entry :process
-                                                                     :precision :f32}))))))
-    (is (= [0 512] (mapv :offset
-                         (:lanes (:abi (dsp/compile #'two-lane-mix {:target :interpreter
-                                                                    :entry :process
-                                                                    :precision :f64})))))))
+  (testing "a lane's stride is the declared frame capacity, at either width"
+    ;; A region holds one *block* per lane, and a block is a frame count, so the f32
+    ;; and f64 artifacts of one IR now accept the same blocks. The earlier version of
+    ;; this test pinned the opposite — when the stride derived from a 4 KB byte
+    ;; budget, an f64 voice silently held half as many frames per lane as an f32 one
+    ;; (P12). That is also what the byte/element mix-up this test once caught was a
+    ;; symptom of: a lane offset is a compile-time element index, so the two counts
+    ;; could not be the same number.
+    (doseq [precision [:f32 :f64]]
+      (let [artifact (dsp/compile #'two-lane-mix {:target :interpreter
+                                                  :entry :process
+                                                  :precision precision})
+            abi (:abi artifact)]
+        (is (= 1024 (:lane-stride abi)) (name precision))
+        (is (= [0 1024] (mapv :offset (:lanes abi))) (name precision))
+        (is (= 1024 (get-in artifact [:options :frame-capacity])) (name precision))))
+    (testing "a declared capacity shortens the stride"
+      (let [abi (:abi (dsp/compile #'two-lane-mix {:target :interpreter
+                                                   :entry :process
+                                                   :frame-capacity 64}))]
+        (is (= 64 (:lane-stride abi)))
+        (is (= [0 64] (mapv :offset (:lanes abi)))))))
   (testing "the generated targets take one region and read it per frame"
     (let [js (:source (dsp/compile #'lane-gain {:target :js :entry :process}))
           wasm (dsp/compile #'lane-gain {:target :wasm :entry :process})]

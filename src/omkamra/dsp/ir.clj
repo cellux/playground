@@ -7,7 +7,8 @@
   on function/process roots."
   (:require [clojure.string :as str]
             [clojure.walk :as walk]
-            [omkamra.dsp.builtins :as builtins]))
+            [omkamra.dsp.builtins :as builtins]
+            [omkamra.dsp.descriptor :as descriptor]))
 
 (def ^:private arithmetic-operators
   {'+ :+ '- :- '* :* '/ :/})
@@ -2161,8 +2162,10 @@
          ;; One region per output buffer: `channels` frame-planes of `stride`
          ;; frames. The stride is the lane/shared region stride, a compile-time
          ;; constant every backend shares, so a region is one flat state slot.
+         ;; The region stride *is* the declared capacity: every per-frame region
+         ;; is a whole number of blocks, and no host may render a longer one.
          region-stride (long (or (:frame-capacity options)
-                                 (lane-frame-capacity (get options :precision :f32))))
+                                 descriptor/default-frame-capacity))
          region-states (mapv (fn [{:keys [id channels]}]
                                {:name id :type :float
                                 :size (* (long channels) region-stride)
@@ -2431,16 +2434,6 @@
 
 ;; The byte distance between two lanes in the shared `:lanes` region. It is the
 ;; same stride the Wasm layout gives a channel, so a lane's base offset is a
-;; compile-time constant in every backend — which is what lets a lane read be an
-;; ordinary `:frame-offset` buffer load. Because the stride is a *byte* count, a
-;; lane holds half as many frames in f64 as in f32, and a host must not render a
-;; block longer than that capacity.
-(def ^:private lane-stride-bytes 4096)
-
-(defn- lane-frame-capacity
-  [precision]
-  (quot lane-stride-bytes (if (= :f64 precision) 8 4)))
-
 (defn- process-input?
   "True when a definition's process has a sample input port.
 
@@ -2737,7 +2730,7 @@
          expanded (expand-state (effective-state definition))
          states (:slots expanded)
          frame-capacity (long (or (:frame-capacity options)
-                                  (lane-frame-capacity (get options :precision :f32))))
+                                  descriptor/default-frame-capacity))
          ;; A fused entry renders `poly`'s voices in one call, so the one lane
          ;; region it owns holds one slice per voice and each call site reads its
          ;; own (F4). The fact is the definition's, marked where the fusion

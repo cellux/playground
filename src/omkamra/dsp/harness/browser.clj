@@ -63,10 +63,15 @@
     value))
 
 (defn- normalize-value
-  "Decode the enumerated values the browser encodes as strings."
+  "Decode the enumerated values the browser encodes as strings.
+
+  Every place a target or a case id can appear is listed here, because the failure
+  mode is silent: `:wasm` arriving as the string `\":wasm\"` still prints as
+  `:wasm`, and only compares equal to nothing. `:target` is a target inside a
+  failing case's `:failures`, `:targets` a check's declared targets."
   [k v]
   (case k
-    (:case :precision) (browser-keyword v)
+    (:case :precision :target) (browser-keyword v)
     :targets (mapv browser-keyword v)
     (keywordize v)))
 
@@ -136,15 +141,61 @@
   [result]
   (conformance/coverage (case-rows result)))
 
+(defn check-names
+  "The names of the checks a result reports, in run order.
+
+  This is the vocabulary `:only` selects from: every needle has to match one of these
+  names — or a catalog case ID — so this is what a needle is measured against when it
+  mattered to nothing."
+  [result]
+  (mapv :name (:results result)))
+
 (defn failures
   "The checks a result reports as failed, in run order.
 
   `:passed?` on the whole result answers *whether*; this answers *which*, which is
   the first thing a bite check has to read. Only `true` counts as passed, so a check
   whose verdict is missing is reported rather than hidden: an absent verdict and a
-  passing one must not look alike."
+  passing one must not look alike.
+
+  A check is the coarsest useful unit — a matrix check holds one case per catalog
+  case, and its `:detail` is a sentence about the first of them. `case-failures`
+  reads the same run one level down, where a failure names its case and target as
+  fields."
   [result]
   (into [] (remove #(true? (:passed? %))) (:results result)))
+
+(defn case-failures
+  "Every case a result reports as failed, one row per case, in run order.
+
+  Each row is `{:check \"shared process matrix f64\" :case :long-block
+  :precision :f64 :targets #{:wasm} :failures [{:target :wasm :detail \"…\"}]}`:
+  the same run `failures` summarises, with the case, the precision, and the target
+  that did not match all present as fields, because reading them out of a message is
+  how a reader ends up guessing which half of a four-target comparison broke.
+
+  A case row's own verdict is the fact, not its check's summary: a check whose
+  `:passed?` says true while one of its cases says false is reported here, because
+  the case is the thing that failed. A check that failed *without* reporting a
+  failing case is included with an empty `:failures` — a check that fails saying
+  nothing is itself the fact."
+  [result]
+  (into []
+        (comp (mapcat (fn [check]
+                        (let [failed (filterv (complement #(true? (:passed? %)))
+                                              (:cases check))]
+                          (if (seq failed)
+                            (map (fn [row]
+                                   (let [row (assoc (select-keys row [:case :precision
+                                                                      :failures])
+                                                    :check (:name check))]
+                                     (assoc row :targets
+                                            (into #{} (map :target) (:failures row)))))
+                                 failed)
+                            (when-not (true? (:passed? check))
+                              [{:check (:name check)}])))))
+              (remove nil?))
+        (:results result)))
 
 (defn check-results
   "The checks whose name contains one of `needles`, the way `:only` selects them.
@@ -171,6 +222,7 @@
 (def ^:private views
   "The derived views `run!` can attach to a result, by the name a caller asks for."
   {:failures failures
+   :case-failures case-failures
    :coverage coverage
    :parity parity})
 
@@ -222,29 +274,39 @@
                  (default false).  The programmatic result is returned either
                  way, but leaving this false avoids running the suite twice;
   - `:views`     attach derived views to the result, by name: `:failures`
-                 (which checks failed), `:coverage` (case -> precision -> the
+                 (which checks failed), `:case-failures` (which cases, with the
+                 target that did not match), `:coverage` (case -> precision -> the
                  targets that ran it and matched) and `:parity` (the cases that did
                  not reach every target their check declares). Each is a function
                  in this namespace too, so `{:views [:parity]}` saves only the
                  keystrokes: `(parity (run! ...))` is the same value. An unknown
-                 name throws;
+                 name throws. `:failures` is always attached, because the one thing
+                 a result must not do is leave *which failed?* to be asked for by
+                 name.
   - `:only`      run only the checks whose name contains one of these
                  strings, e.g. `[\"instrument\"]` for both instrument hosts or
                  `[\"Wasm instrument host\"]` for one — or, for the two shared
                  matrices, a catalog case ID such as `[\"call-int-led\"]`, which
                  narrows the matrix to that case.  A needle that names neither a
                  check nor a case is reported as a failure instead of running
-                 nothing, since an empty run looks exactly like a passing one.
+                 nothing, since an empty run looks exactly like a passing one. Its
+                 failure carries the needles in `:needles`; the vocabulary they were
+                 matched against is not in that result, because the page builds a
+                 check only when the selection asks for it — `check-names` reads the
+                 names off any run that selected something.
                  The result then contains only those checks, which is much faster
                  than the full suite.
 
   Returns `{:passed? boolean :passed int :total int :results [...]}` or a spel
-  anomaly map if the browser interaction failed. Each result has `:name`,
-  `:passed?` and `:detail`; the shared matrices also carry `:targets` and a
-  per-case `:cases` breakdown (`{:case :gain :precision :f32 :javascript true
-  :wasm true :passed? true}`), which is what `case-results` and `coverage` read:
-  the first asks whether one case ran and where, the second turns a whole run into
-  a case-by-target table so a parity check can compare two runs."
+  anomaly map if the browser interaction failed. `:passed` and `:total` count
+  *checks*, not cases or targets; each result has `:name`, `:passed?` and
+  `:detail`. The shared matrices also carry `:targets`, `:case-count`,
+  `:case-failures` and a per-case `:cases` breakdown (`{:case :gain :precision :f32
+  :javascript true :wasm true :passed? true :failures []}`), which is what
+  `case-results`, `coverage` and `case-failures` read: the first asks whether one
+  case ran and where, the second turns a whole run into a case-by-target table so a
+  parity check can compare two runs, and the third says which cases failed on which
+  target."
   ([] (run! {}))
   ([{:keys [headless timeout server? autorun? executable-path only views]
      :or {headless true timeout 60000 server? true autorun? false}}]
@@ -268,7 +330,10 @@
                            p "() => window.omkamraDspTestbed.runConformance()"))]
              (if (spel/anomaly? result)
                result
-               (attach-views (decode-result result) views)))))))))
+               ;; `:failures` is always attached, so a caller never reads a missing
+               ;; key as "nothing failed".
+               (attach-views (decode-result result)
+                             (into [:failures] (remove #{:failures} views)))))))))))
 
 (defn passed?
   "True when `run!` reported that every check passed."

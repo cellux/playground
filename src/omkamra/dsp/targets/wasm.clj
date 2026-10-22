@@ -3,7 +3,6 @@
   (:require [clojure.string :as str]))
 
 (def ^:private page-size 65536)
-(def ^:private channel-stride-bytes 4096)
 ;; One sine period sampled at `table-entry-count` intervals, stored as f32 and
 ;; indexed with linear interpolation. f32-only: a table accurate enough for f64
 ;; would be far larger than the polynomial it replaces.
@@ -13,6 +12,13 @@
 (def ^:dynamic *state-layout* nil)
 (def ^:dynamic *wasm-math* :polynomial)
 (def ^:dynamic *table-offset* 0)
+(def ^:dynamic *frame-capacity*
+  "The declared longest block of the module being emitted, in frames (P12).
+
+  The layout is built from the IR's `:frame-capacity` and every per-frame region is
+  a whole number of blocks; a buffer access multiplies a channel index by that same
+  stride, so the addressing code reads this rather than recomputing it."
+  nil)
 ;; D47: a definition is emitted once per module and serves every call site, so its
 ;; state is addressed relative to the partition base it is handed. The entry's arena
 ;; starts at zero, which is why an entry's addresses stay plain constants.
@@ -39,6 +45,15 @@
 
 (defn- float-type [] (if (f64?) "f64" "f32"))
 (defn- float-bytes [] (if (f64?) 8 4))
+
+(defn- channel-stride-bytes
+  "The bytes one channel's block occupies: the declared capacity, at this width.
+
+  A channel's region is one block of `:frame-capacity` frames, so this is the stride
+  between channels *and* between the slices of a lane or shared region — the one
+  number the old fixed 4096-byte constant stood for (P12)."
+  []
+  (* (long *frame-capacity*) (float-bytes)))
 
 (defn- wat-symbol [value] (symbol (str value)))
 (defn- wat-form [operator & args] (apply list (wat-symbol operator) args))
@@ -109,31 +124,113 @@
   [slots]
   (reduce + 0 (map #(or (:size %) 1) slots)))
 
+(defn- fail-layout
+  [message data]
+  (throw (ex-info (str "Wasm memory layout " message) data)))
+
+(defn- validate-memory-layout!
+  "Check the invariants a host relies on, and return the layout.
+
+  Alignment (a host builds typed views over these regions, so a region that starts
+  off its element boundary is a bug that would surface at the far end of the wire),
+  capacity (a block is `:frame-capacity` frames, so every per-frame region is a whole
+  number of blocks), and non-overlap (two regions sharing a byte would corrupt each
+  other silently) are all *declared* in the ABI. They are checked where they are
+  decided rather than trusted downstream, and every failure carries the numbers that
+  disagree, because a layout bug reported as a corrupted sample is a very long walk
+  (P12)."
+  [layout]
+  (let [element-bytes (long (:element-bytes layout))
+        capacity (long (:frame-capacity layout))
+        stride (long (:channel-stride layout))
+        regions (:regions layout)
+        placed (->> regions
+                    (filter (fn [[_ region]] (pos? (long (or (:bytes region) 0)))))
+                    (sort-by (fn [[_ region]] (long (:offset region)))))]
+    (when-not (= stride (* capacity element-bytes))
+      (fail-layout "declares a channel stride that is not the declared capacity"
+                   {:frame-capacity capacity
+                    :element-bytes element-bytes
+                    :channel-stride stride}))
+    (doseq [[region-name region] placed]
+      (let [offset (long (:offset region))
+            bytes (long (:bytes region))
+            alignment (long (or (:alignment region) 1))]
+        (when-not (zero? (mod offset alignment))
+          (fail-layout "has a region that starts off its alignment"
+                       {:region region-name :offset offset :alignment alignment}))
+        ;; Only a region that holds *frames* has to be a whole number of blocks:
+        ;; the state, scratch and table regions hold slots, and a slot's size is
+        ;; the IR's business, not this stride's.
+        (when (and (contains? region :frame-capacity)
+                   (not (zero? (mod bytes stride))))
+          (fail-layout "has a per-frame region that is not a whole number of blocks"
+                       {:region region-name :bytes bytes :channel-stride stride}))))
+    (doseq [[[name-a a] [name-b b]] (partition 2 1 placed)]
+      (let [end (+ (long (:offset a)) (long (:bytes a)))]
+        (when (> end (long (:offset b)))
+          (fail-layout "has two regions that overlap"
+                       {:first name-a
+                        :first-end end
+                        :second name-b
+                        :second-offset (long (:offset b))}))))
+    (let [state (get regions :state)
+          scratch (get regions :scratch)
+          inside? (fn [offset bytes]
+                    (or (and (>= offset (long (:offset state)))
+                             (<= (+ offset bytes)
+                                 (+ (long (:offset state)) (long (:bytes state)))))
+                        (and (>= offset (long (:offset scratch)))
+                             (<= (+ offset bytes)
+                                 (+ (long (:offset scratch))
+                                    (long (:bytes scratch)))))))]
+      (doseq [[index entry] (:state-layout layout)]
+        (let [offset (long (:offset entry))
+              bytes (* (long (or (:size entry) 1)) (long (:element-bytes entry)))]
+          (when-not (inside? offset bytes)
+            (fail-layout "places a state slot outside its region"
+                         {:index index :offset offset :bytes bytes})))))
+    (let [end (reduce (fn [end [_ region]]
+                        (max end (+ (long (:offset region))
+                                    (long (or (:bytes region) 0)))))
+                      0
+                      placed)]
+      (when (> end (long (:required-bytes layout)))
+        (fail-layout "is smaller than the regions it holds"
+                     {:required-bytes (:required-bytes layout) :needed end})))
+    layout))
+
 (defn- memory-layout
   [ir]
   (let [channels (:channels ir)
         element-bytes (float-bytes)
-        frame-capacity (quot channel-stride-bytes element-bytes)
-        input-bytes (* channels channel-stride-bytes)
+        ;; Capacity is declared, not assumed: the IR carries the longest block a
+        ;; host may render (P12), and every per-frame region is a whole number of
+        ;; blocks at either element width. This target used to derive its own
+        ;; capacity from a fixed 4096-byte stride, which silently gave f64 voices
+        ;; half the frames of f32 ones and ignored the declared option entirely.
+        frame-capacity (long (:frame-capacity ir))
+        channel-stride (* frame-capacity element-bytes)
+        input-bytes (* channels channel-stride)
         output-offset input-bytes
         output-bytes input-bytes
-        ;; Host-supplied per-frame automation: one flat region, a fixed
-        ;; `channel-stride-bytes` slice per lane, so any number of lanes costs
-        ;; one pointer rather than one parameter per lane (D28). A process with
-        ;; no lanes contributes no bytes at all.
+        ;; Host-supplied per-frame automation: one flat region, one block per
+        ;; lane, so any number of lanes costs one pointer rather than one
+        ;; parameter per lane (D28). A process with no lanes contributes no bytes
+        ;; at all.
         lane-count (count (:lanes ir))
         ;; A fused entry renders every voice in one call, so its region holds one
         ;; slice per voice and every later region moves along (F4). A plain
         ;; artifact is one voice, with one slice.
         lane-slots (long (or (:lane-slots ir) 1))
         lanes-offset (+ output-offset output-bytes)
-        lanes-bytes (* lane-count channel-stride-bytes lane-slots)
+        lanes-bytes (* lane-count channel-stride lane-slots)
         ;; The pool's shared region: the same shape as the lane region, but one
         ;; region for the whole pool rather than one per voice (M5). A process
         ;; with no shared control contributes no bytes.
         shared-count (count (:shared ir))
         shared-offset (+ lanes-offset lanes-bytes)
-        shared-bytes (* shared-count channel-stride-bytes)
+        shared-bytes (* shared-count channel-stride)
         state-start (+ shared-offset shared-bytes)
         state-layout (state-memory-layout (:state ir) state-start)
         scratch-start (:next state-layout)
@@ -141,54 +238,59 @@
         table? (table-active?)
         table-offset (align (:next scratch-layout) table-stride-bytes)
         table-bytes (if table? (* (inc table-entry-count) table-stride-bytes) 0)
-        required-bytes (+ table-offset table-bytes)]
-    {:page-size page-size
-     :table? table?
-     :element-type (keyword (float-type))
-     :element-bytes element-bytes
-     :alignment element-bytes
-     :frame-capacity frame-capacity
-     :channel-stride channel-stride-bytes
-     :required-bytes required-bytes
-     :initial-pages (max 1 (long (Math/ceil (/ (double required-bytes)
-                                               page-size))))
-     :state-layout (merge (:entries state-layout) (:entries scratch-layout))
-     :regions {:input {:offset 0
-                       :channels channels
-                       :frame-capacity frame-capacity
-                       :bytes input-bytes
-                       :storage :linear-memory}
-               :output {:offset output-offset
-                        :channels channels
-                        :frame-capacity frame-capacity
-                        :bytes output-bytes
-                        :storage :linear-memory}
-               :shared {:offset shared-offset
-                        :channels 1
-                        :frame-capacity frame-capacity
-                        :bytes shared-bytes
-                        :storage :linear-memory}
-               :lanes {:offset lanes-offset
-                       :channels 1
-                       :frame-capacity frame-capacity
-                       :bytes lanes-bytes
-                       :storage :linear-memory}
-               :state {:storage :linear-memory
-                       :offset state-start
-                       :bytes (- scratch-start state-start)
-                       :count (arena-count (:state ir))}
-               :scratch {:storage :linear-memory
-                         :persistent? false
-                         :offset scratch-start
-                         :bytes (- (:next scratch-layout) scratch-start)
-                         :count (arena-count (:scratch ir))}
-               :table {:storage :linear-memory
-                       :read-only true
-                       :offset table-offset
-                       :bytes table-bytes
-                       :entry-count table-entry-count}
-               :controls {:storage :parameters
-                          :count (count (:controls ir))}}}))
+        required-bytes (+ table-offset table-bytes)
+        ;; Every region states what it is and what a host may do with it. The
+        ;; alignment is a promise the layout has to keep, which is why the assembled
+        ;; layout is validated below rather than trusted.
+        region (fn [region-name fields]
+                 (assoc fields
+                        :storage :linear-memory
+                        :alignment (if (= :table region-name)
+                                     table-stride-bytes
+                                     element-bytes)))
+        layout
+        {:page-size page-size
+         :table? table?
+         :element-type (keyword (float-type))
+         :element-bytes element-bytes
+         :alignment element-bytes
+         :frame-capacity frame-capacity
+         :channel-stride channel-stride
+         :required-bytes required-bytes
+         :initial-pages (max 1 (long (Math/ceil (/ (double required-bytes)
+                                                   page-size))))
+         :state-layout (merge (:entries state-layout) (:entries scratch-layout))
+         :regions
+         {:input (region :input {:offset 0
+                                 :channels channels
+                                 :frame-capacity frame-capacity
+                                 :bytes input-bytes})
+          :output (region :output {:offset output-offset
+                                   :channels channels
+                                   :frame-capacity frame-capacity
+                                   :bytes output-bytes})
+          :lanes (region :lanes {:offset lanes-offset
+                                 :channels 1
+                                 :frame-capacity frame-capacity
+                                 :bytes lanes-bytes})
+          :shared (region :shared {:offset shared-offset
+                                   :channels 1
+                                   :frame-capacity frame-capacity
+                                   :bytes shared-bytes})
+          :state (region :state {:offset state-start
+                                 :bytes (- scratch-start state-start)
+                                 :count (arena-count (:state ir))})
+          :scratch (region :scratch {:offset scratch-start
+                                     :persistent? false
+                                     :bytes (- (:next scratch-layout) scratch-start)
+                                     :count (arena-count (:scratch ir))})
+          :table (region :table {:offset table-offset
+                                 :read-only true
+                                 :bytes table-bytes
+                                 :entry-count table-entry-count})
+          :controls {:storage :parameters
+                     :count (count (:controls ir))}}}]
+    (validate-memory-layout! layout)))
 
 (defn- initial-pages
   [memory]
@@ -234,7 +336,7 @@
                       (wat-form "local.get"
                                 (wat-symbol (str "$" (name (:buffer-id operation)))))
                       (wat-form "i32.mul" (emit-channel (:channel operation))
-                                (wat-form "i32.const" channel-stride-bytes)))
+                                (wat-form "i32.const" (channel-stride-bytes))))
             (emit-index (:index operation))))
 
 (defn- wasm-type
@@ -1252,6 +1354,9 @@
         definitions (:definitions ir)
         table (callee-table definitions)]
     (binding [*state-layout* (:state-layout memory)
+              ;; The layout's capacity, so a buffer access and the region it
+              ;; addresses cannot disagree (P12).
+              *frame-capacity* (:frame-capacity memory)
               *table-offset* (get-in memory [:regions :table :offset] 0)
               *definitions* table
               *callee* nil]

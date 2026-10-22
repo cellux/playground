@@ -215,6 +215,27 @@
      :precisions [:f32 :f64]
      :controls [0.5]
      :input-samples sine-input-samples}
+    ;; P12. A host renders *blocks*, so the only limit on a block's length is the
+    ;; capacity the artifact declares. This case asks for a 1024-frame block at both
+    ;; widths. While the Wasm layout derived its capacity from a fixed 4096-byte
+    ;; channel stride, an f64 artifact held 512 frames: this block ran off the end of
+    ;; its output region, while the f32 artifact of the same IR held 1024 and was
+    ;; fine. Capacity is declared in frames now, so both widths accept it -- and the
+    ;; hosts refuse a longer one rather than corrupting their neighbour's samples.
+    {:id :long-block
+     :entry :process
+     :definition {:dsp/kind :function
+                  :name 'long-block
+                  :params ['sample 'coefficient]
+                  :state [{:name 'previous
+                           :init 0.0
+                           :next '(+ sample (* coefficient previous))}]
+                  :return-type :float
+                  :body ['(+ sample (* coefficient previous))]}
+     :precisions [:f32 :f64]
+     :controls [0.5]
+     :input-samples sine-input-samples
+     :blocks [1 127 1024]}
     ;; D47 stage 2: a target that can call emits one method per definition and
     ;; calls it, so a stateful callee's partition (D19) is addressed through a
     ;; runtime base. These are the cases a mis-derived base breaks: two sites of

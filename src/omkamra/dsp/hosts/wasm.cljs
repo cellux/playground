@@ -38,6 +38,20 @@
                          frame-capacity)))
       block)))
 
+(defn- check-frames!
+  "Refuse a block longer than the module's own declared capacity.
+
+  Linear memory is sized from the ABI's `:frame-capacity`, so a longer block would
+  write past the output region into whatever follows it: the failure would surface
+  as somebody else's samples rather than as an error. The capacity is declared, so
+  the boundary can be checked instead of assumed (P12)."
+  [frames frame-capacity]
+  (when (> (long frames) (long frame-capacity))
+    (throw (ex-info (str "a Wasm instance was asked to render more frames than the"
+                         " capacity its ABI declares")
+                    {:frames (long frames)
+                     :frame-capacity (long frame-capacity)}))))
+
 (defn- special-view
   "A view over one declared special's slot in the module's state region.
 
@@ -329,6 +343,7 @@
        (clear-output! [_ output frames]
          (mixing/clear-channels! f64? channels output frames))
        (mix-voice! [_ voice output frames sample-rate]
+         (check-frames! frames frame-capacity)
          (when (pos? shared-count)
            ;; The module reads its own memory, so hand it this voice's copy of the
            ;; pool's region. Only the frames about to be rendered can be read, so
@@ -426,6 +441,7 @@
           :arguments arguments}))
      :run-bus!
      (clojure.core/fn [bus input output frames sample-rate controls]
+       (check-frames! frames frame-capacity)
        (copy-region! (:lanes bus) lane-region lane-stride lane-count frames)
        (copy-region! (:shared bus) shared-region shared-stride shared-count frames)
        (let [in-view (:input-view bus)

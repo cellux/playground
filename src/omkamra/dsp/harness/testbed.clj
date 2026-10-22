@@ -142,16 +142,31 @@
   [request]
   (wasm-metadata-response (requested-case request) :f64))
 
+(defn- bounded-loop-artifact
+  [_precision]
+  (dsp/compile bounded-loop-definition
+               {:target :wasm
+                :entry :process
+                :precision :f32}))
+
 (defn wasm-bounded-loop-source
   [_request]
-  (let [{:keys [wat]} (dsp/compile bounded-loop-definition
-                                   {:target :wasm
-                                    :entry :process
-                                    :precision :f32})]
-    {:status 200
-     :headers {"content-type" "application/wat; charset=utf-8"
-               "cache-control" "no-store"}
-     :body wat}))
+  {:status 200
+   :headers {"content-type" "application/wat; charset=utf-8"
+             "cache-control" "no-store"}
+   :body (:wat (bounded-loop-artifact :f32))})
+
+(defn wasm-bounded-loop-metadata
+  "The bounded-loop fixture's own memory layout.
+
+  The page drives this module directly, so it needs the region offsets — and taking
+  them from here rather than from a constant is the point (P12): the offsets move
+  with the declared frame capacity."
+  [_request]
+  {:status 200
+   :headers {"content-type" "application/json; charset=utf-8"
+             "cache-control" "no-store"}
+   :body (json/generate-string (:metadata (bounded-loop-artifact :f32)))})
 
 (defn squint-core
   [_request]

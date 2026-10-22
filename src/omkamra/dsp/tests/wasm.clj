@@ -5,7 +5,8 @@
             [omkamra.dsp.harness.fixtures :refer [call-fixture-arena
                                                   call-fixture-inlined
                                                   call-fixture-nested one-pole
-                                                  shared-gain]]))
+                                                  shared-gain]]
+            [omkamra.dsp.targets.wasm :as wasm-backend]))
 
 (deftest wasm-backend-emits-wat-and-abi
   (let [{:keys [wat module memory] :as artifact}
@@ -28,9 +29,9 @@
                                 :channel-stride :input-offset :output-offset
                                 :required-bytes])))
     (is (= {:offset 0 :channels 1 :frame-capacity 1024 :bytes 4096
-            :storage :linear-memory}
+            :alignment 4 :storage :linear-memory}
            (get-in memory [:regions :input])))
-    (is (= {:storage :linear-memory :offset 8192 :bytes 4 :count 1}
+    (is (= {:alignment 4 :storage :linear-memory :offset 8192 :bytes 4 :count 1}
            (get-in memory [:regions :state])))
     (is (= :wasm-process (get-in artifact [:wasm-abi :kind])))
     (is (str/starts-with? wat "(module "))
@@ -73,7 +74,10 @@
     (is (str/includes? (:wat artifact) "f64.store"))
     (is (= :f64 (get-in artifact [:memory :element-type])))
     (is (= 8 (get-in artifact [:memory :element-bytes])))
-    (is (= 512 (get-in artifact [:memory :frame-capacity])))
+    ;; Capacity is a frame count, so f64 holds as many frames as f32 (P12); its
+    ;; channel stride is twice as wide because its elements are.
+    (is (= 1024 (get-in artifact [:memory :frame-capacity])))
+    (is (= 8192 (get-in artifact [:memory :channel-stride])))
     (is (= {:format :wasm :source :wat :generator :browser-wabt :version "1.0.39"
             :bytes nil}
            (:binary artifact)))))
@@ -185,9 +189,100 @@
       (is (str/includes? wat "local.get $shared")))
     (testing "the layout gives the region a slice of its own"
       (is (= {:offset 8192 :channels 1 :frame-capacity 1024 :bytes 4096
-              :storage :linear-memory}
+              :alignment 4 :storage :linear-memory}
              (get-in memory [:regions :shared])))
       (is (= 12288 (:required-bytes memory))
           "input, output and the shared region; this voice has no state")
       (is (= 12288 (get-in memory [:regions :state :offset]))
           "state starts after the shared region"))))
+
+(deftest wasm-layout-follows-the-declared-frame-capacity
+  ;; P12. This target used to derive its capacity from a fixed 4096-byte channel
+  ;; stride, which nothing else shared: the IR's `:frame-capacity` was ignored
+  ;; here, and f64 silently held half the frames f32 did. Capacity is now declared
+  ;; once, in frames, and the ABI, the emitted addressing, and the IR have to agree.
+  (doseq [precision [:f32 :f64]
+          capacity [nil 256 2048]]
+    (let [artifact (dsp/compile one-pole
+                                (cond-> {:target :wasm :entry :process
+                                         :precision precision}
+                                  capacity (assoc :frame-capacity capacity)))
+          memory (:memory artifact)
+          expected (long (or capacity 1024))
+          element-bytes (if (= :f64 precision) 8 4)
+          label (str (name precision) " cap " (or capacity "default"))]
+      (is (= expected (:frame-capacity (:ir artifact))) label)
+      (is (= expected (:frame-capacity memory)) label)
+      (is (= (* expected element-bytes) (:channel-stride memory)) label)
+      (is (= (* expected element-bytes) (get-in memory [:regions :input :bytes])) label)
+      (is (= (get-in memory [:regions :output :offset])
+             (get-in memory [:regions :input :bytes]))
+          (str label ": the output block starts where the input block ends"))
+      (is (str/includes? (:wat artifact)
+                         (str "(i32.const " (get-in memory [:regions :state :offset])))
+          (str label ": the emitted state address is the ABI's")))))
+
+(deftest wasm-layout-invariants-hold-across-fixtures
+  ;; A host trusts the ABI, so its invariants are properties of the layout rather
+  ;; than numbers a test happened to see: every per-frame region is a whole number
+  ;; of blocks, every region starts on its alignment, no two of them share a byte,
+  ;; and the declared page count covers what they need.
+  (doseq [definition [#'one-pole #'shared-gain #'call-fixture-arena]
+          precision [:f32 :f64]
+          capacity [nil 64]
+          channels [1 2]]
+    (let [artifact (dsp/compile definition
+                                (cond-> {:target :wasm :entry :process
+                                         :precision precision
+                                         :channels channels}
+                                  capacity (assoc :frame-capacity capacity)))
+          memory (:memory artifact)
+          label (str (name precision) " cap " (or capacity "default")
+                     " channels " channels)
+          stride (long (:channel-stride memory))
+          placed (->> (:regions memory)
+                      (filter (fn [[_ region]] (pos? (long (or (:bytes region) 0)))))
+                      (sort-by (fn [[_ region]] (long (:offset region)))))]
+      (is (= (long (:frame-capacity memory)) (long (:frame-capacity (:ir artifact))))
+          label)
+      (is (= stride (* (long (:frame-capacity memory))
+                       (long (:element-bytes memory))))
+          (str label ": the stride is the capacity at this width"))
+      (doseq [[region-name region] placed]
+        (is (zero? (mod (long (:offset region)) (long (:alignment region))))
+            (str label ": " region-name " starts on its alignment"))
+        (when (contains? region :frame-capacity)
+          (is (zero? (mod (long (:bytes region)) stride))
+              (str label ": " region-name " is a whole number of blocks"))))
+      (doseq [[[_ first] [_ second]] (partition 2 1 placed)]
+        (is (<= (+ (long (:offset first)) (long (:bytes first)))
+                (long (:offset second)))
+            (str label ": regions do not overlap")))
+      (let [end (reduce (fn [end [_ region]]
+                          (max end (+ (long (:offset region)) (long (:bytes region)))))
+                        0
+                        placed)]
+        (is (<= end (long (:required-bytes memory))) (str label ": bytes required"))
+        (is (<= (long (:required-bytes memory))
+                (* (long (:initial-pages memory)) (long (:page-size memory))))
+            (str label ": pages declared"))))))
+
+(deftest the-wasm-layout-is-validated
+  ;; The invariants are declared in the ABI, so a layout that breaks one is a
+  ;; compile-time error rather than a corrupted sample at the far end of the wire.
+  ;; The emitter's own layouts are exactly the ones that must pass, so the validator
+  ;; is exercised directly with each violation injected — otherwise nothing would
+  ;; ever prove it rejects anything (P12).
+  (let [memory (:memory (dsp/compile one-pole {:target :wasm :entry :process}))
+        validate #'wasm-backend/validate-memory-layout!]
+    (is (= memory (validate memory)) "the layout the emitter builds passes")
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"off its alignment"
+                          (validate (update-in memory [:regions :output :offset] inc))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"overlap"
+                          (validate (assoc-in memory [:regions :output :offset] 0))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not a whole number of blocks"
+                          (validate (update-in memory [:regions :input :bytes] inc))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"not the declared capacity"
+                          (validate (update memory :channel-stride inc))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"smaller than the regions"
+                          (validate (update memory :required-bytes dec))))))

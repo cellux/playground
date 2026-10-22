@@ -329,8 +329,8 @@
                                process (gobj/get exports "process")
                                layout (:memory metadata)
                                input-offset (:input-offset layout 0)
-                               output-offset (:output-offset layout 4096)
-                               lanes-offset (:lanes-offset layout 0)
+                               output-offset (long (:output-offset layout))
+                               lanes-offset (long (:lanes-offset layout))
                                width (if (= :f64 precision) 8 4)
                                channels (long (or (:channels plan) 1))
                                expected (interpreter-process-outputs plan)
@@ -341,11 +341,10 @@
                                            (if (= :f64 precision)
                                              (js/Float64Array. (.-buffer memory) byte-offset (max 1 frames))
                                              (js/Float32Array. (.-buffer memory) byte-offset (max 1 frames))))
-                               ;; One audio port per channel, a fixed
-                               ;; `:channel-stride`-byte slice apart: the module's
-                               ;; own declaration, not a guess (P12 makes it
-                               ;; ABI-declared layout).
-                               channel-stride (long (or (:channel-stride layout) 4096))
+                               ;; One audio port per channel, a `:channel-stride`-byte
+                               ;; slice apart: the module's own declaration, not a
+                               ;; guess (P12 made this ABI-declared layout).
+                               channel-stride (long (:channel-stride layout))
                                input-view (partial lane-view input-offset)
                                output-view (partial lane-view output-offset)
                                input-view-at (fn [channel frames]
@@ -421,12 +420,22 @@
                            :detail (str (:case c) " | " (or (.-message error) (str error))
                                         " | " (or (.-stack error) ""))})))])
       (.then (fn [[js wasm]]
-               {:case (:id c)
-                :precision precision
-                :javascript (:passed? js)
-                :wasm (:passed? wasm)
-                :passed? (and (:passed? js) (:passed? wasm))
-                :detail (or (:detail js) (:detail wasm))}))))
+               (let [;; Which target failed, in its own words. The row already says
+                     ;; *that* something failed; a reader should not have to parse
+                     ;; the prose below — or this check's summary — to learn that it
+                     ;; was Wasm, or that it was not JavaScript. Each verdict is
+                     ;; already `{:target :js ...}` or `{:target :wasm ...}`.
+                     failures (into []
+                                    (comp (remove :passed?)
+                                          (map #(select-keys % [:target :detail])))
+                                    [js wasm])]
+                 {:case (:id c)
+                  :precision precision
+                  :javascript (:passed? js)
+                  :wasm (:passed? wasm)
+                  :passed? (empty? failures)
+                  :failures failures
+                  :detail (or (:detail js) (:detail wasm))})))))
 
 (defn- run-function-case!
   [c precision]
@@ -483,19 +492,27 @@
 
 (defn- matrix-result
   [label targets cases]
-  {:name label
-   :passed? (every? :passed? cases)
-   :targets targets
-   :detail (str "matched " (count cases) " cases"
-                (when-let [failure (first (remove :passed? cases))]
-                  (str "; first failure: " (:case failure)
-                       " — " (:detail failure))))
-   :cases (mapv (fn [entry]
-                  (-> entry
-                      (select-keys [:case :precision :javascript :wasm :passed?])
-                      (update :case str)
-                      (update :precision str)))
-                cases)})
+  (let [failed (filterv (complement :passed?) cases)]
+    {:name label
+     :passed? (empty? failed)
+     :targets targets
+     ;; Counts in the vocabulary of what actually ran. A matrix check runs one case
+     ;; per catalog case at one precision and two targets, so its case count is not
+     ;; comparable with the suite's *check* count, and saying which is which costs
+     ;; nothing — a reader who compares 95 with 50 has to guess otherwise.
+     :case-count (count cases)
+     :case-failures (count failed)
+     :detail (str "ran " (count cases) " cases on " (count targets) " targets"
+                  (when-let [failure (first failed)]
+                    (str "; first failure: " (:case failure)
+                         " (" (name (:precision failure)) ") — " (:detail failure))))
+     :cases (mapv (fn [entry]
+                    (-> entry
+                        (select-keys [:case :precision :javascript :wasm :passed?
+                                      :failures])
+                        (update :case str)
+                        (update :precision str)))
+                  cases)}))
 
 (defn- run-process-matrix!
   [cases]
@@ -787,34 +804,45 @@
 
 (defn- bounded-loop-wasm-test
   []
-  (-> (response-text "/omkamra/dsp/harness/testbed/wasm-bounded-loop-source")
-      (.then compile-wasm)
+  (-> (js/Promise.all
+       #js [(response-text "/omkamra/dsp/harness/testbed/wasm-bounded-loop-source")
+            (fetch-json "/omkamra/dsp/harness/testbed/wasm-bounded-loop-metadata")])
       (.then
-       (fn [bytes]
-         (-> (js/WebAssembly.instantiate bytes)
-             (.then
-              (fn [result]
-                (let [exports (.-exports (.-instance result))
-                      memory (gobj/get exports "memory")
-                      init (gobj/get exports "init")
-                      reset (gobj/get exports "reset")
-                      process (gobj/get exports "process")
-                      input (js/Float32Array. (.-buffer memory) 0 1)
-                      output (js/Float32Array. (.-buffer memory) 4096 1)]
-                  (.call init nil)
-                  (.set input #js [1.0])
-                  (.call process nil 0 4096 1 44100.0 1)
-                  (require! (matches-value? (aget output 0) 2.0)
-                            (str "expected bounded-loop output 2, got " (aget output 0)))
-                  (.call reset nil)
-                  (let [trapped? (try
-                                   (.call process nil 0 4096 1 44100.0 3)
-                                   false
-                                   (catch :default _ true))]
-                    (require! trapped? "bounded Wasm loop did not trap on exhaustion")
-                    {:name "WAT bounded-loop module"
-                     :passed? true
-                     :detail "compiled WAT; completed within bound and trapped on exhaustion"})))))))
+       (fn [[wat metadata]]
+         (let [layout (:memory metadata)
+               input-offset (long (:input-offset layout))
+               output-offset (long (:output-offset layout))]
+           (-> (compile-wasm wat)
+               (.then
+                (fn [bytes]
+                  (-> (js/WebAssembly.instantiate bytes)
+                      (.then
+                       (fn [result]
+                         (let [exports (.-exports (.-instance result))
+                               memory (gobj/get exports "memory")
+                               init (gobj/get exports "init")
+                               reset (gobj/get exports "reset")
+                               process (gobj/get exports "process")
+                               input (js/Float32Array. (.-buffer memory) input-offset 1)
+                               output (js/Float32Array. (.-buffer memory) output-offset 1)]
+                           (.call init nil)
+                           (.set input #js [1.0])
+                           (.call process nil input-offset output-offset 1 44100.0 1)
+                           (require! (matches-value? (aget output 0) 2.0)
+                                     (str "expected bounded-loop output 2, got "
+                                          (aget output 0)))
+                           (.call reset nil)
+                           (let [trapped? (try
+                                            (.call process nil input-offset
+                                                   output-offset 1 44100.0 3)
+                                            false
+                                            (catch :default _ true))]
+                             (require! trapped?
+                                       "bounded Wasm loop did not trap on exhaustion")
+                             {:name "WAT bounded-loop module"
+                              :passed? true
+                              :detail (str "compiled WAT; completed within bound and"
+                                           " trapped on exhaustion")})))))))))))
       (.catch
        (fn [error]
          {:name "WAT bounded-loop module"
@@ -955,14 +983,15 @@
                                            controls))))}))
 
 (defn- wasm-process-instance
-  "One independent Wasm instance, with its own linear memory."
-  [^js instance precision controls]
+  "One independent Wasm instance, with its own linear memory.
+
+  The two region offsets come from the module's ABI rather than from a constant:
+  they move with the declared frame capacity (P12)."
+  [^js instance precision controls input-offset output-offset]
   (let [exports (.-exports instance)
         memory (gobj/get exports "memory")
         reset (gobj/get exports "reset")
         process (gobj/get exports "process")
-        input-offset 0
-        output-offset 4096
         view (fn [offset frames]
                (if (= :f64 precision)
                  (js/Float64Array. (.-buffer memory) offset (max 1 frames))
@@ -993,16 +1022,23 @@
   Returns its `process`, so a test can drive it with its own inputs rather than
   the catalog's block plan."
   [c]
-  (-> (response-text (str "/omkamra/dsp/harness/testbed/wasm-source"
-                          (binding [*wasm-math* :table]
-                            (acceptance-query c :f32))))
-      (.then compile-wasm)
-      (.then (fn [bytes] (js/WebAssembly.instantiate bytes)))
-      (.then
-       (fn [result]
-         (let [instance (wasm-process-instance (.-instance result) :f32 [])]
-           (:reset instance)
-           (:process instance))))))
+  (let [query (binding [*wasm-math* :table] (acceptance-query c :f32))]
+    (-> (js/Promise.all
+         #js [(response-text (str "/omkamra/dsp/harness/testbed/wasm-source" query))
+              (fetch-json (str "/omkamra/dsp/harness/testbed/wasm-metadata" query))])
+        (.then
+         (fn [[wat metadata]]
+           (let [layout (:memory metadata)]
+             (-> (compile-wasm wat)
+                 (.then (fn [bytes] (js/WebAssembly.instantiate bytes)))
+                 (.then
+                  (fn [result]
+                    (let [instance (wasm-process-instance
+                                    (.-instance result) :f32 []
+                                    (long (:input-offset layout))
+                                    (long (:output-offset layout)))]
+                      (:reset instance)
+                      (:process instance)))))))))))
 
 (defn- wasm-table-cos-accuracy-test
   "Under the lookup-table strategy, cosine must be no worse than sine.
@@ -1109,7 +1145,8 @@
     (-> (js/Promise.all #js [(fetch-json plan-url) (response-text wat-url)])
         (.then
          (fn [[plan wat]]
-           (let [controls (decode-values (:controls plan))]
+           (let [controls (decode-values (:controls plan))
+                 layout (:memory plan)]
              (-> (compile-wasm wat)
                  (.then
                   (fn [bytes]
@@ -1123,8 +1160,10 @@
                                             (range count))))
                            (.then (fn [results]
                                     (mapv (fn [result]
-                                            (wasm-process-instance (.-instance result)
-                                                                   precision controls))
+                                            (wasm-process-instance
+                                             (.-instance result) precision controls
+                                             (long (:input-offset layout))
+                                             (long (:output-offset layout))))
                                           (array-seq results))))))))))))))))
 
 ;; ---------------------------------------------------------------------------
@@ -1263,6 +1302,7 @@
         (.then
          (fn [[plan wat]]
            (let [controls (decode-values (:controls plan))
+                 layout (:memory plan)
                  control-name (get-in (plan-ir plan) [:controls 0 :name])]
              (-> (compile-wasm wat)
                  (.then
@@ -1275,8 +1315,10 @@
                                             (range count))))
                            (.then (fn [results]
                                     (mapv (fn [result]
-                                            (assoc (wasm-process-instance (.-instance result)
-                                                                          precision controls)
+                                            (assoc (wasm-process-instance
+                                                    (.-instance result) precision controls
+                                                    (long (:input-offset layout))
+                                                    (long (:output-offset layout)))
                                                    :control-name control-name
                                                    :controls controls
                                                    :precision precision))
@@ -3136,7 +3178,12 @@
 
   A selection that quietly ran nothing looks exactly like a passing suite, so a typo
   has to be loud. A needle is used when it is a substring — as `selected?` has it — of
-  the name of a check that produced a result, or of a catalog case ID."
+  the name of a check that produced a result, or of a catalog case ID.
+
+  The list of check names is only ever the checks that *ran*, which for a stray needle
+  is none of them: this page builds a check when the selection asks for it, so the
+  full vocabulary is not available here. `check-names` reads it off any run that
+  selected something."
   [selection results]
   (let [names (mapv (clojure.core/fn [result] (str/lower-case (str (:name result))))
                     results)
@@ -3388,7 +3435,18 @@
                     (seq unmatched)
                     (conj {:name "selection"
                            :passed? false
-                           :detail (str "no check or case matched: " (pr-str unmatched))})))))
+                           ;; The needles as data, not only as prose: a needle that
+                           ;; is wrong has to be visible as a value.
+                           ;; Deliberately no list of check names here: this page
+                           ;; builds each check only when the selection asks for it,
+                           ;; so a stray needle leaves nothing to list — an empty
+                           ;; vocabulary would be worse than none. `check-names`
+                           ;; reads the vocabulary off any run that selected
+                           ;; something.
+                           :needles unmatched
+                           :detail (str "no check or case matched: " (pr-str unmatched)
+                                        " (a needle matches a check name or a"
+                                        " catalog case id)")})))))
        (.catch (fn [error]
                  (let [failure {:name "browser suite"
                                 :passed? false
@@ -3424,7 +3482,9 @@
               :total (count results)
               :results (mapv (clojure.core/fn [result]
                                (clj->js (select-keys
-                                         result [:name :passed? :detail :targets :cases])))
+                                         result [:name :passed? :detail :targets :cases
+                                                 :case-count :case-failures
+                                                 :needles])))
                              results)})))))))
 
 (defn run-function-case-matrix!

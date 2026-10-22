@@ -3810,3 +3810,103 @@ out of `package.json` and asserts the artifact reports it, so the name cannot dr
 from the tool the browser actually loads. P12 is left with the memory layout and the
 state-initializer blob — the parts that make the module *smaller and faster* on every
 host.
+
+
+## D74 — capacity is a declared frame count, and the memory layout is derived and validated (P12a)
+
+**The defect was a duplicated constant, and it was invisible at the widths in use.**
+Two hardcoded 4096s decided how many frames a region could hold: `ir.clj`'s
+`lane-stride-bytes` — a *byte* budget, so the capacity it yielded was 1024 frames at
+f32 and 512 at f64 — and the Wasm target's own `channel-stride-bytes`, which derived
+its capacity from the same budget independently. They agreed, which is why nothing
+ever failed; and the `:frame-capacity` option that both `ir.clj` and the JVM target
+honoured was not in the closed compiler-options schema at all, so no caller could set
+it through `dsp/compile`. The practical consequence was that an f64 artifact of the
+same IR could render half the block an f32 artifact could, for no reason anyone had
+chosen: a host rendering 1024-frame blocks simply could not use f64 on Wasm.
+
+**Capacity is declared once, in frames.** `descriptor/default-frame-capacity` (1024)
+is the default, `:frame-capacity` is a supported option validated as `pos-int?`, the IR
+carries it, and every backend derives its strides from it:
+`channel-stride = frame-capacity × element-bytes`. Frames rather than bytes, because
+frames are what a host asks for — a host renders blocks, not budgets, and a capacity
+that depends on the element width is not a capacity.
+
+**The layout declares itself, and is validated where it is decided.** Each Wasm region
+publishes `:offset`, `:bytes`, `:channels`, `:frame-capacity` and `:alignment`;
+`validate-memory-layout!` then checks what a host will rely on — the stride *is* the
+declared capacity at the declared width, every per-frame region is a whole number of
+blocks, every region starts on its alignment, no two regions share a byte, every state
+slot lies inside the state or scratch region, and the declared page count covers what
+the regions need. It runs on every artifact, so a layout bug is a compile-time error
+with the disagreeing numbers in it rather than a corrupted sample three layers away.
+
+**Every reader takes the numbers from the ABI.** The Wasm host already read
+`:channel-stride`, `:frame-capacity` and the region offsets from `:memory`, and now
+refuses a block longer than the capacity instead of writing past its regions. The
+page's runners were the ones recomputing: the process runner's `4096` defaults, the
+`wasm-process-instance` offsets, and the two standalone WAT fixtures, which had no
+metadata to read and now fetch it (`wasm-bounded-loop-metadata`, plus the existing
+`wasm-metadata` route for the lookup-table probe).
+
+**Consequences.** The f32 layout is *unchanged* — 1024 frames at four bytes is the old
+4096-byte stride — so only f64 moves, gaining the frames it should always have had
+(stride 8192) and doubling its lane, shared and buffer regions. `automation.clj`'s
+lane-stride test had pinned the old asymmetry *as a fix* ("a lane's stride is a byte
+count, so f64 fits fewer frames per lane"); it now asserts the opposite, that both
+widths accept the same block, and that a shorter declared capacity shortens the stride.
+
+**Verification.** A new shared catalog case, `:long-block`, asks for a 1024-frame block
+at both widths, so it runs on all four targets: two catalog cases' worth of parity
+(209 → 211 pairs, no gaps). Bitten by restoring the fixed stride, it fails on Wasm
+**f64** from sample 512 — precisely where the old capacity ended — while f32, the
+interpreter, the JVM and JavaScript pass. Alongside it, a layout-invariant test over
+fixtures × precisions × capacities × channels, and a validator test that injects each
+violation to prove the checks reject something.
+
+**Rejected.** Keeping the byte budget (an f64 voice that cannot render the blocks an
+f32 one can is not a design, it is an accident); leaving capacity internal (a host that
+wants longer blocks must be able to declare that); a runtime layout (a Wasm module
+declares its memory at compile time, so capacity is a compile-time fact by nature).
+
+**Not in scope, recorded.** The *worklet* path still hardcodes processor options in
+`harness/testbed.clj` (capacity 256, offsets 4096) and the Wasm worklet adapter keeps a
+4096 `channelStride` fallback. That is P14's deliverable — installing a kernel *from*
+ABI metadata — and nothing here breaks it, because the page passes the ABI's numbers to
+the adapters it creates.
+
+## D75 — a failure names its target, and a result always carries what failed (harness)
+
+Two legibility traps in the browser harness cost real time in this session, both of the
+kind that produce a *wrong conclusion* rather than an error:
+
+- `run!` returned `:passed?`, `:passed`, `:total` and `:results`, and the derived views
+  were opt-in. Reading `(:failed result)` therefore returned `nil` — a key that does not
+  exist looks exactly like "nothing failed" — and a failing run was briefly read as a
+  passing one.
+- A matrix check's failure said *which check* failed and buried the target and the
+  precision in a prose `:detail` that also contains a JavaScript stack trace. In a
+  four-target comparison, "which half broke" was the only question, and the answer had
+  to be parsed out of a sentence.
+
+**Now:** `run!` always attaches `:failures` (`:views` adds to it, never removes it);
+each failing case row carries `:failures [{:target :wasm :detail "…"}]`, so the case,
+the precision and the target are fields rather than prose; `browser/case-failures` reads
+a run one level below `browser/failures`, reporting one row per failing case with its
+check and its failing targets; and a matrix check reports `:case-count` and
+`:case-failures`, because a matrix's case count is not comparable with the suite's
+*check* count and saying which is which costs nothing. A case's own verdict is the
+fact: `case-failures` reports a failing case even when its check's summary claims
+success, since the summary is a summary.
+
+Two more things make the vocabulary discoverable: `browser/check-names` reads the check
+names off any result, and a stray `:only` needle is reported with the needles as data.
+That report deliberately does **not** list the check names — the page builds a check
+only when the selection asks for it, so a stray needle leaves nothing to list, and an
+empty vocabulary would be worse than none.
+
+The wire decode had to learn `:target`: it arrives as the string `":wasm"`, and
+`(keyword ":wasm")` builds a keyword whose *name contains the colon*, which compares
+equal to nothing while still printing as `:wasm`. That is the trap this harness exists
+to prevent, so every place a target can now appear is listed in `normalize-value`, and
+the harness test pins `#{:wasm}` rather than the string.

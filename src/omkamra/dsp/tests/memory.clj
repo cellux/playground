@@ -33,7 +33,7 @@
     ;; The table is indexed inside the arena, at its own state offset.
     (is (str/includes? (:source js) "(0 + "))
     (is (= :linear-memory (get-in wasm [:wasm-abi :state-storage])))
-    (is (= {:storage :linear-memory :offset 8192 :bytes 16 :count 4}
+    (is (= {:alignment 4 :storage :linear-memory :offset 8192 :bytes 16 :count 4}
            (get-in wasm [:memory :regions :state])))
     (is (str/includes? (:wat wasm) "(i32.mul (local.get $slot) (i32.const 4))"))
     (is (thrown-with-msg?
@@ -84,7 +84,7 @@
     ;; JavaScript indexes the same arena array for scratch slots.
     (is (str/includes? (:source js) "(1 + 0)"))
     ;; Wasm lays scratch out directly after state in linear memory.
-    (is (= {:storage :linear-memory :persistent? false
+    (is (= {:alignment 4 :storage :linear-memory :persistent? false
             :offset 8196 :bytes 8 :count 2}
            (get-in wasm [:memory :regions :scratch])))
     (is (= 8192 (get-in wasm [:memory :regions :state :offset])))))

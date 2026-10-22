@@ -46,8 +46,22 @@
             :checks :development
             :optimize false
             :loop-bound nil
+            :frame-capacity 1024
             :wasm-math :polynomial}
            (:options artifact))))
+
+  (testing "the declared frame capacity is part of the option contract"
+    ;; A host renders blocks of frames, so the longest block it may render is
+    ;; declared rather than derived from a byte budget (P12).
+    (is (= 1024 (get-in (dsp/compile gain) [:options :frame-capacity])))
+    (is (= 256 (get-in (dsp/compile gain {:frame-capacity 256})
+                       [:options :frame-capacity])))
+    (let [error (try
+                  (dsp/compile gain {:frame-capacity 0})
+                  nil
+                  (catch clojure.lang.ExceptionInfo error error))]
+      (is (= :invalid-definition (-> error ex-data :dsp/error)))
+      (is (= [:options :frame-capacity] (-> error ex-data :dsp/path)))))
 
   (testing "unknown options"
     (let [error (try

@@ -5168,3 +5168,64 @@ One observation worth keeping: the first run after that wipe failed a single che
 `events did not reach the worklet`, and passed on every run after it and in isolation.
 It is a cold-build timing artefact of the worker/worklet paths, not a regression from
 either bump — but it is recorded in `TESTING.md` so the next person does not chase it.
+
+### P12a — the memory layout declares itself
+
+The fixed 4096-byte channel stride is gone, and with it a duplication that had been
+invisible because the two copies agreed. Capacity is now a **frame count**, declared
+once (`descriptor/default-frame-capacity`, 1024) and settable through
+`:frame-capacity` — which the IR and the JVM target had honoured all along while the
+closed compiler-options schema refused it, so no caller could reach it. The Wasm
+target reads the IR's capacity instead of deriving its own, derives every stride and
+region size from it, and validates the assembled layout (alignment, whole blocks,
+non-overlap, state slots inside their regions, declared pages covering what the
+regions need) before publishing it per region.
+
+The layout is also what f64 was quietly losing: half the frames of f32, for no reason
+anyone chose. The new shared case `:long-block` asks for a 1024-frame block at both
+widths and runs on all four targets; restoring the old stride makes it fail on Wasm
+f64 from sample 512 — exactly where the old capacity ended — while f32, the
+interpreter, the JVM and JavaScript stay green. Two f64 pins moved, including the
+lane-stride test whose rationale inverted: it used to assert that f64 fits fewer
+frames per lane, as a *fix*, and now asserts that both widths accept the same block.
+
+The readers were the other half of the deliverable. The Wasm host already took its
+numbers from the ABI and now refuses a block longer than the declared capacity rather
+than writing past its output region into a neighbour's samples. The page's runners
+had `4096` defaults in four places, and its two standalone WAT fixtures had no
+metadata to read at all — they now fetch it (`wasm-bounded-loop-metadata`, and the
+existing `wasm-metadata` route for the lookup-table probe), which is why those
+routes exist at all. The worklet path's own hardcoding is untouched and noted: it is
+P14's deliverable to install a kernel *from* ABI metadata, and today it is consistent
+because the page passes the adapters the ABI's numbers.
+
+### Two traps in the browser harness, removed
+
+The harness cost real time twice in this session, both times by inviting a *wrong
+conclusion* rather than reporting an error. `run!`'s derived views were opt-in, so
+`(:failed result)` returned `nil` — a key that does not exist is indistinguishable
+from "nothing failed" — and a failing run was briefly read as a passing one. And a
+matrix check reported a failure as prose ("matched 95 cases; first failure:
+:long-block — …") with the target buried in a JavaScript stack trace: in a
+four-target comparison the only question is *which half broke*, and the answer had to
+be parsed out of a sentence.
+
+Now `:failures` is always attached, `:views` adds to it rather than replacing it, and
+a failing case carries `:failures [{:target :wasm :detail "…"}]` — the case, the
+precision and the target as fields. `browser/case-failures` reports one row per
+failing case with its check and its failing targets, `check-names` reports the
+vocabulary `:only` selects from, and a matrix check reports `:case-count` and
+`:case-failures` so that a matrix's 95 cases are not confused with the suite's 50
+checks. A case's own verdict is the fact, not its check's summary: the first draft of
+`case-failures` trusted the summary and reported nothing for exactly the failures it
+exists to find, which the test caught rather than a reader.
+
+The wire decode had to learn `:target` for this: it arrives as the string `":wasm"`,
+and `(keyword ":wasm")` builds a keyword whose *name contains the colon* — comparing
+equal to nothing while printing as `:wasm`. The harness test pins `#{:wasm}`, not the
+string. One improvement turned out to be a trap of its own: listing "the checks are
+…" in the stray-needle failure reported an *empty* list, because the page builds a
+check only when the selection asks for it, so a stray needle leaves nothing to list.
+The report is factual again and names the needles as data; making the vocabulary
+available there would mean building the check list as data before running it, which is
+a larger change to that dispatch than this session should make uninvited.

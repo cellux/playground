@@ -14,16 +14,22 @@
   "A result shaped the way the page sends it: keys and enums as strings."
   {:results [{:name "shared process matrix f32"
               :passed? true
+              :case-count 2
+              :case-failures 1
               :targets [":js" ":wasm"]
-              :cases [{:case ":gain" :precision ":f32"
+              :cases [{:case ":gain" :precision ":f32" :failures []
                        :javascript true :wasm true :passed? true}
                       {:case ":region-buffers" :precision ":f32"
-                       :javascript false :wasm true :passed? false}]}
+                       :javascript false :wasm true :passed? false
+                       :failures [{:target ":js" :detail "mismatch at frame 3"}]}]}
              {:name "shared process matrix f64"
               :passed? true
+              :case-count 1
+              :case-failures 1
               :targets [":js" ":wasm"]
               :cases [{:case ":gain" :precision ":f64"
-                       :javascript true :wasm false :passed? false}]}]})
+                       :javascript true :wasm false :passed? false
+                       :failures [{:target ":wasm" :detail "mismatch at frame 512"}]}]}]})
 
 (deftest a-page-result-decodes-its-enumerated-values
   (let [decoded (browser/decode-result page-result)]
@@ -44,7 +50,10 @@
     ;; `coverage` and `parity` read browser rows and interpreter/JVM rows alike.
     (is (= [{:case :region-buffers :precision :f32
              :javascript false :wasm true :passed? false
-             :targets [:js :wasm] :check "shared process matrix f32"}]
+             :targets [:js :wasm] :check "shared process matrix f32"
+             ;; A row carries its own reason now, so a failing case can be read
+             ;; without going back to the check that reported it.
+             :failures [{:target :js :detail "mismatch at frame 3"}]}]
            (browser/case-results decoded :region-buffers)))
     ;; A case that did not run is an empty answer, not a passing one.
     (is (= [] (browser/case-results decoded :no-such-case)))))
@@ -70,6 +79,43 @@
     (is (= ["nameless"]
            (mapv :name (browser/failures
                         (browser/decode-result {:results [{:name "nameless"}]})))))))
+
+(deftest case-failures-name-the-case-and-the-target
+  ;; `failures` answers with the checks; this answers with the cases, one level
+  ;; down, so that a reader never has to read a target out of a message. The target
+  ;; arrives as `\":wasm\"` on the wire and has to be decoded, or `#{:wasm}` below
+  ;; would be a set holding only the string.
+  (let [decoded (browser/decode-result page-result)]
+    (is (= [{:check "shared process matrix f32" :case :region-buffers
+             :precision :f32 :targets #{:js}
+             :failures [{:target :js :detail "mismatch at frame 3"}]}
+            {:check "shared process matrix f64" :case :gain
+             :precision :f64 :targets #{:wasm}
+             :failures [{:target :wasm :detail "mismatch at frame 512"}]}]
+           (browser/case-failures decoded)))
+    ;; A check that failed without naming a case is still reported: a check that
+    ;; fails saying nothing is the fact.
+    (is (= [{:check "selection"}]
+           (browser/case-failures
+            (browser/decode-result {:results [{:name "selection" :passed? false}]}))))
+    ;; The check rows in this synthetic result claim `:passed? true` while their
+    ;; cases say otherwise — deliberately, because a case's verdict is the fact and
+    ;; a check's summary is a summary.
+    (is (= 2 (count (browser/case-failures decoded))))
+    (is (= [] (browser/case-failures
+               (browser/decode-result
+                {:results [{:name "shared process matrix f32" :passed? true
+                            :cases [{:case ":gain" :precision ":f32" :failures []
+                                     :javascript true :wasm true :passed? true}]}]}))))))
+
+(deftest check-names-are-the-vocabulary-only-selects-from
+  (is (= ["shared process matrix f32" "shared process matrix f64"]
+         (browser/check-names (browser/decode-result page-result))))
+  (is (= ["selection"]
+         (browser/check-names
+          (browser/decode-result
+           {:results [{:name "selection" :passed? false
+                       :checks ["Wasm pool host"] :needles ["wasm pool"]}]})))))
 
 (deftest checks-are-found-the-way-only-selects-them
   (let [decoded (browser/decode-result page-result)]

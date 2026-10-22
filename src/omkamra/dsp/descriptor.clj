@@ -12,6 +12,15 @@
 (def logical-types #{:float :int :boolean :void})
 (def value-types #{:float :int :boolean})
 
+(def default-frame-capacity
+  "The longest block a host may render, in frames, when it is not told otherwise.
+
+  Capacity is declared in *frames* rather than bytes because frames are what a host
+  asks for: every per-frame region a backend allocates is a whole number of blocks,
+  at both element widths, so an f32 and an f64 artifact of the same IR accept the
+  same blocks."
+  1024)
+
 (def default-options
   {:target :interpreter
    :entry :function
@@ -20,6 +29,7 @@
    :checks :development
    :optimize false
    :loop-bound nil
+   :frame-capacity default-frame-capacity
    :wasm-math :polynomial})
 
 (def ^:private source-keys #{:namespace :file :line :column})
@@ -191,6 +201,11 @@
    [:checks {:optional true} [:enum :development :none]]
    [:optimize {:optional true} boolean?]
    [:loop-bound {:optional true} [:or nil? int?]]
+   ;; The longest block a host may render, in frames. A backend sizes every
+   ;; per-frame region it allocates as a multiple of it, and a backend that
+   ;; allocates physical memory (Wasm) declares it in its ABI, so a host can tell
+   ;; before a call whether the block it wants fits.
+   [:frame-capacity {:optional true} pos-int?]
    ;; Selects the Wasm transcendental emulation. `:table` uses the f32 sine
    ;; lookup table when one exists; f64 always uses `:polynomial`, because a
    ;; table region is addressed by a byte stride and has no f64 form.
