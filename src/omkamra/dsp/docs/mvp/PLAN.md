@@ -243,6 +243,12 @@ optimizations or compatibility mechanisms, not the primary extension model.
 ```text
 omkamra.dsp.numbers              (.cljc)  every host-different numeric decision (D80)
 omkamra.dsp.compiler             (.cljc)  the portable compile pipeline (D81)
+omkamra.dsp.capture              (.cljc)  the reading of a definition form, shared by both worlds (D83)
+omkamra.dsp.source               (.cljc)  one `compile`: a definition, or a source string (D83)
+omkamra.dsp.sci                  (.cljc)  the SCI context the browser evaluates source in (D83)
+omkamra.dsp.registry             (.cljc)  descriptors by id; linking's portable resolver (D83)
+omkamra.dsp.library-registry     (.cljc)  the DSP library as that registry's seed (D83)
+omkamra.dsp                      (.clj/.cljs)  the user-facing facade: macros, and the two world faces
 omkamra.dsp.{descriptor,ir,linker,builtins,literals,readers,names}   the compiler front end
 omkamra.dsp.targets.capability   (.cljc)  what each target serves (D29)
 omkamra.dsp.targets.interpreter  (.cljc)  the portable reference interpreter (the oracle)
@@ -254,6 +260,7 @@ omkamra.dsp.{modulation,sequencer,instrument}  the instrument layer (M)
 omkamra.dsp.synth, synth.pool    (.cljc)  description -> config; voices, allocation, rendering
 omkamra.dsp.reference            (.cljc)  the reference synthesizer
 omkamra.dsp.hosts*               the assemblers and kernels: jvm, interpreter, js, wasm, fusion
+omkamra.dsp.hosts.instrument     (.cljc)  the instrument program + live host; drives a bus kernel (D85)
 omkamra.dsp.hosts.worker         (.cljc)  the worklet-side kernel
 omkamra.dsp.worklet_adapters.js  (.cljs)  the AudioWorklet adapter
 omkamra.dsp.harness.catalog      (.cljc)  the data-only conformance catalog
@@ -271,7 +278,13 @@ compiler noticed. `targets.capability` is what lets a target refuse an option it
 cannot serve, before any lowering (D29). **compiler** is the pipeline around them —
 options, capability check, link, lower, `prepare-for-target`, emit — as `.cljc`, so
 the JVM's `dsp/compile` and the browser's own compile are one implementation; only
-the JVM backend is injected (D81).
+the JVM backend is injected (D81). **source** is the front end over it: `compile`
+takes a definition or a source string, and `evaluate` takes `:sci` (both worlds)
+or `:native` (the JVM's own reader and macros); **capture** is the reading both
+kinds of macro call; **sci** builds the context the page evaluates a string in.
+**omkamra.dsp** is the facade, `.clj` and `.cljs` as the two world faces, so a
+browser app gets `dsp/defn` (via `:require-macros`) and `dsp/compile` (via
+`:require`) from one alias (D83).
 
 ### Definitions and normalization
 
@@ -800,14 +813,30 @@ Choices not made yet, each with what decides it.
   an untyped parameter means `:float`) with no conflicts, at the cost of threading
   types down through lowering. Deferred, and safe to revisit because
   `compiler equivalence` would catch the two worlds inferring differently.
+- **Can browser source spell an `:int` literal?** (D88's wrinkle.) ClojureScript
+  has one number type, so its reader cannot tell a bare `12345` (an `:int`) from a
+  bare `2.0` (a float) — exactly the ambiguity `#dsp/float` exists for (D78).
+  Today `literals/box-float-literals`'s ClojureScript branch boxes *every* number,
+  so a bare integral literal is a float and an `:int` literal has **no spelling**
+  in browser source; it is why the reference instrument's own source is checked
+  with SCI on the JVM (`tests/reference.clj`) rather than in the page. The
+  D78-consistent rule is to box only non-integral numbers: a bare integral literal
+  is then an `:int`, and an integral float is written `#dsp/float 2.0`. That makes
+  both spellable, at the cost of annotating the integral floats in the reference
+  synth and in `harness/source-cases.cljc` (`:source-chain`), and of every browser
+  author having to box an integral float. What decides it: it is a *spelling
+  contract*, so it is D78's to amend, not a capability to add — the JVM's reader
+  keeps literal types either way, so nothing on that side changes, and the static
+  ClojureScript capture runs the JVM macro, so it is unaffected too. Only
+  SCI-in-the-browser changes.
 
 ## Prioritized work
 
 The plan's priority areas, stated as scope; `PHASES.md` owns the ordering and the
-status of each. As of P13c: **1** language and library, **2** the event and voice
+status of each. As of P13d: **1** language and library, **2** the event and voice
 ABI, and **3** process instances are delivered across P1-P11; **4** browser-side
-compilation is P13, with P13a–P13c done (P13d/P13e, the SCI source layer and
-caching, remain); **5** artifact-driven installation is P14;
+compilation is P13, with P13a–P13d done (P13e, incremental recompilation and
+caching, remains); **5** artifact-driven installation is P14;
 **6** Wasm artifacts and the memory ABI is P12 and is done; **7** safety and
 diagnostics is P15; **8** conformance and release gates is P16.
 

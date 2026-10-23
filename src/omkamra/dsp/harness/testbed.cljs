@@ -13,12 +13,13 @@
             [goog.object :as gobj]
             [omkamra.dsp.harness.catalog :as catalog]
             [omkamra.dsp.event :as event]
+            [omkamra.dsp.examples.reference-synth :as reference-synth]
             [omkamra.dsp.hosts.fusion :as fusion]
             [omkamra.dsp.harness.equivalence :as equivalence]
             [omkamra.dsp.harness.formatting :as formatting]
+            [omkamra.dsp.hosts.instrument :as inst-host]
             [omkamra.dsp.hosts.interpreter :as interpreter-host]
             [omkamra.dsp.hosts.js :as js-host]
-            [omkamra.dsp.hosts.mixing :as mixing]
             [omkamra.dsp.hosts.wasm :as wasm-host]
             [omkamra.dsp.targets.interpreter :as interpreter]
             [omkamra.dsp.reference :as reference]
@@ -2619,52 +2620,6 @@
 ;; The browser instrument host: a voice pool plus a post-mix bus (P11c)
 ;; ---------------------------------------------------------------------------
 
-(defn- interpreter-bus-runner
-  "A bus runner over the in-page interpreter: one state per channel, run with the
-  channel array as both input and output.
-
-  Its regions are the instrument's, like every other host's: one lane region and
-  one shared region for the whole chain, written with `:write-lane!` /
-  `:write-shared!` and handed to the interpreter as the flat arrays it reads (H2)."
-  [bus-ir abi controls precision]
-  (let [f64? (= :f64 precision)
-        lane-stride (long (or (:lane-stride abi) 0))
-        lane-layout (mixing/region-layout (:lanes abi))
-        lane-count (clojure.core/count lane-layout)
-        shared-stride (long (or (:shared-stride abi) 0))
-        shared-layout (mixing/region-layout (:shared abi))
-        shared-count (clojure.core/count shared-layout)
-        lane-region (when (pos? lane-count)
-                      (mixing/real-array f64? (* lane-stride lane-count)))
-        shared-region (when (pos? shared-count)
-                        (mixing/real-array f64? (* shared-stride shared-count)))]
-    {:create-bus
-     (clojure.core/fn [] {:state (interpreter/create-state bus-ir)})
-     :run-bus!
-     (clojure.core/fn [bus input output frames sample-rate _controls]
-       (interpreter/process-context
-        bus-ir
-        (cond-> {:input input :output output :frames frames
-                 :sample-rate sample-rate :controls controls :state (:state bus)}
-          lane-region (assoc :lanes lane-region)
-          shared-region (assoc :shared shared-region))))
-     :reset-bus!
-     (clojure.core/fn [bus] (interpreter/reset-state! bus-ir (:state bus)))
-     :write-lane!
-     (clojure.core/fn [lane values]
-       (when lane-region
-         (mixing/write-region! lane-region
-                               (mixing/region-offset lane-layout lane :lane)
-                               lane-stride values f64?))
-       nil)
-     :write-shared!
-     (clojure.core/fn [control values]
-       (when shared-region
-         (mixing/write-region! shared-region
-                               (mixing/region-offset shared-layout control :shared-control)
-                               shared-stride values f64?))
-       nil)}))
-
 (defn- channel-concat
   "Concatenate a sequence of per-block channel vectors into one channel vector
   per channel, so renders with different block sizes are comparable."
@@ -2795,8 +2750,8 @@
                     bundle
                     (interpreter-host/interpreter-kernel
                      voice-ir (:voice-abi bundle) {:containment :off})
-                    (interpreter-bus-runner bus-ir (:bus-abi bundle)
-                                            bus-controls (:precision bundle))
+                    (interpreter-host/interpreter-bus-kernel bus-ir (:bus-abi bundle)
+                                                             (:precision bundle))
                     bus-controls phrase))]
     (require! (all-finite? actual)
               (str name " rendered a non-finite sample"))
@@ -2883,26 +2838,30 @@
 ;; that never got the region renders silence, which no other check would notice.
 
 (defn- render-bus-instrument
-  "One render through a fresh voice pool and the chain, after writing a region.
+  "One render through a fresh live instrument and the chain, after writing a
+  region.
+
+  The live instrument is the shared, portable host
+  (`omkamra.dsp.hosts.instrument`): a program is data (the served runtime and the
+  bus ABI), and the kernels are the ones this check built. So the page runs the
+  *same* host code as the JVM, over a browser kernel — which is what makes the
+  host portable rather than merely described.
 
   `region` is `[:lane values]` or `[:shared values]`, or nil to write nothing."
   [bundle kernel bus-runner region frames]
   (let [channels (long (or (get-in bundle [:voice-abi :channels :count]) 1))
-        voice-pool (pool/voice-pool (:runtime bundle) kernel)
-        buses (mapv (clojure.core/fn [_] ((:create-bus bus-runner))) (range channels))
+        live (inst-host/instrument-pool
+              {:bundle {:runtime (:runtime bundle)}
+               :bus {:abi (:bus-abi bundle)}}
+              {:kernel kernel :bus-kernel bus-runner})
         block (render-block channels frames)]
     (when region
       (let [[kind values] region]
         (if (= :lane kind)
           ((:write-lane! bus-runner) "post-amount" values)
           ((:write-shared! bus-runner) "post-amount" values))))
-    (pool/note-on! voice-pool 60 1.0)
-    (pool/render! voice-pool block frames 48000.0)
-    (dotimes [channel channels]
-      ((:run-bus! bus-runner) (nth buses channel)
-                              (mixing/channel-of channels block channel)
-                              (mixing/channel-of channels block channel)
-                              frames 48000.0 #js []))
+    (inst-host/note-on! live 60 1.0)
+    (inst-host/render! live block frames)
     (block->vectors block channels)))
 
 (defn- check-bus-region
@@ -2916,8 +2875,8 @@
         oracle-kernel (interpreter-host/interpreter-kernel
                        (reader/read-string (:voice-ir bundle))
                        (:voice-abi bundle) {:containment :off})
-        oracle-bus (interpreter-bus-runner bus-ir (:bus-abi bundle) #js []
-                                           (:precision bundle))
+        oracle-bus (interpreter-host/interpreter-bus-kernel bus-ir (:bus-abi bundle)
+                                                            (:precision bundle))
         frames (count expected)
         region [kind values]
         actual (render-bus-instrument bundle kernel bus-runner region frames)
@@ -3322,6 +3281,21 @@
                    ;; with what the JVM compiled (P13, D79).
                    (when (selected? selection "compiler equivalence")
                      (fn [] (-> (equivalence/check!) (.then (fn [r] [r])))))
+                   ;; The source equivalence check: the page compiles DSP source
+                   ;; strings with SCI and compares with the JVM's own reader and
+                   ;; macros (P13d).
+                   (when (selected? selection "source equivalence")
+                     (fn [] (-> (equivalence/source-check!) (.then (fn [r] [r])))))
+                   ;; The reference instrument: the large, real case. The page
+                   ;; compiles its *own* capture of the voice — the one Shadow
+                   ;; compiled from `dsp/defn` — and the bus definition the JVM
+                   ;; folded, and compares with the JVM's own compile (P13d).
+                   (when (selected? selection "reference instrument equivalence")
+                     (fn [] (-> (equivalence/check-definitions!
+                                 "reference instrument equivalence"
+                                 "/omkamra/dsp/harness/testbed/reference-instrument"
+                                 reference-synth/definitions)
+                                (.then (fn [r] [r])))))
                    ;; The number-formatting check: the page spells a sweep of
                    ;; floats and compares with the JVM's own spelling (P13b).
                    (when (selected? selection "number formatting")

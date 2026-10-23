@@ -493,17 +493,36 @@
   [value]
   (= :compilation-unit (:dsp/kind value)))
 
+(defmulti compile-target
+  "Compile a lowered, ABI-described definition for one target.
+
+  Everything before this step is portable; this step is not, so it is the one
+  open axis of the pipeline. `:interpreter`, `:js` and `:wasm` share the
+  `:default` method, which delegates to the target's own emitter; the JVM backend
+  cannot live here — its bytecode generator `insn` is a JVM library — so the JVM
+  face registers `:jvm` from the side that has it (D77). A host with another
+  backend registers it the same way, which is what makes this a multimethod
+  rather than a `case`.
+
+  The method receives `{:keys [entry lowered abi options]}` and returns the
+  artifact."
+  (fn [target _context] target))
+
+(defmethod compile-target :default
+  [target {:keys [entry lowered options]}]
+  (case entry
+    :function (compile-function-target target lowered options)
+    :process (compile-process-target target lowered options)))
+
 (defn compile
-  "Compile a DSP descriptor or linked unit for a portable target.
+  "Compile a DSP descriptor or linked unit for a target.
 
   The default `:entry` is `:function`, a scalar expression. Use
   `{:entry :process}` to compile the same definition as a block processor.
-  Targets are `:interpreter`, `:js`, and `:wasm`; the JVM target cannot be here
-  and is supplied by the caller as an entry in `extra-targets`, a map from target
-  to `(fn [{:keys [entry lowered abi options]}] artifact)`."
+  Targets are `:interpreter`, `:js`, `:wasm`, and — where the JVM face has
+  registered it — `:jvm`; see `compile-target`."
   ([definition] (compile definition {}))
-  ([definition compile-options] (compile definition compile-options nil))
-  ([definition compile-options extra-targets]
+  ([definition compile-options]
    (let [unit (if (linked-unit? definition)
                 definition
                 (linker/link definition))
@@ -528,11 +547,7 @@
            abi (if (= :function entry)
                  (function-abi lowered)
                  (process-abi lowered))]
-       (if-let [compile-target (get extra-targets target)]
-         (compile-target {:entry entry
-                          :lowered lowered
-                          :abi abi
-                          :options options})
-         (case entry
-           :function (compile-function-target target lowered options)
-           :process (compile-process-target target lowered options)))))))
+       (compile-target target {:entry entry
+                               :lowered lowered
+                               :abi abi
+                               :options options})))))

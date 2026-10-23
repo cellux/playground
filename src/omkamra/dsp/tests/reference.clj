@@ -10,8 +10,12 @@
   that must not — so nothing passes vacuously."
   (:require [clojure.test :refer [deftest is testing]]
             [omkamra.dsp.graph :as graph]
+            [omkamra.dsp.harness.conformance :as conformance]
             [omkamra.dsp.harness.fixtures :refer [allocated-bytes
                                                   thread-allocation-meter]]
+            [omkamra.dsp.ir :as ir]
+            [omkamra.dsp.library-registry :as library]
+            [omkamra.dsp.source :as source]
             [omkamra.dsp.hosts :as host]
             [omkamra.dsp.hosts.instrument :as inst-host]
             [omkamra.dsp.instrument :as inst]
@@ -19,6 +23,48 @@
             [omkamra.dsp.reference :as reference]
             [omkamra.dsp.synth.pool :as pool]
             [omkamra.dsp.examples.reference-synth :as ref]))
+
+(deftest the-reference-instrument-declares-its-own-definitions
+  ;; A browser has no runtime namespace resolution (T7), so the reference synth
+  ;; hands the page its own definitions by qualified id. Those ids must be the
+  ;; ones the linker derives from each definition's own namespace: a
+  ;; same-namespace call resolves to nothing otherwise — and, because the JVM
+  ;; resolves through Vars, nothing on this side would notice.
+  (let [declared (set (keys ref/definitions))]
+    (is (contains? declared 'omkamra.dsp.examples.reference-synth/reference-voice)
+        "the voice is among the definitions the instrument declares")
+    (is (= declared
+           (set (map (fn [[id definition]]
+                       (symbol (str (get-in definition [:source :namespace]))
+                               (name id)))
+                     ref/definitions)))
+        "every declared id is its own definition's namespace-qualified id")))
+
+(deftest the-reference-instrument-source-is-sci-evaluable
+  ;; The "with SCI" half of the instrument's portability: its *own* source — read
+  ;; back from the `.cljc` it is written in, not transcribed — compiles the same
+  ;; way through SCI as through the JVM's reader and macros. One text, two front
+  ;; ends, the same program; that is what makes the source portable rather than a
+  ;; copy of it.
+  ;;
+  ;; Checked here rather than in the page because a browser's reader has one
+  ;; number type: it cannot keep an `:int` literal (`white-noise`'s seed) apart
+  ;; from an integral float, which is what `#dsp/float` is for (D78). The JVM's
+  ;; reader has no such limit, so SCI and the native evaluator are comparable.
+  (let [source-text (conformance/portable-definition-source
+                     "omkamra/dsp/examples/reference_synth.cljc"
+                     'dsp.reference-source
+                     '[[omkamra.dsp :as dsp] [omkamra.dsp.combinators :as comb]])
+        definition 'dsp.reference-source/reference-voice
+        build (fn [evaluator]
+                (let [{evaluated :definition definitions :definitions}
+                      (source/evaluate source-text {:definition definition
+                                                    :evaluator evaluator
+                                                    :library library/library-definitions})
+                      unit (source/link-definition evaluated {:definitions definitions})]
+                  (ir/canonical-text (ir/lower-process unit {:channels 2}))))]
+    (is (= (build :native) (build :sci))
+        "SCI and the JVM's own reader produce the same program from one source")))
 
 ;; ---------------------------------------------------------------------------
 ;; Helpers

@@ -68,6 +68,21 @@
              (aget values index)
              (nth values index))))
 
+(defn values-vector
+  "A host-supplied real sequence as an ordinary vector.
+
+  A host hands over a primitive real array — a typed array on the browser — but
+  a reader that indexes with `nth` (the reference interpreter's control seeding)
+  cannot read a typed array, so a caller that needs an ordinary sequence
+  converts here rather than testing the storage itself."
+  [values]
+  (let [length (value-length values)]
+    (loop [index 0
+           result (transient [])]
+      (if (< index length)
+        (recur (inc index) (conj! result (value-at values index)))
+        (persistent! result)))))
+
 (defn region-layout
   "A region's controls by name, with the offset each one's slice starts at.
 

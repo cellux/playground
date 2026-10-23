@@ -11,13 +11,18 @@
   The JVM suite compares the interpreter with the JVM backend; the browser
   serves the serialized plan and compares the JS/Wasm kernel with the
   interpreter it runs locally."
-  (:require [omkamra.dsp :as dsp]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
+            [omkamra.dsp :as dsp]
             [omkamra.dsp.harness.emission :as emission]
             [omkamra.dsp.numbers :as numbers]
             [omkamra.dsp.descriptor :as descriptor]
             [omkamra.dsp.harness.catalog :as catalog]
+            [omkamra.dsp.harness.source-cases :as source-cases]
             [omkamra.dsp.ir :as ir]
-            [omkamra.dsp.linker :as linker]))
+            [omkamra.dsp.library-registry :as library]
+            [omkamra.dsp.linker :as linker]
+            [omkamra.dsp.source :as source]))
 
 (def process-blocks
   "Block lengths exercised per process case, in order."
@@ -165,7 +170,7 @@
                                                  (map (fn [[name values]]
                                                         [name (real-array precision values)]))
                                                  lanes))))
-    (if (= 1 (long channels)) (vec out) (mapv vec out))))
+    (if (= 1 channels) (vec out) (mapv vec out))))
 
 (defn run-function-plan
   [artifact plan]
@@ -527,3 +532,132 @@
     {:cases (into {} (remove ::skipped compiled))
      :uncompilable (mapv (fn [entry] [(::skipped entry) (::message entry)])
                          (filter ::skipped compiled))}))
+
+;; ---------------------------------------------------------------------------
+;; Reference instrument equivalence (P13d)
+
+(defn- compiled-description
+  "One definition compiled here: its descriptor, canonical IR and both emitters'
+  products, at every width a page will compile it for."
+  [definition {:keys [entry channels]}]
+  ;; `source/link-definition` rather than `linker/link`: a derived definition
+  ;; (a folded post-mix chain) reaches the definitions it was built from through
+  ;; `:dsp/dependencies`, which only the source layer carries into the link.
+  (let [unit (source/link-definition definition {})
+        ir-value (if (= entry :function)
+                   (ir/lower-unit unit)
+                   (ir/lower-process unit {:channels channels}))]
+    {:entry entry
+     :channels channels
+     :normalized (descriptor/normalize definition)
+     :canonical (ir/canonical-text ir-value)
+     :emissions (emission/emissions unit {:entry entry :channels channels})}))
+
+(defn compiled-definition-payload
+  "The JVM's own compile of each entry, as data for a page to compare against.
+
+  `entries` is a sequence of `{:id ..., :definition ..., :entry ..., :channels
+  ..., :definition-id ..., :carry-definition? ...}` and the result is
+  `{id description}`. `:definition-id` names the definition by its fully
+  qualified id, so a page that has its *own* capture of it can compile that
+  instead of the served data — which is how two macro captures are shown to
+  agree. When `:carry-definition?` is true the definition itself travels too, for
+  a case the page does not have — a folded post-mix chain is a JVM compile step,
+  but the folded definition is plain data, so the page can compile the very
+  definition this compiled from.
+
+  It names no example: assembling an example's payload is the caller's business,
+  so the compiler and its general harness carry no knowledge of any one of them."
+  [entries]
+  (into {}
+        (map (fn [{:keys [id definition entry channels definition-id
+                          carry-definition?]}]
+               [id (cond-> (compiled-description definition {:entry entry
+                                                             :channels channels})
+                     definition-id (assoc :definition-id definition-id)
+                     carry-definition? (assoc :definition definition))]))
+        entries))
+
+;; ---------------------------------------------------------------------------
+;; The source a definition was written as (P13d)
+
+(def ^:private definition-heads
+  "The forms that declare a DSP definition, so a file's own source can be handed
+  to a front end without its prose, its description or its host."
+  '#{dsp/defn dsp/def dsp/defstruct})
+
+(defn- read-portable-forms
+  "Every top-level form of a `.cljc` resource, read for *no* world.
+
+  Reader conditionals are resolved for the empty feature set, so a form that
+  exists only under `:clj` or `:cljs` — an `ns` clause, a JVM-only constructor —
+  is left out rather than half-read. What remains is the portable half."
+  [resource]
+  (with-open [reader (io/reader (io/resource resource))]
+    (let [pushback (java.io.PushbackReader. reader)]
+      (loop [forms []]
+        (let [form (read {:read-cond :allow :features #{} :eof ::eof} pushback)]
+          (if (= ::eof form)
+            forms
+            (recur (conj forms form))))))))
+
+(defn portable-definition-source
+  "The `dsp/defn`/`dsp/def` forms of a `.cljc` resource, as a source string.
+
+  `resource` is a classpath path, `namespace` the namespace the forms are read
+  into, and `requires` the `:require` clauses naming what the definitions call.
+  This is how a front end is handed the source a definition was *written as* — the
+  same text the static macros captured — rather than a copy that could drift; a
+  check that compiles it both ways is then a check on the source, not on a
+  transcription."
+  [resource namespace requires]
+  (let [forms (filter (fn [form]
+                        (and (seq? form) (contains? definition-heads (first form))))
+                      (read-portable-forms resource))]
+    (str "(ns " namespace
+         "\n  (:require " (str/join " " (map pr-str requires)) "))\n\n"
+         (str/join "\n\n" (map pr-str forms))
+         "\n")))
+
+;; ---------------------------------------------------------------------------
+;; Source equivalence (P13d)
+
+(defn source-equivalence-payload
+  "The JVM's half of the source equivalence check (P13d).
+
+  Each case is DSP source text. This evaluates it with the JVM's own reader and
+  macros — `:evaluator :native` — links it, and records the descriptor, the
+  canonical IR and what both emitters make of it. The page evaluates the same
+  text with SCI and compares, which is what pins the SCI macro's capture to the
+  real macro's: identical descriptors, identical IR, identical artifacts.
+
+  The source is evaluated exactly once here, at the entry precision; the
+  emissions are per precision because a width is part of what an emitter reads.
+
+  The two evaluators must agree *here*, where both have a reader that keeps a
+  literal's type. A browser's does not (D78), so the reference check that needs
+  it runs on this side; see `portable-definition-source`."
+  []
+  (let [cases source-cases/cases]
+    {:cases
+     (into {}
+           (map (fn [{:keys [id source definition entry channels precisions]}]
+                  (let [{evaluated :definition definitions :definitions}
+                        (source/evaluate source {:definition definition
+                                                 :evaluator :native
+                                                 :library library/library-definitions})
+                        unit (source/link-definition evaluated {:definitions definitions})
+                        ir-value (if (= entry :function)
+                                   (ir/lower-unit unit)
+                                   (ir/lower-process unit {:channels channels}))]
+                    [id
+                     {:source source
+                      :definition definition
+                      :entry entry
+                      :channels channels
+                      :precisions precisions
+                      :normalized (descriptor/normalize evaluated)
+                      :canonical (ir/canonical-text ir-value)
+                      :emissions (emission/emissions unit {:entry entry
+                                                           :channels channels})}])))
+           cases)}))

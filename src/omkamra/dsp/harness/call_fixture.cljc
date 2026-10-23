@@ -1,5 +1,10 @@
 (ns omkamra.dsp.harness.call-fixture
-  (:require [omkamra.dsp :as dsp]))
+  "Call-shape fixtures: the definitions the call/partition cases reach for.
+
+  `.cljc` because the browser compiles them too: a page-side registry seeds them
+  so a case whose unit reaches a fixture can link in the page (P13d)."
+  #?(:clj (:require [omkamra.dsp :as dsp])
+     :cljs (:require-macros [omkamra.dsp :as dsp])))
 
 (dsp/defn double-sample
   [sample]

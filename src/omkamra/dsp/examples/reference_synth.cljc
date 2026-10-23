@@ -1,19 +1,24 @@
 (ns omkamra.dsp.examples.reference-synth
-  "The P11 reference synthesizer: the end-to-end acceptance instrument.
+  "**The portable reference instrument**, and the live host that plays it.
 
-  **What this is.** The v1 acceptance fixture from `PLAN.md`: two band-limited
-  oscillators plus noise, hard sync, PWM and unison; an amp envelope, a filter
-  envelope, and LFOs; a resonant filter; a host-side modulation matrix; stereo
-  output; and (from P11b) a post-mix effect stage. It is assembled from library
-  blocks and combinators (D38) rather than written as one large voice, so its
-  structure is inspectable and each block is already conformance-tested on its
-  own.
+  The first half is the instrument itself: the oscillator bank, the mono source,
+  the stereo voice, the synth description, and the `omkamra.dsp.instrument`
+  value that adds the modulation matrix and the post-mix chain. It is `.cljc`,
+  so the JVM captures it with its own macros and a browser captures it with the
+  macros compiled into the page — the worked example of a *portable* instrument.
+  If the two worlds compile this identically, they compile anything: it is large,
+  it calls into the DSP library, and it uses a combinator, a process- and
+  buffer-shaped voice, and a three-stage post-mix chain.
 
-  **The modulation matrix is deliberately an example, not core** (D34). It stays
-  in this namespace until the end of P11, when it is studied for patterns worth
-  promoting. It is a host-side policy — `base + depth x source` — on top of the
-  pool's unopinionated delivery channel `set-voice-controls!`; the DSP voice
-  knows nothing about it.
+  The second half is the host. It is portable too — a pool, a bus, and a
+  modulation loop hold only primitive arrays and the pool API — except for
+  `build-instrument`, which lowers and compiles the instrument value and is
+  therefore JVM-side. A browser builds the same live host from a served program
+  with `hosts.instrument/instrument-pool` and the kernels it built there.
+
+  The DSP is assembled from library blocks and combinators (D38) rather than
+  written as one large voice, so its structure is inspectable and each block is
+  already conformance-tested on its own.
 
   **Signal flow.**
 
@@ -32,16 +37,8 @@
   a scalar-returning voice; a voice that writes `:output` channels returns
   nothing to sum. So the source is unison'd in mono and the stereo wrapper pans
   the result. The effect/pan module returns a record, which the wrapper projects
-  into the two channels explicitly (D40).
-
-  **The host is portable in shape.** The instrument wraps a live pool and keeps
-  only primitive arrays, so the matrix and render loop touch nothing but the
-  pool API. That portable half — the modulation matrix and the render loop — now
-  lives in `omkamra.dsp.reference` (`.cljc`) and is shared with the browser
-  hosts; this namespace keeps the instrument value and the JVM constructor, which
-  is the only part that reaches for the compiler."
-  (:require [omkamra.dsp :as dsp]
-            [omkamra.dsp.combinators :as comb]
+  into the two channels explicitly (D40)."
+  (:require [omkamra.dsp.combinators :as comb]
             [omkamra.dsp.hosts.instrument :as inst-host]
             [omkamra.dsp.instrument :as inst]
             [omkamra.dsp.library.delay]
@@ -51,7 +48,9 @@
             [omkamra.dsp.library.noise]
             [omkamra.dsp.library.oscillator]
             [omkamra.dsp.library.pitch]
-            [omkamra.dsp.reference :as reference]))
+            [omkamra.dsp.reference :as reference])
+  #?(:clj (:require [omkamra.dsp :as dsp])
+     :cljs (:require-macros [omkamra.dsp :as dsp])))
 
 ;; ---------------------------------------------------------------------------
 ;; The oscillator bank
@@ -254,7 +253,8 @@
     :delay-time {:scope :shared :default 12000.0}
     :delay-feedback {:scope :shared :default 0.45}
     :delay-mix {:scope :shared :default 0.35}}
-   :voice {:definition #'reference-voice}})
+   :voice {:definition #?(:clj #'reference-voice
+                          :cljs 'omkamra.dsp.examples.reference-synth/reference-voice)}})
 
 ;; The modulation matrix and the loop that applies it live in
 ;; `omkamra.dsp.reference`, so the browser hosts run the same host code; see
@@ -282,33 +282,47 @@
       (inst/with-effect omkamra.dsp.library.delay/feedback-delay
         [:delay-time :delay-feedback :delay-mix])))
 
-(defn build-instrument
-  "Build a live reference instrument from an `omkamra.dsp.instrument` value:
-  lower it to a program, create the live pool and bus, and add the portable
-  matrix host (`omkamra.dsp.reference`).
+(def definitions
+  "This namespace's own definitions, by qualified id.
 
-  Exposed so a test can lower a *variant* of the instrument — for example the
-  same voice with no post-mix chain — and compare. `compile-options` selects the
-  target, precision, and containment policy."
-  ([value]
-   (build-instrument value {}))
-  ([value compile-options]
-   (let [program (inst-host/compile-instrument value compile-options)
-         live (inst-host/instrument-pool
-               program (select-keys compile-options [:containment]))
-         live-pool (inst-host/pool-of live)
-         plan (vec (:control-plan (get-in program [:bundle :runtime])))
-         matrix (or (:routes value) reference/modulation-matrix)]
-     ;; The post-mix controls default from the description's `:shared`
-     ;; parameters, which `instrument-pool` wires the bus to.
-     (merge live (reference/new-host live-pool plan matrix)))))
+  ClojureScript has no runtime namespace resolution (T7), so a browser that
+  compiles `reference-voice` cannot find the definitions it reaches for unless it
+  is handed them. A JVM caller resolves them through Vars and needs nothing; the
+  DSP library the voice also calls comes from the world's own registry."
+  {'omkamra.dsp.examples.reference-synth/oscillator-bank oscillator-bank
+   'omkamra.dsp.examples.reference-synth/unison-oscillator-bank unison-oscillator-bank
+   'omkamra.dsp.examples.reference-synth/reference-source reference-source
+   'omkamra.dsp.examples.reference-synth/reference-voice reference-voice})
 
-(defn reference-synth
-  "Build the reference instrument (see `reference-instrument`)."
-  ([]
-   (build-instrument reference-instrument {}))
-  ([compile-options]
-   (build-instrument reference-instrument compile-options)))
+#?(:clj
+   (do
+     (defn build-instrument
+       "Build a live reference instrument from an `omkamra.dsp.instrument` value:
+       lower it to a program, create the live pool and bus, and add the portable
+       matrix host (`omkamra.dsp.reference`).
+     
+       Exposed so a test can lower a *variant* of the instrument — for example the
+       same voice with no post-mix chain — and compare. `compile-options` selects the
+       target, precision, and containment policy."
+       ([value]
+        (build-instrument value {}))
+       ([value compile-options]
+        (let [program (inst-host/compile-instrument value compile-options)
+              live (inst-host/instrument-pool
+                    program (select-keys compile-options [:containment]))
+              live-pool (inst-host/pool-of live)
+              plan (vec (:control-plan (get-in program [:bundle :runtime])))
+              matrix (or (:routes value) reference/modulation-matrix)]
+          ;; The post-mix controls default from the description's `:shared`
+          ;; parameters, which `instrument-pool` wires the bus to.
+          (merge live (reference/new-host live-pool plan matrix)))))
+
+     (defn reference-synth
+       "Build the reference instrument (see `reference-instrument`)."
+       ([]
+        (build-instrument reference-instrument {}))
+       ([compile-options]
+        (build-instrument reference-instrument compile-options)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Playing it

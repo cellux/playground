@@ -33,6 +33,32 @@
     (is (= (ir/canonical-form ##NaN) (ir/canonical-form ##NaN)))
     (is (not= (ir/canonical-form ##NaN) (ir/canonical-form ##Inf)))))
 
+(deftest a-zero-state-region-travels-as-its-size
+  ;; The `.bss` half of a state region. A host gets a zero region by
+  ;; zero-filling it — a typed array, linear memory, a fresh primitive array —
+  ;; so the canonical form carries its *size* where it used to carry every
+  ;; element: a 48 000-slot delay line's buffer was 48 000 zeroes in the cache
+  ;; key, in the emitted module, and in the payload a second world compiled
+  ;; from. Only the all-zero region compacts, and the test is on the bits.
+  (let [canonical-init (fn [values]
+                         (:init (ir/canonical-form {:name 'buffer :type :float
+                                                    :size (count values) :index 1
+                                                    :init values})))]
+    (testing "a region whose whole state is zero is a size"
+      (let [form (canonical-init [0.0 0.0 0.0])]
+        (is (contains? form :dsp/zeros)
+            "the region is a `.bss` section, not an enumerated vector")
+        (is (not (vector? form)) "and its zeroes are not carried")))
+    (testing "a region with any other element stays explicit"
+      (is (vector? (canonical-init [0.0 1.0 0.0]))
+          "one non-zero element and the region is `.data`")
+      (is (vector? (canonical-init [-0.0 0.0 0.0]))
+          "and negative zero is not what a zeroed region holds (D76)"))
+    (testing "the size remains, so a host knows how much to zero-fill"
+      (is (= (ir/canonical-form 3)
+             (:size (ir/canonical-form {:name 'buffer :type :float :size 3
+                                        :index 1 :init [0.0 0.0 0.0]})))))))
+
 (deftest interpreter-vertical-slice
   (let [artifact (dsp/compile gain {:target :interpreter})]
     (is (= :interpreter (:target artifact)))

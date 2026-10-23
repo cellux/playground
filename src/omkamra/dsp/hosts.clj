@@ -69,6 +69,28 @@
                    {:target (:target artifact)
                     :supported [:jvm :interpreter]})))))
 
+(defn bus-kernel
+  "The JVM-side bus kernel for a compiled bus artifact's target.
+
+  The post-mix chain is one mono processor compiled like a voice, so the bus
+  kernel is chosen by the same target axis `host-kernel` uses. A JavaScript or
+  Wasm bus kernel is built by its own host in the browser, from the bus
+  artifact's ABI.
+
+  Returns the `{:create-bus, :run-bus!, :reset-bus!, :write-lane!,
+  :write-shared!}` map `omkamra.dsp.hosts.instrument` drives."
+  [artifact]
+  (case (:target artifact)
+    :jvm (jvm-host/jvm-bus-kernel artifact)
+    :interpreter (interpreter-host/interpreter-bus-kernel
+                  (:ir artifact) (:abi artifact)
+                  (get-in artifact [:physical-type :precision]))
+    (synth/fail (str "this DSP target has no JVM-side bus kernel; a JavaScript"
+                     " or Wasm bus kernel is built in the browser"
+                     " (omkamra.dsp.hosts.js)")
+                {:target (:target artifact)
+                 :supported [:jvm :interpreter]})))
+
 (defn synth-bundle
   "Compile a synth description into an artifact and its runtime configuration.
 

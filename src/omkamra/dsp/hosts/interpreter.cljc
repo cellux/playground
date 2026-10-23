@@ -223,3 +223,61 @@
                (:lane-region voice) (assoc :lanes (:lane-region voice))
                shared-region (assoc :shared shared-region)))
          (mixing/mix-block! containment f64? channels voice output frames))))))
+
+(defn interpreter-bus-kernel
+  "A post-mix bus over the portable interpreter.
+
+  A bus is a *processor*, so this runs one channel's instance over the same
+  array as input and output. The reference interpreter is the oracle every real
+  host is held to, and the extra allocation — a control vector per call — is
+  acceptable here because it is not the audio path.
+
+  The chain is instrument-level, so its regions are too: one lane region and one
+  shared region for the whole instrument, handed to every channel's instance as
+  the flat arrays the interpreter reads (H2). The host writes them with
+  `:write-lane!` / `:write-shared!`.
+
+  `bus-ir` is the compiled interpreter IR, `abi` its ABI, and `precision` its
+  physical precision. Returns the same `{:create-bus, :run-bus!, :reset-bus!,
+  :write-lane!, :write-shared!}` map as `omkamra.dsp.hosts.js/js-bus-kernel`."
+  [bus-ir abi precision]
+  (let [f64? (= :f64 precision)
+        lane-stride (long (or (:lane-stride abi) 0))
+        lane-layout (mixing/region-layout (:lanes abi))
+        lane-count (clojure.core/count lane-layout)
+        lane-region (when (pos? lane-count)
+                      (mixing/real-array f64? (* lane-stride lane-count)))
+        shared-stride (long (or (:shared-stride abi) 0))
+        shared-layout (mixing/region-layout (:shared abi))
+        shared-count (clojure.core/count shared-layout)
+        shared-region (when (pos? shared-count)
+                        (mixing/real-array f64? (* shared-stride shared-count)))]
+    {:create-bus
+     (clojure.core/fn [] {:state (interpreter/create-state bus-ir)})
+     :run-bus!
+     (clojure.core/fn [bus input output frames sample-rate controls]
+       (interpreter/process-context
+        bus-ir
+        (cond-> {:input input :output output :frames frames
+                 :sample-rate sample-rate
+                 :controls (mixing/values-vector controls)
+                 :state (:state bus)}
+          lane-region (assoc :lanes lane-region)
+          shared-region (assoc :shared shared-region))))
+     :reset-bus!
+     (clojure.core/fn [bus] (interpreter/reset-state! bus-ir (:state bus)))
+     :write-lane!
+     (clojure.core/fn [lane values]
+       (when lane-region
+         (mixing/write-region! lane-region
+                               (mixing/region-offset lane-layout lane :lane)
+                               lane-stride values f64?))
+       nil)
+     :write-shared!
+     (clojure.core/fn [control values]
+       (when shared-region
+         (mixing/write-region! shared-region
+                               (mixing/region-offset shared-layout control
+                                                     :shared-control)
+                               shared-stride values f64?))
+       nil)}))

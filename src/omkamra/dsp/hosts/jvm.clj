@@ -328,3 +328,80 @@
   or a lane, is refused with a reason."
   [artifact mapping containment]
   (kernel artifact mapping containment))
+
+(defn jvm-bus-kernel
+  "A post-mix bus over a compiled `:jvm` artifact.
+
+  A bus is a *processor*, so the raw JVM call takes the input array, the output
+  array, frames, the sample rate, the physical control arrays, and the chain's
+  two regions. `control-slots` resolves the ABI's control layout into primitive
+  arrays once, at construction, so `:run-bus!` copies the values vector into them
+  and never walks a map on the audio path.
+
+  The chain is instrument-level, so its regions are too: one lane region and one
+  shared region for the whole instrument, handed to every channel's instance.
+  The host writes them with `:write-lane!` / `:write-shared!`, so the instance
+  reads the region the host owns — the same arrangement every other bus kernel
+  uses.
+
+  Returns the same `{:create-bus, :run-bus!, :reset-bus!, :write-lane!,
+  :write-shared!}` map as `omkamra.dsp.hosts.js/js-bus-kernel`."
+  [artifact]
+  (let [layout (:control-layout artifact)
+        {^longs float-slot :float-slot ^longs int-slot :int-slot
+         control-count :count}
+        (control-slots layout)
+        float-count (long (:float-count layout))
+        int-count (long (:int-count layout))
+        f64? (= :f64 (:precision artifact))
+        abi (:abi artifact)
+        lane-stride (long (or (:lane-stride abi) 0))
+        lane-layout (mixing/region-layout (:lanes abi))
+        lane-count (count lane-layout)
+        lane-region (when (pos? lane-count)
+                      (mixing/real-array f64? (* lane-stride lane-count)))
+        shared-stride (long (or (:shared-stride abi) 0))
+        shared-layout (mixing/region-layout (:shared abi))
+        shared-count (count shared-layout)
+        shared-region (when (pos? shared-count)
+                        (mixing/real-array f64? (* shared-stride shared-count)))]
+    {:create-bus
+     (fn []
+       {:instance (dsp/create-instance artifact)
+        :float-controls (mixing/real-array f64? float-count)
+        :int-controls (int-array (int int-count))})
+     :run-bus!
+     (fn [bus input output frames sample-rate controls]
+       (let [^doubles values controls]
+         (dotimes [position control-count]
+           (let [slot (aget float-slot position)]
+             (if (>= slot 0)
+               (if f64?
+                 (aset-double ^doubles (:float-controls bus) (int slot)
+                              (aget values position))
+                 (aset-float ^floats (:float-controls bus) (int slot)
+                             (float (aget values position))))
+               (aset-int ^ints (:int-controls bus)
+                         (int (aget int-slot position))
+                         (long (aget values position)))))))
+       (dsp/process-unchecked! (:instance bus) input output frames
+                               (double sample-rate)
+                               (:float-controls bus) (:int-controls bus)
+                               lane-region shared-region))
+     :reset-bus!
+     (fn [bus] (dsp/reset! (:instance bus)))
+     :write-lane!
+     (fn [lane values]
+       (when lane-region
+         (mixing/write-region! lane-region
+                               (mixing/region-offset lane-layout lane :lane)
+                               lane-stride values f64?))
+       nil)
+     :write-shared!
+     (fn [control values]
+       (when shared-region
+         (mixing/write-region! shared-region
+                               (mixing/region-offset shared-layout control
+                                                     :shared-control)
+                               shared-stride values f64?))
+       nil)}))

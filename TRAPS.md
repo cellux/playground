@@ -67,3 +67,73 @@ session state.
 
 **Remedy:** restore the value explicitly or restart the development JVM. Suspect
 session state before diagnosing source that no longer contains the stub.
+
+## T6 — Shadow does not invalidate a build for a transitive macro dependency
+
+**Symptom:** a `.cljc` file that uses a macro keeps its previously compiled
+output after a *helper* namespace the macro requires changes. `shadow/compile`
+reports `0 compiled` and the page runs the old behaviour, even though the helper
+was edited.
+
+**Cause:** Shadow tracks the macro namespace itself (`omkamra.dsp`) as a build
+input, but not the `.cljc` namespaces that macro namespace requires. A change
+there does not invalidate the consuming files.
+
+**Remedy:** clear the build's cache (`.shadow-cljs/builds/<build-id>/`) and
+recompile when a macro's helper changes, or touch the consuming file.
+
+## T7 — ClojureScript has no runtime namespace resolution
+
+**Symptom:** code that resolves a namespace at run time works on the JVM and
+fails in a ClojureScript build — `find-ns`, `ns-resolve`, `resolve`, `ns-publics`
+and `ns-interns` either error or demand a literal symbol.
+
+**Cause:** in ClojureScript all of these are *macros* that expand against the
+compiler's own state. There is no runtime namespace to look a name up in, and
+`ns-publics`/`ns-interns` accept only a literal quoted symbol.
+
+**Remedy:** write one literal `(ns-publics 'the.namespace)` per namespace, or use
+an explicit registry rather than reflection. This is why the browser links
+through a registry (D83).
+
+## T8 — `:file` in a macro form differs between the two readers
+
+**Symptom:** data derived from a macro's `&form` metadata is equal on the JVM and
+in the page except for a `:file` key.
+
+**Cause:** Clojure's reader does not stamp a macro form with `:file`;
+ClojureScript's (Shadow's) does.
+
+**Remedy:** do not put `:file` into data two worlds compare. A portable source
+location is namespace+line+column (D84).
+
+## T9 — `tools/reload` refuses a whole-session reload after a large change
+
+**Symptom:** `(tools/reload)` reports `:status :refused` and "a replaced baseline
+rather than an edit", reloading nothing.
+
+**Cause:** the reload tool compares the loaded set against a baseline; a run of
+new namespaces and moved files looks like a replacement rather than an edit.
+
+**Remedy:** reload the affected namespaces by name (`(tools/reload 'the.ns)`) in
+dependency order. When a multimethod's own namespace is reloaded, re-register the
+methods other namespaces added to it (reload those too). Restart the JVM only if
+a targeted reload is not enough.
+
+## T10 — a compacted zero region breaks `reset` unless the bootstrap zero-fills
+
+**Symptom:** after a state region's zeros stop being written (a `.bss`
+compaction — D86), a voice sounds wrong *after a reset*: state that should be
+zero holds whatever the voice last wrote. A conformance plan that resets between
+blocks shows it first.
+
+**Cause:** instantiation and `reset` run the same "write the initializers"
+routine. If that routine writes only the *non-zero* initializers, because a fresh
+region is already zeroed, then `reset` over a region the voice has since written
+leaves it dirty — the routine relied on zeroes it no longer writes.
+
+**Remedy:** the routine must zero the region first and then write the `.data`,
+which is the shape the Wasm emitter has always had (`memory.fill` then the
+non-zero stores). The JavaScript arena's `init` does this now; a region's size
+travels in the canonical form (`{:dsp/zeros n}`) so a host knows how much to
+zero-fill.

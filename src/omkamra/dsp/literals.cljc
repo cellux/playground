@@ -16,8 +16,7 @@
   description transformers that build a voice's body. A bare float literal is
   unambiguous only where the two platforms agree, which is everywhere except an
   integral value — and an integral value is exactly what an integral float
-  looks like to a platform with one number type."
-  (:require [clojure.walk :as walk]))
+  looks like to a platform with one number type.")
 
 (defn float-literal?
   "Whether `form` is a boxed float literal."
@@ -41,10 +40,21 @@
   "Rewrite every float literal in a form as the box its type survives in.
 
   An integer is already unambiguous and is left alone, as is a value that is not
-  a number at all."
+  a number at all, and a form already written with `#dsp/float` is left exactly
+  as it is: the walk does not descend into a box, so a number inside one is not
+  boxed a second time. (A plain postwalk would: it visits the inner number before
+  it sees the box around it, which is how a written `#dsp/float -1.0` became
+  `#dsp/float #dsp/float -1.0`.)"
   [form]
-  (walk/postwalk (fn [node]
-                   (if (or (double? node) (float? node))
-                     (float-literal node)
-                     node))
-                 form))
+  (cond
+    (float-literal? form) form
+    (or (double? form) (float? form)) (float-literal form)
+    (list? form) (apply list (map box-float-literals form))
+    (seq? form) (doall (map box-float-literals form))
+    (vector? form) (mapv box-float-literals form)
+    (map? form) (into (empty form)
+                      (map (fn [[key value]]
+                             [(box-float-literals key) (box-float-literals value)]))
+                      form)
+    (set? form) (into #{} (map box-float-literals) form)
+    :else form))

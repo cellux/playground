@@ -4291,3 +4291,264 @@ line on the JVM (reverting the fix fails it 94 times). The canonical-text compar
 bites when the JVM and cljs spellings differ (perturbing the JVM branch fails the
 browser check). The refactor is bite-free for the 275 pre-existing JVM tests, which
 is the point of comparing before and after.
+
+## D82 — the browser source front end is SCI-source macros over a compiled capture (P13d)
+
+**Status.** In force for P13d (adopted 2026-10-25). The JVM-side mechanics below
+are measured; the browser-side SCI build is the slice's first check.
+
+**Decision.** The browser's DSP source front end is:
+
+1. **SCI evaluates only the user's source; the compiler stays AOT.** D77 already
+   fixed this — Shadow compiles `descriptor`, `linker`, `ir`, `builtins`,
+   `numbers`, `compiler` and both emitters, and SCI expands the user's `dsp/defn`
+   forms and constructs descriptors. Neither the bodies (they are data) nor the
+   compiler are interpreted.
+2. **The `omkamra.dsp` macros are defined as *SCI source*, not injected as host
+   macros.** A `prepare-context` bootstrap evaluates `defmacro`s that read the
+   definition site with SCI's own `ns-name`/`ns-aliases`/`ns-refers` and
+   `&form`'s `:line`/`:column`, then delegate descriptor construction to compiled
+   helper functions injected as ordinary SCI vars. Each macro returns
+   `(def name (quote descriptor))`, exactly as the JVM capture does, so the
+   definitions live in SCI Vars.
+3. **`prepare-context` seeds the compiled-in library namespaces**, injects the
+   compiled capture helpers, evaluates the macro bootstrap, sets
+   `:readers {'dsp/float …}`, and curates `clojure.core` (the macro expansions use
+   `let`/`when-not`/`assoc`/`throw`/`ex-info`, so it is not an empty core). The
+   user's source `require`s what it needs; SCI resolves against the registered
+   namespaces, with no filesystem or `:load-fn`.
+4. **A host-side registry `{qualified-id → descriptor}`, seeded with the
+   library, is what `linker/link` resolves against** (through the injectable
+   `:resolve` built in P13a), not JVM Vars. SCI Vars may also hold the
+   definitions; the map is what the linker and P13e's cache read.
+
+**Rationale for (2), and the measurement that decided it.** `sci.core/new-macro-var`
+exists, so compiled macros *can* be injected. But a host macro runs in its compiled
+namespace: its `*ns*` is not SCI's, and while it can reach SCI's namespace as an
+object through `@sci.core/ns`, `sci.core` exports only `ns-name`/`resolve`, not
+`ns-aliases`/`ns-refers`, so reading the definition site's aliases from the host
+means leaning on `sci.impl.*`. An interpreted SCI macro has all of it for free.
+The capture logic stays compiled either way; only the thin macro that reads the
+definition site is SCI source.
+
+**Measured (dev JVM, 2026-10-25).**
+
+- `sci.core/new-macro-var` exists (`new-var` + `:macro true`).
+- A host macro's `*ns*` is the compiled ns, and `clojure.core/ns-name` on the
+  `sci.lang.Namespace` it can reach throws; `sci.core` exports no alias accessor.
+- An interpreted SCI `defmacro` reads `(ns-name *ns*)`, `(ns-aliases *ns*)` and
+  `(ns-refers *ns*)`; `&form` carries `:line`/`:column`.
+- `(require '[lib :as x])`, `:refer`, and `(ns u (:require …))` resolve against
+  namespaces pre-registered in `sci/init`.
+- `(sci/init {:readers {'dsp/float f}})` round-trips `#dsp/float 1.0`.
+- **SCI's `ns-refers` includes all of `clojure.core`**, whereas the JVM capture
+  deliberately excludes clojure.core from `:resolution {:refers …}`. The browser
+  capture must filter the same way, or descriptors will not match and `compiler
+  equivalence` will flag it.
+
+**Consequences.**
+
+- The runtime/compiler split still holds (D77, D81): SCI and the registry are the
+  compiler half, and the worker build never requires them.
+- The JVM macro and the SCI macro share one compiled capture function, so
+  `compiler equivalence` can compare browser-captured descriptors with JVM-captured
+  ones — and the eight `:definition-var` cases become comparable rather than
+  skipped.
+- The macro must *be* a macro, so the body arrives as data; and the other DSP
+  macros' expansions must be evaluable in SCI's curated core.
+- Anonymous `dsp/fn` values and transformer output (`(dsp/def x (-> (dsp/fn …)
+  (unison …)))`) carry `:dsp/dependencies`; the JVM-only `carried-definitions` in
+  `dsp.clj` must be re-expressed for the registry.
+
+**Open (P13d, not yet decided).**
+
+- Whether the browser SCI build compiles under Shadow — the first check, in the
+  style of D77's spike.
+- Whether descriptors are read back from SCI Vars or mirrored into the host
+  registry (or both).
+- How the library registry is generated: a generated `.cljc` manifest, or
+  per-namespace registration.
+- Error classification separating SCI reader/expansion/eval errors from
+  descriptor/linker/ir and backend errors (P13e).
+
+## D83 — one source pipeline over two worlds and four inputs (P13d)
+
+**Status.** In force (implemented and verified).
+
+**Decision.**
+
+- `omkamra.dsp.source` (`.cljc`) is the front end. `compile` dispatches on the
+  *input*: `:definition` for a descriptor, a linked unit, or a JVM Var;
+  `:source` for a string. `evaluate` dispatches on `:evaluator`: `:sci` (the
+  default, and the only option in the browser world) or `:native` (the JVM's own
+  reader and macros, JVM-only). Both inputs compile to the *same* artifact, so a
+  handle is determined by the target and not by the path that produced it.
+- `omkamra.dsp.capture` (`.cljc`) is the one reading of a definition form. The
+  JVM macros and the browser's macros both call it, so a definition reads the
+  same in either world. It takes the definition site as data — the form, the
+  namespace, the resolved aliases and refers — and never reads `*ns*` itself.
+- The browser's `omkamra.dsp` macros are **SCI source**, not host macros. A host
+  macro made with `new-macro-var` runs in its compiled namespace: its `*ns*` is
+  not SCI's, and SCI exports no alias accessor a host could apply to the
+  namespace object it can reach. An interpreted macro reads `(ns-name *ns*)`,
+  `(ns-aliases *ns*)` and `(ns-refers *ns*)` for free, which is exactly what a
+  definition's `:resolution` needs. `omkamra.dsp.sci` builds the context:
+  library namespaces seeded, the compiled capture functions injected as host
+  vars, one bootstrap of `defmacro`s evaluated into it, `:readers
+  {'dsp/float …}`, and SCI's own `clojure.core`.
+- `omkamra.dsp` has two **world faces**, the arrangement ClojureScript forces on
+  any macro namespace: `omkamra/dsp.clj` (the macros, the JVM runtime, the `:jvm`
+  target method, the `:native` evaluator) and `omkamra/dsp.cljs` (the runtime).
+  A browser app writes `(:require [omkamra.dsp :as dsp])` **and**
+  `(:require-macros [omkamra.dsp :as dsp])` and gets `dsp/defn` and `dsp/compile`
+  from one alias, as `cljs.core.async` gives `go` and `chan`.
+- `compiler/compile-target` is a multimethod. `:interpreter`, `:js` and `:wasm`
+  share the `:default` method; the JVM registers `:jvm` from the side that has
+  `insn` (D77). It replaces the ad-hoc `extra-targets` map, so a host can add a
+  backend without the pipeline changing.
+- The four cells are `{JVM, browser} × {static definition, source string}`.
+  Static is the macros in the app's own namespaces (a Var on the JVM, a
+  descriptor Var in the page); dynamic is a string through SCI (or `:native` on
+  the JVM). Call resolution is the one asymmetry: the JVM resolves through Vars,
+  the browser through a registry, because ClojureScript has no runtime
+  namespace resolution (T7).
+
+**Evidence.** The `source equivalence` browser check compiles five source
+strings with SCI *in the page* and matches the JVM's own reader and macros
+byte-for-byte — descriptor, canonical IR, JS module and WAT. `compiler
+equivalence` compiles all 60 catalog definitions with 0 skipped. JVM 277 tests /
+2541 assertions / 0 failures; browser 53/53 checks, parity gaps empty.
+
+## D84 — a portable source location is namespace+line+column, and a box is never re-boxed
+
+**Status.** In force (amends D78/D79).
+
+- A macro's `&form` carries `:file` under ClojureScript's reader and not under
+  Clojure's, so `:file` cannot be part of a descriptor that two worlds compare.
+  `omkamra.dsp.capture/source-of` selects `[:line :column]` plus the namespace;
+  a front end that knows a file may layer it on *beside* the descriptor. (This
+  was found by the first real cross-world link of a library definition.)
+- `omkamra.dsp.literals/box-float-literals` must not descend into a
+  `{:dsp/float x}` box. A plain `postwalk` visits the inner number before the
+  box around it, so an explicit `#dsp/float -1.0` became
+  `#dsp/float #dsp/float -1.0` — on the JVM as well as in the page.
+
+## D85 — the host API is uniform; a target's representation stays behind its kernel
+
+**Status.** In force as the architecture. The voice half is implemented; the bus
+half is the next slice (see the handoff).
+
+- The voice half is already uniform: `synth.pool/Kernel` is a protocol and
+  `write-voice-controls!` takes a values array in ABI order, so each host maps it
+  to its own representation. The JVM `insn` backend keeps its physical
+  `double[]`/`long[]` control arrays *inside* `hosts/jvm`, private.
+- The bus half is not yet. `js-bus-kernel` and `wasm-bus-kernel` return the same
+  `{:create-bus :run-bus! :reset-bus! :write-lane! :write-shared!}` and the page
+  drives them with one runner, but `hosts/instrument.clj` drives the JVM bus
+  instance directly and therefore carries `control-slots` /
+  `write-bus-controls!` in its own body — a representation leak, not a semantic
+  difference.
+- Decision: give the JVM (and the interpreter) a bus kernel with those same five
+  operations, with `control-slots` private to it; make `hosts/instrument`
+  `.cljc`, taking `{kernel, bus-kernel}` as arguments defaulted per world (the
+  linker's `:resolve` pattern). Then `instrument-pool`, `render!` and the
+  play/`set-*` vocabulary are host-neutral — the same functions in all four
+  cases, with the target the only difference.
+- Consequence: the reference instrument's voice DSP and description can be
+  `.cljc` (the live host staying in a JVM namespace), which makes it the worked
+  example of a portable instrument and the natural subject of the four-path
+  acceptance test.
+
+## D86 — a state region's zeroes travel as a size, not as elements (`.bss`)
+
+**Status.** In force (implemented and verified).
+
+- A state region whose whole initial value is the zero pattern is the `.bss`
+  half of the state: the host supplies it by *zero-filling* — a typed array,
+  linear memory, a fresh primitive array — so only its size has to travel.
+  Everything else is `.data`, written explicitly. The idea is the linker's, one
+  level down: the zeroes need no bytes anywhere.
+- The canonical form carries `{:dsp/zeros n}` where a state entry carried `n`
+  zeroes. The test is on the *bits*: `-0.0` equals `0.0` but is not what a zeroed
+  region holds, so it stays explicit (D76). A region with any non-zero element
+  stays a vector, so the compaction can never eat a value.
+- The JS emitter's arena is the zero-filled *shape* of the right length
+  (`new Float64Array(n)`, or `Array(n).fill(0)` for a mixed arena), and `init`
+  zeroes it and then writes only the non-zero initializers. `reset` runs the same
+  code over state a voice has since written, so the zeros are *put back*, not
+  merely left alone — which is the whole reason the compaction is safe. The Wasm
+  emitter already did this (`memory.fill` + non-zero stores, the P12b fix); the
+  JVM and the interpreter allocate fresh arrays, which the runtime zeroes.
+- What is *not* compacted: the descriptor's materialized array initializers. The
+  compaction lives where the region is used (the IR's canonical form and the
+  emitters), not in the normalized descriptor, so the descriptor stays a plain
+  declaration of what the author wrote.
+
+**Evidence.** The reference instrument's folded post-mix bus (a 48 000-slot delay
+line whose whole state is zero): canonical IR **1.77 MB → 40 KB**, JS module
+**3.65 MB → 11 KB**, emission **4.7 s → 0.16 s**; the WAT is unchanged, because it
+was already compact. JVM 279 tests / 2548 assertions / 0 failures; browser 54/54;
+parity 211 cases, no gaps. A browser run that had been timing out on the payload
+now finishes in well under a second.
+
+## D87 — the compiler names no example; an example is compiled as data
+
+**Status.** In force.
+
+- Nothing in the compiler or its general harness — `descriptor`, `linker`, `ir`,
+  `source`, `sci`, `capture`, `registry`, `targets`, `hosts`, or
+  `harness.conformance` — names a particular example. The payload a check
+  compares against is built from *entries* (`{:id, :definition, :entry,
+  :channels, …}`) and knows nothing about whose they are; the example is named
+  where the example is known, which is the harness that assembles its payload and
+  the browser check that hands over its own definitions.
+- The reference instrument is one `.cljc` file both worlds capture with their own
+  macros, and it is compiled through the same `dsp/compile` as any other
+  definition. It is not special-cased anywhere. If compiling it ever needed a
+  change to the compiler, that change must be a *general* capability with its own
+  justification and its own test — a combinator the source layer may use, a
+  resolution rule the linker applies to any definition — never a hook for this
+  example.
+- The check is `reference instrument equivalence`: the page compiles its own
+  capture of the voice (the `dsp/defn` forms Shadow compiled into the bundle) and
+  the bus *definition* the JVM folded (a derived definition is plain data, so it
+  travels), and compares descriptor, canonical IR, and both artifacts with the
+  JVM's. It is the same generic comparison the catalog cases use.
+
+## D88 — the reference instrument is one `.cljc`, portable on every target
+
+**Status.** In force.
+
+- `omkamra.dsp.examples.reference-synth` is a single `.cljc`. Its *definition*
+  half — the three `dsp/defn`s, the `unison` combinator, the description, and the
+  `omkamra.dsp.instrument` value with its modulation matrix and post-mix chain —
+  is portable and is captured by both worlds' macros. Its *host* half is portable
+  too (a pool, a bus and a modulation loop hold only primitive arrays and the pool
+  API); the one JVM-side function is `build-instrument`, which lowers and compiles
+  the instrument value, and it is `#?(:clj …)`. A browser builds the same live
+  host from a served program with `hosts.instrument/instrument-pool` and the
+  kernels it built there.
+- The `definitions` map declares the namespace's own definitions by qualified id,
+  because ClojureScript has no runtime namespace resolution (T7) and the page must
+  resolve a same-namespace call. The ids are the ones the linker derives from each
+  definition's `:source :namespace`; a test asserts it, because a mismatch is
+  silent on the JVM (which resolves through Vars).
+- It compiles and runs on the interpreter, the JVM, JavaScript and Wasm, from
+  both worlds, and with or without SCI. *Without*: the static macros capture it,
+  and the page compiles its own capture of the voice (the `dsp/defn` forms Shadow
+  compiled) plus the bus definition the JVM folded — that is the `reference
+  instrument equivalence` check, and it holds on all four targets. *With*: its
+  own source, read back from the `.cljc` it is written in (never transcribed),
+  compiles identically through SCI and through the JVM's reader and macros; a
+  test asserts it. The capability SCI needs for it — a combinator, which runs
+  while the source is evaluated — is exposed to the sandbox and checked by the
+  `:source-combinator` source case.
+- **The one wrinkle, and it is the language's, not the example's.** A browser
+  reader has a single number type, so it cannot keep a bare `:int` literal
+  (`white-noise`'s seed) apart from an integral float — the ambiguity `#dsp/float`
+  exists for (D78). `literals/box-float-literals`'s ClojureScript branch currently
+  boxes *every* number, which makes a bare integral literal a float and so makes
+  an `:int` literal unspellable in browser source. The reference source is
+  therefore checked with SCI on the JVM, where the reader keeps the type. Making
+  browser source spell ints (box only non-integral numbers, and write integral
+  floats as `#dsp/float`) is a language-contract change and is left open.

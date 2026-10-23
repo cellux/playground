@@ -3303,6 +3303,42 @@
   [value]
   (pr-str value))
 
+(defn- bss-initializer?
+  "True when `value` is what a zero-filled region holds for `type`.
+
+  A region whose whole initial state is this needs no enumerating: the host
+  zero-fills it (a typed array, linear memory, a fresh primitive array), so only
+  its size has to travel. It is the `.bss` half of a state region, and it is
+  what makes a 48 000-slot delay line a size rather than 48 000 zeroes. The test
+  is on the bits — `-0.0` is not what a zeroed region holds, so it stays
+  explicit (D76)."
+  [type value]
+  (case type
+    :float (and (number? value)
+                (zero? (double value))
+                (not (numbers/negative-zero? (double value) true)))
+    :int (and (number? value) (zero? (long value)))
+    :boolean (not value)
+    false))
+
+(defn- compact-init
+  "Replace a state region's all-zero `:init` vector with its size.
+
+  A state entry whose whole initial value is the zero pattern is one the host
+  zero-fills, so the canonical form carries `{:dsp/zeros n}` where the entry
+  carried `n` zeroes. Anything else — a non-zero initializer, a negative zero, an
+  explicitly written table — is left exactly as it was."
+  [value]
+  (let [init (:init value)
+        size (:size value)]
+    (if (and (vector? init)
+             (integer? size)
+             (> (long size) 1)
+             (= (long size) (count init))
+             (every? (fn [element] (bss-initializer? (:type value) element)) init))
+      (assoc value :init {:dsp/zeros (long size)})
+      value)))
+
 (defn canonical-form
   "A cross-platform canonical value for lowered IR data (D77).
 
@@ -3325,7 +3361,7 @@
     (map? value)
     (into (sorted-map-by (fn [a b] (compare (canonical-key a) (canonical-key b))))
           (map (fn [[k v]] [(canonical-form k) (canonical-form v)]))
-          value)
+          (compact-init value))
 
     (set? value)
     (into (sorted-set-by (fn [a b] (compare (canonical-key a) (canonical-key b))))

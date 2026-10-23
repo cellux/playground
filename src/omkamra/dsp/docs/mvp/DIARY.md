@@ -5185,6 +5185,147 @@ eight.
 
 ---
 
+## 2026-10-25 — the P13d front-end shape, measured (D82)
+
+P13c left the boundary P13d is about: how the page gets the definitions it
+compiles. Two candidate mechanisms were on the table — inject *host* macros via
+`sci.core/new-macro-var`, or define the DSP macros as *SCI source* — and the
+mechanism turns on one question: can the macro read the definition site's aliases
+and refers?
+
+Rather than reason about it, I ran it in the dev JVM. `new-macro-var` does exist,
+and a host macro gets `&form` (line and column included), but its `*ns*` is the
+compiled namespace, not SCI's; it can reach SCI's namespace object through
+`@sci.core/ns`, and `clojure.core/ns-name` on *that* throws, because SCI exposes
+only `ns-name`/`resolve` from `sci.core`, not `ns-aliases`/`ns-refers`. An
+interpreted SCI `defmacro`, by contrast, reads `(ns-name *ns*)`,
+`(ns-aliases *ns*)` and `(ns-refers *ns*)` directly, and gives them to a compiled
+capture function. So the thin macro is SCI source and the capture stays compiled.
+
+Three more measured facts went into the write-up: `require`/`:refer`/`(ns …
+(:require …))` resolve against namespaces pre-registered in `sci/init` (no
+`:load-fn`); `:readers {'dsp/float …}` round-trips the box; and SCI's `ns-refers`
+includes all of `clojure.core`, which the browser capture must filter out the way
+the JVM capture does, or the descriptors will diverge and `compiler equivalence`
+will say so.
+
+The decision is D82. One thing is deliberately not claimed: the browser-side SCI
+build under Shadow is unmeasured (SCI ships cljs sources, and nbb is a cljs host,
+but D77's standard is a spike, not an inference), so it is P13d's first check.
+
+---
+
+## 2026-10-25 — P13d, part one — the source layer (D83, D84)
+
+P13d's job is to let a page compile *source* — the user's, not the catalog's —
+and the first question was where the compiler's input comes from. D82 had
+measured that an interpreted SCI macro can read the definition site where a host
+macro cannot, so the shape was known; what this slice did was build it and let
+the equivalence checks say whether it was right.
+
+**What landed.**
+
+- `omkamra.dsp.capture` (`.cljc`) — step one, a pure refactor: the reading of
+  `dsp/defn`/`fn`/`defstruct`/`def` moved out of the JVM macros into a portable
+  namespace that takes the definition site as *data*. The JVM macros became thin
+  callers supplying `&form`, the namespace, and the resolved aliases and refers.
+  The pre-existing tests passed unchanged, which is the only evidence a refactor
+  has.
+- `omkamra.dsp.registry` and `omkamra.dsp.library-registry` (`.cljc`) — the
+  definition registry, and the library seeded from the namespaces the page
+  compiles. Wiring `equivalence.cljs` through it closed the last gap P13c left:
+  `compiler equivalence` compiles all **60** catalog definitions with **0
+  skipped**, the eight library-reaching cases included.
+- `omkamra.dsp.sci` (`.cljc`) — `evaluate-source`: a context seeded with the
+  library, the compiled capture functions injected, and a bootstrap of
+  SCI-source `defmacro`s.
+- `omkamra.dsp.source` (`.cljc`) — the front end: `compile` dispatches on the
+  input (definition vs string) and `evaluate` on the evaluator (`:sci` in both
+  worlds, `:native` on the JVM).
+- `omkamra.dsp.cljs` — the browser world face, so `dsp/compile` exists on both
+  sides of the macro/runtime split (`cljs.core.async`'s arrangement).
+- `compiler/compile-target` — a multimethod replacing `extra-targets`; the JVM
+  registers `:jvm`.
+- `source equivalence` — a browser check that compiles five source strings with
+  SCI in the page and compares descriptor, canonical IR, JS module and WAT with
+  the JVM's own reader and macros. It passes.
+
+**Three bugs, all found by building it.**
+
+1. A reader discrepancy only a real cross-world link could show: Clojure's
+   reader gives a macro form no `:file`, ClojureScript's does, so the JVM's
+   library descriptor and the page's differed by one key. The portable source is
+   now namespace+line+column (D84).
+2. `box-float-literals` double-boxed an explicit `#dsp/float` — on the JVM too,
+   because a `postwalk` visits the number before the box around it (D84).
+3. ClojureScript's `ns-publics` is a macro that needs a *literal* namespace
+   symbol; there is no runtime namespace enumeration (T7). It reshaped how the
+   library registry is written.
+
+**Verified.** JVM **277 / 2 541 / 0**; browser **53/53**, the new check
+included; parity table empty.
+
+**Still open in P13d**, and the subject of D85: the bus still carries JVM control
+slot arrays into what should be a host-neutral instrument host. The slices are in
+the handoff.
+
+---
+
+## 2026-10-25 — P13d, part two — the reference instrument and a `.bss` (D85–D88)
+
+Part one built the source layer. This part makes the *reference instrument* the
+worked example of a portable one, and in doing so closed the last host seam and
+found a piece of the linker's own idea one level down.
+
+**The host seam closed.** The bus was the last place a target's representation
+leaked into shared code: the JVM bus drove its physical control arrays from
+`hosts.instrument` itself, where JavaScript and Wasm already agreed on a five-op
+bus kernel. D85 is now in force — `hosts.jvm/jvm-bus-kernel` and
+`hosts.interpreter/interpreter-bus-kernel` join the other two, `control-slots`
+moved behind the JVM one, `hosts.instrument` is `.cljc` whose live host takes
+`{kernel, bus-kernel}` (defaulted per world), and the page's bus-region checks
+run the shared host over browser kernels.
+
+**The reference synth is one `.cljc`.** Its definition half (three `dsp/defn`s, a
+`unison` combinator, the description, the instrument value) and its host half (a
+pool, a bus, a modulation loop) are portable; only `build-instrument`, which
+lowers and compiles the instrument, is `#?(:clj …)`. The page compiles its *own*
+capture of the voice and the bus definition the JVM folded, and the new
+`reference instrument equivalence` check finds them identical on JavaScript and
+Wasm — through the same generic comparison the catalog uses. A test pins the
+`definitions` map's ids to each definition's own namespace, because on the JVM
+nothing would notice a mismatch.
+
+**The `.bss`.** The bus's canonical IR was 1.77 MB and its JavaScript module
+3.65 MB — a 48 000-slot delay line whose whole state is zero, written out one
+zero at a time, Squint taking 4.7 s to compile the literal. The idea is the
+linker's, one level down: a zero region needs no bytes anywhere. The canonical
+form now carries `{:dsp/zeros n}`, the JS arena is the zero-filled shape of the
+right length, and `init` zero-fills and *then* writes the non-zero initializers —
+so `reset` puts the zeros back rather than trusting a fresh region (T10).
+Canonical 1.77 MB → 40 KB, JS module 3.65 MB → 11 KB, emission 4.7 s → 0.16 s;
+the WAT was already compact (P12b).
+
+**"With or without SCI".** *Without*: the static macros capture it and the page
+compiles that capture (the check above). *With*: the sandbox now holds the
+*combinator* namespace's functions — `unison` runs while a source is evaluated, so
+SCI needs the function, not a descriptor — and the reference instrument's own
+source, read back from the `.cljc` and never transcribed, compiles identically
+through SCI and the JVM's reader (a JVM test). The one thing between the same
+check and the page is the language's: a browser reader has one number type, so it
+cannot keep a bare `:int` literal apart from an integral float (D78), and
+`box-float-literals`'s ClojureScript branch boxes every number. That is a contract
+decision, and it is open.
+
+**Two principles recorded.** D87 — the compiler and its general harness name no
+example; a payload is built from entries, and the example is named where the
+example is known. D88 — the reference instrument is the single `.cljc` above.
+
+**Verified.** JVM **280 tests / 2 549 assertions / 0 failures**; browser
+**54/54**; parity **211 cases, no gaps**.
+
+---
+
 ## Handoff — current state
 
 The one entry rewritten in place, and always the last. It holds where we are, what
@@ -5194,41 +5335,38 @@ bullet that is still true two slices later is in the wrong file.
 
 ### Where we are
 
-**P13c is the last completed slice** (D81): the compile pipeline is portable
-(`omkamra.dsp.compiler`), `dsp/compile` is the JVM entry point that supplies the JVM
-backend, and the page compiles a definition to a JS module or WAT itself with
-Squint in both worlds. `compiler equivalence` compiles each catalog definition it
-can in the page and compares the descriptor, linked unit, portable IR, canonical IR
-text, emitter forms, Wasm module and the compiled artifacts with the JVM's.
-`ir/canonical-form`/`canonical-text` is the shared serialization and the future
-cache key.
+**P13d is done but for its last slice.** D85–D88 are implemented and verified:
+`dsp/compile` takes a definition or a source string in both worlds; the bus lives
+behind one kernel interface on all four targets; `hosts.instrument` is `.cljc`;
+the reference synth is a single `.cljc` the page compiles its own capture of; and
+a state region's zeros travel as a size (canonical IR 1.77 MB → 40 KB, JS module
+3.65 MB → 11 KB).
 
-Suite: JVM **277 tests / 2 541 assertions / 0 failures**, browser **52/52**, parity
-table empty.
+Suite: JVM **280 tests / 2 549 assertions / 0 failures**, browser **54/54**,
+parity **211 cases, no gaps**.
 
 ### What's next
 
-- **P13d — the SCI source layer** (`PHASES.md` §P13). The SCI-compatible capture
-  macros and the browser definition registry, with aliases, refers, source locations
-  and diagnostics. It is what lets the page compile the eight `:definition-var` cases
-  it currently skips — those expected values already ship, so closing the gap needs
-  no server-side change — and it is the first moment a *user's* source (not the
-  catalog) enters the browser compiler.
-- **P13e**, then: incremental recompilation, caching keyed on `ir/canonical-text`,
-  and error classification separating SCI, validation and backend errors.
-- **P14**, then **H1**. Artifact-driven worklet installation, and only then the pool
-  inside a worklet node, whose shape those phases decide. H1 starts with its own
-  question: where the allocator lives.
-- **P15** and **P16** close the spine: safety and diagnostics with the optimization
-  stage, then conformance and release gates.
+1. **The literal question, and it is a decision, not work** (D88's wrinkle;
+   written up in `PLAN.md` §Open questions, *Can browser source spell an `:int`
+   literal?*). Browser source cannot spell an `:int` literal: the ClojureScript
+   reader cannot tell `12345` from `2.0`, and `literals/box-float-literals` boxes
+   every number. The D78-consistent fix is to box only non-integral numbers — a
+   bare integral literal is an `:int`, an integral float is written `#dsp/float` —
+   but that changes what a browser author must write, so it is held. Nothing
+   blocks on it: it is a spelling contract, not a capability.
+2. **`omkamra.dsp` as a thin facade** (D85's last item): `compile`, `link` and
+   the macros already delegate; the instance lifecycle
+   (`create-instance`/`destroy!`/`process!`/…) still wants its own namespace to
+   re-export.
+3. **Then P13e** (incremental recompilation, caching keyed on
+   `ir/canonical-text`, error classification), then **P14** (artifact-driven
+   worklet installation), then **H1**, **P15**, **P16** per `PHASES.md`.
 
 ### What shapes the next decision
 
-P13d is where the page stops compiling the catalog and starts compiling *source*.
-It is also where the runtime/compiler split gets its first real test: the registry
-and the SCI capture belong to the compiler half, and the worker build must go on
-without them. The design boundary P13c left for it is exactly that — how the page
-gets the definitions it compiles, without reaching for SCI's own `require` first.
-
-Everything else that is undecided is a choice for a later phase, listed in
-`PLAN.md` §Open questions. None of them blocks P13d.
+The {world × input} cells are real and checked for the reference instrument: its
+definition is captured and compiled in both worlds, and its own source is
+evaluated by SCI and by the JVM's reader. What remains is not a missing
+capability but a spelling contract (item 1). Everything else undecided is in
+`PLAN.md` §Open questions.

@@ -8,161 +8,40 @@
   Definitions are data; their bodies are never run as ordinary Clojure
   expressions."
   (:refer-clojure :exclude [compile defn defstruct fn reset!])
-  (:require [clojure.string :as str]
+  (:require [omkamra.dsp.capture :as capture]
             [omkamra.dsp.compiler :as compiler]
-            [omkamra.dsp.literals :as literals]
             [omkamra.dsp.readers]
-            [omkamra.dsp.linker :as linker]
+            [omkamra.dsp.source :as source]
             [omkamra.dsp.targets.jvm :as jvm]))
 
-(clojure.core/defn- valid-definition-name?
-  [name]
-  (and (symbol? name)
-       (not (str/blank? (clojure.core/name name)))))
+;; The reading of a definition form is portable and lives in `omkamra.dsp.capture`
+;; (P13d, D82); what stays here is the JVM's half of the definition site — the
+;; Clojure namespace an alias or a refer must be resolved through.
 
 (clojure.core/defn- macro-source
   [form]
-  (merge (select-keys (meta form) [:file :line :column])
-         {:namespace (ns-name *ns*)}))
+  (capture/source-of form (ns-name *ns*)))
 
 (clojure.core/defn- var-symbol
   [v]
   (symbol (str (-> v meta :ns ns-name)) (str (-> v meta :name))))
 
-(clojure.core/defn- macro-reference-symbols
-  [forms]
-  (letfn [(walk [form]
-            (cond
-              (seq? form) (concat (when (symbol? (first form)) [(first form)])
-                                  (mapcat walk (rest form)))
-              (coll? form) (mapcat walk form)
-              :else []))]
-    (set (mapcat walk forms))))
+(clojure.core/defn- macro-aliases
+  [ns]
+  (into {} (map (clojure.core/fn [[alias target]] [alias (ns-name target)])) (ns-aliases ns)))
 
-(clojure.core/defn- box-state-literals
-  "Box the float literals of every `:next` state transition, and of nothing else
-  in the state declaration: an `:init` is a declared value, typed by the slot it
-  initializes, and needs no box."
-  [states]
-  (when states
-    (mapv (clojure.core/fn [state]
-            (if (contains? state :next)
-              (update state :next literals/box-float-literals)
-              state))
-          states)))
-
-(clojure.core/defn- macro-resolution
-  "Capture only namespace mappings used by ordinary call forms at the
-  definition site. This is a compact, stable snapshot of Clojure resolution."
-  [ns forms]
-  (let [references (macro-reference-symbols forms)
-        aliases (ns-aliases ns)
-        refers (ns-refers ns)]
-    {:aliases (into {}
-                    (keep (clojure.core/fn [reference]
-                            (when-let [target (get aliases
-                                                   (some-> reference namespace symbol))]
-                              [(symbol (namespace reference)) (ns-name target)])))
-                    references)
-     :refers (into {}
-                   (keep (clojure.core/fn [reference]
-                           (when-let [v (and (nil? (namespace reference))
-                                             (get refers reference))]
-                             (when-not (= 'clojure.core (-> v meta :ns ns-name))
-                               [reference (var-symbol v)]))))
-                   references)}))
+(clojure.core/defn- macro-refers
+  [ns]
+  (into {}
+        (keep (clojure.core/fn [[reference v]]
+                (let [target-ns (-> v meta :ns ns-name)]
+                  (when-not (= 'clojure.core target-ns)
+                    [reference (var-symbol v)]))))
+        (ns-refers ns)))
 
 (clojure.core/defn- macro-fail
   [message form path data]
-  (throw (ex-info message
-                  (merge {:dsp/error :invalid-definition
-                          :dsp/source (macro-source form)
-                          :dsp/path path
-                          :dsp/form form}
-                         data))))
-
-(clojure.core/defn- capture-definition
-  "Build a `:function` descriptor from `dsp/defn`/`dsp/fn` arguments.
-
-  `label` names the form for diagnostics, `name` is the definition's name (or a
-  generated one for an anonymous `dsp/fn`), and `form` is the macro's `&form`, for
-  the source location."
-  [label name form args]
-  (let [[doc args] (if (string? (first args))
-                     [(first args) (next args)]
-                     [nil args])
-        [params & body] args
-        explicit-spec? (or (map? params)
-                           (and (vector? params)
-                                (= 2 (count params))
-                                (map? (first params))
-                                (contains? (first params) :params)))
-        [spec body]
-        (cond
-          (and (vector? params)
-               (= 2 (count params))
-               (map? (first params))
-               (contains? (first params) :params))
-          [(first params) [(second params)]]
-
-          (map? params)
-          [params body]
-
-          :else
-          [{:params params} body])
-        explicit-params? explicit-spec?
-        params (:params spec)
-        [options body] (if (and (not explicit-params?)
-                                (seq body)
-                                (map? (first body)))
-                         [(first body) (next body)]
-                         [{} body])
-        spec (merge spec options)
-        ;; A callee asks to be copied into its call sites rather than called,
-        ;; with `^:inline` metadata (on the name for `dsp/defn`, on the form for
-        ;; `dsp/fn`) or an `:inline true` spec key (D47).
-        inline? (boolean (or (:inline spec)
-                             (:inline (meta name))
-                             (:inline (meta form))))]
-    (when-not (vector? params)
-      (macro-fail (str label " params must be a vector")
-                  form [:params] {:name name :params params}))
-    (when (and (not explicit-params?) (not (every? symbol? params)))
-      (macro-fail (str label " parameters must be symbols")
-                  form [:params] {:name name :params params}))
-    (when-not (= (count params)
-                 (count (set (map #(if (symbol? %) % (:name %)) params))))
-      (macro-fail (str label " parameter names must be unique")
-                  form [:params] {:name name :params params}))
-    (when-not (pos? (count body))
-      (macro-fail (str label " requires at least one body expression")
-                  form [:body] {:name name :body body}))
-    (when (contains? spec :dependencies)
-      (macro-fail (str label " infers dependencies from ordinary DSP calls")
-                  form [:dependencies] {:name name}))
-    (let [source (merge
-                  (select-keys (meta form) [:file :line :column])
-                  {:namespace (ns-name *ns*)})]
-      (cond-> {:dsp/kind :function
-               :name name
-               :params params
-               :return-type (or (:return-type spec) :float)
-               :state (box-state-literals (:state spec))
-               ;; Like `clojure.core/defn`, several body forms are an implicit
-               ;; `(do ...)`. A single form is left exactly as written, so a
-               ;; captured descriptor's `[:body 0]` is still the author's form.
-               :body (mapv literals/box-float-literals
-                           (if (= 1 (count body)) body [(cons 'do body)]))
-               :source source
-               :resolution (macro-resolution *ns* body)}
-        (some? doc) (assoc :doc doc)
-        inline? (assoc :inline true)
-        (contains? spec :process)
-        (assoc :process (:process spec))
-        (contains? spec :options)
-        (assoc :options (:options spec))
-        (contains? spec :compiler-options)
-        (assoc :compiler-options (:compiler-options spec))))))
+  (capture/fail message (macro-source form) form path data))
 
 (clojure.core/defmacro defn
   "Capture a DSP function definition as a descriptor.
@@ -193,10 +72,13 @@
   Both forms capture source data; DSP bodies are never executed as ordinary
   Clojure expressions during definition or compilation."
   [name & args]
-  (when-not (valid-definition-name? name)
+  (when-not (capture/valid-definition-name? name)
     (macro-fail "dsp/defn name must be a non-blank symbol"
                 &form [:name] {:name name}))
-  (list 'def name (list 'quote (capture-definition "dsp/defn" name &form args))))
+  (list 'def name
+        (list 'quote (capture/capture-function "dsp/defn" name &form (ns-name *ns*)
+                                               (macro-aliases *ns*) (macro-refers *ns*)
+                                               args))))
 
 (clojure.core/defmacro fn
   "Capture an anonymous DSP definition as a value.
@@ -222,7 +104,9 @@
       (-> (dsp/fn [sample] {:inline true} (max -1.0 (min 1.0 sample)))
           (unison {:count 3})))"
   [& args]
-  (list 'quote (capture-definition "dsp/fn" (gensym "dsp-fn-") &form args)))
+  (list 'quote (capture/capture-function "dsp/fn" (gensym "dsp-fn-") &form (ns-name *ns*)
+                                         (macro-aliases *ns*) (macro-refers *ns*)
+                                         args)))
 
 (clojure.core/defmacro defstruct
   "Capture a DSP state-record shape as data bound to a Var.
@@ -243,31 +127,11 @@
   namespace and inlines the fields. The description is portable data so a
   browser compiler can read the same forms."
   [name params & body]
-  (when-not (valid-definition-name? name)
+  (when-not (capture/valid-definition-name? name)
     (macro-fail "dsp/defstruct name must be a non-blank symbol"
                 &form [:name] {:name name}))
-  (when-not (vector? params)
-    (macro-fail "dsp/defstruct requires a vector of field definitions"
-                &form [:params] {:params params}))
-  (let [[options body] (if (and (seq body) (map? (first body)))
-                         [(first body) (next body)]
-                         [{} body])]
-    (when (seq body)
-      (macro-fail "dsp/defstruct takes field definitions and one optional options map"
-                  &form [:body] {:body body}))
-    (let [fields (mapv (clojure.core/fn [field]
-                         (if (symbol? field)
-                           {:name field :type :float :init 0.0}
-                           field))
-                       params)
-          source (merge (select-keys (meta &form) [:file :line :column])
-                        {:namespace (ns-name *ns*)})]
-      (list 'def name
-            (list 'quote (merge {:dsp/kind :struct
-                                 :name name
-                                 :fields fields
-                                 :source source}
-                                options))))))
+  (list 'def name
+        (list 'quote (capture/capture-struct name &form (ns-name *ns*) params body))))
 
 (clojure.core/defmacro def
   "Bind `name` to a DSP definition produced by a transformer.
@@ -284,42 +148,16 @@
   `dsp/defn` Var. `:name` and `:source` are stamped here, so a transformer does
   not need to know where it is being defined."
   [name definition]
-  (when-not (valid-definition-name? name)
+  (when-not (capture/valid-definition-name? name)
     (macro-fail "dsp/def name must be a non-blank symbol"
                 &form [:name] {:name name}))
-  (let [source (merge (select-keys (meta &form) [:file :line :column])
-                      {:namespace (ns-name *ns*)})]
+  (let [source (macro-source &form)]
     `(~'def ~name
             (let [definition# ~definition]
               (when-not (and (map? definition#) (= :function (:dsp/kind definition#)))
                 (throw (ex-info "dsp/def expects a DSP definition value"
                                 {:name '~name :definition definition#})))
               (assoc definition# :name '~name :source (quote ~source))))))
-
-(clojure.core/defn- carried-definitions
-  "Collect the definitions reachable from `entries` through `:dsp/dependencies`.
-
-  A call-emitting transformer returns a definition whose body calls the original,
-  which for an anonymous `dsp/fn` value has no Var to resolve. The transformer
-  records the original in `:dsp/dependencies`; here those become supplied
-  definitions, transitively, so a chain of transforms links."
-  [entries]
-  (loop [pending (vec entries)
-         found {}]
-    (if (empty? pending)
-      found
-      (let [entry (peek pending)
-            value (if (var? entry) @entry entry)
-            dependencies (when (map? value) (:dsp/dependencies value))
-            fresh (when (map? dependencies)
-                    (reduce-kv (clojure.core/fn [m id dependency]
-                                 (if (contains? found id)
-                                   m
-                                   (assoc m id dependency)))
-                               {}
-                               dependencies))]
-        (recur (into (pop pending) (vals fresh))
-               (merge found fresh))))))
 
 (clojure.core/defn link
   "Link a DSP descriptor or Var into a compilation unit.
@@ -334,23 +172,14 @@
   ([definition]
    (link definition {}))
   ([definition options]
-   (let [options (or options {})
-         supplied (:definitions options)
-         carried (carried-definitions (cons definition (vals supplied)))]
-     (linker/link definition
-                  (assoc options :definitions (merge carried supplied))))))
+   (source/link-definition definition (or options {}))))
 
-(clojure.core/defn- linked-unit?
-  [value]
-  (= :compilation-unit (:dsp/kind value)))
-
-(clojure.core/defn- jvm-target-compiler
-  "The one target the portable pipeline cannot hold: `insn` is a JVM library, so
-  the JVM backend is handed to `compiler/compile` from this side (P13c, D77).
-
-  The pipeline is the same one the browser runs; only the final target step is
-  JVM-only, and this is that step."
-  [{:keys [entry lowered abi options]}]
+;; The one target the portable pipeline cannot hold: `insn` is a JVM library, so
+;; the JVM backend registers itself as `compile-target`'s `:jvm` method from this
+;; side (P13c, D77). The pipeline is the same one the browser runs; only the final
+;; target step is JVM-only, and this is that step.
+(clojure.core/defmethod compiler/compile-target :jvm
+  [_target {:keys [entry lowered abi options]}]
   (case entry
     :function
     (let [{:keys [invoke] :as jvm-artifact}
@@ -365,27 +194,50 @@
                           jvm-artifact)]
       (assoc compiled :initialize (:reset compiled)))))
 
-(clojure.core/defn compile
-  "Compile a DSP descriptor for `:interpreter`, `:jvm`, `:js`, or `:wasm`.
+;; The JVM world's own reader and macros, for a caller that would rather have a
+;; source string read by Clojure than by SCI. It is registered as `source`'s
+;; `:native` evaluator, so it is only reached when a string is compiled with
+;; `{:evaluator :native}`.
+(clojure.core/defmethod source/evaluate :native
+  [source {:keys [definition]}]
+  (binding [*ns* (or (find-ns 'user) *ns*)]
+    (load-string source)
+    (let [v (resolve definition)]
+      (when-not (var? v)
+        (throw (ex-info "the DSP source did not define the requested name"
+                        {:definition definition})))
+      {:definition @v
+       ;; `find-ns` reaches them, so no supplied definitions are needed.
+       :definitions {}})))
 
-  The pipeline itself is portable and lives in `omkamra.dsp.compiler` (P13c), so
-  the browser compiles DSP source with the same code. This entry point adds the
-  two things that are the JVM's: the JVM backend, whose bytecode generator
-  (`insn`) is a JVM library, and `dsp/link`, because a definition produced by a
-  call-emitting transformer carries the definitions it calls by Var.
+(clojure.core/defn- library-definitions
+  "The DSP library descriptors, loaded on demand.
+
+  A static-only JVM app — one that writes its DSP with the macros and never
+  compiles a string — never reaches this, so it never pulls
+  `omkamra.dsp.library-registry` (or SCI) in."
+  []
+  (deref (requiring-resolve 'omkamra.dsp.library-registry/library-definitions)))
+
+(clojure.core/defn compile
+  "Compile a DSP definition — or a source string that defines one — for a target.
+
+  This is the JVM world's face of `omkamra.dsp.source/compile`: it supplies the
+  two things the world owns — the JVM backend, registered as
+  `compiler/compile-target`'s `:jvm` method, and the DSP library the SCI front end
+  seeds from. It reaches a definition the same way it always has, through `link`
+  and the JVM's own namespace lookup, and a source string through the same SCI
+  front end the browser uses (or `{:evaluator :native}` for Clojure itself).
 
   The Wasm target returns WAT plus its linear-memory ABI; the browser-side WABT
   assembler turns that WAT into a binary module. The default `:entry` is
-  `:function`, a scalar expression.  Use `{:entry :process}` to compile the same
-  definition as a single-channel block processor: the first parameter is the
-  input sample and remaining parameters are block-wide controls."
+  `:function`, a scalar expression. Use `{:entry :process}` to compile the same
+  definition as a block processor."
   ([definition]
    (compile definition {}))
   ([definition compile-options]
-   (let [unit (if (linked-unit? definition)
-                definition
-                (link definition))]
-     (compiler/compile unit compile-options {:jvm jvm-target-compiler}))))
+   (source/compile definition (merge {:library (library-definitions)}
+                                     compile-options))))
 
 (clojure.core/defn- check-live!
   "Reject use of a process instance that has been destroyed."

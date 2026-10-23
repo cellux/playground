@@ -110,6 +110,57 @@
                "cache-control" "no-store"}
      :body (pr-str payload)}))
 
+(defn source-equivalence
+  "Serve the source equivalence payload (P13d).
+
+  DSP source strings and the JVM's own capture of each — descriptor, canonical
+  IR and both emissions — so the page can compile the same text with SCI and
+  compare. This is the check that pins the interpreted macro's capture to the
+  real macro's."
+  [_request]
+  ;; The reference instrument's own source is *not* served here. Its literals
+  ;; include an `:int` (`white-noise`'s seed), and a browser reader has one number
+  ;; type, so it cannot tell that `12345` from a `2.0` — which is exactly the
+  ;; ambiguity `#dsp/float` exists for (D78). The JVM's own reader keeps the type,
+  ;; so the reference instrument's source is checked against SCI on the JVM
+  ;; (`omkamra.dsp.tests.reference`), where both readers agree.
+  (let [payload (conformance/source-equivalence-payload)]
+    {:status 200
+     :headers {"content-type" "application/edn; charset=utf-8"
+               "cache-control" "no-store"}
+     :body (pr-str payload)}))
+
+(defn reference-instrument
+  "Serve the reference instrument equivalence payload (P13d).
+
+  The reference synth is the large, real case the catalog's small definitions
+  cannot be: one `.cljc` file both worlds capture with their own macros, calling
+  into the DSP library, using a `unison` combinator, process- and buffer-shaped,
+  with a three-stage post-mix chain. This serves the JVM's own compile of its
+  voice and its folded bus — the page compiles the voice from the capture already
+  in its bundle and the bus from the definition here, and compares descriptor,
+  canonical IR and both artifacts.
+
+  The payload is assembled *here*, where the example is named; `conformance`
+  builds it from the entries without knowing whose they are."
+  [_request]
+  (let [bus (instrument-host/lower-bus reference-synth/reference-instrument)
+        payload (conformance/compiled-definition-payload
+                 [{:id :voice
+                   :definition reference-synth/reference-voice
+                   :definition-id 'omkamra.dsp.examples.reference-synth/reference-voice
+                   :entry :process
+                   :channels 2}
+                  {:id :bus
+                   :definition bus
+                   :entry :process
+                   :channels 1
+                   :carry-definition? true}])]
+    {:status 200
+     :headers {"content-type" "application/edn; charset=utf-8"
+               "cache-control" "no-store"}
+     :body (pr-str payload)}))
+
 (defn numbers
   "Serve the number-formatting payload (P13b).
 

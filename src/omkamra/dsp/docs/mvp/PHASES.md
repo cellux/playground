@@ -609,9 +609,25 @@ otherwise.
   WABT was already in the page (D73), so Wasm needs no new browser dependency.
   The `:definition-var` cases stay skipped until P13d's registry — the eight the
   check reports are that gap, counted rather than failed.
-- **P13d — the SCI layer.** The SCI-compatible capture macros, the browser
-  registry with aliases, refers, source locations and diagnostics, and the
-  bridge where SCI calls compiled functions.
+- **P13d — the SCI layer. Done** (D82–D88). The SCI-compatible capture macros,
+  the browser registry with aliases, refers and source locations, and the bridge
+  where SCI calls compiled functions are in place. `omkamra.dsp.capture` is the
+  shared reading of a definition form; `omkamra.dsp.registry` /
+  `omkamra.dsp.library-registry` seed the definitions; `omkamra.dsp.sci` builds
+  the SCI context (and holds the *combinator* namespace's functions, which a
+  source needs because a combinator runs at evaluation time); `omkamra.dsp.source`
+  is the one `compile` — a definition or a source string, `:evaluator :sci` or
+  `:native` — with `omkamra.dsp.cljs` as the browser world face. `compiler
+  equivalence` compiles all 60 catalog definitions with 0 skipped; `source
+  equivalence` pins SCI's capture to the JVM's own macros per source string; and
+  `reference instrument equivalence` compiles the reference synth's voice (from
+  the page's own capture) and its folded post-mix bus here, matching the JVM on
+  JavaScript and Wasm. The reference synth is one `.cljc` (`D88`), the bus lives
+  behind one kernel interface on all four targets (`D85`), a state region's zeros
+  travel as a size (`D86`), and the compiler names no example (`D87`). **One
+  open item:** browser source cannot spell an `:int` literal — the ClojureScript
+  reader has one number type (D78) — which is a spelling-contract decision, not a
+  capability; see the handoff.
 - **P13e — deliverable 5.** Incremental recompilation, caching keyed on the
   canonical form, and error classification separating SCI, validation and
   backend errors. The least-scoped deliverable; no existing precedent to lean on.

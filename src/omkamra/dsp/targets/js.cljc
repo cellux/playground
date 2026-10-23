@@ -597,51 +597,71 @@
 ;; The module
 ;; ---------------------------------------------------------------------------
 
-(defn- arena-values
-  "Every arena slot as `[type initial-value]`, state first then scratch. A
-  fixed-size array's initial value is a vector, one entry per element."
+(defn- arena-slots
+  "Every arena slot's type, state first then scratch. A fixed-size array's slot
+  is one entry per element."
   [js-ir]
-  (concat (mapcat (fn [{:keys [type init size]}]
-                    (map (fn [value] [type value])
-                         (if (= 1 (or size 1)) [init] init)))
+  (concat (mapcat (fn [{:keys [type size]}]
+                    (repeat (or size 1) type))
                   (:state js-ir))
           (mapcat (fn [{:keys [type size]}]
-                    (repeat (or size 1) [type 0]))
+                    (repeat (or size 1) type))
                   (:scratch js-ir))))
 
-(defn- literal-text
+(defn- zero-initializer?
+  "True when `value` is what an already-zero-filled arena holds for its slot.
+
+  The arena is zeroed before the initializers are written, so only the *non-zero*
+  ones are stores — the `.data` half of a state region, whose `.bss` half the
+  runtime supplies. The test is on the bits: `-0.0` equals `0.0` but is not what a
+  zeroed region holds, so it stays explicit (D76). A boolean is never skipped:
+  the zero fill leaves `0` where a `:boolean` slot wants `false`."
   [type value]
   (case type
-    :int (str (int value))
-    :boolean (if value "true" "false")
-    (let [text ((if (f64?) numbers/f64->text numbers/f32->text) value)]
-      (if (f64?) text (str "Math.fround(" text ")")))))
+    :float (and (number? value)
+                (zero? (double value))
+                (not (numbers/negative-zero? (double value) (f64?))))
+    :int (and (number? value) (zero? (long value)))
+    false))
 
 (defn- arena-form
-  "The arena literal: a typed array when every slot is a float, so the common
-  case keeps its element type, and a plain array otherwise."
+  "The arena value: zero-filled, of the arena's length.
+
+  A typed array when every slot is a float, so the common case keeps its element
+  type and pays nothing to zero it; `Array(n).fill(0)` otherwise. This is only
+  the arena's *shape* — `init` zeroes it again and writes the non-zero
+  initializers — where before it was a literal listing every slot's initial
+  value: a delay line whose whole state is zero was 48 000 of them, and the
+  module a megabyte of zeroes."
   [js-ir]
-  (let [values (arena-values js-ir)
-        literal (list 'js* (str "["
-                                (str/join ", " (map (fn [[type value]]
-                                                      (literal-text type value))
-                                                    values))
-                                "]"))]
-    (if (every? (fn [[type _]] (= type :float)) values)
-      (list (if (f64?) 'js/Float64Array. 'js/Float32Array.) literal)
-      literal)))
+  (let [slots (arena-slots js-ir)
+        total (count slots)]
+    (if (every? (fn [type] (= type :float)) slots)
+      (list (if (f64?) 'js/Float64Array. 'js/Float32Array.) total)
+      (list 'js* (str "new Array(" total ").fill(0)")))))
 
 (defn- init-forms
+  "The instructions that put the initial state back: a zero fill, then the
+  non-zero initializers.
+
+  This is a `.bss` bootstrap plus a `.data` section. The whole arena is zeroed
+  first — `reset` runs the same code over state a voice has since written, so the
+  zeros have to be put *back*, not merely left alone — and only then are the
+  non-zero initializers stored. Before this every initializer was its own store,
+  including the 48 000 zeroes of a delay line's buffer."
   [js-ir]
-  (mapcat (fn [{:keys [index init type size]}]
-            (map-indexed (fn [offset value]
-                           (list 'aset state-arena (+ index offset)
-                                 (coerce-form type
-                                              (expression-form {:op :constant
-                                                                :type type
-                                                                :value value}))))
-                         (if (= 1 (or size 1)) [init] init)))
-          (:state js-ir)))
+  (cons (list '.fill state-arena 0)
+        (mapcat (fn [{:keys [index init type size]}]
+                  (keep-indexed
+                   (fn [offset value]
+                     (when-not (zero-initializer? type value)
+                       (list 'aset state-arena (+ index offset)
+                             (coerce-form type
+                                          (expression-form {:op :constant
+                                                            :type type
+                                                            :value value})))))
+                   (if (= 1 (or size 1)) [init] init)))
+                (:state js-ir))))
 
 (defn- parameter-symbol
   "A parameter as a binding symbol, tagged when it is a boolean so Squint lowers
