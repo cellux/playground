@@ -26,11 +26,12 @@
   (:require [clojure.string :as str]
             [clojure.walk :as walk]
             [omkamra.dsp.numbers :as numbers]
-            ;; Squint is the JVM's, and the browser's compile entry point is
-            ;; P13c's: what is portable, and what the two worlds must agree on,
-            ;; is the source text this namespace builds, not the module squint
-            ;; makes of it.
-            #?(:clj [squint.compiler :as squint])))
+            ;; Squint owns the JavaScript syntax, and it is portable (P13c): the
+            ;; two worlds both hand it the same ClojureScript the emitter builds
+            ;; and both get the module text they compare. It is a *compiler*
+            ;; dependency, so only the compiler half of a build reaches it — a
+            ;; runtime-only consumer never requires this namespace.
+            [squint.compiler :as squint]))
 
 (def ^:dynamic *precision* nil)
 
@@ -297,12 +298,16 @@
     form))
 
 (defn- default-form
-  "The initial value of a declaration the lowering left without one."
+  "The initial value of a declaration the lowering left without one.
+
+  The float default goes through `number-form` like every other float literal:
+  a bare `0.0` prints as `0.0` here and `0` in a browser, so it would make the
+  module text host-dependent (P13c found exactly this in an `if` result)."
   [type]
   (case type
     :int 0
     :boolean false
-    (if (f64?) 0.0 (list fround-helper 0.0))))
+    (number-form 0.0)))
 
 (def ^:private binary-tokens
   {:+ "+" :- "-" :* "*" :/ "/" :rem "%"
@@ -806,9 +811,13 @@
   (binding [*print-meta* true]
     (str (str/join "\n\n" (map pr-str (emit-forms js-ir))) "\n")))
 
-#?(:clj
-   (defn emit-module
-     [js-ir]
-     ;; `:elide-imports` keeps the artifact a standalone module: every form above
-     ;; lowers to plain JavaScript, so it never reaches for the Squint stdlib.
-     (squint/compile-string (emit-source js-ir) {:elide-imports true})))
+(defn emit-module
+  "The ES module a kernel is loaded from: the forms above, compiled by Squint.
+
+  Portable since P13c: the browser compiles the module itself, from the same
+  forms and with the same Squint, and the two worlds' module texts are compared
+  as the JS half of the compiler equivalence check. `:elide-imports` keeps the
+  artifact a standalone module: every form above lowers to plain JavaScript, so
+  it never reaches for the Squint stdlib."
+  [js-ir]
+  (squint/compile-string (emit-source js-ir) {:elide-imports true}))

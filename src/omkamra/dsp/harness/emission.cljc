@@ -20,7 +20,12 @@
   - **The Wasm module is compared as text.** That text *is* the artifact the
     page assembles, and a canonical spelling is what makes it a cache key
     (D77), so a difference that assembles to the same bytes is still a
-    difference worth failing on."
+    difference worth failing on.
+
+  The JavaScript *module* Squint makes of the forms is emitted here too, but it
+  is the browser compile entry point that compares it (P13c): the artifact is the
+  thing a page produces for itself, so `compiler equivalence` compiles it through
+  `omkamra.dsp.compiler` rather than through the emitter's lower half."
   (:require [omkamra.dsp.harness.diff :as diff]
             [omkamra.dsp.ir :as ir]
             ;; Not `js`: ClojureScript reserves that prefix for JavaScript
@@ -84,10 +89,13 @@
 
 (defn emission
   "What the two targets emit for one definition at one precision: the JS target's
-  forms as printed text, and the Wasm target's module."
+  forms as printed text and the ES module Squint makes of them, and the Wasm
+  target's module."
   [unit entry precision]
-  (let [lowered (lower-for-emission unit entry precision)]
-    {:js-forms (mapv pr-str (js-target/emit-forms (js-target/lower lowered)))
+  (let [lowered (lower-for-emission unit entry precision)
+        js-ir (js-target/lower lowered)]
+    {:js-forms (mapv pr-str (js-target/emit-forms js-ir))
+     :js-module (js-target/emit-module js-ir)
      :wat (wasm/emit-module lowered)}))
 
 (defn emissions

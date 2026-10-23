@@ -598,14 +598,17 @@ otherwise.
   registry. The step that prepares IR for a target moved from the JVM entry point
   into `ir`, because both worlds emit from prepared IR. The JS *module* (squint's
   output) is P13c's comparison; the page needs no compiler for this one.
-- **P13c — the browser half.** The page build requires the compiler; the page
-  compiles descriptors to artifacts itself and the harness compiles the whole
-  catalog in-browser, checking it against the in-browser interpreter *and*
-  against the JVM's descriptors, IR and behaviour. The runtime half must stay
-  compiler-free (D77): only the compile entry point pulls malli, squint and
-  edamame in. WABT is already in the page (D73), so Wasm needs no new browser
-  dependency, and the canonical IR form (D77) lands here because this is where
-  it is needed.
+- **P13c — the browser half. DONE** (D81). The page build requires the compiler:
+  `omkamra.dsp.compiler` is the portable pipeline (options → capability check →
+  link → lower → prepare → emit), `dsp/compile` supplies the JVM backend as the
+  one non-portable target step, and `targets/js/emit-module` runs Squint in both
+  worlds. `compiler equivalence` compiles each definition to JS and Wasm
+  artifacts *in the page* and compares the module text with the JVM's, alongside
+  the canonical IR text (D77) that a cache will key on. The runtime half stays
+  compiler-free (D77): the worker build requires neither malli nor Squint, and
+  WABT was already in the page (D73), so Wasm needs no new browser dependency.
+  The `:definition-var` cases stay skipped until P13d's registry — the eight the
+  check reports are that gap, counted rather than failed.
 - **P13d — the SCI layer.** The SCI-compatible capture macros, the browser
   registry with aliases, refers, source locations and diagnostics, and the
   bridge where SCI calls compiled functions.

@@ -496,7 +496,10 @@
                 (let [definition (:definition case)
                       {:keys [entry channels]} (equivalence-entry case definition)]
                   (try
-                    (let [unit (linker/link definition)]
+                    (let [unit (linker/link definition)
+                          ir-value (if (= entry :function)
+                                     (ir/lower-unit unit)
+                                     (ir/lower-process unit {:channels channels}))]
                       [(name (:id case))
                        {:definition definition
                         :entry entry
@@ -506,9 +509,12 @@
                         :library? (> (count (:definitions unit)) 1)
                         :normalized (descriptor/normalize definition)
                         :unit unit
-                        :ir (if (= entry :function)
-                              (ir/lower-unit unit)
-                              (ir/lower-process unit {:channels channels}))
+                        :ir ir-value
+                        ;; The one serialization both worlds can compare (D77):
+                        ;; order-stable and explicit about numbers. Shipping it
+                        ;; alongside the IR makes the page prove it produces the
+                        ;; same text, which is what a cache key rests on.
+                        :canonical (ir/canonical-text ir-value)
                         ;; What the two emitters produce for this definition, at
                         ;; each width. The page lowers its own IR from the unit
                         ;; above and emits from that, so what is compared is the

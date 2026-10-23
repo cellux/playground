@@ -154,23 +154,28 @@ Notable groups:
 
 One browser check is not about a target at all: **`compiler equivalence`** has
 the page compile the catalog's definitions with the compiler compiled *into the
-page* — `descriptor/normalize`, `linker/link`, `ir/lower-*` and now both
-emitters as real ClojureScript — and compare each with what the JVM compiled,
-exactly (`omkamra.dsp.harness.diff`, which compares numbers by bit pattern for
-the reasons D78 gives). The JVM payload is `/omkamra/dsp/harness/testbed/equivalence`
-(`conformance/equivalence-payload`).
+page* — `omkamra.dsp.compiler`, the portable pipeline, which links, lowers,
+prepares and emits; `descriptor/normalize`, `linker/link`, `ir/lower-*`, both
+emitters, and `squint.compiler` are all real ClojureScript in the page (P13c) —
+and compare each with what the JVM compiled, exactly (`omkamra.dsp.harness.diff`,
+which compares numbers by bit pattern for the reasons D78 gives). The JVM payload
+is `/omkamra/dsp/harness/testbed/equivalence` (`conformance/equivalence-payload`).
 
 What is compared per definition, at **both widths**:
 
 | what | how |
 |---|---|
 | normalized descriptor, linked unit, portable IR | as data, by `diff/first-difference` |
+| the canonical IR text | as *text*: the order-stable, number-explicit serialization of D77, which a cache will key on |
 | the JS target's emitted forms | as data, with a float literal a `js*` snippet carrying its spelling, so the comparison sees the spelling (D78) |
-| the Wasm target's module | as *text*, by `diff/text-difference`, which names the line and a window around the character that differs |
+| the Wasm target's module | as *text* (the emitter half), by `diff/text-difference` |
+| the **artifact** the page compiles: JS module, and WAT for a process entry | as *text*, through `compiler/compile` from the raw definition — the entry point a page actually calls — by `diff/text-difference` |
 
 The page lowers its own IR for each width — `ir/prepare-for-target` included, so
 both worlds emit from prepared IR — and emits from that, so a difference is a
-difference the emitter made and not a stored result being repeated back.
+difference the emitter made and not a stored result being repeated back. The
+compiled-artifact row is the one that exercises the *entry point* rather than the
+emitter's halves: option resolution, the capability check and the ABI included.
 
 ```clojure
 (browser/run! {:only ["compiler equivalence"]})
@@ -213,7 +218,7 @@ separately from `compiler equivalence` because it is a different question: that
 one compares what the emitters emit for the catalog, this one asks whether the
 one function they both spell constants with agrees at all.
 
-Expected baseline: **275 tests, 2 532 assertions, 0 failures**, and **52 browser
+Expected baseline: **277 tests, 2 541 assertions, 0 failures**, and **52 browser
 checks**.
 
 ---

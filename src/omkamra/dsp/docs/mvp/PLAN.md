@@ -242,6 +242,7 @@ optimizations or compatibility mechanisms, not the primary extension model.
 
 ```text
 omkamra.dsp.numbers              (.cljc)  every host-different numeric decision (D80)
+omkamra.dsp.compiler             (.cljc)  the portable compile pipeline (D81)
 omkamra.dsp.{descriptor,ir,linker,builtins,literals,readers,names}   the compiler front end
 omkamra.dsp.targets.capability   (.cljc)  what each target serves (D29)
 omkamra.dsp.targets.interpreter  (.cljc)  the portable reference interpreter (the oracle)
@@ -267,7 +268,10 @@ The front end has three parts worth keeping apart: **descriptor** normalizes the
 macros into data, **linker** resolves `dsp/call` and inlines what is not called, and
 **ir** lowers to a small typed IR whose `:diagnostics` channel carries what the
 compiler noticed. `targets.capability` is what lets a target refuse an option it
-cannot serve, before any lowering (D29).
+cannot serve, before any lowering (D29). **compiler** is the pipeline around them —
+options, capability check, link, lower, `prepare-for-target`, emit — as `.cljc`, so
+the JVM's `dsp/compile` and the browser's own compile are one implementation; only
+the JVM backend is injected (D81).
 
 ### Definitions and normalization
 
@@ -749,10 +753,13 @@ open are in §Open questions below.
   installation API. That is P14.
 - The JavaScript worklet status protocol is less complete than the Wasm adapter's
   init/reset protocol.
-- The compiler core and both emitters run in the browser (P13a, P13b), but there is
-  no compile entry point in the page yet: browser tests receive generated artifacts
-  rather than compiling user DSP source. That is P13c, and the definition registry
-  it needs is P13d.
+- The compiler core, both emitters and the compile entry point run in the browser
+  (P13a–P13c): the page compiles a definition to a JS module or WAT itself, through
+  the same portable pipeline the JVM uses, and `compiler equivalence` checks the
+  artifact. What remains is the *source* front end — the SCI capture macros and a
+  browser definition registry (P13d) — so the page compiles catalog definitions
+  rather than user-entered source, and the eight cases whose unit reaches a library
+  definition are still skipped.
 - The sequencing runtime is ClojureScript rather than Wasm.
 
 ### Harness and tooling
@@ -797,9 +804,10 @@ Choices not made yet, each with what decides it.
 ## Prioritized work
 
 The plan's priority areas, stated as scope; `PHASES.md` owns the ordering and the
-status of each. As of P13b: **1** language and library, **2** the event and voice
+status of each. As of P13c: **1** language and library, **2** the event and voice
 ABI, and **3** process instances are delivered across P1-P11; **4** browser-side
-compilation is P13 and is half done; **5** artifact-driven installation is P14;
+compilation is P13, with P13a–P13c done (P13d/P13e, the SCI source layer and
+caching, remain); **5** artifact-driven installation is P14;
 **6** Wasm artifacts and the memory ABI is P12 and is done; **7** safety and
 diagnostics is P15; **8** conformance and release gates is P16.
 
@@ -1066,24 +1074,10 @@ The compiler is complete when:
 
 Current implementation files:
 
-```text
-src/omkamra/dsp.clj                       public API, macros, artifacts, ABI
-src/omkamra/dsp/descriptor.clj            normalization and validation
-src/omkamra/dsp/linker.clj                dependency graph and linking
-src/omkamra/dsp/ir.clj                    typed portable IR
-src/omkamra/dsp/interpreter.clj           reference semantics
-src/omkamra/dsp/targets/jvm.clj                   JVM bytecode backend
-src/omkamra/dsp/targets/js.clj                    JS-like lowering and emitter
-src/omkamra/dsp/targets/wasm.clj                  Wasm lowering and WAT emission
-src/omkamra/dsp/harness/catalog.cljc           shared semantic cases
-src/omkamra/dsp/worklet_adapters/js.cljs   JavaScript worklet adapter
-src/omkamra/dsp/worklet_adapters/wasm.cljs Wasm worklet adapter
-src/omkamra/dsp/harness/testbed.clj                browser development endpoints
-src/omkamra/dsp/harness/testbed.cljs               browser conformance harness
-src/omkamra/dsp_test.clj                   Clojure/JVM test suite
-```
-
-ABI helpers may eventually move into `omkamra.dsp.abi`, and shared worklet
-metadata helpers into a `.cljc` namespace, when doing so makes ownership clearer.
-Backend namespaces must not take responsibility for source validation, linking,
-or target-neutral ABI inference.
+The namespace list above is the map; the DSP subtree's files follow it. A few
+entries are worth naming because their extension is the portability decision:
+`descriptor`, `linker`, `ir`, `builtins`, `literals`, `numbers` and `compiler` are
+`.cljc`; `targets/interpreter`, `targets/js` and `targets/wasm` are `.cljc`;
+`targets/jvm` and `hosts/jvm` are `.clj` because `insn` is a JVM library. Backend
+namespaces must not take responsibility for source validation, linking, or
+target-neutral ABI inference — `compiler` is where those meet a target.

@@ -8,6 +8,31 @@
                                                   stereo-state-ramp sum-count]]
             [omkamra.dsp.ir :as ir]))
 
+(deftest canonical-form-is-ordered-and-explicit-about-numbers
+  ;; The serialization two worlds compare and a cache keys on (D77). Its two
+  ;; properties are exactly the two places the hosts differ, so each is pinned
+  ;; by the fact it makes true.
+  (testing "order is not a fact: a map or set built either way is one value"
+    (is (= (ir/canonical-form {:a 1 :b 2})
+           (ir/canonical-form {:b 2 :a 1})))
+    (is (= (ir/canonical-form #{:a :b}) (ir/canonical-form #{:b :a})))
+    (is (= (ir/canonical-text {:a [1 2] :b {:c 3}})
+           (ir/canonical-text {:b {:c 3} :a [1 2]}))))
+  (testing "every number is its bits, so zero and negative zero differ"
+    (is (not= (ir/canonical-form 0.0) (ir/canonical-form -0.0)))
+    (is (= {:dsp/number "0"} (ir/canonical-form 0.0))
+        "positive zero is the all-zero pattern"))
+  (testing "a value's type is carried by the IR's :type, not by the number"
+    ;; The number is the same bits, which is the only cross-platform way to name
+    ;; it; the `:type` beside it is what makes it a float.
+    (is (= {:op :const :type :float :value {:dsp/number "4607182418800017408"}}
+           (ir/canonical-form {:op :const :type :float :value 1.0})))
+    (is (= {:op :const :type :int :value {:dsp/number "4607182418800017408"}}
+           (ir/canonical-form {:op :const :type :int :value 1}))))
+  (testing "NaN is one value, and its bits are that value"
+    (is (= (ir/canonical-form ##NaN) (ir/canonical-form ##NaN)))
+    (is (not= (ir/canonical-form ##NaN) (ir/canonical-form ##Inf)))))
+
 (deftest interpreter-vertical-slice
   (let [artifact (dsp/compile gain {:target :interpreter})]
     (is (= :interpreter (:target artifact)))

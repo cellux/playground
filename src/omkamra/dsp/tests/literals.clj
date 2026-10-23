@@ -14,6 +14,8 @@
             [omkamra.dsp.combinators :as combinators]
             [omkamra.dsp.descriptor :as descriptor]
             [omkamra.dsp.harness.catalog :as catalog]
+            [omkamra.dsp.harness.conformance :as conformance]
+            [omkamra.dsp.harness.emission :as emission]
             [omkamra.dsp.ir :as ir]
             [omkamra.dsp.library.control]
             [omkamra.dsp.library.delay]
@@ -25,7 +27,8 @@
             [omkamra.dsp.library.oscillator]
             [omkamra.dsp.library.pitch]
             [omkamra.dsp.linker :as linker]
-            [omkamra.dsp.literals :as literals]))
+            [omkamra.dsp.literals :as literals]
+            [omkamra.dsp.targets.js :as js-target]))
 
 ;; Definitions captured by the test, in the same shape the library uses: the
 ;; macro records data, and the data is what the assertions read.
@@ -154,3 +157,24 @@
           :when (:definition case)
           [path value] (definition-floats (:definition case))]
     (is false (str (:id case) " has a bare float " (pr-str value) " at " (pr-str path)))))
+
+(deftest every-emitted-js-form-boxes-its-floats
+  ;; The emitter builds forms too, and D79's rule covers them: a bare float there
+  ;; prints one way here and another in a browser, so it is a latent module-text
+  ;; difference. P13c found exactly this in `default-form`'s `0.0`, which only the
+  ;; cross-world module comparison could see; this is the cheap check that the
+  ;; JVM can catch the same thing without a browser.
+  (doseq [case catalog/cases
+          precision [:f32 :f64]
+          :let [definition (conformance/case-definition case)
+                entry (if (catalog/function-case? case) :function :process)
+                channels (long (or (get-in definition [:process :channels])
+                                   (:channels case) 1))
+                prepared (emission/lower-for-emission
+                          (linker/link definition)
+                          {:entry entry :channels channels}
+                          precision)
+                forms (js-target/emit-forms (js-target/lower prepared))]
+          [path value] (bare-floats (vec forms))]
+    (is false (str (:id case) " " (name precision) " emits a bare float "
+                   (pr-str value) " at " (pr-str path)))))

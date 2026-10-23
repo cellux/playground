@@ -5123,6 +5123,68 @@ otherwise byte-identical apart from its date and level — verified by comparing
 content lines as a multiset before and after, which is how the move could be claimed
 rather than hoped.
 
+## 2026-10-24 — P13c — the page compiles its own artifacts
+
+**The pipeline moved out of `dsp.clj`.** `omkamra.dsp.compiler` (`cljc`) now holds
+the whole compile pipeline — resolve the options, check the target can serve them,
+link, lower to portable IR, `prepare-for-target`, emit — and `dsp/compile` is the
+JVM entry point around it. The only step that cannot be portable is the JVM backend
+(`insn`), so `dsp/compile` hands it to `compiler/compile` as an extra target
+compiler; `:interpreter`, `:js` and `:wasm` are built by the same code in either
+world. That is what makes D77's rule hold rather than merely be intended: a runtime
+consumer requires `synth`/`hosts`, never `compiler`, and the worker build still
+bundles neither malli nor Squint, while the page bundles both because that is the
+compiler's half.
+
+`targets/js/emit-module` lost its `#?(:clj ...)`: Squint runs in the page too, so
+the module a kernel is loaded from is made by the same call on either side.
+
+**The check upgraded from forms to artifacts.** `compiler equivalence` now compiles
+each catalog definition *in the page* through `compiler/compile` and compares the
+resulting JS module and (for a process entry) WAT as text with the JVM's, beside
+the normalized descriptor, linked unit, portable IR and emitter forms it already
+compared. The artifact leg is the one that exercises the entry point — option
+resolution, the capability check and the ABI — rather than the emitter's halves.
+
+**The canonical IR form landed.** `ir/canonical-form`/`canonical-text` is
+order-stable (map keys and set elements sorted by their printed form) and explicit
+about numbers (every number is its f64 bit pattern as exact decimal digits). It is
+compared as text in the check and is the cache key P13e asks for. Printing is made
+host-independent as well: Clojure abbreviates a one-namespace map to `#:ns{...}` and
+ClojureScript does not, so the JVM printer is told not to — without that,
+`{:dsp/kind :function}` would be two spellings of one value.
+
+**It found a real bug on its first run, which is the point.** Two definitions —
+`gated-one-pole` and `sign` — emit an `if` result whose default is a float, and
+`default-form` wrote it as a bare `0.0`: the JVM prints `__dsp_fround(0.0)` and the
+page prints `__dsp_fround(0)`. D79 covered *generated forms* with the box and this
+was still one more generator. Fixed by routing the default through `number-form`
+(the `js*` spelling device, D80), and
+`omkamra.dsp.tests.literals/every-emitted-js-form-boxes-its-floats` now holds the
+line on the JVM — reverting the fix fails it 94 times, so the cheap JVM check
+catches what only the cross-world comparison saw.
+
+**Bites checked.** The module comparison bit first (the two cases above). The
+canonical comparison bites when the two worlds spell it differently: prefixing the
+JVM branch fails the browser check. The whole refactor is bite-free against the 275
+pre-existing JVM tests, which is what comparing before and after is for.
+
+**Two things deliberately not done.** The page does not compile a `:definition-var`
+case, because its unit reaches a library definition the page has not been given;
+the check *skips* those eight and counts them, which is P13d's registry and P13c
+was told not to pre-empt. And the shared matrix still runs JVM-compiled kernels,
+not page-compiled ones: since its artifacts are now proven byte-identical, the
+behaviour it checks is the behaviour of the artifacts the page makes. When P13d
+supplies the registry, the matrix can compile them itself.
+
+### State
+
+JVM **277 tests / 2 541 assertions / 0 failures**; browser **52/52**, parity table
+empty. `compiler equivalence` compiles 52 catalog definitions per width and skips
+eight.
+
+---
+
 ## Handoff — current state
 
 The one entry rewritten in place, and always the last. It holds where we are, what
@@ -5132,25 +5194,28 @@ bullet that is still true two slices later is in the wrong file.
 
 ### Where we are
 
-**P13b is the last completed slice** (D80): both emitters are `.cljc`, every
-host-different numeric decision lives in `omkamra.dsp.numbers`, and the two worlds'
-agreement is a check rather than a claim — `compiler equivalence` compares the
-descriptor, the linked unit, the portable IR, the JS forms and the Wasm module per
-definition and per precision, and `number formatting` spells a swept corpus in the
-page and compares it with the JVM's.
+**P13c is the last completed slice** (D81): the compile pipeline is portable
+(`omkamra.dsp.compiler`), `dsp/compile` is the JVM entry point that supplies the JVM
+backend, and the page compiles a definition to a JS module or WAT itself with
+Squint in both worlds. `compiler equivalence` compiles each catalog definition it
+can in the page and compares the descriptor, linked unit, portable IR, canonical IR
+text, emitter forms, Wasm module and the compiled artifacts with the JVM's.
+`ir/canonical-form`/`canonical-text` is the shared serialization and the future
+cache key.
 
-Suite: JVM **275 tests / 2 532 assertions / 0 failures**, browser **52/52**.
+Suite: JVM **277 tests / 2 541 assertions / 0 failures**, browser **52/52**, parity
+table empty.
 
 ### What's next
 
-- **P13c — the browser compile** (`PHASES.md` §P13). The page compiles a definition
-  itself: `squint.compiler` comes into the page as the JS backend (D41), and the JS
-  half of `compiler equivalence` upgrades from the emitter's *forms* to the *module
-  text* squint produces. The canonical IR form lands with it.
-- **P13d**, then **P13e**. The browser definition registry first — it drives the
-  equivalence check's `:skipped` count from eight to zero, and the expected values
-  for those eight already ship — then incremental recompilation, caching, and errors
-  classified as data an editor can show.
+- **P13d — the SCI source layer** (`PHASES.md` §P13). The SCI-compatible capture
+  macros and the browser definition registry, with aliases, refers, source locations
+  and diagnostics. It is what lets the page compile the eight `:definition-var` cases
+  it currently skips — those expected values already ship, so closing the gap needs
+  no server-side change — and it is the first moment a *user's* source (not the
+  catalog) enters the browser compiler.
+- **P13e**, then: incremental recompilation, caching keyed on `ir/canonical-text`,
+  and error classification separating SCI, validation and backend errors.
 - **P14**, then **H1**. Artifact-driven worklet installation, and only then the pool
   inside a worklet node, whose shape those phases decide. H1 starts with its own
   question: where the allocator lives.
@@ -5159,9 +5224,11 @@ Suite: JVM **275 tests / 2 532 assertions / 0 failures**, browser **52/52**.
 
 ### What shapes the next decision
 
-One thing is genuinely open for P13c, and it is a boundary rather than a design: how
-the page gets the definitions it compiles. P13c should not pre-empt P13d's registry
-by reaching for SCI's own `require` first.
+P13d is where the page stops compiling the catalog and starts compiling *source*.
+It is also where the runtime/compiler split gets its first real test: the registry
+and the SCI capture belong to the compiler half, and the worker build must go on
+without them. The design boundary P13c left for it is exactly that — how the page
+gets the definitions it compiles, without reaching for SCI's own `require` first.
 
-Everything else that is undecided is a choice for a later phase, and is listed in
-`PLAN.md` §Open questions. None of them blocks P13c.
+Everything else that is undecided is a choice for a later phase, listed in
+`PLAN.md` §Open questions. None of them blocks P13d.

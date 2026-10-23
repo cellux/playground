@@ -4230,3 +4230,64 @@ than by the catalog, for the reason the two deviations above give. Checked
 separately from `compiler equivalence` because it is a different question: that one
 asks whether the emitters agree over the catalog, this one whether the one function
 they both spell constants with agrees at all.
+
+## D81 — the compile pipeline is portable, and the page compiles its own artifacts (P13c)
+
+**Status.** In force (P13c, adopted 2026-10-24).
+
+**Decision.** The pipeline that turns a descriptor into an artifact — resolve the
+options, check the target can serve them, link, lower to portable IR, prepare that
+IR for the target, emit — lives in `omkamra.dsp.compiler`, a `.cljc` namespace that
+runs unchanged on the JVM and in a browser. `omkamra.dsp/compile` is the JVM entry
+point around it; the one thing it adds is the JVM backend, whose bytecode generator
+(`insn`) is a JVM library, supplied to `compiler/compile` as an extra target compiler.
+`targets/js/emit-module` requires `squint.compiler` in both worlds, so the ES module
+a kernel is loaded from is made by the same code on either side.
+
+The browser's `compiler equivalence` check compiles every catalog definition it can
+*in the page* and compares, per definition and per precision, the JVM's normalized
+descriptor, linked unit, portable IR, canonical IR text, emitted JS forms, emitted
+Wasm module, and the **compiled artifacts** — the JS module and, for a process
+entry, the WAT — with the browser's own. The artifact leg calls `compiler/compile`
+from the raw definition, so it exercises the entry point (option resolution,
+capability check, ABI) and not only the emitters' halves.
+
+`ir/canonical-form`/`canonical-text` is the one serialization the two worlds compare
+and a cache keys on (D77): map keys and set elements sorted by their printed form,
+and every number replaced by its f64 bit pattern as exact decimal digits, because
+`(= 0 0.0)` and `(pr-str 0.0)` are both host-dependent (D78). A value's type is not
+lost — the IR carries it in `:type` — and the JVM printer is told not to abbreviate
+a one-namespace map to `#:ns{...}`, which ClojureScript does not do, so the text is
+host-independent as well.
+
+**Rationale.** D77's rule is "the runtime half never requires the compiler": the
+worker build and the browser hosts must bundle neither malli nor Squint. Putting the
+pipeline in `compiler.cljc` rather than in `dsp.clj` is what lets the page *have* the
+compiler without the runtime having it, and what makes `dsp/compile` and the page's
+compile the same pipeline instead of two implementations that will drift. Comparing
+the compiled module text, not only the emitter's forms, is the strongest statement of
+"one compiler in two worlds" available: the artifact a page produces is the artifact
+the JVM produces.
+
+**Consequences.**
+
+- A runtime-only consumer (`hosts/js`, `hosts/wasm`, `synth`, the worker build)
+  requires none of `omkamra.dsp.compiler`, `malli` or `squint`.
+- The page build does require them; that is the compiler's bundle and D77's stated
+  default for a project that compiles in the browser.
+- A `.cljc` change to `compiler`, `ir`, `descriptor`, `linker` or either emitter is
+  a change both worlds see, and `compiler equivalence` is what says so.
+- The `:definition-var` cases — those whose linked unit reaches a library definition
+  — cannot be compiled in the page until P13d's browser registry supplies those
+  definitions, so the check **skips** them and counts them rather than failing.
+  P13c deliberately does not pre-empt the registry.
+
+**Evidence (bites).** The module-text comparison found a real host difference on its
+first run: `default-form` emitted a bare `0.0` for an `if` result, which prints
+`__dsp_fround(0.0)` on the JVM and `__dsp_fround(0)` in the page. It is fixed by
+routing the default through `number-form` (the `js*` spelling device, D80), and
+`omkamra.dsp.tests.literals/every-emitted-js-form-boxes-its-floats` now holds the
+line on the JVM (reverting the fix fails it 94 times). The canonical-text comparison
+bites when the JVM and cljs spellings differ (perturbing the JVM branch fails the
+browser check). The refactor is bite-free for the 275 pre-existing JVM tests, which
+is the point of comparing before and after.

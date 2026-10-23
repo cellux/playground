@@ -10,6 +10,7 @@
             [omkamra.dsp.builtins :as builtins]
             [omkamra.dsp.literals :as literals]
             [omkamra.dsp.names :as names]
+            [omkamra.dsp.numbers :as numbers]
             [omkamra.dsp.descriptor :as descriptor]))
 
 (def ^:private arithmetic-operators
@@ -3291,6 +3292,62 @@
      :reflection? false
      :io? false
      :effects (:effects ir)}))
+
+;; ---------------------------------------------------------------------------
+;; Canonical form (P13c, D77)
+;; ---------------------------------------------------------------------------
+
+(defn- canonical-key
+  "The comparison a canonical map or set is ordered by: the printed form of the
+  canonicalized key. Nothing here may depend on a host's hash order."
+  [value]
+  (pr-str value))
+
+(defn canonical-form
+  "A cross-platform canonical value for lowered IR data (D77).
+
+  This is the one serialization both worlds can produce and compare: two hosts
+  that compiled the same program produce the same canonical value, and its
+  printed text is the cache key a later recompile compares against.
+
+  Two properties make that true, and they are the two places the hosts differ.
+  *Order* is made a fact where it is not one: map keys and set elements are
+  sorted by their own printed form, so a map built in a different order is the
+  same value. *Numbers* are made explicit: every number becomes
+  `{:dsp/number <digits>}`, the f64 bit pattern as exact decimal digits, because
+  `(= 0 0.0)` is false in Clojure and true in ClojureScript and `(pr-str 0.0)` is
+  `0` in a browser and `0.0` on the JVM (D78) — a comparison may lean on neither.
+
+  A number's *logical* type is not lost by this: the IR carries it in a `:type`
+  field beside the value, which is data like everything else."
+  [value]
+  (cond
+    (map? value)
+    (into (sorted-map-by (fn [a b] (compare (canonical-key a) (canonical-key b))))
+          (map (fn [[k v]] [(canonical-form k) (canonical-form v)]))
+          value)
+
+    (set? value)
+    (into (sorted-set-by (fn [a b] (compare (canonical-key a) (canonical-key b))))
+          (map canonical-form value))
+
+    (sequential? value) (mapv canonical-form value)
+
+    (number? value) {:dsp/number (numbers/integer-text (numbers/f64-bits value))}
+
+    :else value))
+
+(defn canonical-text
+  "The canonical form of `ir`, printed. Stable in order and explicit about
+  numbers, so two worlds can compare it as text and a cache can key on it.
+
+  The printing is itself made host-independent: Clojure abbreviates a map whose
+  keys all share a namespace to `#:ns{...}` and ClojureScript does not, so the
+  JVM printer is told not to. Without this, `{:dsp/kind :function}` would be two
+  spellings of one value and the comparison would fail on a value that agreed."
+  [ir]
+  #?(:clj (binding [*print-namespace-maps* false] (pr-str (canonical-form ir)))
+     :cljs (pr-str (canonical-form ir))))
 
 (defn expression-operators
   []
