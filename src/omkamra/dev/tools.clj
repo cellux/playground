@@ -21,7 +21,8 @@
     serializable map. A call with nothing to do says so explicitly.
   * A detection-driven reload that would rebuild the **whole** live image
     refuses and says so, rather than act on a baseline that no longer describes
-    the tree; `:all`, or naming namespaces, is how to mean it.
+    the tree. There is deliberately no option that reloads everything: restart
+    the dev server for a fresh baseline, or name the namespaces you want.
   * There is no initialization step: `reload` scopes itself to the classpath
     source directories on first use. Pass a scope map to scan elsewhere.
   * `create-persistent-alias!` registers an alias that stays usable when its
@@ -38,11 +39,11 @@
   unloaded first, which clears removed vars and gives `deftype`/`defrecord`
   fresh classes while `defonce` values are preserved.
 
-  `(reload 'my.ns)`, `(reload '[a b])`, and `(reload :all)` ignore detection and
-  force the loaded namespaces among those named (and their loaded dependents),
-  which is the deterministic escape hatch when no baseline can know about an
-  edit. A namespace that is not loaded is still left alone: a reload refreshes
-  the image, it does not grow it, and `require` is what brings code in.
+  `(reload 'my.ns)` and `(reload '[a b])` ignore detection and force the loaded
+  namespaces among those named (and their loaded dependents), which is the
+  deterministic escape hatch when no baseline can know about an edit. A namespace
+  that is not loaded is still left alone: a reload refreshes the image, it does
+  not grow it, and `require` is what brings code in.
 
   A map argument sets the scan scope and then reloads what changed under it, so
   `(reload {:dirs [\"src\"]})` scans just `src`. The classpath source

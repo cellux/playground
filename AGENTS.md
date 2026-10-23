@@ -70,16 +70,18 @@ Reload namespaces through `omkamra.dev.tools/reload`; do not use
   was never loaded is left alone and summarised under `:not-loaded`; load it with
   `require`, which is the verb for bringing code in.
 - A call with nothing to do says `:status :unchanged`; it never silently no-ops.
-- `(tools/reload 'my.ns)`, `(tools/reload '[a b])`, and `(tools/reload :all)`
-  ignore detection and force the **loaded** named namespaces (and their loaded
-  dependents). Use them when you are unsure whether the baseline saw an edit.
+- `(tools/reload 'my.ns)` and `(tools/reload '[a b])` ignore detection and force
+  the **loaded** named namespaces (and their loaded dependents). Use them when you
+  are unsure whether the baseline saw an edit.
 - A *named* target reloads only what it names, so it reports `:stale` — the
   loaded namespaces whose content changed and were not reloaded. When you see it,
   `(tools/reload)` with no argument picks them up. An absent `:stale` is a
   checked claim: detection runs on every call.
 - A detection-driven reload that would refresh the whole session — a poisoned
   baseline, or a check-out that rewrites the tree — refuses with
-  `:status :refused` rather than doing it; its `:note` says how to mean it.
+  `:status :refused` rather than doing it. There is no option that reloads
+  everything: restart the dev server for a fresh baseline. A session whose
+  baseline no longer describes the tree needs a new process, not a wider reload.
 - There is no initialization step: `reload` scopes itself to the classpath
   source directories. To scan elsewhere, pass a scope map, e.g.
   `(tools/reload {:dirs ["src"]})`.

@@ -586,13 +586,12 @@
   as it loads and takes a headless JVM with it.
 
   Everything else is a root: a changed or brand new file, a file that is gone (to
-  unload), or a namespace named explicitly or through `:all` — each only if the
-  session has loaded it. That includes a namespace a *failed* reload left
-  unloaded: it has run here, so a reload may bring it back."
+  unload), or a namespace named explicitly — each only if the session has loaded
+  it. That includes a namespace a *failed* reload left unloaded: it has run here,
+  so a reload may bring it back."
   [scan file->ns known explicit remembered]
   (let [known? #(contains? remembered %)
         selected (cond
-                   (= :all explicit) (set (mapcat val file->ns))
                    (seq explicit) (set explicit)
                    :else
                    (into (set (mapcat file->ns (:changed scan)))
@@ -613,8 +612,10 @@
   acting on that verdict unloads and rebuilds every namespace in scope that the
   session has run. That is never an incremental edit: it is a reload nobody asked
   for, of everything the session is made of, through an unload-then-load sequence
-  that a single failure leaves half-done. Refusing costs the caller one explicit
-  `:all`.
+  that a single failure leaves half-done. The remedy is a fresh process rather
+  than a wider reload, which is why there is no option to ask for one: a baseline
+  that no longer describes the tree cannot be trusted to describe the reload
+  either.
 
   The threshold is a share of the session rather than all of it, so a check-out
   that rewrites most of the tree is caught too, and it is floored because
@@ -695,7 +696,7 @@
                           (if (= next result) result (recur next)))))
         ;; A detection-driven reload that would rebuild the whole session is a
         ;; baseline that no longer describes the tree, not an edit. An explicit
-        ;; target or `:all` means the caller has already said what they want.
+        ;; target means the caller has already said what they want.
         wholesale? (and (nil? explicit) (wholesale-reload? session closure))
         order (if wholesale? [] (topological-sort closure dependencies-of))
         outcome (reduce
@@ -778,8 +779,8 @@
                   wholesale?
                   (conj (str "the whole session changed (" (count closure) " of "
                              (count session) "), a replaced baseline rather than an "
-                             "edit. Nothing was reloaded. (reload :all) refreshes all "
-                             (count session) ", (reload 'some.ns) only what you name"))
+                             "edit. Nothing was reloaded. Restart the dev server for a "
+                             "fresh baseline, or (reload 'some.ns) to mean one"))
                   (and (= :unchanged status) (empty? not-loaded))
                   (conj "nothing changed; name a namespace to reload it")
                   (seq stale)
@@ -824,10 +825,10 @@
   *failed* reload left unloaded is still the tool's business, because it has run
   here.
 
-  `(reload 'my.ns)`, `(reload '[a b])`, and `(reload :all)` ignore the baseline
-  and force the loaded namespaces among those named (and their loaded
-  dependents), which is the deterministic escape hatch when detection cannot know
-  about an edit. A namespace that is not loaded is still left alone.
+  `(reload 'my.ns)` and `(reload '[a b])` ignore the baseline and force the
+  loaded namespaces among those named (and their loaded dependents), which is
+  the deterministic escape hatch when detection cannot know about an edit. A
+  namespace that is not loaded is still left alone.
 
   A *named* target reloads what it names and nothing else — deliberately, since
   that is what makes it usable while another file is mid-edit — so it is the one
@@ -849,8 +850,11 @@
   check-out or a corruption, makes *every* file look changed. A reload driven by
   detection then refuses rather than rebuild the whole live image, reporting
   `:status :refused`, what it saw in `:changed`, `:would-reload`, and a note
-  naming the way through (`:all`, or the namespaces you want). A change to a
-  widely used namespace still cascades normally.
+  saying what to do about it. There is deliberately **no option that reloads
+  everything**: detection is what decides, and a session whose baseline no longer
+  describes the tree needs a fresh process — restart the dev server — which is
+  the one remedy that cannot half-succeed. Naming namespaces still works, and a
+  change to a widely used namespace still cascades normally.
 
   Every failure is reported, not just the first."
   ([] (with-lock (run-reload! nil)))
@@ -860,10 +864,9 @@
        (do (configure! target-or-options)
            (run-reload! nil))
        (let [explicit (cond
-                        (= :all target-or-options) :all
                         (symbol? target-or-options) [target-or-options]
                         (sequential? target-or-options) (vec target-or-options)
-                        :else (throw (ex-info "reload expects a namespace symbol, a collection, :all, or a scope map"
+                        :else (throw (ex-info "reload expects a namespace symbol, a collection, or a scope map"
                                               {:target target-or-options})))]
          (run-reload! explicit))))))
 
