@@ -238,6 +238,37 @@ optimizations or compatibility mechanisms, not the primary extension model.
 
 ## Current architecture
 
+### Namespaces
+
+```text
+omkamra.dsp.numbers              (.cljc)  every host-different numeric decision (D80)
+omkamra.dsp.{descriptor,ir,linker,builtins,literals,readers,names}   the compiler front end
+omkamra.dsp.targets.capability   (.cljc)  what each target serves (D29)
+omkamra.dsp.targets.interpreter  (.cljc)  the portable reference interpreter (the oracle)
+omkamra.dsp.targets.{jvm,js,wasm}         the three code generators (js/wasm are .cljc)
+omkamra.dsp.library.*            (.cljc)  the standard library; LIBRARY.md is generated
+omkamra.dsp.{graph,combinators}  (.cljc)  definition values, transforms, `poly`, `share`
+omkamra.dsp.event, schedule      (.cljc)  the host-side sequencing layer (P9)
+omkamra.dsp.{modulation,sequencer,instrument}  the instrument layer (M)
+omkamra.dsp.synth, synth.pool    (.cljc)  description -> config; voices, allocation, rendering
+omkamra.dsp.reference            (.cljc)  the reference synthesizer
+omkamra.dsp.hosts*               the assemblers and kernels: jvm, interpreter, js, wasm, fusion
+omkamra.dsp.hosts.worker         (.cljc)  the worklet-side kernel
+omkamra.dsp.worklet_adapters.js  (.cljs)  the AudioWorklet adapter
+omkamra.dsp.harness.catalog      (.cljc)  the data-only conformance catalog
+omkamra.dsp.harness.conformance  (.clj)   plans, payloads, the JVM differential driver
+omkamra.dsp.harness.{diff,emission}       comparison, including the emission check
+omkamra.dsp.harness.{browser,testbed}     the browser suite and the page it drives
+omkamra.dsp.harness.{equivalence,formatting}  the two compiler checks, run in the page
+omkamra.dsp.tests.*              (.clj)   the suite by subject (tests.suite/run-jvm)
+```
+
+The front end has three parts worth keeping apart: **descriptor** normalizes the
+macros into data, **linker** resolves `dsp/call` and inlines what is not called, and
+**ir** lowers to a small typed IR whose `:diagnostics` channel carries what the
+compiler noticed. `targets.capability` is what lets a target refuse an option it
+cannot serve, before any lowering (D29).
+
 ### Definitions and normalization
 
 `omkamra.dsp/defn` captures a DSP definition as data. It supports the shorthand
@@ -684,75 +715,108 @@ automated CI browser job. There is no separate Node conformance runner.
 
 ## Known limitations
 
+What is still not there, as of P13b. Items a later phase closed are not listed:
+the diary entry for that phase is the record. Choices that are deliberately still
+open are in §Open questions below.
+
 ### Language and IR
 
-- Calls cannot target recursive, stateful, or buffer-accessing definitions.
-- Current non-interpreter backends inline expression-only callees instead of
-  emitting calls.
-- Stateful multichannel process definitions are rejected.
-- Process input/output buffers are currently float buffers with a fixed overall
-  channel count.
-- Fixed-size state arrays/tables, local arrays, named state records/`defstruct`,
-  read-only constant tables, and circular-buffer delay lines with interpolation
-  are part of the language (the latter as `omkamra.dsp.library` processes, since
-  stateful callees are not yet callable — P6). Complex/interleaved layouts and
-  generated initialization-time tables are not yet.
-- Dynamic buffer indices are not statically proven safe.
-- Sample-accurate automation, timestamped musical events, and voice management
-  are not yet part of the process ABI.
-- Constructs whose worst-case work cannot be statically bounded are rejected
-  before audio starts; diagnostics identify the offending construct and its
-  bound requirement.
-- The special-value and conversion contract still needs to be completed and
-  enforced uniformly across targets; reference semantics preserve subnormals,
-  while flush-to-zero is an explicit non-default policy.
+- Recursion is rejected at link time: a definition cannot call itself.
+- A definition that returns a record, or that accesses scratch arrays, is inlined
+  into its call sites rather than called (D47's `uncallable` set).
+- Dynamic buffer indices are not statically proven safe; they are diagnosed (the
+  IR's `:diagnostics` channel carries them) rather than rejected.
+- Fixed-size state arrays and tables, preallocated local arrays, named records and
+  `defstruct`, read-only constant tables, and circular-buffer delay lines with
+  interpolation are part of the language. Complex and interleaved layouts, and
+  generated initialization-time tables, are not.
+- Process input and output buffers are float buffers with a per-process channel
+  count; there is no other element type on the audio path.
+- Constructs whose worst-case work cannot be statically bounded are rejected before
+  audio starts, and the diagnostic names the construct and the bound requirement.
+- The special-value and conversion contract is not complete or uniform across
+  targets: reference semantics preserve subnormals, flush-to-zero is an explicit
+  non-default policy, and non-finite `float->int` has no cross-target contract at
+  all (§Open questions).
 
 ### Runtime and ABI
 
-- Interpreter and JVM process artifacts own one state instance rather than a
-  reusable factory for independent instances.
-- Wasm state is in module-instance linear memory, but artifacts do not yet
-  expose reusable independent instance regions or host-managed state handles.
-- Wasm artifacts expose WAT but do not contain compiled binary bytes.
-- Wasm channel stride is currently a fixed 4096 bytes.
-- JS/Wasm worklet setup still depends on testbed-assembled metadata. The kernel's
-  own shape (output width and whether it takes an input) now comes from the
-  artifact ABI (D40), but the processor options that carry it are still assembled
-  by the testbed rather than generated from a standalone installation API (P14).
-- The JavaScript worklet status protocol is less complete than the Wasm
-  adapter's init/reset protocol.
-- The compiler currently runs on the JVM; browser tests receive generated
-  artifacts rather than compiling user DSP source in the browser. Browser-side
-  compilation remains required for v1, while the sequencing runtime remains
-  ClojureScript rather than Wasm.
+- Wasm artifacts carry the WAT text beside the binary bytes; whether the WAT belongs
+  in a shipped artifact is undecided (§Open questions).
+- JS and Wasm worklet setup still depends on testbed-assembled metadata. The
+  kernel's own shape comes from the artifact ABI (D40), but the processor options
+  that carry it are assembled by the testbed rather than generated from a standalone
+  installation API. That is P14.
+- The JavaScript worklet status protocol is less complete than the Wasm adapter's
+  init/reset protocol.
+- The compiler core and both emitters run in the browser (P13a, P13b), but there is
+  no compile entry point in the page yet: browser tests receive generated artifacts
+  rather than compiling user DSP source. That is P13c, and the definition registry
+  it needs is P13d.
+- The sequencing runtime is ClojureScript rather than Wasm.
 
-### Safety and tooling
+### Harness and tooling
 
-- Generated JS and Wasm memory accesses do not yet have complete explicit
-  development checks; JVM relies on primitive array bounds.
-- Effect metadata does not prove absence of allocation, locks, I/O, reflection,
+- Generated JavaScript and Wasm memory accesses do not yet have complete explicit
+  development checks; the JVM relies on primitive array bounds.
+- Effect metadata does not prove the absence of allocation, locks, I/O, reflection,
   or dynamic dispatch in every host adapter.
-- Diagnostics are structured in descriptor/linker/IR paths but are not yet
-  uniform across every backend.
+- Diagnostics are structured in the descriptor, linker and IR paths but are not
+  uniform across every backend, and the capability declarations cover the options
+  and entry kinds only — not allocation, reflection, locks, unbounded loops or
+  unvalidated memory access (P15).
 - There is no general debug-dump API for every compiler stage.
 - Browser conformance and AudioWorklet checks are not yet automated in CI.
 
+### Open questions
+
+Choices not made yet, each with what decides it.
+
+- **Non-finite `float->int`.** The interpreter throws, the JVM saturates (`d2i`), and
+  JavaScript and Wasm do as their own conversions do. It is routed around, not
+  decided.
+- **Does `:wat` ship in every artifact?** It is what the emission check compares and
+  what a Wasm failure is read from, and it is dead weight in a bundle. P14 decides,
+  when the artifact becomes the thing that ships.
+- **The artifact byte transport.** A data URL, a `Uint8Array` message, or a blob URL?
+  P14's choice, and it decides what the binary step must produce.
+- **Where the WABT pin lives.** The WAT-to-binary step is a pinned toolchain step on
+  the JVM (D72). If the browser ever assembles, the pin has to become something a
+  page can have.
+- **What `dsp/compile` assembles, and what a caller assembles.** The assembly policy
+  is unsettled, which is why P12 and P14 describe the binary step rather than
+  assuming a place for it.
+- **Does the fused lowering still earn its keep?** D47 asks it, now that `^:inline`
+  is reachable from the source.
+- **The boxed float literal.** D78 keeps the box. A measurement over the catalog
+  says a context rule would resolve 142 of 168 boxed literals (85%, or about 94% if
+  an untyped parameter means `:float`) with no conflicts, at the cost of threading
+  types down through lowering. Deferred, and safe to revisit because
+  `compiler equivalence` would catch the two worlds inferring differently.
+
 ## Prioritized work
+
+The plan's priority areas, stated as scope; `PHASES.md` owns the ordering and the
+status of each. As of P13b: **1** language and library, **2** the event and voice
+ABI, and **3** process instances are delivered across P1-P11; **4** browser-side
+compilation is P13 and is half done; **5** artifact-driven installation is P14;
+**6** Wasm artifacts and the memory ABI is P12 and is done; **7** safety and
+diagnostics is P15; **8** conformance and release gates is P16.
 
 ### 1. Extend the language for synth DSP
 
-P1–P5 are complete across the interpreter, JVM, JavaScript, and Wasm: bitwise
-operations, the portable scalar math builtins and transcendentals, fixed-size
-state arrays/tables, preallocated local arrays, named state records, read-only
-constant tables, and circular-buffer delay lines with interpolation. Next add
-stateful module composition (P6), mixed numeric representations,
-complex/interleaved data, and the math/DSP library needed for oscillators,
-envelopes, filters, modulation, resampling, and FFT/IFFT. Keep this work in the
-portable language and IR before introducing backend-specific kernels.
+P1–P7 delivered the scalar and fixed-size aggregate cases on every target — bitwise
+operations, the portable math builtins and transcendentals, state arrays and tables,
+preallocated local arrays, named records, read-only constant tables, circular-buffer
+delay lines, and stateful module composition with explicit ownership, feedback
+boundaries, multiple ports and update ordering.
 
-Add stateful module composition with explicit ownership, feedback boundaries,
-multiple ports, and update ordering. Keep native intrinsics limited to measured
-or fundamentally target-specific operations with portable contracts.
+What this priority still wants is mixed numeric representations, complex and
+interleaved data, and whatever the DSP library needs for oscillators, envelopes,
+filters, modulation, resampling and FFT/IFFT that the portable language cannot
+express. Keep it in the portable language and IR before introducing backend-specific
+kernels, and keep native intrinsics limited to measured or fundamentally
+target-specific operations with portable contracts.
 
 ### 2. Define the synth event and voice ABI
 

@@ -1,9 +1,10 @@
 # Implementation phases
 
 This file turns `PLAN.md` into an ordered set of independently testable
-implementation phases. Each phase is finalized when completed and is not
-rewritten afterward. Progress belongs in the append-only `DIARY.md`; persistent
-design decisions belong in `DECISIONS.md`.
+implementation phases. Each phase is finalized when completed and is not rewritten
+afterward. Progress belongs in the append-only `DIARY.md`; persistent design
+decisions belong in `DECISIONS.md`; working rules and the traps that bite belong in
+`RULES.md`. `README.md` maps the whole set and says what each file owns.
 
 ## How to read this plan
 

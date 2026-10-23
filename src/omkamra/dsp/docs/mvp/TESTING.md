@@ -110,17 +110,20 @@ Evaluate in the dev nREPL:
 ```clojure
 (require 'omkamra.dsp.tests.suite)
 (omkamra.dsp.tests.suite/run-jvm)
-;; => {:test 263, :pass 2456, :fail 0, :error 0}
+;; => {:test 275, :pass 2532, :fail 0, :error 0, :passed? true}
 ```
 
 With `clojure_eval`, send that whole form as one expression.
 
-To reload the compiler after an edit before re-running, reload the changed
-namespaces explicitly — **avoid `:reload-all`**, which can reload
-`clojure.core.async` and break the running Shadow server (see Troubleshooting):
+To reload the compiler after an edit before re-running, use
+`omkamra.dev.tools/reload` — it finds what changed by file content and reloads
+dependents in order, which plain `:reload` does not, and which `:reload-all` does
+too brutally (it can reload `clojure.core.async` and break the running Shadow
+server). `RULES.md` `R3` states the contract:
 
 ```clojure
-(require 'omkamra.dsp.ir 'omkamra.dsp.interpreter 'omkamra.dsp.jvm :reload)
+(require '[omkamra.dev.tools :as tools])
+(tools/reload)                       ; detect what changed
 (omkamra.dsp.tests.suite/run-jvm)
 ```
 
@@ -536,8 +539,8 @@ driver above does not need a connected runtime; it launches its own browser.
 
 ## The shared catalog
 
-`omkamra.dsp.acceptance` is **pure data** — there are no `:step` or `:reference`
-functions any more. It has two vectors:
+The catalog is `omkamra.dsp.harness.catalog`, and it is **pure data** — there are
+no `:step` or `:reference` functions any more. It has two vectors:
 
 - `process-cases` (alias `cases`) — block-processing kernels. Each entry
   carries a `:definition`, `:entry :process`, `:precisions`, `:controls`, and
@@ -551,16 +554,26 @@ functions any more. It has two vectors:
 `all-cases` is both concatenated; `case-by-id` searches all of them;
 `function-case?` distinguishes the two.
 
-`omkamra.dsp.conformance` turns a case + precision into a **plan** (the compiled
-portable IR plus controls/vectors plus an invocation sequence including reset
-and special values). `conformance/run-plan` runs a plan on a target artifact.
-The interpreter computes expected outputs; the JVM backend and the browser's
-JavaScript/Wasm kernels are compared against it.
+`omkamra.dsp.harness.conformance` turns a case + precision into a **plan** (the
+compiled portable IR plus controls/vectors plus an invocation sequence including
+reset and special values). `conformance/run-plan` runs a plan on a target
+artifact.
 
-**To add a shared test**, add data to the appropriate vector. It is
-automatically run by the JVM suite and by the browser matrix. Keep input
-generators in portable `.cljc` and avoid target-divergent special values unless
-the case is specifically about them.
+### The oracle contract
+
+- **The plan carries no expected outputs.** It is target-neutral data; whoever
+  runs it computes the expected values itself.
+- **The interpreter is the single oracle**, on the JVM and in the browser. The
+  page bundles the `.cljc` interpreter, runs it to compute expected, then runs the
+  generated JavaScript and Wasm kernels and compares.
+- **Comparison is exact, NaN-equal-as-NaN, and signed-zero-aware.** Numbers are
+  compared by *bit pattern* — the only way two worlds can agree that they made the
+  same double.
+- **Adding a case is data-only**: append to the appropriate vector and both suites
+  pick it up.
+
+Keep input generators in portable `.cljc` and avoid target-divergent special
+values unless the case is specifically about them.
 
 Use the JVM suite for compiler-internal checks (descriptor errors, linker
 diagnostics, ABI shape, allocation) and `testbed.cljs` for browser-only checks
@@ -665,15 +678,20 @@ clojure -M:dev:linux -e "
   `omkamra.dsp.harness.browser/installed-headless-shell` picks the installed revision
   automatically; if the layout differs, pass `:executable-path` explicitly.
 - **The browser build does not pick up an edit:** recompile synchronously with
-  `(omkamra.dev.frontend/recompile! :omkamra.dsp.testbed)`. The on-demand HTTP
-  server starts the watcher on the first compatible asset/page request. A run
+  `(omkamra.dev.frontend/recompile! :omkamra.dsp.harness.testbed)`. The on-demand
+  HTTP server starts the watcher on the first compatible asset/page request. A run
   issued immediately after an edit can be served the *previous* bundle — the
   watcher rebuilds asynchronously — so give it a moment, or check the dev log for
-  the `Build completed` line, before believing a surprising pass.
-- **`No implementation of method: :put! ... ManyToManyChannel` after a
-  `:reload-all`:** reloading every transitive dependency can reload
-  `clojure.core.async` and break the running Shadow server. Reload only the
-  namespaces you changed (`:reload`), and restart the dev process if it happens.
+  the `Build completed` line, before believing a surprising pass. A cljs fix is
+  proven by the check in the page, never by a reload (`RULES.md` `R8`).
+- **A reload that refuses, or a namespace that no longer loads:**
+  `omkamra.dev.tools/reload` reports `:status :refused` after a bulk rewrite
+  (`cljfmt fix`, a scripted edit) — that is the content-based baseline telling you
+  it was replaced rather than edited. There is no option that reloads everything:
+  restart the dev server, which is the one remedy that cannot half-succeed
+  (`RULES.md` `R3`, and `R9` for the general case). If a namespace only works
+  because it happened to be loaded, or a Var is unbound here and fine in a fresh
+  process, that is the same answer.
 - **First browser run times out:** it also compiles the Shadow build; raise
   `:timeout` or warm the build by loading
   `http://127.0.0.1:8080/omkamra/dsp/harness/testbed` once.

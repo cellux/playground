@@ -1,14 +1,18 @@
 # Implementation diary
 
-This file is an append-only progress log for implementation. The implementing agent must add one entry for each completed phase and must not edit earlier entries.
+An append-only record of the work: one entry per phase or slice, each dated with the
+day it was recorded. An entry is never rewritten — it says what was true when it was
+written, including names that have since changed. Several entries can share a date;
+the order of the file is the order of the work.
 
-The final entry, **Handoff — current state**, is a rolling entry rather than a
-completed-phase log: it records what exists, how it fits together, what is
-open, and what to do next, and may be rewritten in place.
+The closing **Handoff — current state** is the one exception: a rolling entry,
+rewritten in place so that it is always current, and always last.
+
+`README.md` maps this file among the others and states the conventions.
 
 ---
 
-## P0 — Baseline (recorded before P1)
+## 2026-10-16 — P0 — Baseline (recorded before P1)
 
 The pre-existing system was recorded as P0 in `PHASES.md`: typed portable IR,
 the reference interpreter, JVM/JS/Wasm backends, scalar and fixed-size typed
@@ -16,7 +20,7 @@ state, the process ABI, and the shared `acceptance.cljc` process catalog.
 
 ---
 
-## P1 — Integer bitwise and shift operations (completed)
+## 2026-10-16 — P1 — Integer bitwise and shift operations (completed)
 
 **Delivered.**
 
@@ -72,7 +76,7 @@ operators is provided by the `:bitwise-lfsr` process case.
 
 ---
 
-## P1 follow-up — per-case target breakdown in the browser result
+## 2026-10-16 — P1 follow-up — per-case target breakdown in the browser result
 
 The browser conformance result now makes the JavaScript/Wasm split visible
 instead of reporting only an aggregate pass/fail. The shared matrices carry
@@ -88,7 +92,7 @@ assertions.
 
 ---
 
-## P2 — Portable scalar math builtins (completed)
+## 2026-10-16 — P2 — Portable scalar math builtins (completed)
 
 **Delivered.** The capability-aware `omkamra.dsp.builtins` registry and a
 generic `:builtin` IR node; primitive lowerings on interpreter/JVM/JS/Wasm via
@@ -134,7 +138,7 @@ JavaScript-only. See the handoff entry below for detail and next steps.
 
 ---
 
-## P3 — Transcendental math intrinsics (completed)
+## 2026-10-16 — P3 — Transcendental math intrinsics (completed)
 
 **Decision.** `DECISIONS.md` D14: compile to a native intrinsic wherever one
 exists, emulate where it does not, and put the resulting deviation in a
@@ -222,7 +226,7 @@ the phase.
 
 ---
 
-## P4 — Local arrays, constant tables, aggregate state (completed)
+## 2026-10-16 — P4 — Local arrays, constant tables, aggregate state (completed)
 
 P4 extends the language from scalar locals and flat state arrays to fixed-size
 memory for delay lines, wavetables, and structured filter state. It is being
@@ -320,7 +324,7 @@ Wasm at f32 and f64. `clj-kondo`/`cljfmt` clean.
 
 ---
 
-## P5 — Delay lines, circular buffers, and interpolation (completed)
+## 2026-10-16 — P5 — Delay lines, circular buffers, and interpolation (completed)
 
 Circular-buffer delay lines are written in the DSP language on top of the P4
 arena and exercised by the catalog. The convention is D17: a persistent `:float`
@@ -384,7 +388,7 @@ P6's territory rather than an ad-hoc mechanism here.
 
 ---
 
-## P6a — Stateful module composition (D19/D20) (completed)
+## 2026-10-16 — P6a — Stateful module composition (D19/D20) (completed)
 
 Calls are no longer limited to pure functions. A **module** is any DSP
 definition with state: used as an entry it has ports and a per-frame transition;
@@ -429,7 +433,7 @@ immediately below.
 
 ---
 
-## P6b — Modules that own records and arrays (completed)
+## 2026-10-16 — P6b — Modules that own records and arrays (completed)
 
 A module may own a record with an array field, end to end:
 
@@ -469,7 +473,7 @@ returning to record returns after the gate.
 
 ---
 
-## P6c — The composed filter voice (completed)
+## 2026-10-16 — P6c — The composed filter voice (completed)
 
 **The P6 gate is met:** `omkamra.dsp.library/filter-voice` composes a stateful
 RBJ biquad with the stateful exponential ADSR and runs identically on the
@@ -501,7 +505,7 @@ design) and the partition-coloring pass (P6d/D20).
 
 ---
 
-## P6b-ii — Record returns (multi-output) (completed)
+## 2026-10-16 — P6b-ii — Record returns (multi-output) (completed)
 
 The other half of deliverable 1. A module may now return **several typed outputs**:
 
@@ -557,7 +561,7 @@ rarely today and matters most once P10 gives many sibling modules.
 
 ---
 
-## P7a — Library namespace seams and a generated reference (completed)
+## 2026-10-17 — P7a — Library namespace seams and a generated reference (completed)
 
 P7's first decision was the sub-namespace seams the single `omkamra.dsp.library`
 was deferring. It is now five namespaces, each definition moved verbatim:
@@ -591,7 +595,7 @@ so it belongs with P8.
 
 ---
 
-## P7b — Band-limited oscillators (completed)
+## 2026-10-17 — P7b — Band-limited oscillators (completed)
 
 `omkamra.dsp.library.oscillator` gained the PolyBLEP family:
 
@@ -622,7 +626,7 @@ naive sawtooth's — the measurable point of PolyBLEP. `clj-kondo`/`cljfmt` clea
 
 ---
 
-## P7c — `if` branches are separate scopes (completed)
+## 2026-10-17 — P7c — `if` branches are separate scopes (completed)
 
 A language wart: `lower-if` lowers both branches with the same environment, and
 the flat `:locals` list carried a "names must be unique" rule, so a local name
@@ -649,7 +653,7 @@ browser 9/9 with 67 process cases. `clj-kondo`/`cljfmt` clean.
 
 ---
 
-## P7d — Noise, LFO, and a parameter-typing fix (completed)
+## 2026-10-17 — P7d — Noise, LFO, and a parameter-typing fix (completed)
 
 **Noise** (`omkamra.dsp.library.noise`):
 
@@ -686,7 +690,7 @@ matched on JavaScript and Wasm. `clj-kondo`/`cljfmt` clean.
 
 ---
 
-## P7e — Control-rate helpers, distortion, cubic interpolation (completed)
+## 2026-10-17 — P7e — Control-rate helpers, distortion, cubic interpolation (completed)
 
 Three self-contained additions across two new namespaces:
 
@@ -718,7 +722,7 @@ addition; three parallel biquads are already expressible with the call mechanism
 
 ---
 
-## P7f — Multimode, linear envelopes, chorus, spreading, sync (P7 complete)
+## 2026-10-17 — P7f — Multimode, linear envelopes, chorus, spreading, sync (P7 complete)
 
 The last of the contents list:
 
@@ -760,7 +764,7 @@ plus the D23 optional input port (P8) and the D20 coloring pass.
 
 ---
 
-## P8a/P8b — Target-neutral process instances (deliverables 1, 2, 4, 5 done)
+## 2026-10-17 — P8a/P8b — Target-neutral process instances (deliverables 1, 2, 4, 5 done)
 
 The artifact/program and the instance are now separate concepts.
 
@@ -817,7 +821,7 @@ deliberately keeps the input parameter, and the reasoning is recorded there.
 
 ---
 
-## P8d — Optional input ports (D23, deliverable 6)
+## 2026-10-17 — P8d — Optional input ports (D23, deliverable 6)
 
 A process may now declare `:input false`. It then has **no sample parameter, no
 input buffer, and no input binding**, and every parameter is a control:
@@ -893,7 +897,7 @@ capability gap.
 
 ---
 
-## P8c — Instance independence in the browser (P8 complete)
+## 2026-10-17 — P8c — Instance independence in the browser (P8 complete)
 
 The browser suite now proves that instances of one compiled kernel are
 independent on both generated targets, adding four checks (JavaScript and Wasm,
@@ -944,7 +948,7 @@ independence tests on the JVM *and* in the browser, and optional input ports
 
 ---
 
-## P9a/P9b — The sequencing layer (deliverables 1, 2, 4 and 6)
+## 2026-10-17 — P9a/P9b — The sequencing layer (deliverables 1, 2, 4 and 6)
 
 The PLAN already drew the line this phase needs: the **sequencing layer** is
 host-side and portable, owns the timeline and the capacity, and delivers
@@ -1052,7 +1056,7 @@ adapters); `clj-kondo`/`cljfmt` clean.
 
 ---
 
-## P9c — Control smoothing and slew, declared on the control (D27)
+## 2026-10-17 — P9c — Control smoothing and slew, declared on the control (D27)
 
 Segmentation alone cannot animate a control *within* a segment, so a control can
 now declare its own per-frame carrier:
@@ -1114,7 +1118,7 @@ a control buffer instead.
 
 ---
 
-## P9d — Host-supplied automation curves: per-frame lanes (D28)
+## 2026-10-17 — P9d — Host-supplied automation curves: per-frame lanes (D28)
 
 A control can now declare `:lane true`, and its value comes from the host one
 float **per frame** — arbitrary curves, envelopes, sequenced lanes:
@@ -1217,7 +1221,160 @@ drivers' `lane-region`, so all three agree by construction.
 
 ---
 
-## P10a — The sequencing runtime: description, voice pool, allocation (P10 partly complete)
+## 2026-10-17 — P15a — Explicit capability diagnostics (pulled forward, D29)
+
+`dsp/compile` now refuses an option the chosen target cannot serve, before any
+lowering, instead of letting a backend ignore it or substitute something else:
+
+```
+DSP target :wasm cannot serve the requested options: it serves :process entries,
+not :function; it serves :wasm-math :polynomial at :f64, not :table
+```
+
+Every unsupported request is reported at once, and the error carries the
+machine-readable form too (`{:dsp/error :unsupported-capability :capabilities
+[{:capability :entry :requested :function :supported #{:process}} ...]}`).
+
+**The work was mostly finding out that the note was wrong.** It claimed the gap
+to declare was the operator set, because Wasm has no native transcendentals. P3
+had already closed that with emulations, so a per-operator table would have been
+entries that all say `true` — untestable code. The differences that actually
+exist are in the options and entry kinds, and two were silent: validation
+(`:checks :development`) is implemented only by the interpreter, and the f32
+lookup table silently became `:polynomial` at f64.
+
+**One consequence was load-bearing, not cosmetic.** `:checks` had to become a
+per-target default. With the single global default of `:development`, every
+generated-target compile would have carried `:development` in its effective
+options while honouring nothing, and an unsupported value would have been
+indistinguishable from the default — so the check would have fired on every
+build. Deriving the default from the target makes the effective value always
+servable, which is exactly what lets an unsupported value mean "somebody asked
+for this". The `:entry` default is the opposite case and stays global on purpose:
+the same definition must not compile to a function on JS and a process on Wasm.
+
+**Two mistakes of mine, both instructive.**
+
+- The first draft of `problems` destructured `{:keys [checks wasm-math]}` from the
+  target table *and* took them from the requested options under the same names.
+  The shadowing made `(contains? checks requested-checks)` compare the table
+  against itself, so the `:checks` capability could **never** be reported — a
+  vacuous check of the exact kind this project keeps rediscovering. The test's
+  negative twin (the interpreter must still accept `:development`) is what would
+  have caught it had the assertion not been written against the table.
+- A test inserted at a prefix-matching anchor landed *inside* the neighbouring
+  `deftest`, which is legal enough to compile but produces an inline `def`.
+  `cljfmt` then re-indented it to match its new nesting, which made the mistake
+  look deliberate. Indentation is not evidence of structure; the lint warning
+  was. The anchor now matches the closing parens, and the replacement is verified
+  by checking what precedes and follows it.
+
+---
+
+## 2026-10-17 — Wasm lookup table — benchmarked, cosine fixed, with follow-ups
+
+Steps 1 and 2 are done (shared emulation functions; f32 sine table via
+`:wasm-math :table`). Measured on this machine with the four-calls-per-sample
+benchmark, warmed, best of three, at f32:
+
+| | `:polynomial` | `:table` |
+|---|---|---|
+| cost per `sin` | 137.1 ns | **24.3 ns** (5.65x faster) |
+| cost per `cos` | 137.0 ns | **25.4 ns** |
+| module text | 25 584 bytes | 51 928 bytes |
+| linear memory | 8 192 bytes | 24 580 bytes |
+
+**`cos` is fixed.** It was looked up as `sin(x + π/2)`, which rounds the
+argument *before* the range reduction — an error of order `ulp(x)`. The quarter
+period is now applied *after* reduction, in index space, where it is exactly
+`entry-count / 4`. Measured against `Math.cos` at |x| ~ 1e10, cosine error went
+from 2.0e-6 to 1.4e-6, and the cos/sin error ratio from 1.415 to 0.99: cosine is
+now no worse than sine, with the residual being the terms they share.
+
+**But the item was smaller than it looked, and that is the useful finding.** The
+posited shift error is ~`|x| * 2^-52`, while the range reduction's own error is
+~2π times larger and therefore dominates. So the shift contributes at most about
+a sixth of the total, and it only *appears* to double the error when a maximum is
+taken over few samples, because the error oscillates. Any real accuracy work at
+large arguments belongs in the **range reduction**, not here: it is what makes
+the polynomial strategy degrade from 3e-8 at |x| ~ 1e6 to 1.7e-7 at |x| ~ 1e9,
+and it affects `sin` exactly as much as `cos`. A Cody-Waite or double-double
+reduction would lift both.
+
+**Two incidental improvements.** Binding the scaled index to a Wasm local was
+needed because a WAT expression is a tree: the first version of the fix
+referenced the reduction three times, which emitted it three times and *cost*
+half the table strategy's speed (32.6 ns to 47.5 ns). Doing it with locals took
+it to 24.3 ns — better than before the change — and shrank the module text below
+its original size. The index wrap also uses a remainder rather than a
+compare-and-subtract, which covers a latent edge case: a reduced phase landing
+exactly on the period produced an index of N, and reading entry N+1 one past the
+last.
+
+Remaining:
+
+- **f64**: a raw table would be too large; consider a piecewise minimax
+  coefficient table if f64 Wasm speed ever matters.
+- **`exp`** has no table (polynomial only); fine while it is not hot.
+- **Table size**: 4097 f32 entries (16 KB payload, ~52 KB WAT text). Could
+  shrink to 2049 entries if the interpolation error stays acceptable, or grow
+  for margin.
+- **`:wasm-math :table` is f32-only and silently ignored at f64** (see open
+  issues; it is now a compile error rather than a silent fallback).
+- **`:wasm-math :table` is f32-only and silently ignored for f64** (the table is
+  a byte-stride region, so it has no f64 form). A caller asking for `:table` at
+  f64 gets the polynomial emulation without being told.
+
+---
+
+## 2026-10-17 — Layout after the reorganisation (before P10)
+
+The suite and its scaffolding were reorganised so a change can be checked against
+the part it concerns, and so it is obvious which namespaces are the compiler and
+which are the machinery around it. The suite is unchanged in substance: **85
+tests, 995 assertions**, and browser **19/19** either side of it.
+
+| before | after |
+|---|---|
+| `omkamra.dsp-test` — one 2864-line file | `omkamra.dsp.tests.{descriptor,linker,ir,interpreter,jvm,js,wasm,process,memory,composition,library,conformance,automation}`, plus `tests.suite/run-all` |
+| *(new)* | `omkamra.dsp.harness.fixtures` — the shared `dsp/defn` fixtures and measuring helpers |
+| `omkamra.dsp.acceptance` | `omkamra.dsp.harness.catalog` |
+| `omkamra.dsp.conformance` | `omkamra.dsp.harness.conformance` |
+| `omkamra.dsp.testbed` (`.clj`/`.cljs`) | `omkamra.dsp.harness.testbed` |
+| `omkamra.dsp.browser` | `omkamra.dsp.harness.browser` |
+| `omkamra.dsp.call-fixture` | `omkamra.dsp.harness.call-fixture` |
+| `omkamra.dsp.{interpreter,jvm,js,wasm}` | `omkamra.dsp.targets.*` |
+| `omkamra.dsp.capability` | `omkamra.dsp.targets.capability` |
+
+Entries above this one use the old names, and should: they record what was true
+when they were written.
+
+**Three couplings that the file tree does not show.**
+
+1. **HTTP routes follow the namespace.** `omkamra.dev.on-demand-http` derives the
+   handler namespace from the URI, so moving the testbed moved every endpoint to
+   `/omkamra/dsp/harness/testbed/...`. The *page* is a separate mechanism: it is
+   served for whichever URI matches a Shadow build's `:asset-path`, and the page
+   HTML's script tag is generated from that same path. So `shadow-cljs.edn`'s
+   build id, `:output-dir`, `:asset-path` and `:init-fn` had to move together, or
+   the page would 404 its own bundle. The Shadow content cache also had to be
+   cleared, as ever.
+2. **A `dsp/call` inside quoted data resolves against the aliases of the
+   namespace that *initiates the link*, not the one that defines the body**: the
+   linker uses `find-ns`, which only sees namespaces already loaded. Splitting
+   the fixtures away from the tests broke two calls, so the fixtures now call
+   their dependencies by full namespace, and `harness.fixtures` requires
+   `harness.call-fixture` purely so the linker can find it — a require that
+   appears nowhere in code, and that a lint-driven tidy-up will try to remove.
+   It is load-bearing; the reason is recorded at the require.
+3. **`dsp/defn` bakes its descriptor at compile time**, so a moved definition is
+   not in effect until it is reloaded — and clj-reload captures its baseline on
+   first use, so files edited *before* that must be touched to be seen at all.
+   Those two together made a correct edit look like a live bug for two runs.
+
+---
+
+## 2026-10-18 — P10a — The sequencing runtime: description, voice pool, allocation (P10 partly complete)
 
 P10 is the largest phase left, so it is cut into slices. **P10a** is the
 runtime's foundation and the whole of it is `PLAN.md`'s second layer:
@@ -1311,7 +1468,9 @@ Whichever is chosen, P10a's only assumption is that a released voice is
 expendable: a pool of capacity C behaves correctly under any number of notes
 because stealing prefers released voices.
 
-## P10b-i — Voice modes (D33)
+---
+
+## 2026-10-18 — P10b-i — Voice modes (D33)
 
 The four missing modes are in, and **no compiler surface changed**: a mode is a
 policy the pool applies to the same compiled voice, so P10b-i touches only
@@ -1354,7 +1513,9 @@ envelope has finished (P10c) — so a capacity-1 pool retriggers its releasing
 voice, which is documented behaviour rather than a defect. And modulation
 routing, which is the rest of P10b.
 
-## P10b-ii — Modulation as an example instrument (D34)
+---
+
+## 2026-10-18 — P10b-ii — Modulation as an example instrument (D34)
 
 Modulation is delivered as `omkamra.dsp.examples.demo-synth`, an example
 instrument, rather than as a core mechanism. The distinction matters: `PLAN.md`
@@ -1573,7 +1734,9 @@ That closed D37. The helpers have since graduated to core: `omkamra.dsp.graph`
 holds the substrate and `omkamra.dsp.combinators` the combinators, with `share`
 as the last of the tree-expressible set. The next step is the D36 inventory.
 
-## D38 — Clojure assembles the static graph; the engine owns dynamic instances
+---
+
+## 2026-10-18 — D38 — Clojure assembles the static graph; the engine owns dynamic instances
 
 The transform work landed on a principle, now written down as D38: an audio
 graph is assembled in ordinary Clojure and crosses into the compiler exactly
@@ -1649,7 +1812,9 @@ candidate list, now recorded in D38: deduplicate identical inlined bodies
 subexpressions only, and note that argument hoisting is the first piece and is
 already in the lowerer.
 
-## P10c — Voice tails and containment (in progress)
+---
+
+## 2026-10-18 — P10c — Voice tails and containment (completed)
 
 Tails turned out to hinge on one design question: how does the pool know a voice
 has finished? Audio level is not an answer — a delay pre-roll, an LFO gate, a
@@ -1719,7 +1884,9 @@ per-sample.
 **Remaining.** The JS/Wasm `read-specials!` and containment, with the P10d host.
 (This is host code: the compiled voice never contains containment.)
 
-## P10d — The JavaScript target emits through Squint (D41)
+---
+
+## 2026-10-18 — P10d — The JavaScript target emits through Squint (D41)
 
 **Delivered.** The JavaScript backend no longer builds JavaScript text. The
 portable IR still lowers to the same JS-shaped IR, but emission now builds
@@ -1777,7 +1944,7 @@ authoring style.
 
 ---
 
-## P10d — The browser host and the worklet boundary (D40, slice 3)
+## 2026-10-18 — P10d — The browser host and the worklet boundary (D40, slice 3)
 
 **Delivered.** A pool runs in the browser over a generated JavaScript module. The
 kernels moved out of `omkamra.dsp.synth.host` into an `omkamra.dsp.hosts` family
@@ -1832,7 +1999,7 @@ P11.
 
 ---
 
-## P11a — the reference instrument (in progress)
+## 2026-10-18 — P11a — the reference instrument (completed)
 
 The P11 acceptance fixture begins as `omkamra.dsp.examples.reference-synth`: a
 stereo voice assembled from library blocks and combinators (D38) rather than
@@ -1872,7 +2039,7 @@ rendering (P11c), and the property battery (P11d).
 
 ---
 
-## Interpreter allocation pass (P11 prep)
+## 2026-10-18 — Interpreter allocation pass (P11 prep)
 
 The suite had grown to ~46 s, and the interpreter — the oracle every conformance
 case runs — was the reason. A profile (`clj-async-profiler`, `:event :alloc`, on
@@ -1913,7 +2080,7 @@ the check that the `.cljc` changes survive ClojureScript. What remains is boxing
 
 ---
 
-## P11b-i — the instrument graph and the post-mix chain (D42)
+## 2026-10-18 — P11b-i — the instrument graph and the post-mix chain (D42)
 
 P11's effects land as a **Clojure-level instrument graph** lowered to a
 **program**, which is the shape the later slices will refine.
@@ -1966,7 +2133,7 @@ deliverable 2's "delay/chorus/distortion".
 
 ---
 
-## P11c — all-backend offline rendering
+## 2026-10-18 — P11c — all-backend offline rendering
 
 The instrument host now runs on JavaScript and Wasm, so the reference fixture is
 rendered on all four targets and checked for block-size invariance.
@@ -2002,7 +2169,7 @@ differential and block-size check remain on the JVM and interpreter.
 
 ---
 
-## P11d — the property battery (P11 complete)
+## 2026-10-18 — P11d — the property battery (P11 complete)
 
 The acceptance properties land, each where it is honestly measured rather than
 only at the instrument level:
@@ -2049,7 +2216,7 @@ per-feature layer boundary — is next.
 
 ---
 
-## Refinement — a control name is a symbol, however it is spelled (D43)
+## 2026-10-18 — Refinement — a control name is a symbol, however it is spelled (D43)
 
 `with-effect` (and `comb/through`) now accept a keyword or a symbol for the
 controls they introduce. `graph/normalize-control-name` folds a symbol, keyword,
@@ -2073,7 +2240,7 @@ that `with-effect` accepts either spelling and lowers identically.
 
 ---
 
-## The reference synth on every target, and the SVF stability bound it exposed
+## 2026-10-18 — The reference synth on every target, and the SVF stability bound it exposed
 
 **The portable host.** The reference synthesizer's modulation matrix and render
 loop moved into `omkamra.dsp.reference` (`.cljc`), shared by the JVM example
@@ -2128,7 +2295,7 @@ clean.
 
 ---
 
-## M1 — Event-driven host (completed)
+## 2026-10-19 — M1 — Event-driven host (completed)
 
 **Goal.** Drive the voice pool from timestamped events rather than per-block
 polling (M1 of the M workstream; `docs/mvp/MODULATION.md`, D44).
@@ -2203,7 +2370,7 @@ assertions; browser 26/26; `clj-kondo`/`cljfmt` clean.
 
 ---
 
-## M2 — Instrument parameters and triggers (in progress)
+## 2026-10-19 — M2 — Instrument parameters and triggers (completed)
 
 **Goal.** The parameter layer above the compiler: declared parameters, bindings,
 the API, and the trigger/handler dispatcher, with note-on/off as the built-in
@@ -2274,7 +2441,7 @@ the routing table is validated at construction.
 
 ---
 
-## M3 — Generators (in progress)
+## 2026-10-19 — M3 — Generators (completed)
 
 **Goal.** Turn the matrix into executable logic on two axes — a host reducer for
 the sequencer and a kernel transform for the assembler — sharing one route schema
@@ -2388,7 +2555,9 @@ reduces.
 deleted temp directory; the test namespace now restores the classpath scope in a
 `use-fixtures :once` teardown.
 
-### M4 — lanes through the pool (in progress)
+---
+
+## 2026-10-19 — M4 — lanes through the pool (completed)
 
 The M4 design note lives in `MODULATION.md` (with the DAW case and the accessor
 rule), and D46 records the language surface.
@@ -2447,7 +2616,7 @@ regression test in `omkamra.dev.tools-test`.
 
 ---
 
-## D47 — definitions as functions with calls (stage 1: the mechanism)
+## 2026-10-19 — D47 — definitions as functions with calls (stage 1: the mechanism)
 
 **Goal.** Stop copying every `dsp/defn` body into each call site: lower definitions
 as separate functions with real calls, and let a callee ask to be copied with
@@ -2481,7 +2650,7 @@ the per-backend work are in D47.
 
 ---
 
-## Reload — an alias held outside the scan scope (regression fix)
+## 2026-10-19 — Reload — an alias held outside the scan scope (regression fix)
 
 `require` stores the namespace *object* it found. `reload` unloads a namespace
 with `remove-ns` and re-creates it, so an alias held **outside the scan scope** —
@@ -2504,7 +2673,7 @@ exactly the stale read.
 
 ---
 
-## omkamra.dev.tools-test — the facade's test file covers both layers
+## 2026-10-19 — omkamra.dev.tools-test — the facade's test file covers both layers
 
 `omkamra.dev.tools` is a two-delegator facade over `omkamra.dev.tools.reload`, and
 every test in `tools_test.clj` is reload behaviour, so moving the file to
@@ -2543,7 +2712,7 @@ whole-tree reload takes the nREPL with it.
 
 ---
 
-## Reload — refusing to rebuild the whole scope
+## 2026-10-19 — Reload — refusing to rebuild the whole scope
 
 **The accident.** While verifying the `initial-digest` unit test I stubbed that
 function and then ran the whole `tools-test` suite. The stub corrupted the
@@ -2580,7 +2749,7 @@ end the original accident now answers `{:status :refused, :would-reload 275,
 
 ---
 
-## Reload — only namespaces the session has run
+## 2026-10-19 — Reload — only namespaces the session has run
 
 **Supersedes** *Reload — refusing to rebuild the whole scope*. That entry put a
 threshold on the symptom (a huge reload) and left the capability in place; this
@@ -2634,7 +2803,7 @@ as one reload will not run, and the session survives.
 
 ---
 
-## Operators fold three or more operands (D48)
+## 2026-10-19 — Operators fold three or more operands (D48)
 
 **Why.** Writing a three-term sum in the DSL failed: `(+ a b c)` was a lowering
 error, and so were `(and a b c)`, `(bit-or a b c)`. The playground's `pygen` and
@@ -2668,7 +2837,7 @@ value domain rather than arity, and still open.
 
 ---
 
-## D47 stage 2 — the JVM calls
+## 2026-10-19 — D47 stage 2 — the JVM calls
 
 **What happened.** A process compiled for `:jvm` no longer copies a callable
 definition into every call site: each retained definition becomes a **static method**
@@ -2726,7 +2895,7 @@ size*, which is what the D45 cliff was about, so a JVM timing measurement is owe
 
 ---
 
-## D47 measured — the cliff is inlining's, and leaving it costs 15%
+## 2026-10-19 — D47 measured — the cliff is inlining's, and leaving it costs 15%
 
 **What was missing.** D45's table had JVM pool/fused columns but no *calls-against-
 inlined* axis, and no committed timing code at all: those numbers came from an ad-hoc
@@ -2770,7 +2939,7 @@ interns behind under plain `require`/`:reload`, which cost a confusing detour un
 
 ---
 
-## D47 stage 3 — the JavaScript target calls
+## 2026-10-19 — D47 stage 3 — the JavaScript target calls
 
 **What happened.** A process compiled for `:js` now emits one `letfn` binding per
 retained definition and calls it, exactly as the JVM does. The differences from the
@@ -2830,7 +2999,7 @@ other or to D45's.
 
 ---
 
-## D47 stage 4 — the Wasm target calls, and every target is measured
+## 2026-10-19 — D47 stage 4 — the Wasm target calls, and every target is measured
 
 **What happened.** A process compiled for `:wasm` now emits one function per retained
 definition and calls it, so `calling-targets` is `#{:jvm :js :wasm}` and D47 is
@@ -2893,7 +3062,7 @@ Wasm, which is why it could safely go last. A user who wants the 7% back writes
 
 ---
 
-## Testing: case-level `:only`, and one call that runs both suites
+## 2026-10-19 — Testing: case-level `:only`, and one call that runs both suites
 
 **Why.** Two small things the work above wanted. First, `browser/run!`'s `:only`
 matched *check* names only, so a bite-check that distinguishes one case ("does
@@ -2922,1173 +3091,7 @@ and its baselines now read 192/1729 and 28/28.
 
 ---
 
-## F2a — process-shaped voices fuse on the interpreter (completed)
-
-**Delivered.** The mechanism, the surface, and the invariant beneath them:
-
-- **Surface (D57).** `(with-buffers <binding> <call>)` binds a process-shaped
-  callee's output buffers to region names the call site reads; the binding is a
-  map from callee buffer id to region name, or the bare name as sugar when the
-  callee writes exactly one output buffer. `linker.clj` threads a `buffered?`
-  context through `call-sites`/`rewrite-calls`, so the buffer refusal relaxes only
-  for the wrapped call; a plainly-called buffer writer still refuses with
-  "cannot access the caller's process buffers".
-- **Mechanism.** A bound buffer is a **region buffer** of the entry
-  (`:direction :region`, per channel like `:output`); the callee's output buffers
-  lower as a process-shaped module's own buffers, and `ir/lower-call` records
-  `:regions {callee-buffer region}` on the call. The interpreter allocates the
-  regions once per block and `evaluate-call` overlays them into a *fresh* callee
-  context, so the caller's context is untouched. No ABI, target, or bundle-schema
-  change was needed for F2a.
-- **A process-shaped callee returns `:void`** (D58): the descriptor allows it for
-  a `:process` definition, `lower` omits the return, `coerce-value` handles
-  `:void`, and the module-buffer setup is gated on `(:process definition)` so a
-  plain function still has no buffer namespace.
-
-**The trap that cost the most.** `descriptor/default-options` carries
-`:channels 1` and `normalize-options` merges it unconditionally, so
-`(:channels options)` is never a "was a width declared?" signal. F2's first cut
-read it in `lower`, pinning every module to one channel; the failure was a
-stereo voice writing `:output 1` into a one-channel buffer. Worse, the *first*
-fix only *dissoc'd* `:channels` when the top-level width was inferred and never
-*wrote* the resolved value when it came from `:process :channels`, so an explicit
-2 still reached modules as the default 1. `compile` now writes the resolved width
-into `lowering-options` (or removes it when inferred), and `lower` reads the
-forced width first, then the module's own declaration, then its body. Inference
-does not propagate: a mono helper in a stereo entry stays mono (**D58**).
-
-**Tests.** `a-fused-process-voice-writes-the-call-sites-region` renders the
-fused entry and asserts it is exactly the sum of two separately-rendered voices,
-frame and channel, with an audibility guard so `0 == 0` cannot pass;
-`a-callee-that-writes-its-output-must-be-given-a-region` and
-`with-buffers-refuses-an-unbindable-region` pin the two refusals. **Bite-check:**
-disabling the region overlay (a `false` branch) collapsed the fused output to
-zeros and failed all three assertions. The JVM target does not yet handle
-regions — that is **F2b**, which the interpreter-only test waits on.
-
-**Suite.** JVM **219 tests / 1918 assertions, 0 failures**; `clj-kondo` and
-`cljfmt` clean on `src/omkamra/dsp`.
-
----
-
-## F2b — regions on the JVM, and the F2a rework that made them free (completed)
-
-**Delivered.** F2b is small because F2a was reworked first.
-
-- **F2a reworked to D57's design (D59).** F2a had given the entry a per-call-site
-  `:region` *buffer* (a per-channel array) and overlaid it into the callee's
-  context. That worked on the interpreter but asked the JVM for a region *buffer
-  argument* — a new ABI shape — and every other target for the same plumbing. The
-  rework makes a region exactly what D57 said: a **state slot in the callee's call
-  partition**. A process-shaped module's output buffers become state (`channels *
-  stride` floats, the lane/shared stride), its `buffer-store`/`buffer-load` lower
-  to `:state-store`/`:state-load` with the channel folded into the element index,
-  and a `with-buffers` name aliases the callee's rebased slot. The interpreter's
-  region code (an allocation in `process-context`, an overlay in `evaluate-call`)
-  was **deleted**; the entry's `:buffers` keeps only `:output`.
-- **The frame (D59).** A region is frame-indexed; a per-sample callee has no
-  frame local. So a callee with `:region-slots` gets one extra leading `:int`
-  parameter — the current frame — between `sample-rate` and its arguments, and
-  `callee-descriptor`/`callee-slots`/`call-instructions` agree on it. A callee
-  with no regions is unchanged. The interpreter needed nothing: its callee context
-  already carries `:frame`. **Bite-checked** — passing a constant zero left only
-  frame 0 correct and failed the test on frames 1..7.
-- **The JVM's `:void`.** `jvm-type` maps `:void` to the `:void` descriptor insn
-  uses; a void module's method gets a trailing `return`; a void call is not
-  `pop`ped. Two compile-time guards (a state access or a local with no layout
-  entry) now say so instead of emitting a null var index — they cost nothing, being
-  emitter-time.
-
-**Tests.** `a-fused-process-voice-writes-the-call-sites-region` now runs the
-interpreter *and* the JVM and requires them bit-for-bit equal to the sum of two
-separately-rendered voices, and pins that the regions are state (entry `:buffers`
-holds only `:output`, two call partitions, `:state-size` = two regions).
-
-**Suite.** JVM **219 tests / 1926 assertions, 0 failures**; browser **34/34**;
-`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
-
----
-
-## F2c/F2d — the rest of fusion (done)
-
-**Delivered.**
-
-- **F2c (targets).** JavaScript and Wasm apply a region-writing callee's per-slot
-  region as ordinary state, so the only target facts were the frame parameter and
-  the `:void` return. JS needed only the frame (it is dynamically typed); Wasm
-  also needed `:void` in `wasm-type`'s result position and no `drop` after a void
-  call. The region itself, the void module, and the frame were already correct in
-  the shared IR.
-- **F2d (`poly`).** `poly` now fuses a *process-shaped* voice (D60): each slot's
-  call is wrapped `(with-buffers :slot-k …)` and the fused body sums the regions
-  into `:output` per channel, requiring the voice to declare `:process :channels`.
-  `reference-voice` now declares `:void` and `:channels 2`, and the reference
-  instrument fuses on every target.
-- **The interpreter hosts fused pools (D60).** The interpreter kernel applies the
-  same base → fused mapping and resets one slot's partition from the ABI's
-  `:call-partitions`, so a fused pool on *any* host has an oracle. This was the
-  gap you flagged; without it the JVM and the browser only agreed with each other.
-- **Guard.** A process-shaped voice is fused without the M6b guard (it writes a
-  region, not a scalar), an optimisation withheld rather than a correctness gap.
-- **Checks.** `a-fused-pool-runs-on-the-interpreter-oracle` (fused == plain on the
-  interpreter, and the JVM matches it); `a-fused-reference-instrument-renders-
-  what-a-plain-one-renders` (the stereo reference instrument, interpreter + JVM,
-  bit for bit, with an audibility guard); and a browser check that renders the
-  fused reference voice against the *plain* voice on the same kernel, so the
-  transcendentals cancel (JavaScript matches exactly). **Bite-checked**: a
-  one-channel region (the channel factor dropped) errored the stereo test.
-
-**Bugs found on the way.** A `list*` splices only its *last* argument, so the JS
-call emitted the optional frame as a literal `null` argument on *every* call — the
-whole shared JS matrix regressed, which is how it was caught. Wasm `drop`ped a
-void call's absent result. And a restored bite-check whose `ir.clj` was never
-reloaded made the region one channel wide in the running image; the browser
-fused-reference check is what exposed it.
-
-**The Wasm item, closed.** The **Wasm** fused reference voice drifted from the
-plain Wasm voice (~0.26), and the cause was not fusion at all: a Wasm instance
-starts from zeroed memory and reaches the IR's initial values only through the
-module's `reset` — and the pool resets a voice only when it **steals** one, so a
-*fresh* Wasm voice rendered from zero, while the JavaScript host seeds the state
-array in `create`. The fused path had a second, independent bug: it snapshotted
-`:initial` before seeding (so the per-slot restore copied zeros), and
-`partition-ranges` resolved a partition one arena index at a time, but a region is
-a *single* layout entry spanning thousands of indices — so the interior had no
-entry, `min` collapsed the start to nil, and the reset built a negative-index view
-that restored nothing while writing state bytes into the input region. Both
-fixed (D61), both bite-checked independently, and the browser check now steals a
-voice so the per-slot reset is exercised. The fused and plain reference voices
-now render **bit for bit** identically on JavaScript *and* Wasm (`worst 0`).
-
-Two lessons, both about "the oracle": the drift was a *host* divergence that the
-fused check merely made visible, and the segment bug was invisible to every
-module-shaped fused check because only a region makes a multi-slot partition.
-
-**Suite.** JVM **221 tests / 1933 assertions, 0 failures**; browser **36/36**;
-`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`. Verified in a fresh JVM as
-well as the long-lived one.
-
----
-
-## F1's browser half — served, written, and held on a kernel divergence
-
-**What landed.**
-
-- **The browser fused instrument is served.** `fused-instrument-bundle` and
-  `fused-instrument-source` carry the same pair the fused-pool endpoints do: the
-  fused voice's runtime, ABI, IR, and `:fusion` mapping; the *plain* lowering of
-  the same voice as the same-target oracle (D14), so the transcendentals cancel;
-  and the modulation matrix and post-mix bus, which are not fused.
-- **`check-fused-instrument`** rebuilds the host over them and asserts the fused
-  instrument renders the plain one's phrase, finite and block-size invariant. It
-  is written for both JavaScript and Wasm and is **not registered** yet.
-- **A fused runtime holds its slots (D62).** `runtime-config` takes `:capacity`
-  from the description, and the fusion branch never overrode it, so a fused build
-  of an eight-voice description produced a pool of eight voices over a two-voice
-  artifact. The kernels map a pool voice onto a slot by creation order, so several
-  handles landed on one slot — and `modulation/publisher`, which writes the
-  matrix's targets to *every* voice each block, had them clobber each other. The
-  browser fused-pool endpoints had been setting `:capacity slots` by hand, which
-  is what the lowering should have done. Pinned by
-  `a-fused-instrument-holds-exactly-its-slots`.
-
-**The blocker, and what is eliminated.** The fused **reference instrument** —
-process-shaped, with smoothed controls — does not match its plain twin on the
-**JVM** or **JS/Wasm**, though it matches exactly *until a smoothed control
-departs from its default* (`pulse-width`, `cutoff`, `resonance`); every other
-control is bit-identical, and `:guard` on or off, `slots` 1, 2 or 4, and f32 or
-f64 all behave the same. The fused signal is ~1e-4 smaller at first and settles a
-few percent low.
-
-The **interpreter is exact** for the same comparison with the same IR and the
-same control values, and interpreter-plain equals JVM-plain, so the fused
-lowering is right and the JVM/JS kernels are wrong. Three candidates are already
-ruled out, each by measurement rather than by reading:
-
-- **The control mapping.** `fusion/fused-position` maps every base control onto
-  its fused twin — printed position by position — and for `slots 1` the fused
-  interface is the base interface with the hoisted pair moved to the front, so
-  delivery is effectively an identity.
-- **The control values.** The pool resolves identical values for both, and the
-  controls that diverge are exactly the smoothed ones.
-- **Rebasing.** If the callee's state accesses were unrebased, the partition base
-  would matter: dropping the entry's duplicated ramp slots moves that base and
-  must change the audio. It does not — the divergence is bit-identical — which is
-  also how we know those duplicated entry slots were dead code.
-
-A minimal voice with a single smoothed control fuses *exactly* on both targets, so
-the reproducer needs more of the reference voice's structure; that is where this
-picks up. One near-miss is worth recording: the Wasm host had a real bug of the
-same family (resolving a partition by arena *index* rather than by layout
-*segment*, which a region breaks), but the JVM's `partition-ranges` already
-handles multi-slot entries, so that is not this one.
-
-**Suite.** JVM **222 tests / 1935 assertions, 0 failures**; browser **36/36**;
-`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
-
----
-
-## F1 closed — the drift was a doubled ramp, not a kernel bug
-
-The fused **instrument** disagreed with the plain one as soon as a smoothed
-control left its default, on the JVM and in the browser, by ~1e-4 and settling
-percent low. It looked like numerical drift — the interpreter seemed exact, which
-sent the hunt into the JVM host's control delivery, the fused partition's arena
-base, and the region address lowering. All three were innocent.
-
-**What it actually was.** A **derived definition ramped the controls it merely
-forwards**. `derived-definition` carries the voice's control *declarations* across
-— including `:smooth` — and `normalize` turned each of them into a ramp state, so
-the wrapper smoothed the raw control and handed the *smoothed* value to a voice
-that smoothed it again. Two poles compound, so the derived signal lagged: percent
-for the first milliseconds, settling only after thousands of frames. The decay
-that made it look like a transient was real, and it was the tell.
-
-It was never `poly`'s alone. `guard`, `unison`, `share`, the instrument wrapper,
-and the modulation transformers all build on `derived-definition`, so any voice
-that passed through a wrapper doubled its smoothed controls.
-
-**How it was pinned.** A generator whose whole output *is* a smoothed control
-made it exact and legible in eight samples: the plain voice ramps
-`[0.0 0.5 0.75 0.875 …]` and the fused one `[0.0 0.0 0.0 0.125 0.3125 …]`. Reading
-the interpreter's own ramp state settled the remaining doubt — plain and derived
-ramp *identically*, so it was never the ramp's shape; and the state showed the
-same control ramped twice, once in the wrapper and once in the voice. Everything
-larger was consistent with several stories; the small subject was not.
-
-**Two things the hunt got wrong, worth remembering.**
-
-- **The "interpreter is exact" evidence was a stale Var.** `tools/reload`
-  unloads and rebuilds a namespace, so a REPL helper compiled *before* the reload
-  keeps calling the *old* Var, and therefore the old `poly`, forever. Several
-  measurements taken after the fix were really measurements of the unfixed code.
-  Helper functions in `user` must be re-evaluated after a reload.
-- **`guard` doubled, but it was not the only doubler.** The M6b guard is withheld
-  for process-shaped voices, so the process-shaped *reference* instrument was
-  never guarded — its divergence came through `poly` itself. Had the fix gone
-  into `guard` alone, the reference would still have drifted.
-
-**The fix.** `graph/derived-definition` marks its result
-`:dsp/forwarded-controls`; `descriptor/normalize` reads the mark and skips ramp
-creation, so the declaration still travels — the ABI a host reads still reports
-the mode — while the value stays raw until the voice that owns it ramps it, once
-per call site. That is D63. The `:smooth`/`:slew` stripping tried earlier inside
-`combinators/poly` is gone: one rule, in one place. It was bite-checked by
-removing the mark: the first block becomes
-`[0.0 0.0 0.0 0.125 0.3125 …]`, and the check fails.
-
-**Also landed.** The fused runtime's capacity is the slot count (D62): a fused
-build of an eight-voice description used to make an eight-voice pool over a
-two-voice artifact, so several handles shared one slot and the modulation
-publisher — which writes every voice each block — had them clobber each other.
-
-**Registered.** `javascript-fused-instrument-test` and
-`wasm-fused-instrument-test` are checks now, not comments: F1's browser half.
-They were failing before this and pass after, which is what proves they are not
-comparing a plain kernel with itself.
-
-**Suite.** JVM **223 tests / 1937 assertions, 0 failures**; browser **38/38**;
-`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
-
----
-
-## F3 — a lane reaches a callee
-
-**What it was.** `(lane control)` was refused anywhere but the entry process
-("lane is only available in the entry process", `ir.clj`), for a shared lane as
-much as a per-voice one, so automation died at the first module boundary and a
-caller had to compose at the call site. That refusal is gone: a definition that
-reads a lane is now handed the region.
-
-**The shape (D64).** One pointer per lane-reading definition, plus the current
-frame. Not a base into the callee's own partition: a lane's offset is
-`index * frame-capacity` — a constant of the *entry's* layout (D28) — so the
-region is all a callee needs, and every definition in the artifact reads the same
-slices. A definition that only calls a lane reader forwards its own region, so
-`lower-definitions` propagates the flag up the call graph.
-
-**The two halves, and where each was caught.**
-
-- The *IR* half — the lane table reaches callees, the refusal goes, and a
-  lane-reading definition is marked — was caught by the JVM suite: bite-checked
-  by withholding the table, which refuses with "lane is only available where a
-  lane region is".
-- The *target* half — passing the region and, with it, **the frame** — was caught
-  by the browser. A lane read is per-frame, so a lane reader needs the frame for
-  the same reason a `with-buffers` region writer does (F2), and the first cut
-  gave the lanes path the region but not the frame: the JVM emitted `[:iload
-  nil]` for the read's index (found by printing the callee's instructions) and
-  the browser matrix failed on both JavaScript precisions with `ReferenceError:
-  lanes is not defined` and, once that was in, `frame` likewise. One predicate
-  now answers for regions and lanes on all four targets.
-
-**Verified on all four targets** by a case in the shared catalog,
-`:automation-lane-in-callee`: an entry that declares a lane and calls a callee
-whose body reads it with `(lane amount)`. The JVM suite runs it on the
-interpreter and the JVM; the browser matrix runs it on JavaScript and Wasm, f32
-and f64. Nothing was hand-written for any target — that is the catalog's point —
-and the browser went from two failures to green on exactly this case, which is
-what makes it a bite check rather than a formality.
-
-**A note on the tooling.** Two of this slice's measurements were wrong before
-they were right, both for the reason F1 recorded: `(tools/reload '[a b])`
-*forces* those namespaces and skips detection, so a file edited but not named
-stays stale in the image — which is how the JavaScript target kept emitting a
-callee without its lane parameter while the source clearly had it. The
-no-argument `(tools/reload)` is what finds everything. The tool now says so
-itself: a named target reports `:stale` — the loaded namespaces whose content
-changed and were not reloaded, with a note — so the image's freshness is never
-something a caller has to remember to check.
-
-**Suite.** JVM **223 tests / 1944 assertions, 0 failures**; browser **38/38**;
-`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
-
----
-
-## F4 — a lane reaches every fused slot
-
-**What it was.** A fused entry renders every voice in one call, so it owns *one*
-lane region — and a lane is per voice. `poly` therefore refused one on a per-slot
-control outright ("poly cannot expand a lane per slot: a lane belongs to the entry
-process"), and a lane-only control slipped past that refusal with a worse outcome:
-it was hoisted, one slice was laid out, and every slot read the same automation,
-whichever voice happened to write it last. Two different curves make that a wrong
-block rather than a missing one, which is how the pin was written.
-
-**The shape (D65).** The region is the entry's, `slots` slices of it, and a call
-site hands its callee the base of **its** slice: zero-based lane offsets plus a
-base, exactly as a callee's state indices are resolved against a partition base
-(D19). Nothing else in the ABI changes — a lane-reading callee gains one `int`
-next to the region it already had — and a callee that merely forwards the region
-passes the base it was handed. Three further facts fell out of "one slice per
-voice":
-
-- **Expansion does not multiply lanes.** `poly` expands a per-slot control, but a
-  lane belongs to the *control*: the expanded declarations carry the lane's name
-  (`:lane-name`), so the entry lays out one lane per base control and the slots
-  differ by slice. Without this the callee's `(lane amount)` could not resolve at
-  all: the entry's layout held `amount_0`/`amount_1` and the voice declared
-  `amount`.
-- **A lane-only control's name is a lane read wherever it is read.** In the entry
-  that was already true; a callee now binds it to a read of *its own* slice rather
-  than to the value the caller passed. Where the artifact has one slice the two
-  are the same read, so no existing check moved.
-- **A slot is a call partition.** The base a call site hands out is the partition
-  ordinal — the same index a host resets one voice by (M6a) — so a fused entry's
-  lane-reading call site has to own one; it is refused loudly otherwise rather
-  than given an arbitrary slice.
-
-**Where each half was caught.** The IR half and the JVM/interpreter hosts were
-caught by the JVM suite; the two pins were written first and failed for exactly
-the two reasons above (`[40 40 40 40]` where the plain pool gave `[22 24 26 28]`,
-and the refusal). The JavaScript *host* half — its fused branch still allocated a
-one-slice lane region, so slice 1's writes went out of bounds and read as zeros —
-was caught by the new browser check, which is the bite check for a line no JVM
-test can reach: it reported `[[0 0 0 0]]` against the interpreter's
-`[[22 24 26 28]]` and went green on the fix.
-
-**Verified on all four targets.** The JVM suite renders both pins on the
-interpreter and the JVM (`a-fused-pool-gives-each-slot-its-own-lane`,
-`a-fused-pool-expands-a-lane-carrying-control-per-slot`), each against a plain
-pool over the same description as the oracle; the browser runs `JavaScript fused
-lane` and `Wasm fused lane` over a served fused bundle, with two curves written to
-the two voices and the interpreter pool as the oracle. The per-slot-lane refusal
-in `poly`'s tests became a positive test of the lane that travels with an expanded
-control.
-
-**Suite.** JVM **225 tests / 1953 assertions, 0 failures**; browser **40/40**;
-`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
-
----
-
-## F5 — a fused AudioWorklet
-
-**What it was.** The worklet adapter serves one kernel instance per node, so a
-fused voice — one process holding `slots` voices — needed a node that renders all
-of them, with a parameter of its own for every per-slot control. F5 is that node.
-
-**What it turned out to be: plumbing, not a mechanism.** The adapter writes each
-parameter into the kernel's control array at the parameter's own index and builds
-its own kernel, so there is no pool inside a worklet and *nothing has to be
-mapped*: the node's parameters simply **are** the fused interface, in ABI order
-(`gate_0`, `frequency_0`, `delay_0`, `mix_0`, `gate_1`, ...). The plan had assumed
-the pool's `:mapping` would have to be applied here; it is not needed, because
-`:mapping` exists to translate the *pool's* base-shaped writes, and a worklet has
-no pool. So the change is: the served adapter's parameter descriptors are
-generated from the fused artifact's ABI instead of being a `one-pole` literal, and
-one fused arm is served per target.
-
-**Two bugs fell out, and the check caught both.**
-
-- The adapter read `processorOptions` unguarded, so a node created without them
-  threw where nothing could see it: the worklet reported a bare `processorerror`
-  and the page saw only a node that never answered. Both adapters now default it
-  to an empty object, and the JavaScript one also reports a constructor throw
-  through its own port, so `worklet-ready` rejects with the *reason* instead of
-  timing out. That is how "Cannot read properties of undefined (reading
-  'controlNames')" was found — and it was mine: the page had put the processor
-  fields at the top level of the node options rather than under
-  `processorOptions`.
-- A stub of the descriptor *order* did **not** bite, which is worth writing down:
-  the adapter indexes by `processorOptions.controlNames`, not by the descriptor
-  list, so `parameterDescriptors` only has to *name* what the page drives. The
-  check does bite when the per-slot *names* go missing ("rendered silence for a
-  gated slot").
-
-**The check.** `JavaScript fused worklet` and `Wasm fused worklet` each render one
-node three times — slot 0 alone, slot 1 alone, and both — with the second slot at
-twice the first's `frequency`, and ask two things of the blocks: that slot 1's
-peak is twice slot 0's (a parameter reached the slot it names, not a neighbour's
-control block) and that the both-slots block *is* their sum (one node rendered
-both voices, not one). The worst difference is one f32 ulp-ish (3e-5), and the
-same numbers come out of both hosts.
-
-**Suite.** JVM **225 tests / 1953 assertions, 0 failures**; browser **42/42**;
-`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
-
----
-
-## Handoff — current state (rolling entry)
-
-This is the one living entry, as opposed to the completed-phase entries above:
-what exists, how it fits together, what is open, and what to do next. It may be
-rewritten in place. Read with `PLAN.md`, `PHASES.md`, and `DECISIONS.md`.
-
-### Resume here
-
-- **Next: H — closing the declared gaps** (`PHASES.md`, the section after F).
-  An audit of the source for "not yet"/"cannot … yet" found five: the worklet
-  path is a renderer rather than a runtime (no lanes, shared region, `:activity`
-  read-back, per-slot reset or allocator, and mono-only events); the browser bus
-  carries neither lanes nor a shared region; a lane on a per-channel control has
-  no delivery; a fused voice with no state and no `gate` cannot fuse; and arrays
-  of records cannot hold array fields.
-
-  **Order and one deferral.** **H2, H3 and H4 are done (D67, D68, D70)**: the
-  chain's own lane and shared regions, a per-channel lane, and a slot that is the
-  call site's identity rather than a state partition. **H5** (array fields in
-  records) is the last H item and it is a language decision, not a slice.
-  **H1 — the pool inside a worklet node — is deferred until after P13 and P14**,
-  because how a worklet gets its kernel and its configuration is exactly what
-  those phases decide: P13 runs the compiler in the browser (squint as its JS
-  backend *inside* SCI), so a node's kernel is a blob the page creates rather
-  than a per-request server URL, and P14 makes worklet installation
-  artifact-driven while *removing* the testbed assembly H1 would have extended.
-  H1 then starts with a decision about where the allocator lives (SCI hosting the
-  pool in the worklet / a Shadow-built worklet runtime / an allocator emitted by
-  the compiler).
-
-  **Toolchain, since it decides this.** Shadow compiles this project's
-  ClojureScript (page, worker, hosts, pool, `synth`) with cljs semantics; SCI is
-  how our Clojure code is meant to run in the browser (P13), also semantics
-  preserving; **squint is not a ClojureScript compiler** — syntax to native JS,
-  JS data structures, `Symbol.for` protocols — and its one intended job here is
-  the emitter's JS backend (D41), running inside SCI. So no *library* namespace
-  goes through squint.
-- **The F workstream is complete: F0, F1, F2, F3, F4 and F5 are all done.** Fusion is *deployed*: `{:fusion {:slots S}}`
-  fuses the **reference instrument** (stereo, process-shaped) and a fused pool
-  renders its plain pool **bit for bit** on the **interpreter, the JVM, and in the
-  browser** — and the fused **instrument host** does too (D62, D63). A **lane
-  reaches a callee** on all four targets (D64), and a **fused entry gives each of
-  its slots its own lane slice**, so per-voice automation and fusion compose (F4,
-  D65). The workstream is `with-buffers` (D57); a region is a **call-partition
-  state slot** (D59); a process-shaped module returns `:void` and is handed the
-  frame; `poly` fuses such a voice by summing its slots' regions (D60); the
-  browser's **JavaScript** and **Wasm** fused reference voices match their plain
-  voices exactly, through a steal (D61), and a fused **worklet node** renders all
-  `slots` voices of a fused voice, driven per slot (F5, D66).
-- **Seams 1–4 are done on every host**: the pool mixes a fused instance once
-  per block (`instance-key`, an *equality* contract the pool numbers itself), the
-  kernel maps the pool's base control plan onto each slot's slice
-  (`hosts/fusion/fused-mapping`, applied by `fused-jvm-kernel` through one
-  precomputed row per slot), a slot resets its own state partition
-  (`:partitions` on the artifact, `:reset-partition` on the instance) — so stealing
-  into one slot leaves its neighbour bit-for-bit alone — and a callee may publish a
-  special, so a fused slot's `:activity` is readable per partition and the pool
-  frees a finished slot exactly as the plain path does (D54). All four are
-  bite-checked on the JVM and the last three on the browser too; seam 4 restored
-  the tail-freedom fusion had given up.
-- **Fusion is an option, `{:fusion {:slots S}}`** (D52): a compile option beside
-  `:target`/`:precision`/`:containment`, lowering a module-shaped voice to
-  `(poly S voice)`; `poly` carries a voice's control declarations through, so a
-  `:shared` control stays shared and a lane travels with the control it belongs to
-  (a shared control per slot is still refused with a reason).
-- **The measurements it rests on** are D45's post-D47 section: the pool is ~2×
-  slower at a full patch on the JVM (1.5–1.8× on JS, ~1.1× on Wasm) and 2–7.5×
-  *faster* at two voices, flat in capacity; on a delay-line voice fusion is ~1.9×
-  at 32 slots. The occupancy knob (`bench/run! {:sounding n}`), the pool arm
-  (`bench/pool-arm`), and `realistic-sweep!` are in place.
-- **M4 is done** (M4c closed it): a lane's scope is its control's storage, one
-  region per voice, `set-lane!`/`set-voice-lane!`. Two bugs fell out of making the
-  browser checks honest (the Wasm lane pointer; the harness's typed-array
-  conversion) — see the M4c entry and D28.
-- **D47 is done: every target calls.** A process on `:jvm` emits one static method per
-  retained definition, on `:js` one `letfn` binding, and on `:wasm` one function — the
-  ABI is `base, frames, sampleRate, args…` in all three cases (`float-state int-state
-  float-base int-base frames sample-rate args…` on the JVM, and on Wasm the base is the
-  only extra parameter, since the memory is the module's), with `base + constant` state
-  addressing inside a callee. `dsp.clj`'s `prepare-ir` decides per target: the calling
-  targets `#{:jvm :js :wasm}` call, copying only `uncallable ∪ requested`, where
-  `uncallable` is a record return or scratch arrays and `requested` is `^:inline`; a
-  **function** entry stays
-  flat everywhere, and the interpreter is untouched (it is the oracle, and the
-  un-optimised shape). One invariant is Wasm's alone: a callee is emitted once, so its
-  partition's layout must be the enclosing layout translated by its base, which is why
-  `state-memory-layout` places every slot at the *block's* element alignment (f64-int
-  case: `call-fixture/mixed-state` + `call-fixture-int-led` + catalog case
-  `:call-int-led`, bite-checked — reverting the alignment fails it on Wasm in f64).
-  Measured (D47): the JVM cliff is N=12→14, calling costs ~15% below it; the JS cliff is
-  N=16→24, calling is free below it, and at N=32 the *inlined* JS lowering cannot be
-  compiled at all (Squint overflows — the endpoint answers 500); Wasm has **no cliff**
-  and a flat ~7%. Verified: **192 tests / 1729 assertions**, browser **28/28**, a
-  bite-check that fails 14 conformance assertions when `partition-bases` is stubbed to
-  zero, and `harness/bench.clj` + `harness/browser.clj`'s `bench!` as repeatable drivers.
-  D47 also records an **open question**: whether the *fused* lowering still earns its
-  keep now that `^:inline` is reachable from the source.
-- **Two ways to test, besides the two suites.** `browser/run!`'s `:only` matches check
-  names *or* catalog case IDs — `(browser/run! {:only ["call-int-led"]})` runs one case
-  in two precisions, and a needle matching neither is reported as a failure rather than
-  running nothing. `omkamra.dsp.tests.suite/run-everything` runs the JVM suite and the
-  browser suite in two futures and reports once (62.3 s total; `:only` is passed to the
-  browser half). Both are documented in `TESTING.md`.
-- **Operators fold three or more operands (D48).** `(+ a b c)`, `(and a b c)`,
-  `(bit-or a b c)` now reshape at lowering into the left-nested form the IR always
-  took; comparisons, shifts and `min`/`max` are deliberately unchanged. DSL
-  fixtures can use the variadic spelling.
-- **Reload only concerns namespaces the session has run.** A namespace is the
-  tool's business only if this session has loaded it at least once *and* it
-  changed or depends on one that did. Loading is `require`'s job: a changed file
-  whose namespace has never been loaded is summarised under `:not-loaded`
-  (`{:count :sample}`, not a list to read), never run — loading code runs it, and
-  `src/rb/explores/quil.clj` ends in a top-level `(q/defsketch …)` that kills a
-  headless JVM. Namespaces a *failed* reload unloaded are still refreshable,
-  because they have run here. A detection-driven reload that would still refresh
-  the whole session (a poisoned baseline, a check-out) returns `:status :refused`
-  with `:would-reload` and a `:note` naming `(reload :all)`; the floor and share
-  are `wholesale-reload-floor` (50) and half. AGENTS.md's *Reloading* section
-  states all of this.
-- **Reload repairs stale aliases.** An alias held outside the scan scope — `user`
-  at a REPL — used to keep pointing at the namespace object a reload threw away,
-  so `(require '[a.b :as b])` threw on every reload and a form using it ran the
-  *old* code. `reload` now re-points such aliases and reports `:aliases-repaired`.
-  Both the end-to-end test and unit tests for the sweep, the diagnostic stub and
-  the digest baseline live in `omkamra.dev.tools-test` (18 tests / 79
-  assertions), which covers the facade **and** its `reload` implementation —
-  deliberately flat: every other `omkamra.dev` facade has one flat
-  `<facade>_test.clj` and none has a test file under a sub-namespace.
-- **Where.** `omkamra.dsp` is a DSP compiler (macros → descriptors → typed IR →
-  interpreter/JVM/JS/Wasm) plus a host-side sequencing layer. P0–P11 are done:
-  **P11 is complete** (P11a the instrument and matrix, P11b the instrument graph
-  and post-mix chain per D42, P11c all-backend rendering, P11d the property
-  battery), along with an interpreter allocation pass. The phase was scoped to
-  end with a **refinement round** over D42's graph, the modulation matrix (D34),
-  and the per-feature layer boundary; that is the next work.
-- **Pitch domain (D35).** A voice takes `note`/`bend`/`detune` (cents) and
-  converts to Hz in the DSP (`omkamra.dsp.library.pitch/pitch->frequency`); the
-  pool delivers the standard sources and stays pitch-agnostic.
-- **Synth runtime.** `omkamra.dsp.synth` (description → pure-data config);
-  `synth.pool` (modes `{poly, mono, legato, retrigger}`, allocation/stealing,
-  global source bank `set-pitch-bend!`/`set-detune!`, `read-controls!` +
-  `set-voice-controls!`); `omkamra.dsp.hosts` (the assembler: `synth-bundle`,
-  `compile-synth`) over the kernel family `hosts.{jvm,interpreter,js}` and their
-  shared plumbing `hosts.mixing`.
-- **Stereo (P10d, D40, slices 1a–3 done).** One evaluation per frame;
-  multi-channel output is explicit per-channel stores; state may be shared across
-  channels. A stereo voice renders a **planar** block through the pool, which
-  sums voices plainly (it never pans). `:pan` is a standard **per-voice** source
-  (`set-pan!`, the stereo counterpart of `:detune`); a voice that binds no `:pan`
-  control pans inside its own DSP instead. The library `effect/pan` (equal-power,
-  -1..1) and `effect/stereo-spread` (Haas) both return a `stereo-pair`. The
-  browser host is `omkamra.dsp.hosts.js` (a `Kernel` over a generated JavaScript
-  module) and `omkamra.dsp.hosts.wasm` (views over a Wasm instance's own
-  linear memory), each checked against the interpreter pool by the browser suite
-  (`JavaScript pool host`, `Wasm pool host`); both worklet adapters call a kernel
-  once per block. **P10 is complete.**
-- **JavaScript target (D41).** The JS backend emits by building ClojureScript
-  forms and compiling them with Squint, so the module is standalone (no
-  `squint_core`, no import) and the emitter no longer writes JavaScript text.
-  `tests/js.clj` pins the contract and the catalog-wide standalone rule; Node is
-  the fast loop while working on it. The Wasm target still emits WAT by hand.
-- **Voice tails (P10c, D39).** Tails are *declared, not inferred*: a
-  released voice is kept until stolen by default; a voice that writes the builtin
-  `:activity` slot is reset + freed when it reads ≤ 0. A scalar state slot is now
-  body-writable (`set!`), which is what lets a body local (e.g. an ADSR's output)
-  become a flag; `(store-special :activity v)` writes the builtin slot, added to
-  the state by scanning the body, with default `:init 1` (active). Specials are a
-  **bitmask** with fixed bits (`:activity` = 0) placed at the **front** of the
-  entry's state; the ABI exposes `:special-mask` + `:special-slots`, and each
-  kernel resolves the physical slot **at construction** (no map lookup on the
-  audio path). `compile-synth` carries the mask. A callee's `store-special` is
-  rejected. Non-finite containment is a **kernel policy** (`:containment
-  :reset` default — silences + resets + counts, per `PLAN.md`; `:sanitize`
-  contains; `:off`), applied per voice before mixing. **Remaining:** the JS/Wasm
-  readback and containment (with P10d).
-- **Definition values and transformers.** `dsp/fn` returns an anonymous
-  definition value; `dsp/defn` is `def` + the same capture; `dsp/def` names a
-  derived value; `->` chains transforms. **Promoted to core:**
-  `omkamra.dsp.graph` holds the substrate (`definition-id`, `parameter-symbols`,
-  `definition-call`, `derived-definition`), and `omkamra.dsp.combinators` holds
-  `unison`, `mix`, `sum`, `through`, `poly`, `share`, `guard`, and
-  `smooth`/`slew`.
-  `omkamra.dsp.examples.demo-synth` is the instrument that uses them.
-- **Graph model (D38).** Build in Clojure, lower once, link; the fixed expression
-  is already a DAG via `let`, so fan-out does not force a new IR. Hoisting is the
-  cost control: computed call arguments bind once at lowering, `poly` hoists
-  shared controls and expands only `:per-slot` ones, and `share` is a `let`.
-- **Optimization stage.** Already planned (P15 deliverable 4, `PLAN.md` §9);
-  D38 records the concrete candidates (dedup of identical inlined bodies,
-  stateless CSE) and that argument hoisting is in place.
-- **Removed from the pool:** `:unison`, `unison-detune`, the unison branch; the
-  mode set is `{poly, mono, legato, retrigger}`.
-- **Tests.** JVM `(omkamra.dsp.tests.suite/run-all)` — 173 tests / 1599
-  assertions; browser `(omkamra.dsp.harness.browser/run! {:server? false})` —
-  26/26; `omkamra.dev` 7 tests / 19 assertions. The reference voice's stereo stage (`:pan-left`, `:pan-right`) and the
-  pitch conversion (`:pitch->frequency`) are now shared-catalog cases, so they
-  run on the interpreter and every backend, browser included, instead of the JVM
-  alone; the reference instrument and all three containment policies run on the
-  browser hosts too. See `TESTING.md`.
-- **P10d — stereo (D40, in progress).** The compiler model is now *one evaluation
-  per frame*, not run-per-channel: the four targets lost their channel loop, the
-  implicit `channel` is 0, a `:void` body that writes `:output` (a process, by
-  that fact alone — no `:process` map needed) writes per channel, and stateful
-  multi-channel compiles — so a shared-state stereo voice (reverb,
-  `stereo-spread`) is expressible. Bodies also follow `defn`: several forms are
-  an implicit `(do ...)`. Slices 1a–2 are done (the audio width is *counted* from
-  the body's buffer accesses, and a stereo voice renders a **planar** block
-  through the pool, whose voices are summed plainly); remaining: the
-  CLJS/AudioWorklet host (3).
-- **Next.** P11 (the reference synthesizer acceptance fixture), or first the
-  D36 inventory — the transforms still unimplemented (oversampling; stereo
-  spread, now unblocked), promoted one at a time as the instrument needs them.
-- **Linting.** `.clj-kondo` uses opaque hooks for `dsp/defn`/`dsp/fn`/`dsp/defstruct`
-  and `:lint-as clojure.core/def` for `dsp/def`; a real DSP-aware linter is
-  designed but deferred (three findings in `TESTING.md`).
-- **Exploration (deferred).** Plain Clojure functions as macros inside DSP forms
-  — an expansion pass ahead of normalized descriptors; rationale, candidates, and
-  hazards are in `PLAN.md` §10.
-- **State.** Everything since P10a is uncommitted (staged/working tree); the user
-  commits when P10 is finalized. The dev nREPL is running; the `:on-demand-http`
-  Shadow watcher is running.
-
-- **P7 (DSP standard library) is complete.** Eight `.cljc` sub-namespaces under
-  `omkamra.dsp.library` cover band-limited oscillators (PolyBLEP saw/pulse/
-  square/triangle, PWM, hard sync), noise, linear and exponential AR/ADSR and
-  LFOs, one-pole/biquad/multimode/SVF filters, delay/chorus/distortion and
-  linear/cubic/allpass interpolation, and stereo spreading. `docs/mvp/
-  LIBRARY.md` is generated from the docstrings with a drift guard.
-- **P8 (process instances, D23) is complete.** `dsp/create-instance` returns an
-  independent state region over the same compiled program, `dsp/destroy!`
-  releases it, and every lifecycle function accepts an artifact *or* an
-  instance. A process input port is optional (`:input false`), which makes a
-  generator just a process with no input buffer.
-- **P9 (sample-accurate automation) is complete** — see P9a–P9d above. The
-  sequencing layer (`omkamra.dsp.event`, `omkamra.dsp.schedule`) is host-side
-  and drives the kernel by segmentation; the kernel itself carries declared
-  `:smooth`/`:slew` control modes (D27) and host-supplied per-frame automation
-  lanes (D28), and no backend has a ramp or curve op.
-- **P10a is complete** — see the P10a entry above. A synth is one serialisable
-  description that yields a voice artifact and a pure-data runtime
-  configuration; `omkamra.dsp.synth.pool` runs N kernel instances with
-  deterministic allocation and stealing, the note lifecycle, and block
-  rendering; and `omkamra.dsp.synth.host` adapts the JVM and the reference
-  interpreter, so a pool is checked against the interpreter hosting the same
-  pool. No compiler surface changed.
-- **P10b-i (voice modes) is complete** — see the P10b-i entry above. `:mono`,
-  `:legato`, `:retrigger`, and `:unison` are declared allocation policies over
-  the same pool (D33); the monophonic held-note stack is bounded by a declared
-  `:held-notes` capacity, and unison detunes symmetrically in cents. Still
-  host-side, still no compiler surface.
-- **P10b-ii (modulation) is complete, as an example (D34).** Core gained exactly
-  one affordance, `omkamra.dsp.synth.pool/set-voice-controls!`; the wiring lives
-  in `omkamra.dsp.examples.demo-synth`, the growing example instrument. Patterns
-  the example exposes are listed for inspection before any is promoted to core.
-- **Pitch is pitch-domain, converted in DSP (D35).** The vocabulary is core
-  now: `control-sources` has `:bend`/`:detune`, the description has `:bend-range`,
-  the pool has a global source bank (`set-pitch-bend!`) and a per-voice detune,
-  and the conversion default is
-  `omkamra.dsp.library.pitch/pitch->frequency`. `read-controls!` was added as the
-  read half of the host control channel. Only the (b) transformer remains.
-- **Voice transforms are functions over definition values (D36).** `dsp/def`
-  names a derived definition, `->` chains transforms, and `unison` is the first
-  one. **Validated and promoted**: the transform is bit-identical to the sum of
-  its detuned copies (interpreter and JVM), and the pool's `:unison`,
-  `unison-detune`, and unison branch are removed. `:detune` stays a host source,
-  set by `set-detune!`. The mode set is `{poly, mono, legato, retrigger}`.
-- **A definition is a value (D37).** `dsp/fn` is the anonymous counterpart of
-  `dsp/defn` (one shared `capture-definition`), so definitions compose with `->`.
-  `smooth`/`slew` are transformers that *set metadata* the compiler already
-  desugars (D27), so the inline and transformer surfaces are one mechanism and
-  match bit-for-bit; they work on anonymous `dsp/fn` values. Call-emitting
-  transforms (`unison`) work on anonymous values too: the derived value carries
-  the original in `:dsp/dependencies`, which `link` supplies.
-- **Verification.** `omkamra.dsp-test` on the JVM is the primary suite, with an
-  `:automation-lane` and other catalog cases shared through `omkamra.dsp
-  .acceptance`; the browser testbed runs the same catalog on JavaScript and Wasm
-  against the portable-IR oracle. Every check carries a positive or negative
-  twin: a value that must change, a lane that must be reported missing, a stride
-  that must differ between precisions.
-
-### Where things stand
-
-- **P1 (integer bitwise/shift) is complete.** The seven operators exist across
-  interpreter/JVM/JS/Wasm per `DECISIONS.md` D3.
-- **P2 (portable scalar math builtins) is complete**, including the
-  capability-aware registry, the D9–D12 semantics, and the first standard
-  library entries (`omkamra.dsp.library`).
-- **P3 (transcendentals) is complete** under D14 (native intrinsic per
-  target, emulation fallback, target-dispatched matcher). All thirteen
-  operations are done end to end on interpreter/JVM/JS/Wasm; the `:wasm-math`
-  option selects the Wasm emulation strategy (`:polynomial` or the f32
-  `:table`); and the library's `sine-oscillator` and `exponential-adsr`
-  render on all four targets.
-- **P4 (local arrays, records, constant tables) is complete** under D15/D16.
-  `(array :float|:int N)` declares preallocated scratch; `aget`/`aset` (or
-  `array-load`/`array-store`) index it. `dsp/defstruct` names a record shape,
-  referenced with `{:name slot :struct shape}` (plus `:size` for arrays of
-  records) and accessed with `field`/`set-field!`; the linker inlines the
-  fields, laid out struct-of-arrays in the same arena as state and scratch. A
-  scalar record may own an array field (`:size M`), indexed with `(aget rec k)`
-  or `(field rec :buf k)`. `:constant` tables are read-only and materialized at
-  initialization. The ABI exposes `:records` and `:arena`.
-- **P5 (delay lines, circular buffers, interpolation) is complete** under D17
-  and D18. The library provides `linear-interpolate`, `allpass-coefficient`, and
-  the `delay-line` / `allpass-delay-line` modules (with `-voice` process
-  wrappers); the convention is a
-  persistent buffer plus an `:int` cursor with write-then-read ordering and
-  floored `mod` wrap. Array storage is a static *place* (D18), so a record owns
-  its buffer and `(aget (:buf rec) k)` / `let` aliases index it. Catalog vectors
-  cover zero, unit, fractional, wrap, allpass, and the place form.
-- **P6 (stateful module composition) is complete** under D19/D21/D22, and the
-  phase gate is met: `filter-voice` composes a stateful RBJ biquad with a
-  stateful exponential ADSR and runs identically on all four targets. A call to
-  a stateful module owns one private state partition per call site; the
-  transition applies at the call; nested composition works; a module may own a
-  record/array end to end; and a module may return a **named record** for
-  multi-output (`state-variable-filter` yields low/band/high). The interpreter
-  executes `:call` against the partition (the oracle); JVM/JS/Wasm share one
-  statement-level inliner. The coloring pass under D20 (partition coloring)
-  is deferred: it is an arena optimization, not a P6 deliverable.
-- **The conformance harness is interpreter-oracle-driven** (D7/D13): the shared
-  catalog is pure data, and the reference interpreter is the single oracle on
-  the JVM *and* in the browser.
-- **North star:** users eventually edit DSP definitions in the browser
-  (CodeMirror) and compile them there, which means the compiler itself becomes
-  portable and runs in SCI (P13). The library and every new language form are
-  therefore authored as portable `.cljc` source forms.
-- Verified through `clojure_eval` on the running nREPL: JVM 81 tests / 852
-  assertions, browser 17/17 (four shared matrices matching 80 process cases and
-  13/3 function cases on JavaScript and Wasm, the WAT bounded-loop and sin-table
-  checks, four instance-independence checks, four sample-accurate-scheduling
-  checks, and the three AudioWorklet adapters), and `clj-kondo`/`cljfmt` clean.
-
-### Layout after the reorganisation (before P10)
-
-The suite and its scaffolding were reorganised so a change can be checked against
-the part it concerns, and so it is obvious which namespaces are the compiler and
-which are the machinery around it. The suite is unchanged in substance: **85
-tests, 995 assertions**, and browser **19/19** either side of it.
-
-| before | after |
-|---|---|
-| `omkamra.dsp-test` — one 2864-line file | `omkamra.dsp.tests.{descriptor,linker,ir,interpreter,jvm,js,wasm,process,memory,composition,library,conformance,automation}`, plus `tests.suite/run-all` |
-| *(new)* | `omkamra.dsp.harness.fixtures` — the shared `dsp/defn` fixtures and measuring helpers |
-| `omkamra.dsp.acceptance` | `omkamra.dsp.harness.catalog` |
-| `omkamra.dsp.conformance` | `omkamra.dsp.harness.conformance` |
-| `omkamra.dsp.testbed` (`.clj`/`.cljs`) | `omkamra.dsp.harness.testbed` |
-| `omkamra.dsp.browser` | `omkamra.dsp.harness.browser` |
-| `omkamra.dsp.call-fixture` | `omkamra.dsp.harness.call-fixture` |
-| `omkamra.dsp.{interpreter,jvm,js,wasm}` | `omkamra.dsp.targets.*` |
-| `omkamra.dsp.capability` | `omkamra.dsp.targets.capability` |
-
-Entries above this one use the old names, and should: they record what was true
-when they were written.
-
-**Three couplings that the file tree does not show.**
-
-1. **HTTP routes follow the namespace.** `omkamra.dev.on-demand-http` derives the
-   handler namespace from the URI, so moving the testbed moved every endpoint to
-   `/omkamra/dsp/harness/testbed/...`. The *page* is a separate mechanism: it is
-   served for whichever URI matches a Shadow build's `:asset-path`, and the page
-   HTML's script tag is generated from that same path. So `shadow-cljs.edn`'s
-   build id, `:output-dir`, `:asset-path` and `:init-fn` had to move together, or
-   the page would 404 its own bundle. The Shadow content cache also had to be
-   cleared, as ever.
-2. **A `dsp/call` inside quoted data resolves against the aliases of the
-   namespace that *initiates the link*, not the one that defines the body**: the
-   linker uses `find-ns`, which only sees namespaces already loaded. Splitting
-   the fixtures away from the tests broke two calls, so the fixtures now call
-   their dependencies by full namespace, and `harness.fixtures` requires
-   `harness.call-fixture` purely so the linker can find it — a require that
-   appears nowhere in code, and that a lint-driven tidy-up will try to remove.
-   It is load-bearing; the reason is recorded at the require.
-3. **`dsp/defn` bakes its descriptor at compile time**, so a moved definition is
-   not in effect until it is reloaded — and clj-reload captures its baseline on
-   first use, so files edited *before* that must be touched to be seen at all.
-   Those two together made a correct edit look like a live bug for two runs.
-
-### Architecture
-
-```text
-omkamra.dsp.targets.capability   (.cljc)  what each target serves (D29)
-omkamra.dsp.targets.interpreter  (.cljc)  portable reference interpreter (the oracle)
-omkamra.dsp.targets.{jvm,js,wasm}         the three code generators
-omkamra.dsp.descriptor, ir, linker, builtins   the compiler front end
-omkamra.dsp.library.*            (.cljc)  the DSP standard library (P7)
-omkamra.dsp.event, schedule      (.cljc)  the host-side sequencing layer (P9)
-omkamra.dsp.synth                (.cljc)  synth description + runtime configuration (P10a)
-omkamra.dsp.synth.pool           (.cljc)  preallocated voices, allocation, rendering (P10a)
-omkamra.dsp.synth.host           (.clj)   JVM/interpreter kernels, compile-synth (P10a)
-omkamra.dsp.harness.catalog      (.cljc)  data-only conformance catalog
-omkamra.dsp.harness.conformance  (.clj)   plan building, JVM differential driver
-omkamra.dsp.harness.{browser,testbed}     spel driver and the browser suite
-omkamra.dsp.harness.fixtures     (.clj)   shared test fixtures
-omkamra.dsp.tests.*              (.clj)   the suite, by subject (tests.suite/run-all)
-```
-
-### Interpreter-oracle conformance
-
-- A **plan** (`conformance/plan`) is target-neutral data: the compiled portable
-  IR, controls or function vectors, and the invocation sequence (blocks, reset,
-  special values). It contains **no expected outputs**.
-- **JVM:** the interpreter computes expected outputs; the JVM backend is
-  compared against it (`interpreter-oracle-conformance` in `dsp_test.clj`).
-- **Browser:** `/omkamra/dsp/harness/testbed/plan` serves the plan; the page reads the
-  EDN IR with `cljs.reader`, runs the bundled `.cljc` interpreter to compute
-  expected, runs the generated JavaScript/Wasm kernel, and compares.
-- Adding a test is now **data-only**: append to `acceptance/process-cases` or
-  `acceptance/function-cases`; both suites pick it up automatically.
-- Comparison is exact, NaN-equal-as-NaN, and signed-zero-aware on both the JVM
-  and the browser.
-
-### P2 builtins
-
-- Registry: `omkamra.dsp.builtins` (data + small pure fns, ready to become
-  `.cljc`). Each entry has `:operator`, `:kind` (`:primitive`/`:derived`),
-  `:signatures` overloads, `:effects`, and `:expand` for derived ops.
-- IR: primitives lower to a generic `{:op :builtin :builtin ... :args [...]}`
-  node; derived ops expand during lowering, binding each argument to a fresh
-  local so effectful arguments are evaluated once.
-- Backends use multimethods dispatched on `[operator type]`
-  (`builtin-instructions`, `emit-builtin`).
-- Contract: D9 (`min`/`max` NaN-propagating, signed-zero-aware), D10 (`round`
-  half-away, derived), D11 (small primitive set), D12 (integer `/`, `rem`,
-  `mod` total and wrapping), D13 (registry + `:builtin` node).
-
-### Standard library
-
-- `omkamra.dsp.library` is the `.cljc` seed of the P7 library. `clip` and
-  `triangular-window` are written with `dsp/defn` and compose builtins only.
-- P6a added the first *callable modules*: `one-pole` (scalar state) and
-  `one-pole-pair` / `one-pole-voice` / `one-pole-pair-voice` that compose it
-  through calls. P6b turned `delay-line` / `allpass-delay-line` into modules
-  (with `-voice` wrappers and a `delay-line-pair-voice`). P6c added `biquad`
-  (record-owned history) and `filter-voice`, the done-when ADSR + biquad voice.
-- **P7 (DSP standard library) is complete.** Eight namespaces
-  (`library.{math,oscillator,noise,envelope,filter,delay,control,effect}`) cover
-  the phase's contents list: band-limited oscillators (PolyBLEP saw/pulse/
-  square/triangle, plus non-band-limited hard sync), white/pink noise, an LFO,
-  linear and exponential AR/ADSR envelopes, smoothing and slew limiting,
-  one-pole/biquad/multimode/SVF filters, delay/chorus/distortion, linear/cubic/
-  allpass interpolation, and stereo spreading as a record-returning module. The
-  reference page `docs/mvp/LIBRARY.md` is generated from the descriptors by
-  `omkamra.dsp.library.doc` (with a drift-guard test).
-- The library is `:clj`-required by `acceptance.cljc` so the JVM linker can
-  resolve the calls; the browser only receives compiled IR and never loads it.
-- Fully-qualified symbols (`omkamra.dsp.library/clip`) are used in catalog
-  bodies so no alias/`:resolution` plumbing is needed in hand-built data.
-- It is deliberately one namespace for now; P7 will decide the sub-namespace
-  seams (`omkamra.dsp.library.<category>`).
-
-### Open issues
-
-1. **(Done, D29.) Capability diagnostics are now explicit — and the real gaps
-   were not where the original note guessed.** It assumed the operator set was the place to declare
-   support, because Wasm has no native `sin`/`cos`/`exp`/`log`. That is stale:
-   P3 gave every transcendantal an emulation, so **every builtin is served on all
-   four targets** and a per-operator capability table would be speculative —
-   unreachable code with no way to test it. The differences that actually exist
-   are in the *options and entry kinds*, and two of the three are silent:
-   - **`:checks :development` is honoured only by the interpreter.** Verified: no
-     backend mentions it, and it is not surfaced in the ABI, so requesting it for
-     the JVM, JS or Wasm buys nothing and says nothing. This is also what the old
-     "generated-target development guards" item meant.
-   - **`:wasm-math :table` is f32-only** and silently becomes `:polynomial` at
-     f64 (the table is a byte-stride region, so it has no f64 form).
-   - **The `:function` entry is unavailable on Wasm** — by design, but reported as
-     a generic unsupported-target failure rather than as "Wasm serves process
-     entries only".
-
-   All three are now declared in `omkamra.dsp.capability` and refused at compile
-   time with a message naming what the target does serve; `:checks` is a
-   per-target default, so a generated-target compile no longer claims validation
-   it does not implement. The rest of P15 deliverable 1 — allocation, reflection,
-   locks, unbounded loops, unvalidated memory access — is still outstanding,
-   though the IR's `:diagnostics` channel already carries the loop and dynamic
-   index warnings.
-2. **(Done.) Browser coverage is restored.** The dropped Wasm **f64**
-   AudioWorklet check is back: the worklet step now renders at both precisions,
-   and the f64 case is the one that matters, because the adapter reads its
-   element type and width from processor options — so the *same* adapter source
-   has to serve f64, and only the module behind it changes. Checking f32 alone
-   left that untested. Browser suite 19/19.
-
-   The other two checks the rewrite folded away are genuinely covered by the
-   shared matrix: the "generated-kernel" checks are the JavaScript path the
-   matrix already drives per case, and the "Wasm-module" checks are the Wasm path
-   it drives the same way. Neither needs a separate check.
-
-   One thing worth knowing about the restored check: the f32 and f64 renders
-   report the *same* peak, because the worklet case is a one-pole at coefficient
-   0.5, whose arithmetic is exact in both precisions, and `OfflineAudioContext`
-   narrows to f32 in any case. So it does not discriminate the precisions
-   numerically — what it tests is the adapter's element width, where getting 8
-   bytes wrong would misalign every read and show up as silence or garbage.
-3. **Function-entry cases are JS-only.** Wasm is process-only by design, so the
-   function matrix runs on interpreter/JVM/JS; Wasm coverage for the same
-   operators comes from process cases.
-4. **Non-finite sample-to-int conversion is undefined across targets.**
-   `float->int` of NaN/infinity throws in the interpreter but saturates on the
-   JVM (`d2i`), with JavaScript/Wasm behavior of their own. The conversion
-   special-value contract is still open (`PLAN.md`); P4 hit it through an
-   int-array test and routed around it.
-5. **The allocation test no longer compares exact totals** (fixed). It asserted
-   `processed <= baseline` over two exact thread-allocation measurements, which
-   passes with *zero* headroom: both sides read 9880 bytes over 10 000 calls, so
-   one stray byte failed it. It now allows four bytes per call, which is still a
-   real bound rather than a fudge — every possible per-call allocation is far
-   larger (a boxed scalar is tens of bytes; the regression it guards against was
-   ~24 KB per call, D26). Negative control: the same measurement reads an
-   allocating reference path at 994 MB across the same loops, 24 862x the
-   allowance, so the bound has teeth.
-
-### P15a — Explicit capability diagnostics (pulled forward, D29)
-
-`dsp/compile` now refuses an option the chosen target cannot serve, before any
-lowering, instead of letting a backend ignore it or substitute something else:
-
-```
-DSP target :wasm cannot serve the requested options: it serves :process entries,
-not :function; it serves :wasm-math :polynomial at :f64, not :table
-```
-
-Every unsupported request is reported at once, and the error carries the
-machine-readable form too (`{:dsp/error :unsupported-capability :capabilities
-[{:capability :entry :requested :function :supported #{:process}} ...]}`).
-
-**The work was mostly finding out that the note was wrong.** It claimed the gap
-to declare was the operator set, because Wasm has no native transcendentals. P3
-had already closed that with emulations, so a per-operator table would have been
-entries that all say `true` — untestable code. The differences that actually
-exist are in the options and entry kinds, and two were silent: validation
-(`:checks :development`) is implemented only by the interpreter, and the f32
-lookup table silently became `:polynomial` at f64.
-
-**One consequence was load-bearing, not cosmetic.** `:checks` had to become a
-per-target default. With the single global default of `:development`, every
-generated-target compile would have carried `:development` in its effective
-options while honouring nothing, and an unsupported value would have been
-indistinguishable from the default — so the check would have fired on every
-build. Deriving the default from the target makes the effective value always
-servable, which is exactly what lets an unsupported value mean "somebody asked
-for this". The `:entry` default is the opposite case and stays global on purpose:
-the same definition must not compile to a function on JS and a process on Wasm.
-
-**Two mistakes of mine, both instructive.**
-
-- The first draft of `problems` destructured `{:keys [checks wasm-math]}` from the
-  target table *and* took them from the requested options under the same names.
-  The shadowing made `(contains? checks requested-checks)` compare the table
-  against itself, so the `:checks` capability could **never** be reported — a
-  vacuous check of the exact kind this project keeps rediscovering. The test's
-  negative twin (the interpreter must still accept `:development`) is what would
-  have caught it had the assertion not been written against the table.
-- A test inserted at a prefix-matching anchor landed *inside* the neighbouring
-  `deftest`, which is legal enough to compile but produces an inline `def`.
-  `cljfmt` then re-indented it to match its new nesting, which made the mistake
-  look deliberate. Indentation is not evidence of structure; the lint warning
-  was. The anchor now matches the closing parens, and the replacement is verified
-  by checking what precedes and follows it.
-
-### Gotchas burned into this session
-
-- **A stale Shadow cache can silently mask an editor's mistakes.** After the P7
-  namespace split, `.shadow-cljs` still held a cache entry for the *deleted*
-  `omkamra.dsp.library`, and it expanded `.cljc` library sources with a **stale
-  cached `omkamra.dsp/defn`** (from before docstring support), printing
-  `Syntax error macroexpanding dsp/defn … params must be a vector` on a
-  background thread while every eval and test still passed. Touching the macro
-  namespace did not help (Shadow keys its cache on content, not mtime). Fix:
-  stop the dev server, `rm -rf .shadow-cljs .dev` (both gitignored build
-  artifacts), restart. The restart then surfaced two genuine breakages that the
-  in-memory state had been hiding: two catalog cases still called
-  `omkamra.dsp.library/clip` and `…/triangular-window` (library calls *inside*
-  case bodies, which the split's rewrite had missed), and `LIBRARY.md` was stale
-  (caught by the drift-guard test, exactly as intended). Both fixed.
-- `-0` in source is **integer zero**; negative zero is `-0.0`.
-- Clojure's `(float x)` **throws** on infinity; use `unchecked-float` (JVM) and
-  `unchecked-float`/`Math.fround` (CLJS).
-- ClojureScript `unchecked-remainder-int` is **floored** (it uses `mod`); use
-  `rem` plus explicit `int32`. `unchecked-divide-int` may not narrow
-  `INT_MIN / -1`; wrap with `int32`.
-- Do not name a parameter `case` — it shadows the `case` special form in CLJS.
-- **ClojureScript's map `assoc` short-circuits on `identical?`/`===`**, so it
-  loses a `+0.0` → `-0.0` (or reverse) value change because `0 === -0` in JS.
-  Force a fresh insertion (`dissoc` first) whenever signed zero matters.
-- Avoid `:reload-all` in the dev JVM (it reloads `clojure.core.async` and
-  breaks the running Shadow server). To refresh `omkamra.dsp-test`, use
-  `(remove-ns 'omkamra.dsp-test)` then `(require 'omkamra.dsp-test :reload)`,
-  because `:reload` alone leaves removed `deftest` vars behind.
-- A `:reload` flag placed mid-list — `(require 'a :reload 'b :reload)` — does
-  not reliably reload every namespace, and a stale served catalog shows up as a
-  browser 500 for a case the server does not know. Reload explicitly:
-  `(doseq [n [...]] (require n :reload))`.
-- `spel`'s bundled Playwright wants a different Chromium revision than the
-  installed one; `omkamra.dsp.browser/installed-headless-shell` finds the
-  installed headless shell and passes it as `:executable-path`.
-- The Shadow watcher sometimes reports `0 compiled`; call
-  `omkamra.dev.frontend/recompile!` and re-check. Dev assets are served with
-  `cache-control: no-store` now.
-
-### Next steps
-
-P1–P9 are complete, and P10 is under way, except for the residuals listed under
-"Open issues" and the two partial P9 deliverables (`PHASES.md`, P9 "Not done"):
-linear/critical ramps, which a host can supply as a lane instead, and non-finite
-containment, which belongs with P10's voice pool.
-
-1. **Finish the transformer layer (D36/D37).** Step 2: give anonymous `dsp/fn`
-   values an internal id and carry their anonymous dependencies in the value
-   (`:dsp/dependencies`), fed to `link`'s `:definitions`, so
-   `(-> (dsp/fn …) (unison …))` resolves. Then work the inventory one transform
-   at a time: oversampling; stereo spread (needs P10d's multi-channel output);
-   per-voice effects. (`:smooth`/`:slew` is done as D37 and stays compiler sugar.)
-2. **P10c — voice and effect tails, and non-finite containment.** This is where
-   the one genuinely new mechanism lives: the kernel has to report that a voice
-   has finished. The P10a entry records the reconnaissance — a JS/Wasm instance
-   does not expose its state, a multi-channel process replicates rather than
-   carrying a different signal per channel, and the output buffer is the only
-   channel every target already writes — so the candidates are an *output* status
-   region symmetric with `:lanes`, or a declared state readback.
-3. **P10d — stereo spreading, effect tails, and the CLJS/AudioWorklet host.**
-   The pool is `.cljc` and host-neutral already; this is the adapter, plus the
-   second channel everywhere.
-4. **A structured capability diagnostic.** There is still no registry-level,
-   pre-flight check: an unimplemented `[operator type]` fails in a backend's
-   `:default` method at emission time. Worth doing before P12 adds more surface.
-5. **Generated-target (JS/Wasm) development guards**, and restoring the dropped
-   Wasm f64 AudioWorklet check. Lanes are a live example of the gap: the Wasm
-   *worklet* adapter does not carry a lane region, because no case drives it.
-6. **The D20 partition-coloring pass is deferred, now with numbers.** D20
-   permits reusing a partition only when it is **dead on frame entry**, and
-   colours both persistent state and P4 scratch. Measured over all 83 catalog
-   process cases: **663** persistent-state slots against **14** scratch slots,
-   and only 4 cases have any scratch at all, each a single array — so there is
-   nothing to share *within* a case, and the pass would save nothing on any case
-   that exists.
-
-   There is also a structural reason the state half can never pay. A partition is
-   dead on frame entry exactly when every path writes it before reading it; but
-   that is the definition of state that **carries no information across the
-   frame boundary**. Every library module reads its state before writing it —
-   that is why it is state — so a state partition the analysis would accept is
-   one whose contents were never needed. The payoff is therefore real but
-   confined to *scratch*: a module that refills a buffer each frame before
-   reading it, such as an FFT or convolution block, which the corpus does not
-   have.
-
-   So if it is built, it should be **scoped to scratch**: that removes the
-   riskiest half (touching persistent state means instance-state sizing and the
-   ABI) and keeps the half with a reachable beneficiary. Otherwise it waits for a
-   real one.
-
-### Wasm lookup table — benchmarked, cosine fixed, with follow-ups
-
-Steps 1 and 2 are done (shared emulation functions; f32 sine table via
-`:wasm-math :table`). Measured on this machine with the four-calls-per-sample
-benchmark, warmed, best of three, at f32:
-
-| | `:polynomial` | `:table` |
-|---|---|---|
-| cost per `sin` | 137.1 ns | **24.3 ns** (5.65x faster) |
-| cost per `cos` | 137.0 ns | **25.4 ns** |
-| module text | 25 584 bytes | 51 928 bytes |
-| linear memory | 8 192 bytes | 24 580 bytes |
-
-**`cos` is fixed.** It was looked up as `sin(x + π/2)`, which rounds the
-argument *before* the range reduction — an error of order `ulp(x)`. The quarter
-period is now applied *after* reduction, in index space, where it is exactly
-`entry-count / 4`. Measured against `Math.cos` at |x| ~ 1e10, cosine error went
-from 2.0e-6 to 1.4e-6, and the cos/sin error ratio from 1.415 to 0.99: cosine is
-now no worse than sine, with the residual being the terms they share.
-
-**But the item was smaller than it looked, and that is the useful finding.** The
-posited shift error is ~`|x| * 2^-52`, while the range reduction's own error is
-~2π times larger and therefore dominates. So the shift contributes at most about
-a sixth of the total, and it only *appears* to double the error when a maximum is
-taken over few samples, because the error oscillates. Any real accuracy work at
-large arguments belongs in the **range reduction**, not here: it is what makes
-the polynomial strategy degrade from 3e-8 at |x| ~ 1e6 to 1.7e-7 at |x| ~ 1e9,
-and it affects `sin` exactly as much as `cos`. A Cody-Waite or double-double
-reduction would lift both.
-
-**Two incidental improvements.** Binding the scaled index to a Wasm local was
-needed because a WAT expression is a tree: the first version of the fix
-referenced the reduction three times, which emitted it three times and *cost*
-half the table strategy's speed (32.6 ns to 47.5 ns). Doing it with locals took
-it to 24.3 ns — better than before the change — and shrank the module text below
-its original size. The index wrap also uses a remainder rather than a
-compare-and-subtract, which covers a latent edge case: a reduced phase landing
-exactly on the period produced an index of N, and reading entry N+1 one past the
-last.
-
-Remaining:
-
-- **f64**: a raw table would be too large; consider a piecewise minimax
-  coefficient table if f64 Wasm speed ever matters.
-- **`exp`** has no table (polynomial only); fine while it is not hot.
-- **Table size**: 4097 f32 entries (16 KB payload, ~52 KB WAT text). Could
-  shrink to 2049 entries if the interpolation error stays acceptable, or grow
-  for margin.
-- **`:wasm-math :table` is f32-only and silently ignored at f64** (see open
-  issues; it is now a compile error rather than a silent fallback).
-- **`:wasm-math :table` is f32-only and silently ignored for f64** (the table is
-  a byte-stride region, so it has no f64 form). A caller asking for `:table` at
-  f64 gets the polynomial emulation without being told.
-
-### How to run everything
-
-See `TESTING.md`. Short version, through `clojure_eval`:
-
-```clojure
-;; The edit-reload-test loop: initialize clj-reload BEFORE editing, then reload
-;; after each edit. Do not substitute `require :reload`: it leaves dependents
-;; stale, which shows up as stale protocol classes and phantom failures.
-(require '[omkamra.dev.tools :as tools])            ; the facade, not clj-reload
-(tools/reload)                                     ; content-based, dependents included
-(let [r (tools/reload)] (select-keys r [:unloaded :reloaded :failed]))
-
-;; JVM: the whole suite (namespace list lives in omkamra.dsp.tests.suite)
-(require 'omkamra.dsp.tests.suite)
-(omkamra.dsp.tests.suite/run-all)
-
-;; Browser (JS + Wasm). `:on-demand-http` starts the Shadow watcher; do not start
-;; a second one. `run!` recompiles what changed, so give it a moment after an
-;; edit — a request served mid-rebuild runs the previous bundle.
-(require '[omkamra.dsp.harness.browser :as browser])
-(browser/run!)                                     ; or {:only ["lane delivery"]}
-
-;; Both halves at once (JVM in one future, browser in another)
-(require '[omkamra.dsp.tests.suite :as suite])
-(suite/run-everything)
-```
-
-Two traps worth remembering: reloading a namespace **invalidates REPL aliases**
-and class identity, so prefer fully-qualified names in evals and expect
-`instance?` checks against reloaded classes to be meaningless; and a reloaded
-namespace is JIT-cold, so an allocation measurement taken right after one reads
-the compiler, not the code.
-
-### M4c — per-voice lanes, and two bugs the honest check found
+## 2026-10-19 — M4c — per-voice lanes, and two bugs the honest check found
 
 M4 closes: a lane now has a *scope*, and the pool delivers it accordingly.
 
@@ -4136,7 +3139,9 @@ checks.
 Next: **M5** (a shared kernel region for scalar broadcast), then **M6** (fused
 lowering as an option, D45).
 
-### M5a — the shared region: language, ABI, and the raw JVM/interpreter path
+---
+
+## 2026-10-19 — M5a — the shared region: language, ABI, and the raw JVM/interpreter path
 
 M5 in three steps (PHASES), of which this is the first. The design is D49.
 
@@ -4175,7 +3180,9 @@ JavaScript argument, the Wasm memory copy, the testbed's direct path), then
 **M5c** (the pool maps a `:shared` parameter to the region, so `set-parameter!`
 stops resolving every voice's controls), then M6.
 
-### M5b/M5c — the shared region reaches the pool, and one write serves every voice
+---
+
+## 2026-10-19 — M5b/M5c — the shared region reaches the pool, and one write serves every voice
 
 M5 closes. The design (`:shared true`, the lane-shaped region) landed in M5a; this
 is delivery and the pool's use of it.
@@ -4208,7 +3215,9 @@ the Wasm check fail while JavaScript still passes.
 Next: **M6** (fused voice lowering as an option, D45) — the pool remains the
 default.
 
-### M6-0 — the measurement that gated fusion, and what it overturned
+---
+
+## 2026-10-19 — M6-0 — the measurement that gated fusion, and what it overturned
 
 M6's plan said to measure before building, because D47 keeps scratch inlined and
 the worry was that `(poly S voice)` would copy a delay line's body into every slot
@@ -4239,7 +3248,9 @@ else was built this turn: the plan's own order was to measure first, and the
 answer changed what M6a should be (no chunking default to design around, and a
 module-shape precondition to state).
 
-### M6a — the realistic voice, timed, and the four seams that remain
+---
+
+## 2026-10-19 — M6a — the realistic voice, timed, and the four seams that remain
 
 M6-0 settled the artifact; this is the other half of the question — whether a
 voice that *does* work is still worth fusing. `bench/realistic-sweep!` weighs a
@@ -4490,7 +3501,9 @@ independent: the IR must allow and rebase a callee's special store across every
 calling target, and the artifact must publish a per-slot special map -- the sibling
 of what D51 did for state ranges, but for the special index space.
 
-### M6b — per-slot skipping, and the latch that makes it correct
+---
+
+## 2026-10-19 — M6b — per-slot skipping, and the latch that makes it correct
 
 M6a gave fusion a slot-aware host; M6b stops a fused process from evaluating a slot
 nothing is using. The measurement that opened the slice is worth recording first,
@@ -4556,7 +3569,9 @@ equals. JVM 213 tests / 1884 assertions, browser 32/32, all green.
 fused voice still exposes no per-slot `:activity`, so a used slot is held until it
 is stolen (seam 4, deferred — D45). `:guard false` restores the bare lowering.
 
-### Seam 4 — a callee's special is published per call partition, and a fused slot can finish
+---
+
+## 2026-10-19 — Seam 4 — a callee's special is published per call partition, and a fused slot can finish
 
 M6b's entry ends "a used slot is held until it is stolen, because a fused process
 exposes no per-slot `:activity` (seam 4, deferred)". This closes that seam, so the
@@ -4611,7 +3626,9 @@ special yet — that is M6c. The IR and ABI they consume already carry it, and t
 continue to compile a callee's `store-special` as an ordinary state store. D39 is
 amended (not deleted) to point here; D45's seam 4 is closed.
 
-### M6c — the browser fused hosts apply the partitions the ABI already publishes
+---
+
+## 2026-10-19 — M6c — the browser fused hosts apply the partitions the ABI already publishes
 
 This closes M6. Seam 4's entry ends "the JavaScript and Wasm *kernels* do not read
 a fused slot's special yet — that is M6c". This is that slice, and it turned out
@@ -4672,7 +3689,9 @@ the JVM test has, and the reason the bite is a whole-instance reset.
 `clj-kondo` and `cljfmt` clean. D55 records the decision; the pool checks that
 were there stay green, because a kernel with no mapping is unchanged.
 
-### F0 decided, and F1's JVM half — fusion reaches the instrument layer
+---
+
+## 2026-10-20 — F0 decided, and F1's JVM half — fusion reaches the instrument layer
 
 M6 built a fused pool that renders a plain one and runs on every host, but it was
 reachable only by calling `compile-synth`/a pool host directly, and only for a
@@ -4707,7 +3726,9 @@ oracle and the fused one for the kernel, as the fused-pool endpoints do) is next
 F5 (a fused AudioWorklet) was moved from optional to in scope at the user's
 request.
 
-### F2 scoped — process-shaped fusion needs a mechanism *and* a surface
+---
+
+## 2026-10-20 — F2 scoped — process-shaped fusion needs a mechanism *and* a surface
 
 Before writing F2 I read the three pieces it touches, and it is two changes, not
 one. The record, because it is the shape of the slice:
@@ -4735,7 +3756,435 @@ switches on, which is F1's second half). The new form's shape is the open design
 decision — it becomes DSL surface, so it is worth choosing deliberately rather
 than by accident.
 
-### H2 — the post-mix chain gets its own lane and shared regions
+---
+
+## 2026-10-20 — F2a — process-shaped voices fuse on the interpreter (completed)
+
+**Delivered.** The mechanism, the surface, and the invariant beneath them:
+
+- **Surface (D57).** `(with-buffers <binding> <call>)` binds a process-shaped
+  callee's output buffers to region names the call site reads; the binding is a
+  map from callee buffer id to region name, or the bare name as sugar when the
+  callee writes exactly one output buffer. `linker.clj` threads a `buffered?`
+  context through `call-sites`/`rewrite-calls`, so the buffer refusal relaxes only
+  for the wrapped call; a plainly-called buffer writer still refuses with
+  "cannot access the caller's process buffers".
+- **Mechanism.** A bound buffer is a **region buffer** of the entry
+  (`:direction :region`, per channel like `:output`); the callee's output buffers
+  lower as a process-shaped module's own buffers, and `ir/lower-call` records
+  `:regions {callee-buffer region}` on the call. The interpreter allocates the
+  regions once per block and `evaluate-call` overlays them into a *fresh* callee
+  context, so the caller's context is untouched. No ABI, target, or bundle-schema
+  change was needed for F2a.
+- **A process-shaped callee returns `:void`** (D58): the descriptor allows it for
+  a `:process` definition, `lower` omits the return, `coerce-value` handles
+  `:void`, and the module-buffer setup is gated on `(:process definition)` so a
+  plain function still has no buffer namespace.
+
+**The trap that cost the most.** `descriptor/default-options` carries
+`:channels 1` and `normalize-options` merges it unconditionally, so
+`(:channels options)` is never a "was a width declared?" signal. F2's first cut
+read it in `lower`, pinning every module to one channel; the failure was a
+stereo voice writing `:output 1` into a one-channel buffer. Worse, the *first*
+fix only *dissoc'd* `:channels` when the top-level width was inferred and never
+*wrote* the resolved value when it came from `:process :channels`, so an explicit
+2 still reached modules as the default 1. `compile` now writes the resolved width
+into `lowering-options` (or removes it when inferred), and `lower` reads the
+forced width first, then the module's own declaration, then its body. Inference
+does not propagate: a mono helper in a stereo entry stays mono (**D58**).
+
+**Tests.** `a-fused-process-voice-writes-the-call-sites-region` renders the
+fused entry and asserts it is exactly the sum of two separately-rendered voices,
+frame and channel, with an audibility guard so `0 == 0` cannot pass;
+`a-callee-that-writes-its-output-must-be-given-a-region` and
+`with-buffers-refuses-an-unbindable-region` pin the two refusals. **Bite-check:**
+disabling the region overlay (a `false` branch) collapsed the fused output to
+zeros and failed all three assertions. The JVM target does not yet handle
+regions — that is **F2b**, which the interpreter-only test waits on.
+
+**Suite.** JVM **219 tests / 1918 assertions, 0 failures**; `clj-kondo` and
+`cljfmt` clean on `src/omkamra/dsp`.
+
+---
+
+## 2026-10-20 — F2b — regions on the JVM, and the F2a rework that made them free (completed)
+
+**Delivered.** F2b is small because F2a was reworked first.
+
+- **F2a reworked to D57's design (D59).** F2a had given the entry a per-call-site
+  `:region` *buffer* (a per-channel array) and overlaid it into the callee's
+  context. That worked on the interpreter but asked the JVM for a region *buffer
+  argument* — a new ABI shape — and every other target for the same plumbing. The
+  rework makes a region exactly what D57 said: a **state slot in the callee's call
+  partition**. A process-shaped module's output buffers become state (`channels *
+  stride` floats, the lane/shared stride), its `buffer-store`/`buffer-load` lower
+  to `:state-store`/`:state-load` with the channel folded into the element index,
+  and a `with-buffers` name aliases the callee's rebased slot. The interpreter's
+  region code (an allocation in `process-context`, an overlay in `evaluate-call`)
+  was **deleted**; the entry's `:buffers` keeps only `:output`.
+- **The frame (D59).** A region is frame-indexed; a per-sample callee has no
+  frame local. So a callee with `:region-slots` gets one extra leading `:int`
+  parameter — the current frame — between `sample-rate` and its arguments, and
+  `callee-descriptor`/`callee-slots`/`call-instructions` agree on it. A callee
+  with no regions is unchanged. The interpreter needed nothing: its callee context
+  already carries `:frame`. **Bite-checked** — passing a constant zero left only
+  frame 0 correct and failed the test on frames 1..7.
+- **The JVM's `:void`.** `jvm-type` maps `:void` to the `:void` descriptor insn
+  uses; a void module's method gets a trailing `return`; a void call is not
+  `pop`ped. Two compile-time guards (a state access or a local with no layout
+  entry) now say so instead of emitting a null var index — they cost nothing, being
+  emitter-time.
+
+**Tests.** `a-fused-process-voice-writes-the-call-sites-region` now runs the
+interpreter *and* the JVM and requires them bit-for-bit equal to the sum of two
+separately-rendered voices, and pins that the regions are state (entry `:buffers`
+holds only `:output`, two call partitions, `:state-size` = two regions).
+
+**Suite.** JVM **219 tests / 1926 assertions, 0 failures**; browser **34/34**;
+`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
+
+---
+
+## 2026-10-20 — F2c/F2d — the rest of fusion (done)
+
+**Delivered.**
+
+- **F2c (targets).** JavaScript and Wasm apply a region-writing callee's per-slot
+  region as ordinary state, so the only target facts were the frame parameter and
+  the `:void` return. JS needed only the frame (it is dynamically typed); Wasm
+  also needed `:void` in `wasm-type`'s result position and no `drop` after a void
+  call. The region itself, the void module, and the frame were already correct in
+  the shared IR.
+- **F2d (`poly`).** `poly` now fuses a *process-shaped* voice (D60): each slot's
+  call is wrapped `(with-buffers :slot-k …)` and the fused body sums the regions
+  into `:output` per channel, requiring the voice to declare `:process :channels`.
+  `reference-voice` now declares `:void` and `:channels 2`, and the reference
+  instrument fuses on every target.
+- **The interpreter hosts fused pools (D60).** The interpreter kernel applies the
+  same base → fused mapping and resets one slot's partition from the ABI's
+  `:call-partitions`, so a fused pool on *any* host has an oracle. This was the
+  gap you flagged; without it the JVM and the browser only agreed with each other.
+- **Guard.** A process-shaped voice is fused without the M6b guard (it writes a
+  region, not a scalar), an optimisation withheld rather than a correctness gap.
+- **Checks.** `a-fused-pool-runs-on-the-interpreter-oracle` (fused == plain on the
+  interpreter, and the JVM matches it); `a-fused-reference-instrument-renders-
+  what-a-plain-one-renders` (the stereo reference instrument, interpreter + JVM,
+  bit for bit, with an audibility guard); and a browser check that renders the
+  fused reference voice against the *plain* voice on the same kernel, so the
+  transcendentals cancel (JavaScript matches exactly). **Bite-checked**: a
+  one-channel region (the channel factor dropped) errored the stereo test.
+
+**Bugs found on the way.** A `list*` splices only its *last* argument, so the JS
+call emitted the optional frame as a literal `null` argument on *every* call — the
+whole shared JS matrix regressed, which is how it was caught. Wasm `drop`ped a
+void call's absent result. And a restored bite-check whose `ir.clj` was never
+reloaded made the region one channel wide in the running image; the browser
+fused-reference check is what exposed it.
+
+**The Wasm item, closed.** The **Wasm** fused reference voice drifted from the
+plain Wasm voice (~0.26), and the cause was not fusion at all: a Wasm instance
+starts from zeroed memory and reaches the IR's initial values only through the
+module's `reset` — and the pool resets a voice only when it **steals** one, so a
+*fresh* Wasm voice rendered from zero, while the JavaScript host seeds the state
+array in `create`. The fused path had a second, independent bug: it snapshotted
+`:initial` before seeding (so the per-slot restore copied zeros), and
+`partition-ranges` resolved a partition one arena index at a time, but a region is
+a *single* layout entry spanning thousands of indices — so the interior had no
+entry, `min` collapsed the start to nil, and the reset built a negative-index view
+that restored nothing while writing state bytes into the input region. Both
+fixed (D61), both bite-checked independently, and the browser check now steals a
+voice so the per-slot reset is exercised. The fused and plain reference voices
+now render **bit for bit** identically on JavaScript *and* Wasm (`worst 0`).
+
+Two lessons, both about "the oracle": the drift was a *host* divergence that the
+fused check merely made visible, and the segment bug was invisible to every
+module-shaped fused check because only a region makes a multi-slot partition.
+
+**Suite.** JVM **221 tests / 1933 assertions, 0 failures**; browser **36/36**;
+`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`. Verified in a fresh JVM as
+well as the long-lived one.
+
+---
+
+## 2026-10-20 — F1's browser half — served, written, and held on a kernel divergence
+
+**What landed.**
+
+- **The browser fused instrument is served.** `fused-instrument-bundle` and
+  `fused-instrument-source` carry the same pair the fused-pool endpoints do: the
+  fused voice's runtime, ABI, IR, and `:fusion` mapping; the *plain* lowering of
+  the same voice as the same-target oracle (D14), so the transcendentals cancel;
+  and the modulation matrix and post-mix bus, which are not fused.
+- **`check-fused-instrument`** rebuilds the host over them and asserts the fused
+  instrument renders the plain one's phrase, finite and block-size invariant. It
+  is written for both JavaScript and Wasm and is **not registered** yet.
+- **A fused runtime holds its slots (D62).** `runtime-config` takes `:capacity`
+  from the description, and the fusion branch never overrode it, so a fused build
+  of an eight-voice description produced a pool of eight voices over a two-voice
+  artifact. The kernels map a pool voice onto a slot by creation order, so several
+  handles landed on one slot — and `modulation/publisher`, which writes the
+  matrix's targets to *every* voice each block, had them clobber each other. The
+  browser fused-pool endpoints had been setting `:capacity slots` by hand, which
+  is what the lowering should have done. Pinned by
+  `a-fused-instrument-holds-exactly-its-slots`.
+
+**The blocker, and what is eliminated.** The fused **reference instrument** —
+process-shaped, with smoothed controls — does not match its plain twin on the
+**JVM** or **JS/Wasm**, though it matches exactly *until a smoothed control
+departs from its default* (`pulse-width`, `cutoff`, `resonance`); every other
+control is bit-identical, and `:guard` on or off, `slots` 1, 2 or 4, and f32 or
+f64 all behave the same. The fused signal is ~1e-4 smaller at first and settles a
+few percent low.
+
+The **interpreter is exact** for the same comparison with the same IR and the
+same control values, and interpreter-plain equals JVM-plain, so the fused
+lowering is right and the JVM/JS kernels are wrong. Three candidates are already
+ruled out, each by measurement rather than by reading:
+
+- **The control mapping.** `fusion/fused-position` maps every base control onto
+  its fused twin — printed position by position — and for `slots 1` the fused
+  interface is the base interface with the hoisted pair moved to the front, so
+  delivery is effectively an identity.
+- **The control values.** The pool resolves identical values for both, and the
+  controls that diverge are exactly the smoothed ones.
+- **Rebasing.** If the callee's state accesses were unrebased, the partition base
+  would matter: dropping the entry's duplicated ramp slots moves that base and
+  must change the audio. It does not — the divergence is bit-identical — which is
+  also how we know those duplicated entry slots were dead code.
+
+A minimal voice with a single smoothed control fuses *exactly* on both targets, so
+the reproducer needs more of the reference voice's structure; that is where this
+picks up. One near-miss is worth recording: the Wasm host had a real bug of the
+same family (resolving a partition by arena *index* rather than by layout
+*segment*, which a region breaks), but the JVM's `partition-ranges` already
+handles multi-slot entries, so that is not this one.
+
+**Suite.** JVM **222 tests / 1935 assertions, 0 failures**; browser **36/36**;
+`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
+
+---
+
+## 2026-10-20 — F1 closed — the drift was a doubled ramp, not a kernel bug
+
+The fused **instrument** disagreed with the plain one as soon as a smoothed
+control left its default, on the JVM and in the browser, by ~1e-4 and settling
+percent low. It looked like numerical drift — the interpreter seemed exact, which
+sent the hunt into the JVM host's control delivery, the fused partition's arena
+base, and the region address lowering. All three were innocent.
+
+**What it actually was.** A **derived definition ramped the controls it merely
+forwards**. `derived-definition` carries the voice's control *declarations* across
+— including `:smooth` — and `normalize` turned each of them into a ramp state, so
+the wrapper smoothed the raw control and handed the *smoothed* value to a voice
+that smoothed it again. Two poles compound, so the derived signal lagged: percent
+for the first milliseconds, settling only after thousands of frames. The decay
+that made it look like a transient was real, and it was the tell.
+
+It was never `poly`'s alone. `guard`, `unison`, `share`, the instrument wrapper,
+and the modulation transformers all build on `derived-definition`, so any voice
+that passed through a wrapper doubled its smoothed controls.
+
+**How it was pinned.** A generator whose whole output *is* a smoothed control
+made it exact and legible in eight samples: the plain voice ramps
+`[0.0 0.5 0.75 0.875 …]` and the fused one `[0.0 0.0 0.0 0.125 0.3125 …]`. Reading
+the interpreter's own ramp state settled the remaining doubt — plain and derived
+ramp *identically*, so it was never the ramp's shape; and the state showed the
+same control ramped twice, once in the wrapper and once in the voice. Everything
+larger was consistent with several stories; the small subject was not.
+
+**Two things the hunt got wrong, worth remembering.**
+
+- **The "interpreter is exact" evidence was a stale Var.** `tools/reload`
+  unloads and rebuilds a namespace, so a REPL helper compiled *before* the reload
+  keeps calling the *old* Var, and therefore the old `poly`, forever. Several
+  measurements taken after the fix were really measurements of the unfixed code.
+  Helper functions in `user` must be re-evaluated after a reload.
+- **`guard` doubled, but it was not the only doubler.** The M6b guard is withheld
+  for process-shaped voices, so the process-shaped *reference* instrument was
+  never guarded — its divergence came through `poly` itself. Had the fix gone
+  into `guard` alone, the reference would still have drifted.
+
+**The fix.** `graph/derived-definition` marks its result
+`:dsp/forwarded-controls`; `descriptor/normalize` reads the mark and skips ramp
+creation, so the declaration still travels — the ABI a host reads still reports
+the mode — while the value stays raw until the voice that owns it ramps it, once
+per call site. That is D63. The `:smooth`/`:slew` stripping tried earlier inside
+`combinators/poly` is gone: one rule, in one place. It was bite-checked by
+removing the mark: the first block becomes
+`[0.0 0.0 0.0 0.125 0.3125 …]`, and the check fails.
+
+**Also landed.** The fused runtime's capacity is the slot count (D62): a fused
+build of an eight-voice description used to make an eight-voice pool over a
+two-voice artifact, so several handles shared one slot and the modulation
+publisher — which writes every voice each block — had them clobber each other.
+
+**Registered.** `javascript-fused-instrument-test` and
+`wasm-fused-instrument-test` are checks now, not comments: F1's browser half.
+They were failing before this and pass after, which is what proves they are not
+comparing a plain kernel with itself.
+
+**Suite.** JVM **223 tests / 1937 assertions, 0 failures**; browser **38/38**;
+`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
+
+---
+
+## 2026-10-20 — F3 — a lane reaches a callee
+
+**What it was.** `(lane control)` was refused anywhere but the entry process
+("lane is only available in the entry process", `ir.clj`), for a shared lane as
+much as a per-voice one, so automation died at the first module boundary and a
+caller had to compose at the call site. That refusal is gone: a definition that
+reads a lane is now handed the region.
+
+**The shape (D64).** One pointer per lane-reading definition, plus the current
+frame. Not a base into the callee's own partition: a lane's offset is
+`index * frame-capacity` — a constant of the *entry's* layout (D28) — so the
+region is all a callee needs, and every definition in the artifact reads the same
+slices. A definition that only calls a lane reader forwards its own region, so
+`lower-definitions` propagates the flag up the call graph.
+
+**The two halves, and where each was caught.**
+
+- The *IR* half — the lane table reaches callees, the refusal goes, and a
+  lane-reading definition is marked — was caught by the JVM suite: bite-checked
+  by withholding the table, which refuses with "lane is only available where a
+  lane region is".
+- The *target* half — passing the region and, with it, **the frame** — was caught
+  by the browser. A lane read is per-frame, so a lane reader needs the frame for
+  the same reason a `with-buffers` region writer does (F2), and the first cut
+  gave the lanes path the region but not the frame: the JVM emitted `[:iload
+  nil]` for the read's index (found by printing the callee's instructions) and
+  the browser matrix failed on both JavaScript precisions with `ReferenceError:
+  lanes is not defined` and, once that was in, `frame` likewise. One predicate
+  now answers for regions and lanes on all four targets.
+
+**Verified on all four targets** by a case in the shared catalog,
+`:automation-lane-in-callee`: an entry that declares a lane and calls a callee
+whose body reads it with `(lane amount)`. The JVM suite runs it on the
+interpreter and the JVM; the browser matrix runs it on JavaScript and Wasm, f32
+and f64. Nothing was hand-written for any target — that is the catalog's point —
+and the browser went from two failures to green on exactly this case, which is
+what makes it a bite check rather than a formality.
+
+**A note on the tooling.** Two of this slice's measurements were wrong before
+they were right, both for the reason F1 recorded: `(tools/reload '[a b])`
+*forces* those namespaces and skips detection, so a file edited but not named
+stays stale in the image — which is how the JavaScript target kept emitting a
+callee without its lane parameter while the source clearly had it. The
+no-argument `(tools/reload)` is what finds everything. The tool now says so
+itself: a named target reports `:stale` — the loaded namespaces whose content
+changed and were not reloaded, with a note — so the image's freshness is never
+something a caller has to remember to check.
+
+**Suite.** JVM **223 tests / 1944 assertions, 0 failures**; browser **38/38**;
+`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
+
+---
+
+## 2026-10-20 — F4 — a lane reaches every fused slot
+
+**What it was.** A fused entry renders every voice in one call, so it owns *one*
+lane region — and a lane is per voice. `poly` therefore refused one on a per-slot
+control outright ("poly cannot expand a lane per slot: a lane belongs to the entry
+process"), and a lane-only control slipped past that refusal with a worse outcome:
+it was hoisted, one slice was laid out, and every slot read the same automation,
+whichever voice happened to write it last. Two different curves make that a wrong
+block rather than a missing one, which is how the pin was written.
+
+**The shape (D65).** The region is the entry's, `slots` slices of it, and a call
+site hands its callee the base of **its** slice: zero-based lane offsets plus a
+base, exactly as a callee's state indices are resolved against a partition base
+(D19). Nothing else in the ABI changes — a lane-reading callee gains one `int`
+next to the region it already had — and a callee that merely forwards the region
+passes the base it was handed. Three further facts fell out of "one slice per
+voice":
+
+- **Expansion does not multiply lanes.** `poly` expands a per-slot control, but a
+  lane belongs to the *control*: the expanded declarations carry the lane's name
+  (`:lane-name`), so the entry lays out one lane per base control and the slots
+  differ by slice. Without this the callee's `(lane amount)` could not resolve at
+  all: the entry's layout held `amount_0`/`amount_1` and the voice declared
+  `amount`.
+- **A lane-only control's name is a lane read wherever it is read.** In the entry
+  that was already true; a callee now binds it to a read of *its own* slice rather
+  than to the value the caller passed. Where the artifact has one slice the two
+  are the same read, so no existing check moved.
+- **A slot is a call partition.** The base a call site hands out is the partition
+  ordinal — the same index a host resets one voice by (M6a) — so a fused entry's
+  lane-reading call site has to own one; it is refused loudly otherwise rather
+  than given an arbitrary slice.
+
+**Where each half was caught.** The IR half and the JVM/interpreter hosts were
+caught by the JVM suite; the two pins were written first and failed for exactly
+the two reasons above (`[40 40 40 40]` where the plain pool gave `[22 24 26 28]`,
+and the refusal). The JavaScript *host* half — its fused branch still allocated a
+one-slice lane region, so slice 1's writes went out of bounds and read as zeros —
+was caught by the new browser check, which is the bite check for a line no JVM
+test can reach: it reported `[[0 0 0 0]]` against the interpreter's
+`[[22 24 26 28]]` and went green on the fix.
+
+**Verified on all four targets.** The JVM suite renders both pins on the
+interpreter and the JVM (`a-fused-pool-gives-each-slot-its-own-lane`,
+`a-fused-pool-expands-a-lane-carrying-control-per-slot`), each against a plain
+pool over the same description as the oracle; the browser runs `JavaScript fused
+lane` and `Wasm fused lane` over a served fused bundle, with two curves written to
+the two voices and the interpreter pool as the oracle. The per-slot-lane refusal
+in `poly`'s tests became a positive test of the lane that travels with an expanded
+control.
+
+**Suite.** JVM **225 tests / 1953 assertions, 0 failures**; browser **40/40**;
+`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
+
+---
+
+## 2026-10-20 — F5 — a fused AudioWorklet
+
+**What it was.** The worklet adapter serves one kernel instance per node, so a
+fused voice — one process holding `slots` voices — needed a node that renders all
+of them, with a parameter of its own for every per-slot control. F5 is that node.
+
+**What it turned out to be: plumbing, not a mechanism.** The adapter writes each
+parameter into the kernel's control array at the parameter's own index and builds
+its own kernel, so there is no pool inside a worklet and *nothing has to be
+mapped*: the node's parameters simply **are** the fused interface, in ABI order
+(`gate_0`, `frequency_0`, `delay_0`, `mix_0`, `gate_1`, ...). The plan had assumed
+the pool's `:mapping` would have to be applied here; it is not needed, because
+`:mapping` exists to translate the *pool's* base-shaped writes, and a worklet has
+no pool. So the change is: the served adapter's parameter descriptors are
+generated from the fused artifact's ABI instead of being a `one-pole` literal, and
+one fused arm is served per target.
+
+**Two bugs fell out, and the check caught both.**
+
+- The adapter read `processorOptions` unguarded, so a node created without them
+  threw where nothing could see it: the worklet reported a bare `processorerror`
+  and the page saw only a node that never answered. Both adapters now default it
+  to an empty object, and the JavaScript one also reports a constructor throw
+  through its own port, so `worklet-ready` rejects with the *reason* instead of
+  timing out. That is how "Cannot read properties of undefined (reading
+  'controlNames')" was found — and it was mine: the page had put the processor
+  fields at the top level of the node options rather than under
+  `processorOptions`.
+- A stub of the descriptor *order* did **not** bite, which is worth writing down:
+  the adapter indexes by `processorOptions.controlNames`, not by the descriptor
+  list, so `parameterDescriptors` only has to *name* what the page drives. The
+  check does bite when the per-slot *names* go missing ("rendered silence for a
+  gated slot").
+
+**The check.** `JavaScript fused worklet` and `Wasm fused worklet` each render one
+node three times — slot 0 alone, slot 1 alone, and both — with the second slot at
+twice the first's `frequency`, and ask two things of the blocks: that slot 1's
+peak is twice slot 0's (a parameter reached the slot it names, not a neighbour's
+control block) and that the both-slots block *is* their sum (one node rendered
+both voices, not one). The worst difference is one f32 ulp-ish (3e-5), and the
+same numbers come out of both hosts.
+
+**Suite.** JVM **225 tests / 1953 assertions, 0 failures**; browser **42/42**;
+`clj-kondo` and `cljfmt` clean on `src/omkamra/dsp`.
+
+---
+
+## 2026-10-21 — H2 — the post-mix chain gets its own lane and shared regions
 
 The audit item was "the browser bus carries neither lanes nor a shared region":
 `hosts/js.cljs` and `hosts/wasm.cljs` refused at bus construction. Reading the
@@ -4801,7 +4250,9 @@ per-block copy → `[[0 …]]` against `[[1 2 3 4 5 6 7 8]]`.
 **Counts.** JVM 227 tests / 1973 assertions / 0 failures; browser 46/46 (was
 225/1953 and 42/42). H3 (a lane on a per-channel control) is next.
 
-### H3 — a lane beside `:bend` is a curve per channel
+---
+
+## 2026-10-21 — H3 — a lane beside `:bend` is a curve per channel
 
 The audit item was "a lane on a per-channel control has no delivery", refused at
 pool construction. Reading the code made the shape of the answer clear: the
@@ -4845,7 +4296,9 @@ channel.
 227/1973 and 46/46). H4 — a fused slot identity that does not require state — is
 next.
 
-### H4 — a slot is the call site's identity, and state is one thing it may own
+---
+
+## 2026-10-21 — H4 — a slot is the call site's identity, and state is one thing it may own
 
 The audit item was "a fused voice with no state and no `gate` cannot fuse", refused
 by every host with "a slot cannot be reset on its own". Reading the code showed the
@@ -4895,7 +4348,9 @@ and 48/48 after H3, 225/1953 and 42/42 before H2). H5 — array fields in record
 the one remaining H item — is a decision, not a slice; H1 stays deferred until
 P13/P14.
 
-### H5 — an array of records owns an array field, and a bank is just a record
+---
+
+## 2026-10-21 — H5 — an array of records owns an array field, and a bank is just a record
 
 The last H item was a *language* omission, not a host gap: `descriptor.clj` refused
 an array of records whose field declared `:size`, and D16 had recorded it as
@@ -4947,7 +4402,9 @@ cases per shared process matrix (was 90). H's remaining open items are H1
 (deferred to after P13 → P14 by design) and nothing else: H2, H3, H4 and H5 are
 done.
 
-### Parity audit before P12 — three targets, and one hole in the *verification*
+---
+
+## 2026-10-21 — Parity audit before P12 — three targets, and one hole in the *verification*
 
 The question was whether JVM, JavaScript and Wasm have feature parity now. There are
 two kinds of answer and the second is the one that matters: what the targets
@@ -5049,7 +4506,9 @@ stereo case is shown to be load-bearing rather than decorative. That a *lowering
 stub still cannot be seen this way is unchanged and by design: these rows pin
 parity between targets, not the value of an expression all four compute.
 
-### P12 readiness spike: what the binary step actually is
+---
+
+## 2026-10-21 — P12 readiness spike: what the binary step actually is
 
 Before committing to P12 I went looking for the one thing the phase's first
 deliverable depends on and the plan does not name: *which* WABT — and whether
@@ -5085,7 +4544,9 @@ P12 is re-scoped in `PHASES.md` around that ordering: the layout first (no new
 dependency, verifiable with today's tooling), the binary step second, the init blob
 third. No DSP code changed for this spike.
 
-### The final lowering belongs to the target's world (D73)
+---
+
+## 2026-10-21 — The final lowering belongs to the target's world (D73)
 
 I had recommended compiling WAT on the JVM, with a pinned WABT release, on the
 grounds that a complete artifact should carry its binary. The user pushed back twice
@@ -5138,7 +4599,9 @@ mentions are historical (this diary, `PLAN.md`'s original file tree, and one old
 decision's prose), and the two *live* references — the file table and a CI snippet in
 `TESTING.md` — are fixed.
 
-### Dependency refresh: squint and SCI, with insn already current
+---
+
+## 2026-10-21 — Dependency refresh: squint and SCI, with insn already current
 
 `squint` 0.14.211 → **0.15.212**, `sci` 0.15.58 → **0.15.59**, and `insn` stays at
 **0.5.4**, which is the newest stable release Clojars has (checked, not assumed).
@@ -5169,7 +4632,9 @@ One observation worth keeping: the first run after that wipe failed a single che
 It is a cold-build timing artefact of the worker/worklet paths, not a regression from
 either bump — but it is recorded in `TESTING.md` so the next person does not chase it.
 
-### P12a — the memory layout declares itself
+---
+
+## 2026-10-22 — P12a — the memory layout declares itself
 
 The fixed 4096-byte channel stride is gone, and with it a duplication that had been
 invisible because the two copies agreed. Capacity is now a **frame count**, declared
@@ -5230,7 +4695,9 @@ The report is factual again and names the needles as data; making the vocabulary
 available there would mean building the check list as data before running it, which is
 a larger change to that dispatch than this session should make uninvited.
 
-### P12b — initialization in constant space, and a signed zero that was not one
+---
+
+## 2026-10-22 — P12b — initialization in constant space, and a signed zero that was not one
 
 `$init` was one store per initializer element, and for `feedback-delay` at f64 that was
 48 004 stores: 2 251 108 bytes of WAT text, 99.8% of the module, for a delay line whose
@@ -5273,7 +4740,9 @@ kept as a case that cannot fail.
 **P12 is complete** — both slices, the layout and the initializers, with the target
 parity table at 211 case/precision pairs and no gaps.
 
-### P13 reconnaissance — what the browser can already do
+---
+
+## 2026-10-22 — P13 reconnaissance — what the browser can already do
 
 Before writing any of P13 I measured it, in a real browser, with a throwaway Shadow
 build that I then deleted.
@@ -5421,7 +4890,9 @@ Also renamed, as asked: `run-all` is `run-jvm`, and `run-browser` joins it, so t
 two halves of `run-everything` can be run by name. The living docs were updated;
 the diary's older entries were left as they were written.
 
-## P13b — the emitters (D80)
+---
+
+## 2026-10-23 — P13b — the emitters (D80)
 
 ### First, a question that did not become a change
 
@@ -5570,3 +5041,85 @@ spelling representation (the JS-form comparison fails, number formatting stays
 green), and the two traps above, which failed before they were fixed. The scratch
 probe build was removed from `shadow-cljs.edn` and `src/p13b` deleted once the
 corpus became a check.
+
+---
+
+---
+
+## 2026-10-23 — Reload — the full-reload option is gone
+
+`omkamra.dev.tools/reload` no longer accepts `:all`. A detection-driven reload that
+would rebuild the whole session still refuses with `:status :refused`, but the note
+it leaves now says what to do instead: **restart the dev server**. The argument
+error for an unknown target stops offering the option too, and `AGENTS.md`,
+`RULES.md` `R3` and `TESTING.md` were updated to match.
+
+**Why it went.** The option existed to be the answer to the tool's own safety
+refusal, and it was a bad answer. The refusal fires when the baseline no longer
+describes the tree — a check-out, a corruption, a bulk rewrite — which means the one
+thing that cannot be trusted at that moment is the baseline. Asking it to rebuild
+everything routes through the same unload-then-load sequence that a single failure
+leaves half-done, and it does so on the strength of a verdict already known to be
+wrong. A fresh process re-establishes the baseline in the one way that cannot
+half-succeed.
+
+**And the tool cannot reach its own case.** Its own namespaces are reported under
+`:deferred` and are never reloaded in process, so the situation that most needs to
+start over is exactly the one the tool cannot fix. Recommending a restart is not a
+retreat from that; it is admitting what the tool is for.
+
+**What it cost to keep.** `:all` was a second definition of "what to reload" sitting
+beside detection, and the root-set resolution carried it as a case of its own: the
+selection is now `(seq explicit)` or detection, with nothing between them.
+
+**How the removal is pinned.** `omkamra.dev.tools-test` asserts that the refusal's
+note names a restart rather than a call, that `(tools/reload :all)` throws, and that
+naming the namespaces you want still works — so the option cannot come back by
+accident. The tooling suite is **20 tests / 102 assertions / 0 failures**, run in a
+fresh process, which this change required rather than merely preferred.
+
+The two remaining mentions are in records and stay as written: `DECISIONS.md` `D79`
+and the older entries of this file say what was true when they were written.
+
+## Handoff — current state
+
+The one entry rewritten in place, and always the last. It holds where we are, what
+is next, and what shapes the next decision. Everything durable belongs to the file
+that owns it — `README.md` says which — so this points rather than restates, and a
+bullet that is still true two slices later is in the wrong file.
+
+### Where we are
+
+**P13b is the last completed slice** (D80): both emitters are `.cljc`, every
+host-different numeric decision lives in `omkamra.dsp.numbers`, and the two worlds'
+agreement is a check rather than a claim — `compiler equivalence` compares the
+descriptor, the linked unit, the portable IR, the JS forms and the Wasm module per
+definition and per precision, and `number formatting` spells a swept corpus in the
+page and compares it with the JVM's.
+
+Suite: JVM **275 tests / 2 532 assertions / 0 failures**, browser **52/52**.
+
+### What's next
+
+- **P13c — the browser compile** (`PHASES.md` §P13). The page compiles a definition
+  itself: `squint.compiler` comes into the page as the JS backend (D41), and the JS
+  half of `compiler equivalence` upgrades from the emitter's *forms* to the *module
+  text* squint produces. The canonical IR form lands with it.
+- **P13d**, then **P13e**. The browser definition registry first — it drives the
+  equivalence check's `:skipped` count from eight to zero, and the expected values
+  for those eight already ship — then incremental recompilation, caching, and errors
+  classified as data an editor can show.
+- **P14**, then **H1**. Artifact-driven worklet installation, and only then the pool
+  inside a worklet node, whose shape those phases decide. H1 starts with its own
+  question: where the allocator lives.
+- **P15** and **P16** close the spine: safety and diagnostics with the optimization
+  stage, then conformance and release gates.
+
+### What shapes the next decision
+
+One thing is genuinely open for P13c, and it is a boundary rather than a design: how
+the page gets the definitions it compiles. P13c should not pre-empt P13d's registry
+by reaching for SCI's own `require` first.
+
+Everything else that is undecided is a choice for a later phase, and is listed in
+`PLAN.md` §Open questions. None of them blocks P13c.
