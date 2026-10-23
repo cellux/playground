@@ -64,12 +64,20 @@ once both are done:
 (require '[omkamra.dsp.tests.suite :as suite])
 (suite/run-everything)
 ;; prints the JVM suite's own report under a header, then:
-;;   === browser: 51/51 checks passed (79.1s total) ===
+;;   === browser: 52/52 checks passed (75.9s total) ===
 ;;   === all green ===
-;; => {:jvm {:test 246, :pass 2412, :fail 0, :error 0, :passed? true}
-;;     :browser {:passed? true, :passed 51, :total 51, :failed []}
-;;     :seconds 73.4, :passed? true}
+;; => {:jvm {:test 275, :pass 2532, :fail 0, :error 0, :type :summary, :passed? true}
+;;     :browser {:passed 52, :total 52, :results [...], :failures [], :passed? true}
+;;     :passed? true, :seconds 75.9, :failures []}
 ```
+
+The two halves are reported as their runners returned them — `run-jvm`'s
+`clojure.test` summary and `run-browser`'s (that is `browser/run!`'s) result, each
+carrying `:passed?` — so a half can be run and read on its own with the same
+keys it has inside the whole. The top level adds what is about the two together:
+`:passed?`, `:seconds`, and `:failures` as `[half name detail]` for every failure
+either half reported. A half that never finished appears as
+`{:timeout true :passed? false}`.
 
 Use it before a commit, or after a change that touches both a target and the
 harness. The two halves overlap, so `:seconds` is the slower half's wall clock rather
@@ -143,11 +151,23 @@ Notable groups:
 
 One browser check is not about a target at all: **`compiler equivalence`** has
 the page compile the catalog's definitions with the compiler compiled *into the
-page* — `descriptor/normalize`, `linker/link` and `ir/lower-*` as real
-ClojureScript — and compare each with what the JVM compiled, exactly
-(`omkamra.dsp.harness.diff`, which compares numbers by bit pattern for the
-reasons D78 gives). The JVM payload is `/omkamra/dsp/harness/testbed/equivalence`
+page* — `descriptor/normalize`, `linker/link`, `ir/lower-*` and now both
+emitters as real ClojureScript — and compare each with what the JVM compiled,
+exactly (`omkamra.dsp.harness.diff`, which compares numbers by bit pattern for
+the reasons D78 gives). The JVM payload is `/omkamra/dsp/harness/testbed/equivalence`
 (`conformance/equivalence-payload`).
+
+What is compared per definition, at **both widths**:
+
+| what | how |
+|---|---|
+| normalized descriptor, linked unit, portable IR | as data, by `diff/first-difference` |
+| the JS target's emitted forms | as data, with a float literal a `js*` snippet carrying its spelling, so the comparison sees the spelling (D78) |
+| the Wasm target's module | as *text*, by `diff/text-difference`, which names the line and a window around the character that differs |
+
+The page lowers its own IR for each width — `ir/prepare-for-target` included, so
+both worlds emit from prepared IR — and emits from that, so a difference is a
+difference the emitter made and not a stored result being repeated back.
 
 ```clojure
 (browser/run! {:only ["compiler equivalence"]})
@@ -167,7 +187,31 @@ Two properties are deliberate and worth knowing when reading it:
   one row per case, with an empty `:targets` because nothing was a target's
   fault.
 
-Expected baseline: **263 tests, 2 456 assertions, 0 failures**.
+**`number formatting`** is the other check that is not about a target, and it is
+the one that asks whether the *text* two worlds make from a number is the same
+text. It fetches a swept corpus — the catalog's own constants, the smallest
+subnormals one by one, powers of ten, and a seeded sample of random bit patterns,
+with each value travelling as its bit pattern because that is the only way two
+worlds can name the same double — spells every value in the page through
+`omkamra.dsp.numbers`, and compares with the JVM's spelling of the same value
+(`conformance/number-corpus-payload`, served at
+`/omkamra/dsp/harness/testbed/numbers`).
+
+```clojure
+(browser/run! {:only ["number formatting"]})
+;; => one check, one case row per width (f64 and f32)
+```
+
+The catalog alone cannot be the sample: its constants are small round numbers,
+and every divergence this sweep found — a subnormal whose shortest spelling the
+JDK does not give, an exact decimal tie at f32 width, an f32 that rounds to the
+largest one, an integer printed beyond 2^53 — is outside them. Checked
+separately from `compiler equivalence` because it is a different question: that
+one compares what the emitters emit for the catalog, this one asks whether the
+one function they both spell constants with agrees at all.
+
+Expected baseline: **275 tests, 2 532 assertions, 0 failures**, and **52 browser
+checks**.
 
 ---
 

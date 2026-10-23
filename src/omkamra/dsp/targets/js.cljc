@@ -25,7 +25,12 @@
     see operands Squint can prove boolean."
   (:require [clojure.string :as str]
             [clojure.walk :as walk]
-            [squint.compiler :as squint]))
+            [omkamra.dsp.numbers :as numbers]
+            ;; Squint is the JVM's, and the browser's compile entry point is
+            ;; P13c's: what is portable, and what the two worlds must agree on,
+            ;; is the source text this namespace builds, not the module squint
+            ;; makes of it.
+            #?(:clj [squint.compiler :as squint])))
 
 (def ^:dynamic *precision* nil)
 
@@ -266,22 +271,18 @@
 (def ^:private i32-helper '__dsp_i32)
 
 (defn- number-form
-  "A floating-point literal, already coerced to the target width."
+  "A floating-point literal, already coerced to the target width.
+
+  A `js*` snippet carrying the spelling, which is the same device this emitter
+  writes every exact JavaScript spelling with — and here it is what keeps the
+  literal a function of the kernel rather than of the world: a number prints as
+  `2.0` on the JVM and as `2` in a browser, which has one number type and no way
+  to tell them apart (D78), and a symbol whose name is the spelling would read
+  back as a name rather than as a literal. It also leaves the emitted *form* as
+  data both worlds can compare, which is what the harness does."
   [value]
-  (if (f64?)
-    (let [value (double value)]
-      (cond (Double/isNaN value) '(js* "NaN")
-            (Double/isInfinite value) (if (pos? value)
-                                        '(js* "Infinity")
-                                        '(js* "-Infinity"))
-            :else value))
-    (let [value (float value)]
-      (list fround-helper
-            (cond (Float/isNaN value) '(js* "NaN")
-                  (Float/isInfinite value) (if (pos? value)
-                                             '(js* "Infinity")
-                                             '(js* "-Infinity"))
-                  :else value)))))
+  (let [literal (list 'js* ((if (f64?) numbers/f64->text numbers/f32->text) value))]
+    (if (f64?) literal (list fround-helper literal))))
 
 (defn- coerce-form
   "Coerce a form to a DSP type, the way the target's arithmetic requires.
@@ -608,11 +609,8 @@
   (case type
     :int (str (int value))
     :boolean (if value "true" "false")
-    (let [value (double value)]
-      (cond (Double/isNaN value) "NaN"
-            (Double/isInfinite value) (if (pos? value) "Infinity" "-Infinity")
-            :else (let [text (str (if (f64?) value (float value)))]
-                    (if (f64?) text (str "Math.fround(" text ")")))))))
+    (let [text ((if (f64?) numbers/f64->text numbers/f32->text) value)]
+      (if (f64?) text (str "Math.fround(" text ")")))))
 
 (defn- arena-form
   "The arena literal: a typed array when every slot is a float, so the common
@@ -689,17 +687,6 @@
           (normalize-booleans (:params definition)
                               (cons 'do (statement-forms [(:body definition)]))))))
 
-(defmacro with-module-names
-  "Emit `body` with the module's callee names in scope.
-
-  A macro on purpose. The emitter resolves a call site's callee *while it builds* the
-  form, so the binding has to wrap the construction: as a function this took an
-  already-emitted argument, the `binding` came too late, and the result was
-  `*callee*` nil inside a call — which the module's own error message then reported
-  as a definition that was never emitted."
-  [names & body]
-  `(binding [*callee* {:base nil :names ~names}] ~@body))
-
 (defn- process-form
   [js-ir]
   (let [controls (map parameter-symbol (:controls js-ir))
@@ -717,14 +704,20 @@
                     (map-indexed (fn [index [id _]]
                                    [id (definition-name index id)]))
                     (:definitions js-ir))
-        callees (with-module-names names
+        ;; The binding is written out at each site rather than put behind a
+        ;; helper, and that is not a style choice: the emitter resolves a call
+        ;; site's callee *while it builds* the form, so the binding has to wrap
+        ;; the construction. Behind a function it took an already-emitted
+        ;; argument, the binding came too late, and the result was `*callee*` nil
+        ;; inside a call — which the module's own error message then reported as
+        ;; a definition that was never emitted.
+        callees (binding [*callee* {:base nil :names names}]
                   (mapv (fn [[id definition]]
                           (callee-form (get names id) definition))
                         (:definitions js-ir)))
         frame (with-meta frame-counter {:mutable true})
         ;; One evaluation per frame (D40): no channel loop.
-        body (with-module-names
-               names
+        body (binding [*callee* {:base nil :names names}]
                (normalize-booleans
                 (:controls js-ir)
                 (list 'let [frame 0]
@@ -779,29 +772,43 @@
   metadata this emitter means: `^:mutable`, `^:export`, and `^boolean`."
   [form]
   (walk/postwalk (fn [value]
-                   (if (instance? clojure.lang.IObj value)
+                   (if #?(:clj (instance? clojure.lang.IObj value)
+                          :cljs (implements? IWithMeta value))
                      (vary-meta value dissoc :line :column :file)
                      value))
                  form))
 
-(defn- squint-source
-  [js-ir]
-  (let [definition (case (:op js-ir)
-                     :function (function-form js-ir)
-                     :process (process-form js-ir))]
-    (binding [*print-meta* true]
-      (str (str/join "\n\n"
-                     (map (comp pr-str strip-location)
-                          (concat (map second
-                                       (filter (fn [[helper _]]
-                                                 (referenced? definition helper))
-                                               helper-definitions))
-                                  [definition])))
-           "\n"))))
+(defn emit-forms
+  "The forms a kernel's module is printed from: the helpers it uses, then the
+  entry point, with reader metadata dropped so the only metadata left is the kind
+  this emitter means (`^:mutable`, `^:export`, `^boolean`).
 
-(defn emit-module
+  Public because this is the JS target's portable half — the part both worlds
+  have to agree on, and the part the harness compares across them (P13b). Every
+  host-dependent decision has already been made by the time a form is here: a
+  float literal is a `js*` snippet carrying its spelling, so the form is data
+  the two worlds can compare rather than text each of them prints its own way."
   [js-ir]
   (binding [*precision* (:precision js-ir)]
-    ;; `:elide-imports` keeps the artifact a standalone module: every form above
-    ;; lowers to plain JavaScript, so it never reaches for the Squint stdlib.
-    (squint/compile-string (squint-source js-ir) {:elide-imports true})))
+    (let [definition (case (:op js-ir)
+                       :function (function-form js-ir)
+                       :process (process-form js-ir))]
+      (mapv strip-location
+            (concat (map second
+                         (filter (fn [[helper _]]
+                                   (referenced? definition helper))
+                                 helper-definitions))
+                    [definition])))))
+
+(defn emit-source
+  "The ClojureScript a kernel is compiled from, as text."
+  [js-ir]
+  (binding [*print-meta* true]
+    (str (str/join "\n\n" (map pr-str (emit-forms js-ir))) "\n")))
+
+#?(:clj
+   (defn emit-module
+     [js-ir]
+     ;; `:elide-imports` keeps the artifact a standalone module: every form above
+     ;; lowers to plain JavaScript, so it never reaches for the Squint stdlib.
+     (squint/compile-string (emit-source js-ir) {:elide-imports true})))

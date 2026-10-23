@@ -24,6 +24,7 @@
             [omkamra.dsp.tests.literals]
             [omkamra.dsp.tests.memory]
             [omkamra.dsp.tests.modulation]
+            [omkamra.dsp.tests.numbers]
             [omkamra.dsp.tests.process]
             [omkamra.dsp.tests.reference]
             [omkamra.dsp.tests.sequencer]
@@ -46,6 +47,7 @@
     omkamra.dsp.tests.combinators
     omkamra.dsp.tests.library
     omkamra.dsp.tests.literals
+    omkamra.dsp.tests.numbers
     omkamra.dsp.tests.conformance
     omkamra.dsp.tests.automation
     omkamra.dsp.tests.modulation
@@ -55,15 +57,23 @@
     omkamra.dsp.tests.harness])
 
 (defn run-jvm
-  "Run every DSP test namespace and return the `clojure.test` summary.
+  "Run every DSP test namespace and return the result.
+
+  `clojure.test`'s summary in its own vocabulary — `:test`, `:pass`, `:fail`,
+  `:error` — plus `:passed?`: a half answers in the same shape whichever half it
+  is, so `run-everything` reports each as it came instead of reshaping it.
 
   This is the half that needs neither a browser nor a dev server. The other half
   is `run-browser`, and `run-everything` runs both."
   []
-  (apply test/run-tests test-namespaces))
+  (let [{:keys [fail error] :as summary} (apply test/run-tests test-namespaces)]
+    (assoc summary :passed? (and (zero? (or fail 0)) (zero? (or error 0))))))
 
 (defn run-browser
   "Run the browser conformance suite and return `browser/run!`'s result.
+
+  That result is already the shape a half reports in — `:passed`, `:total`,
+  `:results`, `:failures` and a boolean `:passed?` — so this adds nothing to it.
 
   Separate from `run-jvm` because it needs a browser and a dev server, and a
   green JVM run says nothing about either. Options are `browser/run!`'s — `:only`
@@ -99,9 +109,11 @@
       :gaps gaps
       :passed? (and (browser/passed? browser-result) (empty? gaps))})))
 
-(defn- timeout-result
+(defn- reported-half
+  "A half as it is reported: its own result, or a timeout in its place. Carries
+  `:passed?`, because a half that never finished did not pass."
   [half]
-  (if (= ::timeout half) {:timeout true} half))
+  (if (= ::timeout half) {:timeout true :passed? false} half))
 
 (defn run-everything
   "Run everything that can run here, and report it once.
@@ -119,8 +131,16 @@
     there while the whole JVM suite still runs (see
     `omkamra.dsp.harness.browser/run!`).
 
-  Returns `{:jvm … :browser … :seconds … :passed? …}`; each half carries `:timeout
-  true` when it did not finish."
+  The report is two halves and a verdict:
+
+  - `:jvm`     `run-jvm`'s result, as it came;
+  - `:browser` `run-browser`'s result, as it came. Both halves answer `:passed?`,
+    so neither has to be interpreted here to be placed;
+  - `:passed?`, `:seconds` and `:failures`   the two together: whether everything
+    passed, how long the whole thing took, and every failure either half reported
+    as `[half name detail]` so one call answers what went wrong where.
+
+  A half carries `:timeout true` — and `:passed? false` — when it did not finish."
   ([] (run-everything {}))
   ([{:keys [timeout only] :or {timeout 1800000}}]
    (let [started (System/nanoTime)
@@ -132,36 +152,34 @@
                                *out* jvm-output]
                        (run-jvm)))
          browser (future (browser/run! (cond-> {} only (assoc :only only))))
-         jvm-result (deref jvm timeout ::timeout)
-         browser-result (deref browser timeout ::timeout)
-         summary (timeout-result jvm-result)
-         conformance (timeout-result browser-result)]
+         jvm (reported-half (deref jvm timeout ::timeout))
+         browser (reported-half (deref browser timeout ::timeout))]
      (println "=== DSP JVM suite ===")
      (print (str jvm-output))
      (flush)
-     (let [jvm-failed (or (:timeout summary)
-                          (pos? (:fail summary 0))
-                          (pos? (:error summary 0)))
-           browser-failed (or (:timeout conformance)
-                              (not (true? (:passed? conformance))))
-           report {:jvm (assoc (select-keys summary [:test :pass :fail :error])
-                               :passed? (not jvm-failed))
-                   :browser (if (:timeout conformance)
-                              {:timeout true :passed? false}
-                              {:passed? (true? (:passed? conformance))
-                               :passed (:passed conformance)
-                               :total (:total conformance)
-                               :failed (mapv (juxt :name :detail)
-                                             (remove :passed? (:results conformance)))})
+     (let [failures (into (if (:timeout browser)
+                            [[:browser "(timed out)" nil]]
+                            (mapv (fn [failure] [:browser (:name failure) (:detail failure)])
+                                  (:failures browser)))
+                          ;; clojure.test reports a failure by printing it, and
+                          ;; that output is directly above; naming the half is the
+                          ;; honest summary rather than a detail to go looking for.
+                          (when-not (:passed? jvm)
+                            [[:jvm "(the suite failed)" "see the suite output above"]]))
+           report {:jvm jvm
+                   :browser browser
+                   :passed? (and (true? (:passed? jvm)) (true? (:passed? browser)))
                    :seconds (/ (double (- (System/nanoTime) started)) 1.0e9)
-                   :passed? (not (or jvm-failed browser-failed))}]
-       (println (if (:timeout conformance)
+                   :failures failures}]
+       (when-not (:passed? jvm)
+         (println "=== jvm: failed (see the suite output above) ==="))
+       (println (if (:timeout browser)
                   "=== browser: timed out ==="
                   (format "=== browser: %s/%s checks passed (%.1fs total) ==="
-                          (:passed conformance) (:total conformance)
+                          (:passed browser) (:total browser)
                           (:seconds report))))
-       (doseq [[name detail] (:failed (:browser report))]
-         (println (str "  " name ": " detail)))
+       (doseq [[half name detail] failures]
+         (println (str "  " half ": " name (when detail (str ": " detail)))))
        (println (format "=== %s ===" (if (:passed? report) "all green" "FAILED")))
        (flush)
        report))))

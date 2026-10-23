@@ -1,6 +1,7 @@
 (ns omkamra.dsp.targets.wasm
   "Emit WebAssembly text from explicit process IR."
-  (:require [clojure.string :as str]))
+  (:require [clojure.string :as str]
+            [omkamra.dsp.numbers :as numbers]))
 
 (def ^:private page-size 65536)
 ;; One sine period sampled at `table-entry-count` intervals, stored as f32 and
@@ -66,42 +67,28 @@
 (defn- local-name [name] (wat-symbol (str "$" (identifier name))))
 (defn- loop-counter-name [index] (wat-symbol (str "$source-loop-count-" index)))
 
-(defn- negative-zero-bits
-  "The bit pattern of negative zero at the kernel's width."
-  []
-  (if (f64?) Long/MIN_VALUE Integer/MIN_VALUE))
-
-(defn- float-bits
-  "The raw bits of a float at the kernel's width.
-
-  Sign and zero are bit questions here. `=` says `-0.0` and `0.0` are the same number,
-  and `neg?` agrees with `=` — so neither can tell them apart, while a sample is
-  compared bit for bit across targets and across `reset`, and the interpreter
-  preserves the difference (P12b)."
-  [value]
-  (if (f64?)
-    (Double/doubleToRawLongBits (double value))
-    (long (Float/floatToRawIntBits (float value)))))
-
 (defn- wat-number
+  "A constant as a WAT literal at the kernel's width.
+
+  The sign of a zero is a bit question, which `=` and `neg?` cannot answer —
+  they say `-0.0` and `0.0` are the same number — while a sample is compared bit
+  for bit across targets and across `reset`, and the interpreter preserves the
+  difference (P12b). `omkamra.dsp.numbers` is where that question and the
+  spelling of the text are answered for both worlds."
   [value]
-  (let [value (if (f64?)
-                (double value)
-                (float value))]
-    (cond
-      (Double/isNaN (double value)) (wat-symbol "nan")
-      (Double/isInfinite (double value))
-      (wat-symbol (if (pos? value) "inf" "-inf"))
-      (zero? value) (wat-symbol (if (= (negative-zero-bits) (float-bits value))
-                                  "-0.0"
-                                  "0.0"))
-      :else (wat-symbol (if (f64?)
-                          (Double/toString value)
-                          (Float/toString (float value)))))))
+  (cond
+    (numbers/nan? value) (wat-symbol "nan")
+    (numbers/infinite? value) (wat-symbol (if (pos? value) "inf" "-inf"))
+    (zero? value) (wat-symbol (if (numbers/negative-zero? value (f64?))
+                                "-0.0"
+                                "0.0"))
+    :else (wat-symbol (if (f64?)
+                        (numbers/f64->text value)
+                        (numbers/f32->text value)))))
 
 (defn- align
   [offset alignment]
-  (* alignment (long (Math/ceil (/ (double offset) alignment)))))
+  (* alignment (long (numbers/ceil-div offset alignment))))
 
 (defn- state-memory-layout
   "Lay a function's state slots out in linear memory, in slot order.
@@ -276,8 +263,8 @@
          :frame-capacity frame-capacity
          :channel-stride channel-stride
          :required-bytes required-bytes
-         :initial-pages (max 1 (long (Math/ceil (/ (double required-bytes)
-                                                   page-size))))
+         :initial-pages (max 1 (long (numbers/ceil-div required-bytes
+                                                       page-size)))
          :state-layout (merge (:entries state-layout) (:entries scratch-layout))
          :regions
          {:input (region :input {:offset 0
@@ -415,8 +402,10 @@
       (long (or (reduce (fn [resolved entry]
                           (let [index (long (:index entry))]
                             (if (and (<= base index) (< index end))
-                              (min (or resolved Long/MAX_VALUE)
-                                   (long (:offset entry)))
+                              (let [offset (long (:offset entry))]
+                                (if (nil? resolved)
+                                  offset
+                                  (min resolved offset)))
                               resolved)))
                         nil
                         (vals layout))
@@ -623,17 +612,15 @@
 (defn- f64-number
   "Format a constant as an f64 literal regardless of kernel precision."
   [value]
-  (let [value (double value)]
-    (cond
-      (Double/isNaN value) (wat-symbol "nan")
-      (Double/isInfinite value) (wat-symbol (if (pos? value) "inf" "-inf"))
-      ;; Always the f64 width, whatever the kernel's is — so the sign bit is read
-      ;; from f64 bits here rather than through the kernel's `float-bits`.
-      (zero? value) (wat-symbol (if (= Long/MIN_VALUE
-                                       (Double/doubleToRawLongBits value))
-                                  "-0.0"
-                                  "0.0"))
-      :else (wat-symbol (Double/toString value)))))
+  (cond
+    (numbers/nan? value) (wat-symbol "nan")
+    (numbers/infinite? value) (wat-symbol (if (pos? value) "inf" "-inf"))
+    ;; Always the f64 width, whatever the kernel's is — so the sign bit is read
+    ;; at f64 width rather than through the kernel's own precision.
+    (zero? value) (wat-symbol (if (numbers/negative-zero? value true)
+                                "-0.0"
+                                "0.0"))
+    :else (wat-symbol (numbers/f64->text value))))
 
 (def ^:private ln2 0.6931471805599453)
 (def ^:private log2e 1.4426950408889634)
@@ -643,7 +630,7 @@
 (defn- f64-sub [a b] (wat-form "f64.sub" a b))
 (defn- f64-mul [a b] (wat-form "f64.mul" a b))
 (defn- f64-const [value] (wat-form "f64.const" (f64-number value)))
-(defn- i64-const [value] (wat-form "i64.const" (wat-symbol (str value))))
+(defn- i64-const [value] (wat-form "i64.const" (wat-symbol (numbers/integer-text value))))
 
 (defn- f64-horner
   "Horner evaluation `c0 + r*(c1 + r*(...))` for `coefficients` low to high."
@@ -693,13 +680,13 @@
                        (i64-const 52))
         scale (wat-form "f64.reinterpret_i64" bits)
         general (f64-mul poly scale)
-        positive-infinity (wat-form "select" (f64-const Double/POSITIVE_INFINITY)
+        positive-infinity (wat-form "select" (f64-const numbers/positive-infinity)
                                     general
-                                    (wat-form "f64.eq" x (f64-const Double/POSITIVE_INFINITY)))
+                                    (wat-form "f64.eq" x (f64-const numbers/positive-infinity)))
         negative-infinity (wat-form "select" (f64-const 0.0)
                                     positive-infinity
-                                    (wat-form "f64.eq" x (f64-const Double/NEGATIVE_INFINITY)))]
-    (wat-form "select" (f64-const Double/NaN) negative-infinity nan?)))
+                                    (wat-form "f64.eq" x (f64-const numbers/negative-infinity)))]
+    (wat-form "select" (f64-const numbers/not-a-number) negative-infinity nan?)))
 
 (defn- taylor-coefficients
   "Taylor coefficients `1/n!` for n = 0..degree."
@@ -742,7 +729,7 @@
   [x]
   (let [abs-x (wat-form "f64.abs" x)
         nonfinite (wat-form "i32.or"
-                            (wat-form "f64.eq" abs-x (f64-const Double/POSITIVE_INFINITY))
+                            (wat-form "f64.eq" abs-x (f64-const numbers/positive-infinity))
                             (wat-form "f64.ne" x x))
         safe (wat-form "select" (f64-const 0.0) x nonfinite)
         n (wat-form "f64.nearest" (f64-mul safe (f64-const two-over-pi)))
@@ -765,21 +752,21 @@
                                         (wat-form "select" neg-cos sin-r two?)
                                         one?)
                               zero?)]
-    {:sin (wat-form "select" (f64-const Double/NaN) sin-general nonfinite)
-     :cos (wat-form "select" (f64-const Double/NaN) cos-general nonfinite)}))
+    {:sin (wat-form "select" (f64-const numbers/not-a-number) sin-general nonfinite)
+     :cos (wat-form "select" (f64-const numbers/not-a-number) cos-general nonfinite)}))
 
-(defn- i32-const [value] (wat-form "i32.const" (wat-symbol (str value))))
+(defn- i32-const [value] (wat-form "i32.const" (wat-symbol (numbers/integer-text value))))
 
 (defn- sine-table-values
   "sin over one period, sampled inclusively so index N interpolates to index 0."
   []
-  (let [step (/ (* 2.0 Math/PI) table-entry-count)]
-    (mapv (fn [index] (Math/sin (* step index))) (range (inc table-entry-count)))))
+  (let [step (/ (* 2.0 numbers/pi) table-entry-count)]
+    (mapv (fn [index] (numbers/sin (* step index))) (range (inc table-entry-count)))))
 
 (defn- f32-little-endian-bytes
   [values]
   (mapcat (fn [value]
-            (let [bits (Float/floatToIntBits (float value))]
+            (let [bits (numbers/f32-bits value)]
               [(bit-and bits 0xff)
                (bit-and (unsigned-bit-shift-right bits 8) 0xff)
                (bit-and (unsigned-bit-shift-right bits 16) 0xff)
@@ -790,7 +777,7 @@
   "A WAT data string literal. A symbol keeps the quotes and `\\xx` escapes
   verbatim through `pr-str`."
   [bytes]
-  (str "\"" (apply str (map #(format "\\%02x" (bit-and 0xff %)) bytes)) "\""))
+  (str "\"" (apply str (map numbers/hex-byte bytes)) "\""))
 
 (defn- table-data-form
   [memory]
@@ -821,13 +808,13 @@
   on the period: the table is sampled inclusively so entry N is entry 0, and an
   unwrapped index of N would read entry N+1, one past the last."
   [x offset]
-  (let [two-pi (* 2.0 Math/PI)
+  (let [two-pi (* 2.0 numbers/pi)
         scaled-local (wat-symbol "$scaled")
         raw-local (wat-symbol "$raw")
         index-local (wat-symbol "$index")
         nonfinite (wat-form "i32.or"
                             (wat-form "f64.eq" (wat-form "f64.abs" x)
-                                      (f64-const Double/POSITIVE_INFINITY))
+                                      (f64-const numbers/positive-infinity))
                             (wat-form "f64.ne" x x))
         safe (wat-form "select" (f64-const 0.0) x nonfinite)
         phase (f64-sub safe
@@ -855,7 +842,7 @@
      :statements [(wat-form "local.set" scaled-local scaled)
                   (wat-form "local.set" raw-local raw)
                   (wat-form "local.set" index-local index)]
-     :result (wat-form "select" (f64-const Double/NaN) general nonfinite)}))
+     :result (wat-form "select" (f64-const numbers/not-a-number) general nonfinite)}))
 
 (def ^:private emulated-operators
   "Builtins Wasm has no native instruction for; each gets a shared function."
@@ -923,12 +910,12 @@
         nan? (wat-form "f64.ne" x x)
         negative? (wat-form "f64.lt" x (f64-const 0.0))
         zero? (wat-form "f64.eq" x (f64-const 0.0))
-        infinite? (wat-form "f64.eq" x (f64-const Double/POSITIVE_INFINITY))]
+        infinite? (wat-form "f64.eq" x (f64-const numbers/positive-infinity))]
     (as-> general g
-      (wat-form "select" (f64-const Double/NaN) g nan?)
-      (wat-form "select" (f64-const Double/NaN) g negative?)
-      (wat-form "select" (f64-const Double/NEGATIVE_INFINITY) g zero?)
-      (wat-form "select" (f64-const Double/POSITIVE_INFINITY) g infinite?))))
+      (wat-form "select" (f64-const numbers/not-a-number) g nan?)
+      (wat-form "select" (f64-const numbers/not-a-number) g negative?)
+      (wat-form "select" (f64-const numbers/negative-infinity) g zero?)
+      (wat-form "select" (f64-const numbers/positive-infinity) g infinite?))))
 
 (defn- f64-atan-body
   "Portable f64 atan as a function body with a scratch local.
@@ -997,7 +984,7 @@
       :atan2 (let [[y x] args
                    quotient (emulated-call :atan (f64-div y x))
                    quarter-turn (wat-form "select"
-                                          (f64-copysign (f64-const Math/PI) y)
+                                          (f64-copysign (f64-const numbers/pi) y)
                                           (f64-const 0.0)
                                           (f64-lt x (f64-const 0.0)))
                    adjusted (f64-add quotient quarter-turn)
@@ -1012,7 +999,7 @@
                  odd (i32-and integral (i32-eqz even))
                  signed (wat-form "select" (f64-neg magnitude) magnitude odd)
                  undefined (i32-and (f64-lt x (f64-const 0.0)) (i32-eqz integral))
-                 base (wat-form "select" (f64-const Double/NaN) signed undefined)]
+                 base (wat-form "select" (f64-const numbers/not-a-number) signed undefined)]
              (wat-form "select"
                        (f64-const 1.0)
                        (wat-form "select" (f64-const 1.0) base
@@ -1152,7 +1139,9 @@
   measure, which is what they should be."
   [type value]
   (case type
-    :float (zero? (float-bits value))
+    ;; Zero with the sign bit clear, which is what a zeroed region holds: a
+    ;; negative zero is a pattern that has to be written (D76).
+    :float (and (zero? value) (not (numbers/negative-zero? value (f64?))))
     :int (zero? (long value))
     :boolean (not value)))
 

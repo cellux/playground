@@ -5420,3 +5420,153 @@ broken JVM: a failure that was true about the session and false about the code.
 Also renamed, as asked: `run-all` is `run-jvm`, and `run-browser` joins it, so the
 two halves of `run-everything` can be run by name. The living docs were updated;
 the diary's older entries were left as they were written.
+
+## P13b — the emitters (D80)
+
+### First, a question that did not become a change
+
+Before starting P13b we stopped to ask whether the box was avoidable after all:
+collect the float literals that had to be boxed, and see whether a cheap inference
+would let most of them stay bare. The measurement was a scratch pass that walked
+every definition's form with an environment of declared types and asked each box
+whether the place it sat in demanded a type — a sibling operand's type, a declared
+parameter or state slot, a builtin's signature, the enclosing demand propagated
+through `if`, `do` and the operators.
+
+**168 boxed literals in 144 definitions**, and **142 (85%) had a context the rule
+read**. The 26 that did not grouped into causes, and one group of 17 was the
+analysis's own fault: it read *raw* captures, where an untyped parameter means
+`:float` and the normalizer fills that in. With that fixed, roughly **159 of 168
+(94%)** resolve. The residue is about nine: seven nested-`if` branches where the
+pass had no demand to propagate, and two `let`-binding initializers — the hole
+named when the box was introduced, and the only one that is a hole in principle
+rather than in that pass. **No box contradicted the type its context demanded.**
+
+We kept the box and deferred the inference. The trick is sound, but it is not cheap
+in this architecture: the lowering types bottom-up, so a context-directed literal
+means pushing types down — a top-down variant of `descriptor/expression-type`
+threaded through `ir`, on the order of 150–250 lines plus diagnostics and test
+churn, which is more than the box work it would remove. It also loosens the
+language (`(+ sample 1)` becomes legal where it is an error today), and the places
+it would save a human are sixteen — the catalog's eight and ~8 generator call
+sites; the other 152 are synthesized by the capture and invisible to authors. The
+middle path the data supports, if we want it later, is narrow: an untyped integral
+literal in a position that demands `:float` *is* that float, and everywhere else
+stays `:int`, so the ~9 unresolved cases keep their box and nothing is silently
+overruled. The equivalence check makes the whole question revisitable: if we adopt
+that rule, both worlds would have to infer identically, and the check says whether
+they do.
+
+### The port
+
+The work began with a corpus rather than with the port, because D77's lesson was
+that the surprises here are *measured*. A scratch Node build of a probe namespace
+compared this side's spelling of a value with the JVM's over **30,743 doubles and
+26,017 floats** — every float constant the catalog emits, the smallest subnormals
+one by one, a sweep of powers of ten, and random bit patterns. It found four
+divergences, none of which reading would have produced:
+
+- **Clojure's `float` is stricter than IEEE 754.** It throws for anything above
+  `Float/MAX_VALUE`, including `Float/MAX_VALUE`'s own printed value, where the
+  JVM's narrowing conversion rounds to the maximum and `Math.fround` agrees. The
+  portable coercion asks the JVM's cast.
+- **The smallest subnormals.** The JDK spells `4.9E-324` for the double whose
+  shortest spelling is `5.0E-324`, against its own javadoc, and does the same for
+  its neighbours.
+- **An exact decimal tie at f32 width.** `1439526.25` has `1439526.2` and
+  `1439526.3` equidistant at eight digits: the JDK rounds to even, JavaScript round
+  half up on the magnitude.
+- **The notation.** `1.0E7` against `10000000`, `1.0E21` against `1e+21`: the same
+  digits, two conventions.
+
+So `omkamra.dsp.numbers` does not delegate to either library. The rule is the
+shortest digits that read back as the value, rounded to nearest with a tie away from
+zero, written in the JDK's notation — computed by the *same search* on both sides,
+since each host's round-to-`k`-digits primitive already rounds half up on the
+magnitude. And the digits are not taken from `String.format`: the JDK's `%e` rounds
+half up *except where it recognises the value*, which is what produced the f64 tie
+mismatch before `BigDecimal` replaced it. With the rule implemented twice the
+corpus reads **0 mismatches in both directions**, and the catalog's own constants
+deviate from `Double/toString` **zero times**.
+
+**Bite-checking is how the rule stayed honest.** Making the browser delegate to its
+own conversion (`(str value)`) fails both checks — 10,604 of 10,733 doubles differ,
+and *zero* floats, because only the f64 path was stubbed. Making the browser hand
+the number where it hands the spelling fails only the JS-form comparison, and number
+formatting stays green: a bite that points at one target and not the other is a bite
+that is measuring something.
+
+The port itself was mechanical and verifiable, so it was verified: a baseline of all
+**240** emitted modules (120 JS modules and 120 WAT) was captured *before* the port
+and compared after — **byte-identical**, 240 of 240. `Byte-identical` is the claim
+worth making for a port, and it is cheap when there is an oracle.
+
+### The check
+
+`compiler equivalence` now emits as well as compiles: per definition and per width
+the page lowers its own IR and produces the JS target's forms and the Wasm target's
+module, and compares them with the JVM's. The forms are compared as *data* — a float
+literal is a `js*` snippet carrying its spelling, so the spelling is visible and the
+metadata the two printers render differently is not compared at all — and the Wasm
+module as *text*, through `diff/text-difference`, which reports the line and a window
+around the character that differs rather than a page of text.
+
+The squint *source* is deliberately not compared. `pr-str` renders metadata
+differently on the two platforms (`^:mutable` against `^{:mutable true}`), which is
+host-independent in the emitter's own code and invisible in the artifact; comparing
+it would have meant writing a Clojure-compatible printer to compare something nobody
+reads, and the module text, where squint's own host-dependence would show, is P13c's.
+That is the (C) choice, and it kept squint out of the page for this phase.
+
+### What the check found that we would not have
+
+- **`(:require [omkamra.dsp.targets.js :as js])` compiles, warns about nothing, and
+  fails at run time.** ClojureScript reserves the `js` prefix for JavaScript
+  globals, so `js/emit-forms` is a global lookup named `emit_forms`. The JVM never
+  would have noticed; the page failed on every case with "`emit_forms` is not
+  defined".
+- **JavaScript's number→string gives the shortest decimal, not the integer.** The
+  f64 exponent mask was emitted as `4607182418800017400` where the module means
+  `4607182418800017408` — a different number, in a WAT `i64.const`. `integer-text`
+  asks for the digits.
+- **`prepare-for-target` was in the JVM entry point.** A target is handed *prepared*
+  IR, and preparation lived in `dsp.clj`, so the page could not produce the IR
+  either emitter is given: `stereo-spread` reached the JS emitter as a record
+  expression it has no case for, because the inlining that removes records happens
+  in preparation. The step is the compiler's and it is portable, so it moved into
+  `ir`, and both worlds now emit from prepared IR.
+
+### Two fresh-JVM lessons
+
+A restart is part of the workflow, and two things about it are now known. The
+shadow build registry belongs to the *running* server: a build removed from
+`shadow-cljs.edn` stays in `list-builds` until the server restarts, which is how an
+old scratch build was still being listed after it had been deleted. And a
+`(tools/reload :all)` immediately after a restart left the session able to fail on a
+reader Var it had `:reloaded` — a require of the same namespace then failed with
+"Attempting to call unbound fn: #'omkamra.dsp.readers/float-literal" in a file that
+requires that namespace itself. The failure did not survive a restart, so it was a
+property of the session, not of the code — the same shape as the bite that a stale
+session kept alive two slices ago.
+
+### And a shape, on request
+
+`run-everything` used to *build* its halves: `select-keys` on the JVM summary, a
+renamed copy of the browser result, and `:passed?` derived in the consumer from each
+half's own numbers. Now `run-jvm` returns the `clojure.test` summary plus
+`:passed?`, `run-browser` returns exactly what `browser/run!` returns (which already
+has one), and `run-everything` places each as it came and adds only what is about the
+two together: `:passed?`, `:seconds`, and `:failures` as `[half name detail]`. A
+half can be run and read on its own with the same keys it has inside the whole,
+which is the test of whether a report is composed or patched up.
+
+### State
+
+JVM **275 tests / 2 532 assertions / 0 failures**; browser **52/52** — the
+`compiler equivalence` check (now including both emitters) and the new `number
+formatting` check among them. Verified in a fresh JVM, both halves in parallel.
+Bites: the number rule (both checks fail, 10,604 of 10,733 doubles differ), the
+spelling representation (the JS-form comparison fails, number formatting stays
+green), and the two traps above, which failed before they were fixed. The scratch
+probe build was removed from `shadow-cljs.edn` and `src/p13b` deleted once the
+corpus became a check.

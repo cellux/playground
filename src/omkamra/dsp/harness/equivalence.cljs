@@ -19,6 +19,7 @@
   (:require [cljs.reader :as reader]
             [omkamra.dsp.descriptor :as descriptor]
             [omkamra.dsp.harness.diff :as diff]
+            [omkamra.dsp.harness.emission :as emission]
             [omkamra.dsp.ir :as ir]
             [omkamra.dsp.linker :as linker]))
 
@@ -49,10 +50,15 @@
     {::skipped id}
     (try
       (let [{:keys [normalized unit ir]} (compile-here entry)
-            differences (remove nil?
-                                [(diff/first-difference normalized (:normalized entry))
-                                 (diff/first-difference unit (:unit entry))
-                                 (diff/first-difference ir (:ir entry))])]
+            compiled (remove nil?
+                             [(diff/first-difference normalized (:normalized entry))
+                              (diff/first-difference unit (:unit entry))
+                              (diff/first-difference ir (:ir entry))])
+            ;; The emitters, from an IR lowered *here*, at each width. Nothing is
+            ;; taken from the payload but the definition itself and how to compile
+            ;; it, so a difference is a difference the emitter made.
+            emitted (emission/differences unit entry (:emissions entry))
+            differences (concat compiled emitted)]
         {:case id
          :passed? (empty? differences)
          :failures (mapv #(assoc % :detail (pr-str %)) differences)})
@@ -81,7 +87,7 @@
             :skipped (mapv ::skipped not-compiled)
             :detail (str "compiled " (count rows) " catalog definitions in the page"
                          " and compared each with the JVM's own normalization,"
-                         " linked unit and IR"
+                         " linked unit, IR and emitted JS forms and Wasm module"
                          (when (seq not-compiled)
                            (str "; skipped " (count not-compiled)
                                 " that call library definitions the page has not"

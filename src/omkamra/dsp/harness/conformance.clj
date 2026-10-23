@@ -12,6 +12,8 @@
   serves the serialized plan and compares the JS/Wasm kernel with the
   interpreter it runs locally."
   (:require [omkamra.dsp :as dsp]
+            [omkamra.dsp.harness.emission :as emission]
+            [omkamra.dsp.numbers :as numbers]
             [omkamra.dsp.descriptor :as descriptor]
             [omkamra.dsp.harness.catalog :as catalog]
             [omkamra.dsp.ir :as ir]
@@ -394,6 +396,76 @@
      :channels (long (or (get-in definition [:process :channels])
                          (:channels case) 1))}))
 
+;; ---------------------------------------------------------------------------
+;; Number formatting (P13b)
+
+(def ^:private catalog-constants
+  "Every float constant the catalog emits, at both widths."
+  (for [case catalog/cases
+        :when (and (nil? (:definition-var case)) (:definition case))
+        precision [:f32 :f64]
+        :let [artifact (dsp/compile (:definition case)
+                                    (cond-> {:target :js :precision precision}
+                                      (not (catalog/function-case? case))
+                                      (assoc :entry :process)))]
+        expression (tree-seq coll? seq (:ir artifact))
+        :when (and (map? expression) (= :const (:op expression))
+                   (= :float (:type expression))
+                   (number? (:value expression)))]
+    (double (:value expression))))
+
+(defn- number-corpus
+  "The doubles and floats the formatter is checked on, the same ones every run so
+  that a difference is a difference in the code and not in the sample.
+
+  Deliberately not only the catalog's constants: those are small round numbers,
+  and every divergence the sweep found is outside them — the shortest spelling of
+  the smallest subnormals, an exact decimal tie, an f32 that rounds to the largest
+  one, a number printed beyond 2^53."
+  []
+  (let [random (java.util.Random. 20251022)]
+    {:f64 (vec (distinct (concat catalog-constants
+                                 ;; the smallest subnormals, one by one
+                                 (map (fn [bits] (Double/longBitsToDouble bits))
+                                      (range 0 4097))
+                                 (map (fn [n] (Math/pow 10.0 n)) (range -320 309))
+                                 [0.0 -0.0 1.0 -1.0 (+ 0.1 0.2)
+                                  Double/MIN_VALUE Double/MAX_VALUE
+                                  Double/POSITIVE_INFINITY Double/NEGATIVE_INFINITY
+                                  Double/NaN]
+                                 (repeatedly 6000 (fn [] (Double/longBitsToDouble
+                                                          (.nextLong random)))))))
+     :f32 (vec (distinct (concat [(float 0.1) (float 0.5) (float -0.16666667)
+                                  (float 0.0) (float -0.0)
+                                  Float/MAX_VALUE Float/MIN_VALUE Float/MIN_NORMAL
+                                  Float/POSITIVE_INFINITY Float/NEGATIVE_INFINITY
+                                  Float/NaN]
+                                 (repeatedly 8000 (fn [] (Float/intBitsToFloat
+                                                          (.nextInt random)))))))}))
+
+(defn number-corpus-payload
+  "The JVM's spelling of a wide sample of floats, for the browser to match.
+
+  The emitters turn constants into text, and the two worlds do that from
+  different primitives: Clojure has a float type and ClojureScript has one number
+  type made of doubles, and neither JDK method nor JavaScript conversion is the
+  other. A catalog comparison would not see that — its constants are small round
+  numbers — so the sample is swept and the value travels as its bit pattern,
+  which is the only way two worlds can name the same double (D78).
+
+  Each entry is `[bits spelling]`, and the bits are hexadecimal text: 64 of them
+  do not fit a JavaScript number, so an integer would arrive rounded and the
+  check would be checking a different double."
+  []
+  (let [{:keys [f64 f32]} (number-corpus)]
+    {:f64 (mapv (fn [value] [(format "0x%016x" (Double/doubleToRawLongBits (double value)))
+                             (numbers/f64->text value)])
+                f64)
+     :f32 (mapv (fn [value] [(format "0x%08x" (bit-and 0xffffffff
+                                                       (long (Float/floatToRawIntBits value))))
+                             (numbers/f32->text value)])
+                f32)}))
+
 (defn equivalence-payload
   "The JVM's half of the compiler equivalence check, as data.
 
@@ -436,7 +508,12 @@
                         :unit unit
                         :ir (if (= entry :function)
                               (ir/lower-unit unit)
-                              (ir/lower-process unit {:channels channels}))}])
+                              (ir/lower-process unit {:channels channels}))
+                        ;; What the two emitters produce for this definition, at
+                        ;; each width. The page lowers its own IR from the unit
+                        ;; above and emits from that, so what is compared is the
+                        ;; emitter in both worlds rather than a stored result.
+                        :emissions (emission/emissions unit {:entry entry :channels channels})}])
                     (catch clojure.lang.ExceptionInfo error
                       {::skipped (name (:id case))
                        ::message (.getMessage error)}))))

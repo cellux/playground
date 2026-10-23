@@ -15,6 +15,7 @@
             [omkamra.dsp.event :as event]
             [omkamra.dsp.hosts.fusion :as fusion]
             [omkamra.dsp.harness.equivalence :as equivalence]
+            [omkamra.dsp.harness.formatting :as formatting]
             [omkamra.dsp.hosts.interpreter :as interpreter-host]
             [omkamra.dsp.hosts.js :as js-host]
             [omkamra.dsp.hosts.mixing :as mixing]
@@ -3321,6 +3322,10 @@
                    ;; with what the JVM compiled (P13, D79).
                    (when (selected? selection "compiler equivalence")
                      (fn [] (-> (equivalence/check!) (.then (fn [r] [r])))))
+                   ;; The number-formatting check: the page spells a sweep of
+                   ;; floats and compares with the JVM's own spelling (P13b).
+                   (when (selected? selection "number formatting")
+                     (fn [] (-> (formatting/check!) (.then (fn [r] [r])))))
                    (when (selected? selection "JavaScript pool host")
                      (fn [] (-> (javascript-pool-test) (.then (fn [r] [r])))))
                    (when (selected? selection "Wasm pool host")

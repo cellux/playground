@@ -8,7 +8,8 @@
   one case ran and on which targets, and what a whole run proved per case."
   (:require [clojure.test :refer [deftest is]]
             [omkamra.dsp.harness.browser :as browser]
-            [omkamra.dsp.harness.conformance :as conformance]))
+            [omkamra.dsp.harness.conformance :as conformance]
+            [omkamra.dsp.harness.diff :as diff]))
 
 (def ^:private page-result
   "A result shaped the way the page sends it: keys and enums as strings."
@@ -201,3 +202,41 @@
     (is (= :gain (:case row)))
     (is (= #{} (:targets row)))
     (is (= 1 (count (:failures row))))))
+
+(deftest a-text-difference-points-at-a-place
+  ;; A WebAssembly module is one string, so a difference in it has to arrive as a
+  ;; line and a window rather than as the line, which is unreadable, or the whole
+  ;; module, which is useless.
+  (let [actual "(module\n  (func $a (f64.const 0.5))\n  (memory 1)\n)"
+        expected "(module\n  (func $a (f64.const 0.6))\n  (memory 1)\n"
+        difference (diff/text-difference actual expected)]
+    (is (= [1] (:path difference)))
+    ;; The line is short enough to report whole: a window is for a line too long
+    ;; to read, which an emitted line usually is and this one is not.
+    (is (= "  (func $a (f64.const 0.5))" (:actual difference)))
+    (is (= "  (func $a (f64.const 0.6))" (:expected difference)))))
+
+(deftest an-identical-text-is-not-a-difference
+  (is (nil? (diff/text-difference "(module)" "(module)")))
+  (is (nil? (diff/text-difference "" ""))))
+
+(deftest a-text-that-only-differs-in-length-says-which-line
+  (let [difference (diff/text-difference "(module)\n(memory 1)" "(module)")]
+    (is (= [1] (:path difference)))
+    (is (= [2 1] (:lengths difference)))))
+
+(deftest a-window-is-cut-around-the-difference
+  ;; Long enough to show the number that moved, short enough to read, and marked
+  ;; where it was cut: 48 characters either side of the difference, with the
+  ;; difference itself in the middle.
+  (let [prefix (apply str (repeat 200 "x"))
+        difference (diff/text-difference (str prefix "1" prefix)
+                                         (str prefix "2" prefix))]
+    (is (= [0] (:path difference)))
+    (is (= 98 (count (:actual difference))))
+    (is (= "…" (subs (:actual difference) 0 1)))
+    (is (= "…" (subs (:actual difference) 97 98)))
+    ;; 48 either side of the difference, so the difference is the 49th character
+    ;; of the window — the first one after the leading ellipsis.
+    (is (= "1" (subs (:actual difference) 49 50)))
+    (is (= "2" (subs (:expected difference) 49 50)))))

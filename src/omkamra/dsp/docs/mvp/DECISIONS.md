@@ -4153,3 +4153,80 @@ have hidden it. The cost is one explicit `(tools/reload :all)`, and the reason i
 mattered here is that the stale session kept a *bite* in place, so the equivalence
 check failed with names from a broken JVM — a failure that was true about the
 session and false about the code.
+
+## D80 — the emitters are portable, and the text they make is one rule (P13b)
+
+**A number's text is decided once, and neither host's answer is taken on faith.**
+`omkamra.dsp.numbers` holds every decision the two worlds make differently about a
+number: its bits (`BigInt64Array` against `doubleToRawLongBits`, and 64 bits as a
+BigInt in the browser because they do not fit a JavaScript number), whether it is
+NaN or infinite, rounding it to f32, spelling it. The spelling is **the shortest
+digits that read back as the value, rounded to nearest with a tie away from zero,
+written in the JDK's notation** — plain below `1e7` and above `1e-3`, `d.dddE n`
+outside that, always a digit after the point. It is computed by the *same search*
+on both sides: round the exact value to `k` significant digits, `k` from one up,
+and stop at the first `k` that reads back (`BigDecimal` of the double on the JVM,
+`toExponential` in the browser). Both round half up on the magnitude, so the search
+lands on the same digits in both worlds.
+
+It is deliberately **not** the JDK's own spelling, because that spelling is not
+the rule. Two deviations were measured, both outside anything a kernel emits and
+both pinned in `omkamra.dsp.tests.numbers`: the smallest subnormals, which the JDK
+spells `4.9E-324` where the shortest spelling is `5.0E-324`, against its own
+javadoc; and a value whose shortest spelling is an exact decimal tie, which the JDK
+rounds to even (`1439526.2`) where the rule says away from zero (`1439526.3`). The
+digits are not taken from `String.format` either: the JDK's `%e` rounds half up
+except where it recognises the value, so it is not a rule a second host can be made
+to agree with. Two further divergences came out of the same sweep: Clojure's
+`float` is stricter than IEEE and throws for values above `Float/MAX_VALUE` that
+round to it, so the coercion asks the JVM's own narrowing conversion; and
+JavaScript's number→string gives the *shortest decimal*, so an `i64.const` of the
+f64 exponent mask was spelled one digit off — `4607182418800017400` for
+`4607182418800017408`, which assembles to a different module.
+
+**A float literal leaves the JavaScript emitter as a spelling, not as a number.**
+It is written as a `js*` snippet carrying its text, which is the device this
+emitter already uses for every exact JavaScript spelling (`Math.fround`, `| 0`,
+`break`) and therefore costs no new rule. The reason is D78's: on the JVM a
+literal prints `2.0` and in a browser `2`, and a symbol whose *name* were the
+spelling would read back as a name rather than a literal. As a snippet it also
+leaves the emitted **form** comparable data on both sides, which is what the
+harness compares.
+
+**The emitters are compared as forms and as text, not as squint source.** The
+`compiler equivalence` check now emits as well: for each definition and each width
+the page lowers its own IR and produces the JS target's forms and the Wasm target's
+module, and compares them with the JVM's — the forms as *data* (numbers by bit
+pattern, and a literal's spelling is visible in the snippet's string) and the module
+as *text*, through `diff/text-difference`, which reports the line and a window
+around the character that differs rather than a page of text. The squint *source*
+is not compared, and that is deliberate: `pr-str` renders metadata differently on
+the two platforms (`^:mutable` against `^{:mutable true}`), which is host-independent
+in the emitter's own code and invisible in the artifact, so comparing it would have
+meant writing a Clojure-compatible printer to compare something nobody reads. The
+module text — where squint's own host-dependence would show — is P13c's, along with
+the browser compile entry point; the JS emitter requires squint only under
+`#?(:clj …)` and exposes `emit-forms` as its portable half.
+
+**`prepare-for-target` moved from `dsp.clj` into `ir.cljc`.** The check found the
+gap rather than a suspicion: a target is handed *prepared* IR, and the preparation
+lived in the JVM-only compile entry, so the page could not produce the IR either
+emitter is actually given. A definition that returns a record — which no backend's
+calling convention can take and which is therefore copied into its call sites —
+reached the JS emitter as an expression it has no case for. The step is the
+compiler's and it is portable, so it is now in `ir`, and both worlds emit from
+prepared IR.
+
+**The check found two ClojureScript traps on its first runs, which is the point of
+having it.** `(:require [omkamra.dsp.targets.js :as js])` compiled, warned about
+nothing, and failed at run time with `emit_forms is not defined`: ClojureScript
+reserves the `js` prefix for JavaScript globals, so `js/emit-forms` is a global
+lookup and not the namespace's function — the JVM never would have noticed. And the
+integer above is the second. Neither is the sort of thing reading finds.
+
+**The spelling is verified over a corpus wide enough to be wrong about.**
+`number formatting` is a browser check of its own, fed by a swept corpus rather
+than by the catalog, for the reason the two deviations above give. Checked
+separately from `compiler equivalence` because it is a different question: that one
+asks whether the emitters agree over the catalog, this one whether the one function
+they both spell constants with agrees at all.

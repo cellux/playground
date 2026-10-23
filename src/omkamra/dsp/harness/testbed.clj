@@ -110,6 +110,19 @@
                "cache-control" "no-store"}
      :body (pr-str payload)}))
 
+(defn numbers
+  "Serve the number-formatting payload (P13b).
+
+  A sweep of floats and the JVM's spelling of each, for the page to spell for
+  itself and compare. EDN, and each value travels as its bit pattern: two
+  worlds can only name the same double by its bits (D78)."
+  [_request]
+  (let [payload (conformance/number-corpus-payload)]
+    {:status 200
+     :headers {"content-type" "application/edn; charset=utf-8"
+               "cache-control" "no-store"}
+     :body (pr-str payload)}))
+
 (defn- wasm-artifact
   ([case precision] (wasm-artifact case precision :polynomial))
   ([case precision wasm-math]

@@ -582,12 +582,21 @@ otherwise.
   sixty definitions, fifty-two bit-exact, eight skipped pending P13d's registry.
   Byte-identical artifacts throughout — the whole box apparatus lowers to the
   constants it boxed.
-- **P13b — the emitters.** `targets/js` and `targets/wasm` move to `.cljc`,
-  including the float-bit abstraction and the D77 number rule: float literals
-  are formatted from the IR's declared type, so the same case compiles to the
-  same bytes in either world. Verified by a source-text equality test across
-  platforms over the whole catalog — which is what catches both measured
-  surprises exhaustively, instead of the ten kernels the spike sampled.
+- **P13b — the emitters. DONE** (D80). `targets/js` and `targets/wasm` are
+  `.cljc`, and the float-bit abstraction is `omkamra.dsp.numbers`: the one place
+  that decides what a number's text is, by one rule implemented twice rather
+  than by either host's answer — the JDK's own spelling deviates from its
+  documented rule in two measured places, and JavaScript's conversion, Clojure's
+  `float` cast and its integer printing each differ again. A float literal leaves
+  the JS emitter as a `js*` snippet carrying its spelling, which is why the
+  emitted *form* is comparable data. `compiler equivalence` now emits as well:
+  per definition and per width the page lowers its own IR and compares the JS
+  forms as data and the Wasm module as text with the JVM's, and `number
+  formatting` spells a swept corpus in the page and compares it with the JVM's —
+  sixty definitions, fifty-two compared, eight still skipped pending P13d's
+  registry. The step that prepares IR for a target moved from the JVM entry point
+  into `ir`, because both worlds emit from prepared IR. The JS *module* (squint's
+  output) is P13c's comparison; the page needs no compiler for this one.
 - **P13c — the browser half.** The page build requires the compiler; the page
   compiles descriptors to artifacts itself and the harness compiles the whole
   catalog in-browser, checking it against the in-browser interpreter *and*
