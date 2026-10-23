@@ -1,20 +1,21 @@
 # Working rules
 
-How work is done in this project, as opposed to what the project is. The test for
-what belongs here:
+What to do while working in this repository. The test for what belongs here:
 
-- a rule about **how the work is done**, learned by being bitten → this file, `R1`,
-  `R2`, …;
-- a property of **the thing we build** (the required order of implementation, the
-  type boundary, precision policy) → `PLAN.md` §Design rules;
-- a **choice about what the system is** → `DECISIONS.md`, `D1`, `D2`, …
+- **a rule** tells you what to do, and you can choose to follow it → this file,
+  `R1`, `R2`, …;
+- **a trap** tells you what *will* happen, ready or not → `TRAPS.md`, `T1`, `T2`, …;
+- a property of **what a project builds** — the order a feature must be implemented
+  in, a type boundary, a precision policy → that project's plan. For the DSP compiler
+  that is `src/omkamra/dsp/docs/mvp/PLAN.md` §Design rules;
+- a **choice about what a system is** → that project's decisions. For the DSP
+  compiler, `src/omkamra/dsp/docs/mvp/DECISIONS.md`, `D1`, `D2`, ….
 
-Rules are numbered so that other documents and the diary can cite them instead of
-repeating them. A rule is not deleted while it can still bite: when one stops
-applying, it is marked superseded and says why. A rule earns its number by having
-bitten someone — a plausible hazard that has not happened yet is a note, not a rule.
-
-## The working loop
+Rules are numbered so that other documents, and the diaries, can cite them instead
+of repeating them. Entries are **appended and never renumbered**, so a citation
+stays good. A rule is not deleted while it can still bite: when one stops applying
+it is marked superseded and says why. A rule earns its number by having bitten
+someone.
 
 **R1 — Run everything in the running dev server.** Tests, experiments, analysis
 and Shadow compiles all evaluate through the dev nREPL. A fresh `clojure -M …` per
@@ -43,10 +44,10 @@ everything, because a session whose baseline no longer describes the tree has lo
 its footing, and a wholesale rebuild would be a guess. A helper compiled before a
 reload keeps calling the old Var, so re-evaluate `user` helpers after one.
 
-**R4 — Lint and format with the tools, scoped, and clean.**
-`clj-kondo --lint src/omkamra/dsp src/omkamra/dsp.clj` and `cljfmt check` on the
-same paths. A stale `clj-kondo` cache reports errors that do not exist after rapid
-edits; re-run with `--cache false` before believing a finding.
+**R4 — Lint and format with the tools, scoped, and clean.** `clj-kondo --lint` and
+`cljfmt check` over the paths you touched — for the DSP compiler, `src/omkamra/dsp`
+and `src/omkamra/dsp.clj`. A stale `clj-kondo` cache reports errors that do not
+exist after rapid edits; re-run with `--cache false` before believing a finding.
 
 **R5 — A check that has only ever passed has not been tested.** When you add or
 change a *check*, stub the thing it guards once and watch it fail, then restore.
@@ -78,33 +79,3 @@ happens to be loaded, a Var that is unbound in one session and fine in the next,
 baseline the reload tool never saw. This is deliberately *not* a routine — a restart
 costs the REPL state — but it is the first thing to try when a failure does not
 reproduce from a clean start, and before diagnosing anything subtle.
-
-## Traps
-
-**R10 — The `js` alias is reserved in ClojureScript.** `(:require [some.js :as js])`
-compiles, warns about nothing, and makes `js/f` a *global* lookup at run time: it
-works on the JVM and fails in the page with `f is not defined`. Use any other alias.
-
-**R11 — A `.cljc` `defmacro` is not visible to its own ClojureScript side.** The
-macro expands on the JVM and the CLJS reader never sees it. Write out the form it
-stood for.
-
-**R12 — A raw double quote inside a Clojure docstring breaks the load**, with an
-error that names `defn` and not the docstring. Use *emphasis*.
-
-**R13 — Scripted and bulk edits of Clojure source mis-balance brackets**, and
-`cljfmt` will re-indent the result so that it looks deliberate. Prefer an exact
-replacement on a unique anchor, or a whole-block rewrite, and re-lint after every
-one.
-
-**R14 — `(keyword ":wasm")` builds a keyword whose *name contains the colon*.** It
-prints as `:wasm` and equals nothing. This is the wire-decode trap: a keyword that
-arrives as text has to be decoded, not re-read.
-
-**R15 — JavaScript's number→string above 2^53 gives the shortest decimal, not the
-integer** — `4607182418800017400` for `4607182418800017408`. Ask
-`omkamra.dsp.numbers` for digits.
-
-**R16 — A `defonce` value survives a reload, so a stale test stub survives one
-too.** A failure that is true about the session and false about the code usually
-means a bite that was never restored.

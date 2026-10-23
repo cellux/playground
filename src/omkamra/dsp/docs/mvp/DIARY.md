@@ -5081,6 +5081,48 @@ fresh process, which this change required rather than merely preferred.
 The two remaining mentions are in records and stay as written: `DECISIONS.md` `D79`
 and the older entries of this file say what was true when they were written.
 
+---
+
+## 2026-10-23 — The documentation set has one owner per fact
+
+The handoff at the end of this file had grown to 250 lines, and it was a fourth copy
+of four documents: the phase status of `PHASES.md`, the architecture of `PLAN.md`,
+the oracle contract of `TESTING.md`, and the narration of the previous handoff. That
+is the diagnosis, and it explains both symptoms — a handoff too long to read and too
+stale to trust, and entries that kept landing *inside* it, because a rolling entry
+that is also the last one is where anything with nowhere else to go accumulates.
+
+**Each fact now has an owner.** `README.md` is new: which file answers what, in what
+order to read them, and the conventions. `RULES.md` (new — what to do, `R1`) and
+`TRAPS.md` (new — what will happen, `T1`) take the accumulated toolchain lessons that
+had no home. The oracle contract moved into `TESTING.md` §The oracle contract, the
+namespace map into `PLAN.md` §Current architecture, and the open questions into
+`PLAN.md` §Known limitations — which was rewritten, because about half of it
+described limitations that P8, P9, P12 and D47 had already closed. The handoff is 41
+lines: where we are, what is next, and what shapes the next decision.
+
+**Why rules and traps are two files rather than two sections.** One numbered series
+with sections cannot be appended to: a new rule in the first section renumbers every
+trap, and every citation elsewhere goes stale. Two files, one series each, both
+appended and never re-sorted, is the shape that survives being added to. The
+constraint is written into `README.md`'s conventions, because any numbered list here
+will have to respect it.
+
+**What the move found drifting.** `TESTING.md` was reloading with `require :reload`,
+which `AGENTS.md` forbids; it named `omkamra.dsp.acceptance` and
+`omkamra.dsp.conformance`, which are now `harness.catalog` and `harness.conformance`;
+it gave the Shadow build id as `:omkamra.dsp.testbed`, which is
+`:omkamra.dsp.harness.testbed`; and its JVM baseline was twelve tests and 76
+assertions behind. `PLAN.md` §Prioritized work still said "Next add stateful module
+composition (P6)". Each was a copy of a fact whose owner had moved on.
+
+**One thing was retired rather than moved.** Three handoff subsections went:
+"P2 builtins" and "Standard library", whose facts `DECISIONS.md` (`D9`–`D13`) and
+`LIBRARY.md` own, and "Next steps", which `PHASES.md` owns. Every chronicle entry is
+otherwise byte-identical apart from its date and level — verified by comparing the
+content lines as a multiset before and after, which is how the move could be claimed
+rather than hoped.
+
 ## Handoff — current state
 
 The one entry rewritten in place, and always the last. It holds where we are, what

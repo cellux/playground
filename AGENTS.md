@@ -54,40 +54,34 @@ implemented by `omkamra.dev.on-demand-http/resolve-handler`; it also starts
 compatible Shadow watchers automatically when a page or generated asset is
 requested. Do not start a separate watcher process.
 
+## Working rules and traps
+
+`RULES.md` says what to do while working here (`R1`, `R2`, …) and `TRAPS.md` says what
+will happen to you (`T1`, `T2`, …). Both are short, and both are appended to rather
+than edited. The three that matter before your first edit: run everything in the
+running dev server (`R1`), reload with `omkamra.dev.tools/reload` (`R3`), and lint and
+format with the `clj_kondo`/`cljfmt` tools (`R4`).
+
 ## Reloading
 
 Reload namespaces through `omkamra.dev.tools/reload`; do not use
-`clojure.core/require :reload` or clj-reload.
+`clojure.core/require :reload` or clj-reload. The essentials:
 
-- After editing source, call `(tools/reload)`. It finds what changed by file
-  **content** (never by modification time), reloads each changed namespace and
-  its transitive dependents in dependency order, unloads each namespace first so
-  removed vars disappear and `deftype`/`defrecord` get fresh classes, preserves
-  `defonce` values, and reports **every** failure in one compact, serializable
-  map.
-- It only concerns namespaces **this session has already loaded at least once**:
-  reload refreshes the image, it does not grow it. A changed file whose namespace
-  was never loaded is left alone and summarised under `:not-loaded`; load it with
-  `require`, which is the verb for bringing code in.
-- A call with nothing to do says `:status :unchanged`; it never silently no-ops.
-- `(tools/reload 'my.ns)` and `(tools/reload '[a b])` ignore detection and force
-  the **loaded** named namespaces (and their loaded dependents). Use them when you
-  are unsure whether the baseline saw an edit.
-- A *named* target reloads only what it names, so it reports `:stale` — the
-  loaded namespaces whose content changed and were not reloaded. When you see it,
-  `(tools/reload)` with no argument picks them up. An absent `:stale` is a
-  checked claim: detection runs on every call.
-- A detection-driven reload that would refresh the whole session — a poisoned
-  baseline, or a check-out that rewrites the tree — refuses with
-  `:status :refused` rather than doing it. There is no option that reloads
-  everything: restart the dev server for a fresh baseline. A session whose
-  baseline no longer describes the tree needs a new process, not a wider reload.
-- There is no initialization step: `reload` scopes itself to the classpath
-  source directories. To scan elsewhere, pass a scope map, e.g.
-  `(tools/reload {:dirs ["src"]})`.
-- The tooling's own namespaces are reported under `:deferred` and are not
-  reloaded in process; restart the dev server after editing them.
-- Need an alias that stays usable across reloads? Use `create-persistent-alias!`:
-  `(tools/create-persistent-alias! {:in-ns 'user :alias 'x :target 'some.ns})`.
+- `(tools/reload)` reloads what changed by file **content** (never by modification
+  time): each changed namespace and its transitive dependents, unloaded first so
+  removed vars disappear and `deftype`/`defrecord` get fresh classes, `defonce`
+  values preserved, and **every** failure reported in one compact map. A call with
+  nothing to do says `:status :unchanged`.
+- It only concerns namespaces **this session has already loaded at least once**: a
+  changed file whose namespace never loaded is summarised under `:not-loaded` and
+  left alone, because loading code runs it. `require` is the verb for bringing code
+  in.
+- `(tools/reload 'my.ns)` forces the **loaded** namespaces you name and skips
+  detection.
+- A refusal (`:status :refused`) means the baseline no longer describes the tree — a
+  check-out, a bulk rewrite. **Restart the dev server.** There is deliberately no
+  option that reloads everything.
+- The tooling's own namespaces are never reloaded in process (`:deferred`): restart
+  the dev server after editing them.
 
-The implementation and its design rationale live in `omkamra.dev.tools.reload`.
+`RULES.md` `R3` has the reasoning, and `omkamra.dev.tools.reload` the implementation.
