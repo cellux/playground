@@ -1,87 +1,63 @@
 # Playground
 
-This is my Clojure/ClojureScript playground.
+A Clojure/ClojureScript playground containing several independent projects.
 
-## Usage
+Before changing code, read the repository-wide [`RULES.md`](RULES.md) and
+[`TRAPS.md`](TRAPS.md). Rules say what to do; traps record non-obvious behavior
+that has already caused failures.
 
-Before starting the dev server, inspect `deps.edn` for active local roots for `omkamra` projects. Mount the sibling `omkamra` repository into the sandbox at `/omkamra` (read-only is sufficient) only when an uncommented dependency is actually linked to that checkout through a local root such as `{:local/root "../omkamra/jnr"}`. Commented-out local-root alternatives and ordinary Maven coordinates such as `{:mvn/version "..."}` do not require a mount.
+## Start the development process
 
-When an active local root points into the sibling checkout, resolve its host path relative to the host checkout of this project and use that checkout as the mount source, keeping `/omkamra` as the sandbox target. The mount must happen before starting the dev server because Clojure resolves the dependency graph and builds the JVM classpath at startup. If no active `omkamra` local roots are present, skip the mount.
+Before starting the dev server, inspect `deps.edn` for active, uncommented
+`omkamra` local roots such as `{:local/root "../omkamra/jnr"}`. Ignore commented
+alternatives and ordinary Maven coordinates.
 
-1. Inspect `deps.edn` and identify active, uncommented `omkamra` local roots; ignore commented alternatives and Maven dependencies.
-2. If any active local root resolves into the sibling `omkamra` checkout, request/approve a read-only host mount of that checkout at `/omkamra`; otherwise do not mount it.
-3. Use `clojure_start_dev` to start up the Clojure dev server.
-4. Use `clojure_eval` to evaluate forms in the dev server via nREPL.
-5. Use `clj_kondo` and `cljfmt` to lint and format source code. They run without
-   a JVM, so they still work when the dev server is down or the code does not
-   compile; prefer them over any in-JVM lint/format.
+1. If an active local root points into the sibling `omkamra` checkout, resolve
+   that checkout relative to this project's host checkout and mount it read-only
+   at `/omkamra`. The mount must exist before JVM startup because dependency
+   resolution and classpath construction happen then.
+2. If there is no active `omkamra` local root, do not request the mount.
+3. Start the development process with `clojure_start_dev`. Do not start another
+   one if it is already running.
+4. Evaluate Clojure forms through the running nREPL with `clojure_eval`.
+5. Lint and format with the `clj_kondo` and `cljfmt` tools. They do not require a
+   working JVM and remain usable when source does not compile.
 
-## Feature discovery
+For a human using a connected editor or REPL, the same principle applies: start
+one development JVM and evaluate work in that process rather than launching a
+new JVM per command.
 
-Read the following entrypoint namespaces before exploring their implementation
-namespaces. Their public functions are lightweight discovery APIs, and their
-docstrings point to lower-level namespaces for details.
+## Discover project features
 
-- `omkamra.dev.systems` — discover and control the generic Integrant systems
-  listed in `dev.edn`.
+Read an entrypoint namespace before exploring its implementation. Its public
+functions are the discovery API, and its docstrings point to lower-level
+namespaces when necessary.
+
+- `omkamra.dev.systems` — discover and control the Integrant systems in
+  `dev.edn`.
 - `omkamra.dev.on-demand-http` — inspect and control the `:on-demand-http`
   Ring/Shadow server, including route resolution and server configuration.
-- `omkamra.dev.frontend` — discover browser builds, connected runtimes, rebuild
-  a running Shadow build, and evaluate ClojureScript.
+- `omkamra.dev.frontend` — discover browser builds and connected runtimes,
+  rebuild a running Shadow build, and evaluate ClojureScript.
 - `omkamra.dev.playwright` — drive a real browser through a curated subset of
-  spel: launch a headless session, navigate, wait for readiness, evaluate
-  JavaScript, read and interact with elements, and capture screenshots.
-- `omkamra.dev.tools` — reload namespaces and create persistent namespace
-  aliases. See [Reloading](#reloading) for the reload workflow. (Linting and
-  formatting are the `clj_kondo` and `cljfmt` tools, not this namespace.)
+  spel: launch a headless session, navigate, wait, evaluate JavaScript, inspect
+  and interact with elements, and capture screenshots.
+- `omkamra.dev.tools` — reload namespaces and create persistent aliases.
 - `omkamra.vice` — assemble, run, capture, and inspect VICE workflows; follow
   its docstrings into the analysis and capture namespaces.
 - `omkamra.supercollider` — start or wrap SuperCollider sessions, create
   players, define SynthDefs/UGens, and run performances. Use
-  `omkamra.supercollider.player` for manipulating an existing player.
+  `omkamra.supercollider.player` to manipulate an existing player.
 
-When using a feature through `clojure_eval`, first require the
-selected namespace. Then use Clojure's introspection facilities to
-inspect its public API functions and the `:doc`/`:arglists` metadata
-for the namespace and each API function before calling them. For
-example, inspect `(ns-publics 'omkamra.dev.tools)` and the metadata of
-the returned Vars. Treat the entrypoint namespace and its function
-docstrings as the source of truth; only follow implementation
-namespaces when the public documentation directs you to do so.
+When using an entrypoint through `clojure_eval`:
 
-The `:on-demand-http` system discovers Ring handlers using the URI convention
-implemented by `omkamra.dev.on-demand-http/resolve-handler`; it also starts
-compatible Shadow watchers automatically when a page or generated asset is
-requested. Do not start a separate watcher process.
+1. Require the namespace.
+2. Inspect `(ns-publics 'the.namespace)`.
+3. Inspect the `:doc` and `:arglists` metadata of the relevant Vars.
+4. Treat that public documentation as the source of truth; inspect an
+   implementation namespace only when it directs you there.
 
-## Working rules and traps
-
-`RULES.md` says what to do while working here (`R1`, `R2`, …) and `TRAPS.md` says what
-will happen to you (`T1`, `T2`, …). Both are short, and both are appended to rather
-than edited. The three that matter before your first edit: run everything in the
-running dev server (`R1`), reload with `omkamra.dev.tools/reload` (`R3`), and lint and
-format with the `clj_kondo`/`cljfmt` tools (`R4`).
-
-## Reloading
-
-Reload namespaces through `omkamra.dev.tools/reload`; do not use
-`clojure.core/require :reload` or clj-reload. The essentials:
-
-- `(tools/reload)` reloads what changed by file **content** (never by modification
-  time): each changed namespace and its transitive dependents, unloaded first so
-  removed vars disappear and `deftype`/`defrecord` get fresh classes, `defonce`
-  values preserved, and **every** failure reported in one compact map. A call with
-  nothing to do says `:status :unchanged`.
-- It only concerns namespaces **this session has already loaded at least once**: a
-  changed file whose namespace never loaded is summarised under `:not-loaded` and
-  left alone, because loading code runs it. `require` is the verb for bringing code
-  in.
-- `(tools/reload 'my.ns)` forces the **loaded** namespaces you name and skips
-  detection.
-- A refusal (`:status :refused`) means the baseline no longer describes the tree — a
-  check-out, a bulk rewrite. **Restart the dev server.** There is deliberately no
-  option that reloads everything.
-- The tooling's own namespaces are never reloaded in process (`:deferred`): restart
-  the dev server after editing them.
-
-`RULES.md` `R3` has the reasoning, and `omkamra.dev.tools.reload` the implementation.
+The `:on-demand-http` system resolves Ring handlers by the URI convention in
+`omkamra.dev.on-demand-http/resolve-handler`. It starts compatible Shadow
+watchers when a page or generated asset is requested. Do not start a separate
+watcher process.
