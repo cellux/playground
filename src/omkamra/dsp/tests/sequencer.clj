@@ -3,7 +3,7 @@
   invariant under block partitioning."
   (:require [clojure.test :refer [deftest is testing]]
             [omkamra.dsp :as dsp]
-            [omkamra.dsp.hosts :as hosts]
+            [omkamra.dsp.hosts.jvm :as hosts]
             [omkamra.dsp.sequencer :as sequencer]
             [omkamra.dsp.synth.pool :as pool]
             [omkamra.dsp.library.envelope]

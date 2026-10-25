@@ -1947,12 +1947,12 @@ authoring style.
 ## 2026-10-18 — P10d — The browser host and the worklet boundary (D40, slice 3)
 
 **Delivered.** A pool runs in the browser over a generated JavaScript module. The
-kernels moved out of `omkamra.dsp.synth.host` into an `omkamra.dsp.hosts` family
+kernels moved out of `omkamra.dsp.synth.host` into an `omkamra.dsp.hosts.jvm` family
 — `.jvm`, `.interpreter`, `.js`, with `.wasm` still to come — and the plumbing
 every one of them shares (the containment policy, and the planar blocks a voice
-is rendered into and mixed through) into `omkamra.dsp.hosts.mixing`. `mixing` is
+is rendered into and mixed through) into `omkamra.dsp.kernels.mixing`. `mixing` is
 `.cljc`, so the JVM suite and the browser testbed run the *same* reference oracle
-rather than two copies of it. `omkamra.dsp.hosts` itself is the assembler:
+rather than two copies of it. `omkamra.dsp.hosts.jvm` itself is the assembler:
 `synth-bundle` compiles a description and derives its runtime configuration from
 the artifact's own ABI, and `compile-synth` adds a JVM-side kernel. A browser host
 builds its own from the bundle, which is what makes the browser check a
@@ -1981,7 +1981,7 @@ two output channels.
 **Verified.** Browser 20/20 (the new `JavaScript pool host` among them); JVM 137
 tests / 1437 assertions; `clj-kondo`/`cljfmt` clean.
 
-**The Wasm host.** `omkamra.dsp.hosts.wasm` is the same kernel seam over a Wasm
+**The Wasm host.** `omkamra.dsp.kernels.wasm` is the same kernel seam over a Wasm
 module, and is where the two browser hosts genuinely differ: a Wasm kernel is not
 handed the block. `process` takes the byte offset of its output region and writes
 channel `c` at `offset + c * channel-stride` in its own linear memory, so a
@@ -2026,7 +2026,7 @@ written as one voice, plus a host-side modulation matrix.
   guard for the whole host path.
 
 **The allocation guard found a real bug in the P10d stereo mixing path.**
-`omkamra.dsp.hosts.mixing/channel-of` did `(aget buffer channel)` with no type
+`omkamra.dsp.kernels.mixing/channel-of` did `(aget buffer channel)` with no type
 hint, so selecting a plane of a planar block was a *reflective* `RT.aget` —
 about 24 KB per channel per block on the JVM. It never showed up because the
 mono path does not index, and no allocation check covered stereo. P11's
@@ -2090,7 +2090,7 @@ functions: `instrument` (the description's top-level fields), `voice`,
 `routes`, and `with-effect`. Nothing there knows about kernels or channel
 layout.
 
-**The lowering** (`omkamra.dsp.hosts.instrument`, `.clj`) has one strategy so
+**The lowering** (`omkamra.dsp.instrument.program`, `.clj`) has one strategy so
 far: the voice goes through `synth-bundle` (the P10 pool), and the post-mix
 chain is folded by `chain-effect` into **one mono processor definition** whose
 interface grows by each effect's controls. That compiles to one artifact and is
@@ -2323,7 +2323,7 @@ so the sequencer owns the one timeline and will route to several pools in M2.
 
 **Delivered (browser transport).**
 
-- `omkamra.dsp.hosts.worker` (`.cljc`) is the **central** worker-side runtime:
+- `omkamra.dsp.worker` (`.cljc`) is the **central** worker-side runtime:
   it validates a `[frame value]` timeline through `omkamra.dsp.event` and posts
   timestamped events on a `MessagePort`. The script-to-events logic is portable;
   only the worker plumbing is ClojureScript. The browser testbed is one consumer.
@@ -2338,7 +2338,7 @@ so the sequencer owns the one timeline and will route to several pools in M2.
   and 155. (Two adapter bugs it caught: absolute event frames were used as
   block-relative array indices, and AudioParams reset event-set controls every
   block.)
-- The Shadow build `:omkamra.dsp.hosts.worker` points `:init-fn` at the runtime
+- The Shadow build `:omkamra.dsp.worker` points `:init-fn` at the runtime
   (build id and paths mirror the namespace).
 
 **Browser build note.** The worker is a separate, self-contained Shadow build
@@ -5333,7 +5333,7 @@ instance lifecycle moved out of `omkamra.dsp` into namespaces of its own, and
 the facade re-exports it (D89). No behaviour changed; the point is a dependency
 that is no longer there.
 
-**Why it was worth doing.** `omkamra.dsp.hosts.jvm` drives a voice and a bus
+**Why it was worth doing.** `omkamra.dsp.kernels.jvm` drives a voice and a bus
 instance in its own body, and it required `omkamra.dsp` — the macro namespace
 that also loads the definition forms, the SCI front end and the library registry
 — to call `create-instance`, `reset!`, `destroy!` and `process-unchecked!`. A
@@ -5493,6 +5493,105 @@ measurement.
 
 ---
 
+## 2026-10-25 — D94 — the pipeline stops knowing what a target's artifact looks like
+
+A target-inventory pass asked where shared code is really used by only some of the
+four lowering paths. The answer was mostly "it isn't": `builtins` names no target,
+the four `targets/*` are self-contained, and the host layer splits cleanly into
+`fusion`/`mixing`/`pool` plus one kernel per host. The exception was
+`compiler.cljc` — the "portable pipeline" owned each target's artifact:
+`target-instance`'s `case` over four targets, `compile-js-target`, the
+interpreter's instance closures, the whole Wasm artifact map, and the assembler
+pin. About 130 lines — the file went from 553 to 432.
+
+The tell was that `:jvm` already did it right — it registers its own
+`compile-target` method from the side that has `insn`. So the other three now match
+it: the pipeline builds the shared base, each target's `compile-artifact` adds what
+only it has. That is also the honest shape, because the artifacts genuinely differ
+— the interpreter and JVM carry `:invoke`, the two code generators carry a module —
+and the pipeline no longer has to know either way.
+
+The same pass caught `ir`'s inlining policy: a `#{:jvm :js :wasm}` set plus an
+`(= :interpreter target)` special case. That is a fact about targets, so it became
+`targets.capability/calls?`, and `ir` names no target now.
+
+No behaviour change, and that *is* the verification: the artifact maps come out
+identical, so `compiler equivalence` (JS forms, Wasm module text, canonical IR) and
+`parity` are the proof rather than a new test.
+
+**Verified.** JVM **284 tests / 2 620 assertions / 0 failures**; browser
+**54/54**; parity **211 cases, no gaps**. `clj-kondo` and `cljfmt` clean on the
+touched paths.
+
+---
+
+## 2026-10-25 — D95 — the bundle leaves the JVM's assembler
+
+`omkamra.dsp.hosts.jvm` was a `.clj` file whose name promised all hosts and whose
+content was one world's assembly. The user kept coming back to it, and the
+instinct was right: its own docstring said the bundle "can be sent to another
+host", and `hosts/instrument.cljc` said outright that "a browser host has no
+compiler-side assembler here". So the portable half was locked in a JVM-only
+file, and a browser could only receive a bundle over the wire — which is exactly
+what the harness does.
+
+`synth-bundle` now lives in `omkamra.dsp.synth.bundle` (`.cljc`), and
+`omkamra.dsp.hosts.jvm` keeps the JVM world's kernels: 265 lines to 103. Three seams
+made it portable. The voice resolves through `:definitions` — the same map
+`dsp/compile` takes — with `requiring-resolve` only as the JVM's fallback. A
+descriptor rather than a Var is what the combinators are handed. And the fused
+path dropped a `(dsp/link …)`: `dsp/compile` already links, and the extra call
+linked with `{}`, so it could not see `:definitions`. That one is a latent bug
+fixed by deleting a call.
+
+`:target` still defaults to `:jvm`, deliberately — the descriptor's own default is
+`:interpreter`, so a bundle that omitted a target would silently compile one.
+That is the last JVM-flavoured thing, and it is documented where it lives.
+
+The `.cljc` claim was checked rather than assumed: with it required from the
+testbed page build, Shadow emitted `cljs-runtime/omkamra.dsp.synth.bundle.js`, so
+it is ClojureScript-legal today. Nothing in the tree requires it yet — the browser
+assembler is P14's — so the check is not recurring, and that is the honest state:
+a browser *can* build a bundle, but nothing does.
+
+**Verified.** JVM **284 tests / 2 620 assertions / 0 failures**; browser
+**54/54**; parity **211 cases, no gaps**. `clj-kondo` and `cljfmt` clean on the
+touched paths.
+
+---
+
+## 2026-10-25 — D96 — the names catch up with the axes
+
+Three naming passes in, the map is literal: **world** = JVM/browser, **target** =
+`:jvm`/`:interpreter`/`:js`/`:wasm`, **kernel** = a target's `Kernel`.
+`omkamra.dsp.hosts` was the JVM world's assembler sitting as the *parent* of
+`omkamra.dsp.hosts.jvm`, which was the `:jvm` kernel — a parent and a child on
+different axes, which is why the file kept nagging. Now `hosts/jvm.clj` is the
+world and `kernels/jvm.clj` is the target, and one glance tells them apart.
+
+The four namespaces that shared the old tree turned out not to be one kind of
+thing, and the requires settled it: `mixing` and `fusion` are required by every
+kernel, `instrument` by the portable reference synth (a layer *above* the pool),
+and `worker` by nobody — it is a Shadow `:web-worker` entry. So `mixing` went to
+`kernels/`, `fusion` to the top level (pure data, no dependencies, a concept),
+`instrument` to `instrument/program`, and `worker` to the top level as the build
+entry it is.
+
+`mixing`'s numeric half — the typed array, and how to read a value back out of
+whatever a host supplied — went to `numbers`, where a host's numeric decisions
+already live. What is left in `kernels/mixing` is exactly what its docstring says:
+regions, containment, summing.
+
+One incidental find: the browser suite failed 47/48 on the first run and passed on
+the second. The page build was still being rebuilt with the renamed namespaces, so
+that was a raced build rather than a check — worth knowing when a rename looks
+like a regression.
+
+**Verified.** JVM **284 tests / 2 620 assertions / 0 failures**; browser
+**54/54**; parity **211 cases, no gaps**. `clj-kondo` and `cljfmt` clean.
+
+---
+
 ## Handoff — current state
 
 The one entry rewritten in place, and always the last. It holds where we are, what
@@ -5502,9 +5601,12 @@ bullet that is still true two slices later is in the wrong file.
 
 ### Where we are
 
-**P13 is done** — P13a–P13d implemented and verified, P13e dropped (D93).
+**P13 is done** — P13a–P13d implemented and verified, P13e dropped (D93) — and
+three settling passes followed: a target's artifact shape now lives in the target's
+own namespace (D94), the world-independent synth bundle left the JVM assembler
+(D95), and the names now follow the axes — world, target, kernel (D96).
 `dsp/compile` takes a definition or a source string in both worlds; the bus lives
-behind one kernel interface on all four targets; `hosts.instrument` is `.cljc`; the reference synth
+behind one kernel interface on all four targets; `instrument.program` is `.cljc`; the reference synth
 is a single `.cljc` the page compiles its own capture of; a state region's zeros
 travel as a size (canonical IR 1.77 MB → 40 KB, JS module 3.65 MB → 11 KB);
 `omkamra.dsp` is a facade again — the instance lifecycle lives in
@@ -5519,7 +5621,9 @@ parity **211 cases, no gaps**.
 ### What's next
 
 1. **P14** (artifact-driven worklet installation), then **H1**, **P15**,
-   **P16** per `PHASES.md`. P13 is complete; P13e is dropped (D93).
+   **P16** per `PHASES.md`. P13 is complete; P13e is dropped (D93). The browser
+world's assembler — the kernel it builds from a bundle — is still missing (D95);
+P14 is where it belongs.
 
 ### What shapes the next decision
 

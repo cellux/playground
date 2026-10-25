@@ -14,13 +14,13 @@
             [omkamra.dsp.harness.catalog :as catalog]
             [omkamra.dsp.event :as event]
             [omkamra.dsp.examples.reference-synth :as reference-synth]
-            [omkamra.dsp.hosts.fusion :as fusion]
+            [omkamra.dsp.fusion :as fusion]
             [omkamra.dsp.harness.equivalence :as equivalence]
             [omkamra.dsp.harness.formatting :as formatting]
-            [omkamra.dsp.hosts.instrument :as inst-host]
-            [omkamra.dsp.hosts.interpreter :as interpreter-host]
-            [omkamra.dsp.hosts.js :as js-host]
-            [omkamra.dsp.hosts.wasm :as wasm-host]
+            [omkamra.dsp.instrument.program :as inst-program]
+            [omkamra.dsp.kernels.interpreter :as interpreter-kernels]
+            [omkamra.dsp.kernels.js :as js-kernels]
+            [omkamra.dsp.kernels.wasm :as wasm-kernels]
             [omkamra.dsp.targets.interpreter :as interpreter]
             [omkamra.dsp.reference :as reference]
             [omkamra.dsp.schedule :as schedule]
@@ -659,7 +659,7 @@
                                                    :eventCapacity 256
                                                    :controlNames #js ["amount"]
                                                    :controlDefaults #js [0.0]}})
-                 worker (js/Worker. "/omkamra/dsp/hosts/worker/main.js")
+                 worker (js/Worker. "/omkamra/dsp/worker/main.js")
                  channel (js/MessageChannel.)
                  ready (js/Promise.
                         (fn [resolve reject]
@@ -1465,7 +1465,7 @@
   [name runtime abi ir channels kernel]
   (let [actual (play-note (pool/voice-pool runtime kernel) channels)
         expected (play-note (pool/voice-pool runtime
-                                             (interpreter-host/interpreter-kernel ir abi))
+                                             (interpreter-kernels/interpreter-kernel ir abi))
                             channels)]
     (require! (= actual expected)
               (str name " drifted from the interpreter: "
@@ -1496,8 +1496,8 @@
                      "JavaScript pool host"
                      (:runtime bundle) abi (reader/read-string (:ir bundle))
                      (get-in abi [:channels :count])
-                     (js-host/js-kernel (gobj/get module "createKernel") abi
-                                        {:precision (:precision bundle)})))))
+                     (js-kernels/js-kernel (gobj/get module "createKernel") abi
+                                           {:precision (:precision bundle)})))))
                (.finally (clojure.core/fn [] (js/URL.revokeObjectURL url)))))))))
 
 (defn- wasm-pool-test
@@ -1516,8 +1516,8 @@
                    "Wasm pool host"
                    (:runtime bundle) abi (reader/read-string (:ir bundle))
                    (get-in abi [:channels :count])
-                   (wasm-host/wasm-kernel module abi (:memory bundle)
-                                          {:precision (:precision bundle)}))))))))))
+                   (wasm-kernels/wasm-kernel module abi (:memory bundle)
+                                             {:precision (:precision bundle)}))))))))))
 
 (defn- check-lane-pool
   "Compare a pool's lane delivery on a browser kernel against the interpreter
@@ -1536,7 +1536,7 @@
                  (pool/render! p block 4 48000.0)
                  (block->vectors block channels)))
         actual (play kernel)
-        expected (play (interpreter-host/interpreter-kernel ir abi))]
+        expected (play (interpreter-kernels/interpreter-kernel ir abi))]
     (require! (= actual expected)
               (str name " drifted from the interpreter: "
                    (pr-str actual) " vs " (pr-str expected)))
@@ -1566,8 +1566,8 @@
                      "JavaScript lane delivery"
                      (:runtime bundle) abi (reader/read-string (:ir bundle))
                      (or (get-in abi [:channels :count]) 1)
-                     (js-host/js-kernel (gobj/get module "createKernel") abi
-                                        {:precision (:precision bundle)})))))
+                     (js-kernels/js-kernel (gobj/get module "createKernel") abi
+                                           {:precision (:precision bundle)})))))
                (.finally (clojure.core/fn [] (js/URL.revokeObjectURL url)))))))))
 
 (defn- wasm-lane-test
@@ -1585,8 +1585,8 @@
                    "Wasm lane delivery"
                    (:runtime bundle) abi (reader/read-string (:ir bundle))
                    (or (get-in abi [:channels :count]) 1)
-                   (wasm-host/wasm-kernel module abi (:memory bundle)
-                                          {:precision (:precision bundle)}))))))))))
+                   (wasm-kernels/wasm-kernel module abi (:memory bundle)
+                                             {:precision (:precision bundle)}))))))))))
 
 (defn- check-voice-lane-pool
   "Compare a pool's *per-voice* lane delivery on a browser kernel against the
@@ -1609,7 +1609,7 @@
                  (pool/render! p block 4 48000.0)
                  (block->vectors block channels)))
         actual (play kernel)
-        expected (play (interpreter-host/interpreter-kernel ir abi))]
+        expected (play (interpreter-kernels/interpreter-kernel ir abi))]
     (require! (= actual expected)
               (str name " drifted from the interpreter: "
                    (pr-str actual) " vs " (pr-str expected)))
@@ -1654,7 +1654,7 @@
                [:note 64 5] [:render]
                [:lane 5 [5.0 5.0 5.0 5.0]] [:render]]
         actual (filterv some? (play kernel steps))
-        expected (filterv some? (play (interpreter-host/interpreter-kernel ir abi)
+        expected (filterv some? (play (interpreter-kernels/interpreter-kernel ir abi)
                                       steps))]
     (require! (= actual expected)
               (str name " drifted from the interpreter: "
@@ -1688,8 +1688,8 @@
                      "JavaScript channel lane"
                      (:runtime bundle) abi (reader/read-string (:ir bundle))
                      (or (get-in abi [:channels :count]) 1)
-                     (js-host/js-kernel (gobj/get module "createKernel") abi
-                                        {:precision (:precision bundle)})))))
+                     (js-kernels/js-kernel (gobj/get module "createKernel") abi
+                                           {:precision (:precision bundle)})))))
                (.finally (clojure.core/fn [] (js/URL.revokeObjectURL url)))))))))
 
 (defn- wasm-channel-lane-test
@@ -1708,8 +1708,8 @@
                    "Wasm channel lane"
                    (:runtime bundle) abi (reader/read-string (:ir bundle))
                    (or (get-in abi [:channels :count]) 1)
-                   (wasm-host/wasm-kernel module abi (:memory bundle)
-                                          {:precision (:precision bundle)}))))))))))
+                   (wasm-kernels/wasm-kernel module abi (:memory bundle)
+                                             {:precision (:precision bundle)}))))))))))
 
 (defn- check-shared-pool
   "Compare a pool's shared-region delivery on a browser kernel against the
@@ -1733,7 +1733,7 @@
                  [(block->vectors default-block channels)
                   (block->vectors block channels)]))
         [default-actual actual] (play kernel)
-        [default-expected expected] (play (interpreter-host/interpreter-kernel ir abi))]
+        [default-expected expected] (play (interpreter-kernels/interpreter-kernel ir abi))]
     (require! (= default-actual default-expected)
               (str name " drifted from the interpreter on the default: "
                    (pr-str default-actual) " vs " (pr-str default-expected)))
@@ -1766,8 +1766,8 @@
                      "JavaScript shared parameter"
                      (:runtime bundle) abi (reader/read-string (:ir bundle))
                      (or (get-in abi [:channels :count]) 1)
-                     (js-host/js-kernel (gobj/get module "createKernel") abi
-                                        {:precision (:precision bundle)})))))
+                     (js-kernels/js-kernel (gobj/get module "createKernel") abi
+                                           {:precision (:precision bundle)})))))
                (.finally (clojure.core/fn [] (js/URL.revokeObjectURL url)))))))))
 
 (defn- wasm-shared-test
@@ -1785,8 +1785,8 @@
                    "Wasm shared parameter"
                    (:runtime bundle) abi (reader/read-string (:ir bundle))
                    (or (get-in abi [:channels :count]) 1)
-                   (wasm-host/wasm-kernel module abi (:memory bundle)
-                                          {:precision (:precision bundle)}))))))))))
+                   (wasm-kernels/wasm-kernel module abi (:memory bundle)
+                                             {:precision (:precision bundle)}))))))))))
 
 (defn- javascript-voice-lane-test
   "The JavaScript host: one region per voice, handed to each generated process."
@@ -1806,8 +1806,8 @@
                      "JavaScript voice lane delivery"
                      (:runtime bundle) abi (reader/read-string (:ir bundle))
                      (or (get-in abi [:channels :count]) 1)
-                     (js-host/js-kernel (gobj/get module "createKernel") abi
-                                        {:precision (:precision bundle)})))))
+                     (js-kernels/js-kernel (gobj/get module "createKernel") abi
+                                           {:precision (:precision bundle)})))))
                (.finally (clojure.core/fn [] (js/URL.revokeObjectURL url)))))))))
 
 (defn- wasm-voice-lane-test
@@ -1825,8 +1825,8 @@
                    "Wasm voice lane delivery"
                    (:runtime bundle) abi (reader/read-string (:ir bundle))
                    (or (get-in abi [:channels :count]) 1)
-                   (wasm-host/wasm-kernel module abi (:memory bundle)
-                                          {:precision (:precision bundle)}))))))))))
+                   (wasm-kernels/wasm-kernel module abi (:memory bundle)
+                                             {:precision (:precision bundle)}))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; A fused worklet node: one node, `slots` voices (F5)
@@ -2070,7 +2070,7 @@
   base voice: the same runtime, the same operations, block for block."
   [name runtime base-abi base-ir channels kernel]
   (let [control-count (clojure.core/count (:controls base-abi))
-        oracle (interpreter-host/interpreter-kernel base-ir base-abi)
+        oracle (interpreter-kernels/interpreter-kernel base-ir base-abi)
         actual-steal (fused-steal runtime kernel channels control-count)
         expected-steal (fused-steal runtime oracle channels control-count)]
     (require! (= actual-steal expected-steal)
@@ -2111,7 +2111,7 @@
                  (pool/render! p block 4 48000.0)
                  (block->vectors block channels)))
         actual (play kernel)
-        expected (play (interpreter-host/interpreter-kernel base-ir base-abi))]
+        expected (play (interpreter-kernels/interpreter-kernel base-ir base-abi))]
     (require! (= actual expected)
               (str name " drifted from the interpreter: "
                    (pr-str actual) " vs " (pr-str expected)))
@@ -2141,7 +2141,7 @@
                      (:runtime bundle) (:base-abi bundle)
                      (reader/read-string (:base-ir bundle))
                      (or (get-in abi [:channels :count]) 1)
-                     (js-host/js-kernel
+                     (js-kernels/js-kernel
                       (gobj/get module "createKernel") abi
                       {:precision (:precision bundle)
                        :mapping (fusion/runtime-mapping (:controls abi)
@@ -2166,7 +2166,7 @@
                    (:runtime bundle) (:base-abi bundle)
                    (reader/read-string (:base-ir bundle))
                    (or (get-in abi [:channels :count]) 1)
-                   (wasm-host/wasm-kernel
+                   (wasm-kernels/wasm-kernel
                     module abi (:memory bundle)
                     {:precision (:precision bundle)
                      :mapping (fusion/runtime-mapping (:controls abi)
@@ -2185,7 +2185,7 @@
                url (js/URL.createObjectURL blob)
                run (clojure.core/fn [module]
                      (let [abi (:abi bundle)
-                           kernel (js-host/js-kernel
+                           kernel (js-kernels/js-kernel
                                    (gobj/get module "createKernel") abi
                                    {:precision (:precision bundle)
                                     :mapping (fusion/runtime-mapping
@@ -2212,7 +2212,7 @@
               (clojure.core/fn [bytes]
                 (let [module (js/WebAssembly.Module. bytes)
                       abi (:abi bundle)
-                      kernel (wasm-host/wasm-kernel
+                      kernel (wasm-kernels/wasm-kernel
                               module abi (:memory bundle)
                               {:precision (:precision bundle)
                                :mapping (fusion/runtime-mapping
@@ -2293,7 +2293,7 @@
                        (-> (dynamic-import module-url)
                            (.then
                             (clojure.core/fn [module]
-                              (js-host/js-kernel
+                              (js-kernels/js-kernel
                                (gobj/get module "createKernel") module-abi
                                (cond-> {:precision (:precision bundle)}
                                  mapping (assoc :mapping mapping)))))))
@@ -2323,7 +2323,7 @@
              (.then
               (clojure.core/fn [[fused-bytes base-bytes]]
                 (let [build (clojure.core/fn [bytes page-abi memory mapping]
-                              (wasm-host/wasm-kernel
+                              (wasm-kernels/wasm-kernel
                                (js/WebAssembly.Module. bytes) page-abi memory
                                (cond-> {:precision (:precision bundle)}
                                  mapping (assoc :mapping mapping))))
@@ -2458,9 +2458,9 @@
                           (clojure.core/fn []
                             (bench-pool-ms
                              pool-bundle
-                             (js-host/js-kernel (gobj/get pool-module "createKernel")
-                                                (:abi pool-bundle)
-                                                {:precision (:precision pool-bundle)})
+                             (js-kernels/js-kernel (gobj/get pool-module "createKernel")
+                                                   (:abi pool-bundle)
+                                                   {:precision (:precision pool-bundle)})
                              voices)))
                    :fused (attempt (clojure.core/fn []
                                      (bench-fused-js-ms fused-module fused-bundle)))
@@ -2491,10 +2491,10 @@
                         (clojure.core/fn []
                           (bench-pool-ms
                            pool-bundle
-                           (wasm-host/wasm-kernel (js/WebAssembly.Module. pool-bytes)
-                                                  (:abi pool-bundle)
-                                                  (:memory pool-bundle)
-                                                  {:precision (:precision pool-bundle)})
+                           (wasm-kernels/wasm-kernel (js/WebAssembly.Module. pool-bytes)
+                                                     (:abi pool-bundle)
+                                                     (:memory pool-bundle)
+                                                     {:precision (:precision pool-bundle)})
                            voices)))
                  :fused (attempt
                          (clojure.core/fn []
@@ -2582,12 +2582,12 @@
                    "JavaScript containment"
                    (:runtime bundle)
                    (clojure.core/fn [mode]
-                     (js-host/js-kernel (gobj/get module "createKernel") (:abi bundle)
-                                        {:precision (:precision bundle) :containment mode}))
+                     (js-kernels/js-kernel (gobj/get module "createKernel") (:abi bundle)
+                                           {:precision (:precision bundle) :containment mode}))
                    (:runtime loud-bundle)
                    (clojure.core/fn [mode]
-                     (js-host/js-kernel (gobj/get loud-module "createKernel") (:abi loud-bundle)
-                                        {:precision (:precision loud-bundle) :containment mode})))))
+                     (js-kernels/js-kernel (gobj/get loud-module "createKernel") (:abi loud-bundle)
+                                           {:precision (:precision loud-bundle) :containment mode})))))
                (.finally (clojure.core/fn []
                            (js/URL.revokeObjectURL voice-url)
                            (js/URL.revokeObjectURL loud-url)))))))))
@@ -2609,12 +2609,12 @@
                    "Wasm containment"
                    (:runtime bundle)
                    (clojure.core/fn [mode]
-                     (wasm-host/wasm-kernel voice-module (:abi bundle) (:memory bundle)
-                                            {:precision (:precision bundle) :containment mode}))
+                     (wasm-kernels/wasm-kernel voice-module (:abi bundle) (:memory bundle)
+                                               {:precision (:precision bundle) :containment mode}))
                    (:runtime loud-bundle)
                    (clojure.core/fn [mode]
-                     (wasm-host/wasm-kernel loud-module (:abi loud-bundle) (:memory loud-bundle)
-                                            {:precision (:precision loud-bundle) :containment mode})))))))))))
+                     (wasm-kernels/wasm-kernel loud-module (:abi loud-bundle) (:memory loud-bundle)
+                                               {:precision (:precision loud-bundle) :containment mode})))))))))))
 
 ;; ---------------------------------------------------------------------------
 ;; The browser instrument host: a voice pool plus a post-mix bus (P11c)
@@ -2748,10 +2748,10 @@
         expected (when tolerance
                    (play-reference-phrase
                     bundle
-                    (interpreter-host/interpreter-kernel
+                    (interpreter-kernels/interpreter-kernel
                      voice-ir (:voice-abi bundle) {:containment :off})
-                    (interpreter-host/interpreter-bus-kernel bus-ir (:bus-abi bundle)
-                                                             (:precision bundle))
+                    (interpreter-kernels/interpreter-bus-kernel bus-ir (:bus-abi bundle)
+                                                                (:precision bundle))
                     bus-controls phrase))]
     (require! (all-finite? actual)
               (str name " rendered a non-finite sample"))
@@ -2790,13 +2790,13 @@
                (.then
                 (clojure.core/fn [[voice-module bus-module]]
                   (let [voice-kernel
-                        (js-host/js-kernel (gobj/get voice-module "createKernel")
-                                           (:voice-abi bundle)
-                                           {:precision (:precision bundle)
-                                            :containment :off})
+                        (js-kernels/js-kernel (gobj/get voice-module "createKernel")
+                                              (:voice-abi bundle)
+                                              {:precision (:precision bundle)
+                                               :containment :off})
                         bus-runner
-                        (js-host/js-bus-kernel (gobj/get bus-module "createKernel")
-                                               (:bus-abi bundle))]
+                        (js-kernels/js-bus-kernel (gobj/get bus-module "createKernel")
+                                                  (:bus-abi bundle))]
                     (check-reference-host "JavaScript instrument host"
                                           bundle voice-kernel bus-runner 0.0))))
                (.finally (clojure.core/fn []
@@ -2815,14 +2815,14 @@
                 (let [voice-module (js/WebAssembly.Module. voice-bytes)
                       bus-module (js/WebAssembly.Module. bus-bytes)
                       voice-kernel
-                      (wasm-host/wasm-kernel voice-module (:voice-abi bundle)
-                                             (:voice-memory bundle)
-                                             {:precision (:precision bundle)
-                                              :containment :off})
+                      (wasm-kernels/wasm-kernel voice-module (:voice-abi bundle)
+                                                (:voice-memory bundle)
+                                                {:precision (:precision bundle)
+                                                 :containment :off})
                       bus-runner
-                      (wasm-host/wasm-bus-kernel bus-module (:bus-abi bundle)
-                                                 (:bus-memory bundle)
-                                                 (:precision bundle))]
+                      (wasm-kernels/wasm-bus-kernel bus-module (:bus-abi bundle)
+                                                    (:bus-memory bundle)
+                                                    (:precision bundle))]
                   (check-reference-host "Wasm instrument host"
                                         bundle voice-kernel bus-runner nil)))))))))
 
@@ -2842,7 +2842,7 @@
   region.
 
   The live instrument is the shared, portable host
-  (`omkamra.dsp.hosts.instrument`): a program is data (the served runtime and the
+  (`omkamra.dsp.instrument.program`): a program is data (the served runtime and the
   bus ABI), and the kernels are the ones this check built. So the page runs the
   *same* host code as the JVM, over a browser kernel — which is what makes the
   host portable rather than merely described.
@@ -2850,7 +2850,7 @@
   `region` is `[:lane values]` or `[:shared values]`, or nil to write nothing."
   [bundle kernel bus-runner region frames]
   (let [channels (long (or (get-in bundle [:voice-abi :channels :count]) 1))
-        live (inst-host/instrument-pool
+        live (inst-program/instrument-pool
               {:bundle {:runtime (:runtime bundle)}
                :bus {:abi (:bus-abi bundle)}}
               {:kernel kernel :bus-kernel bus-runner})
@@ -2860,8 +2860,8 @@
         (if (= :lane kind)
           ((:write-lane! bus-runner) "post-amount" values)
           ((:write-shared! bus-runner) "post-amount" values))))
-    (inst-host/note-on! live 60 1.0)
-    (inst-host/render! live block frames)
+    (inst-program/note-on! live 60 1.0)
+    (inst-program/render! live block frames)
     (block->vectors block channels)))
 
 (defn- check-bus-region
@@ -2872,11 +2872,11 @@
   the samples *are* the gain the region carries."
   [name bundle kernel bus-runner kind values expected]
   (let [bus-ir (reader/read-string (:bus-ir bundle))
-        oracle-kernel (interpreter-host/interpreter-kernel
+        oracle-kernel (interpreter-kernels/interpreter-kernel
                        (reader/read-string (:voice-ir bundle))
                        (:voice-abi bundle) {:containment :off})
-        oracle-bus (interpreter-host/interpreter-bus-kernel bus-ir (:bus-abi bundle)
-                                                            (:precision bundle))
+        oracle-bus (interpreter-kernels/interpreter-bus-kernel bus-ir (:bus-abi bundle)
+                                                               (:precision bundle))
         frames (count expected)
         region [kind values]
         actual (render-bus-instrument bundle kernel bus-runner region frames)
@@ -2936,12 +2936,12 @@
                               (check-bus-region
                                (str "JavaScript post-mix " (clojure.core/name kind))
                                bundle
-                               (js-host/js-kernel (gobj/get voice-module "createKernel")
-                                                  (:voice-abi bundle)
-                                                  {:precision (:precision bundle)
-                                                   :containment :off})
-                               (js-host/js-bus-kernel (gobj/get bus-module "createKernel")
-                                                      (:bus-abi bundle))
+                               (js-kernels/js-kernel (gobj/get voice-module "createKernel")
+                                                     (:voice-abi bundle)
+                                                     {:precision (:precision bundle)
+                                                      :containment :off})
+                               (js-kernels/js-bus-kernel (gobj/get bus-module "createKernel")
+                                                         (:bus-abi bundle))
                                kind values expected))
                         [[lane-kind lane-values lane-expected]
                          [shared-kind shared-values shared-expected]]
@@ -2975,11 +2975,11 @@
                             (check-bus-region
                              (str "Wasm post-mix " (clojure.core/name kind))
                              bundle
-                             (wasm-host/wasm-kernel
+                             (wasm-kernels/wasm-kernel
                               (js/WebAssembly.Module. voice-bytes) (:voice-abi bundle)
                               (:voice-memory bundle)
                               {:precision (:precision bundle) :containment :off})
-                             (wasm-host/wasm-bus-kernel
+                             (wasm-kernels/wasm-bus-kernel
                               (js/WebAssembly.Module. bus-bytes) (:bus-abi bundle)
                               (:bus-memory bundle) (:precision bundle))
                              kind values expected))
@@ -3057,7 +3057,7 @@
                              (-> (dynamic-import url)
                                  (.then
                                   (clojure.core/fn [module]
-                                    (js-host/js-kernel
+                                    (js-kernels/js-kernel
                                      (gobj/get module "createKernel") abi
                                      (cond-> {:precision (:precision bundle)
                                               :containment :off}
@@ -3071,7 +3071,7 @@
                      (-> (dynamic-import bus-url)
                          (.then
                           (clojure.core/fn [module]
-                            (js-host/js-bus-kernel
+                            (js-kernels/js-bus-kernel
                              (gobj/get module "createKernel")
                              (:bus-abi bundle)))))])
                (.then
@@ -3098,7 +3098,7 @@
               (clojure.core/fn [[fused-bytes base-bytes bus-bytes]]
                 (let [abi (:voice-abi bundle)
                       build (clojure.core/fn [bytes abi memory mapping]
-                              (wasm-host/wasm-kernel
+                              (wasm-kernels/wasm-kernel
                                (js/WebAssembly.Module. bytes) abi memory
                                (cond-> {:precision (:precision bundle)
                                         :containment :off}
@@ -3110,7 +3110,7 @@
                           (:base-voice-memory bundle) nil)
                    (build fused-bytes abi (:voice-memory bundle)
                           (fusion/runtime-mapping (:controls abi) (:fusion bundle)))
-                   (wasm-host/wasm-bus-kernel
+                   (wasm-kernels/wasm-bus-kernel
                     (js/WebAssembly.Module. bus-bytes) (:bus-abi bundle)
                     (:bus-memory bundle) (:precision bundle)))))))))))
 
@@ -3176,7 +3176,7 @@
   "Compare a fused pool automated per voice against the interpreter pool over the
   base voice, with two different lane curves written to the two voices."
   [name runtime base-abi base-ir channels kernel]
-  (let [oracle (interpreter-host/interpreter-kernel base-ir base-abi)
+  (let [oracle (interpreter-kernels/interpreter-kernel base-ir base-abi)
         render (clojure.core/fn [k]
                  (let [p (pool/voice-pool runtime k)
                        block (render-block channels 4)]
@@ -3212,7 +3212,7 @@
                url (js/URL.createObjectURL blob)
                run (clojure.core/fn [module]
                      (let [abi (:abi bundle)
-                           kernel (js-host/js-kernel
+                           kernel (js-kernels/js-kernel
                                    (gobj/get module "createKernel") abi
                                    {:precision (:precision bundle)
                                     :mapping (fusion/runtime-mapping
@@ -3237,7 +3237,7 @@
               (clojure.core/fn [bytes]
                 (let [module (js/WebAssembly.Module. bytes)
                       abi (:abi bundle)
-                      kernel (wasm-host/wasm-kernel
+                      kernel (wasm-kernels/wasm-kernel
                               module abi (:memory bundle)
                               {:precision (:precision bundle)
                                :mapping (fusion/runtime-mapping

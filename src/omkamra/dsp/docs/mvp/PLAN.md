@@ -261,10 +261,14 @@ omkamra.dsp.{graph,combinators}  (.cljc)  definition values, transforms, `poly`,
 omkamra.dsp.event, schedule      (.cljc)  the host-side sequencing layer (P9)
 omkamra.dsp.{modulation,sequencer,instrument}  the instrument layer (M)
 omkamra.dsp.synth, synth.pool    (.cljc)  description -> config; voices, allocation, rendering
+omkamra.dsp.synth.bundle         (.cljc)  description -> artifact + runtime config, in either world (D95)
 omkamra.dsp.reference            (.cljc)  the reference synthesizer
-omkamra.dsp.hosts*               the assemblers and kernels: jvm, interpreter, js, wasm, fusion
-omkamra.dsp.hosts.instrument     (.cljc)  the instrument program + live host; drives a bus kernel (D85)
-omkamra.dsp.hosts.worker         (.cljc)  the worklet-side kernel
+omkamra.dsp.fusion               (.cljc)  where a pool's controls land in a fused voice (M6)
+omkamra.dsp.hosts.jvm            (.clj)   the JVM world's assembler: a bundle + its kernel -> a pool
+omkamra.dsp.kernels.{jvm,interpreter,js,wasm}   one `Kernel` per target (js/wasm are .cljs)
+omkamra.dsp.kernels.mixing       (.cljc)  the plumbing every kernel shares: regions, containment, summing
+omkamra.dsp.instrument.program   (.cljc)  the instrument program + live host; drives a bus kernel (D85)
+omkamra.dsp.worker               (.cljc)  off-thread sequencing; a Shadow `:web-worker` entry
 omkamra.dsp.worklet_adapters.js  (.cljs)  the AudioWorklet adapter
 omkamra.dsp.harness.catalog      (.cljc)  the data-only conformance catalog
 omkamra.dsp.harness.conformance  (.clj)   plans, payloads, the JVM differential driver
@@ -278,10 +282,13 @@ The front end has three parts worth keeping apart: **descriptor** normalizes the
 macros into data, **linker** resolves `dsp/call` and inlines what is not called, and
 **ir** lowers to a small typed IR whose `:diagnostics` channel carries what the
 compiler noticed. `targets.capability` is what lets a target refuse an option it
-cannot serve, before any lowering (D29). **compiler** is the pipeline around them —
-options, capability check, link, lower, `prepare-for-target`, emit — as `.cljc`, so
-the JVM's `dsp/compile` and the browser's own compile are one implementation; only
-the JVM backend is injected (D81). **source** is the front end over it: `compile`
+cannot serve, before any lowering (D29), and what says whether a target emits a
+call or evaluates the call graph (D94). **compiler** is the pipeline around them —
+options, capability check, link, lower, `prepare-for-target`, dispatch — as
+`.cljc`, so the JVM's `dsp/compile` and the browser's own compile are one
+implementation; the final target step is each target's own `compile-artifact`,
+and only the JVM backend is injected from the side that has `insn` (D81, D94).
+**source** is the front end over it: `compile`
 takes a definition or a source string, and `evaluate` takes `:sci` (both worlds)
 or `:native` (the JVM's own reader and macros); **capture** is the reading both
 kinds of macro call; **sci** builds the context the page evaluates a string in.
@@ -1102,6 +1109,6 @@ The namespace list above is the map; the DSP subtree's files follow it. A few
 entries are worth naming because their extension is the portability decision:
 `descriptor`, `linker`, `ir`, `builtins`, `literals`, `numbers` and `compiler` are
 `.cljc`; `targets/interpreter`, `targets/js` and `targets/wasm` are `.cljc`;
-`targets/jvm` and `hosts/jvm` are `.clj` because `insn` is a JVM library. Backend
+`targets/jvm` and `kernels/jvm` are `.clj` because `insn` is a JVM library. Backend
 namespaces must not take responsibility for source validation, linking, or
 target-neutral ABI inference — `compiler` is where those meet a target.

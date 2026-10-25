@@ -11,11 +11,12 @@
   (:require [clojure.test :refer [deftest is testing]]
             [omkamra.dsp :as dsp]
             [omkamra.dsp.examples.demo-synth :as demo]
-            [omkamra.dsp.hosts.instrument :as instrument-host]
+            [omkamra.dsp.instrument.program :as instrument-program]
             [omkamra.dsp.instrument :as inst]
             [omkamra.dsp.library.filter :as filter]
             [omkamra.dsp.synth :as synth]
-            [omkamra.dsp.hosts :as host]
+            [omkamra.dsp.hosts.jvm :as host]
+            [omkamra.dsp.synth.bundle :as bundle]
             [omkamra.dsp.synth.pool :as pool]
             [omkamra.dsp.harness.fixtures :as fixtures
              :refer [allocated-bytes
@@ -1268,8 +1269,8 @@
   ;; the whole pool, so a broadcast write is one call that every instance reads,
   ;; including voices that start after it (M5).
   (doseq [target [:jvm :interpreter]]
-    (let [bundle (host/synth-bundle shared-voice-description
-                                    {:target target :containment :off})
+    (let [bundle (bundle/synth-bundle shared-voice-description
+                                      {:target target :containment :off})
           kernel (host/host-kernel (:artifact bundle) {:containment :off})
           first-voice (pool/create-voice kernel 4)
           second-voice (pool/create-voice kernel 4)
@@ -1325,8 +1326,8 @@
   ;; voice out of the mix, silently, and only when a second voice sounds. Pin the
   ;; key function itself, before anything consumes it (M6).
   (doseq [target [:jvm :interpreter]]
-    (let [bundle (host/synth-bundle sine-voice-description
-                                    {:target target :containment :off})
+    (let [bundle (bundle/synth-bundle sine-voice-description
+                                      {:target target :containment :off})
           kernel (host/host-kernel (:artifact bundle) {:containment :off})
           voices (mapv (fn [_] (pool/create-voice kernel 128)) (range 4))
           keys (mapv (fn [voice] (pool/instance-key kernel voice)) voices)]
@@ -1372,7 +1373,7 @@
   ;; mark array's size is asserted too: a field that is one slot off reads another
   ;; field, which is how the first attempt failed.
   (let [mixes (atom [])
-        runtime (:runtime (host/synth-bundle sine-voice-description {:target :jvm}))
+        runtime (:runtime (bundle/synth-bundle sine-voice-description {:target :jvm}))
         pool (pool/voice-pool runtime (fake-kernel 2 mixes))
         output (float-array 8)]
     (is (= (pool/pool-capacity pool)
@@ -1397,7 +1398,7 @@
   ;; voice, so the marks must never suppress a mix — including for the last key,
   ;; which is where the first version's per-block clearing was short by one (M6).
   (let [mixes (atom [])
-        runtime (:runtime (host/synth-bundle sine-voice-description {:target :jvm}))
+        runtime (:runtime (bundle/synth-bundle sine-voice-description {:target :jvm}))
         pool (pool/voice-pool runtime (fake-kernel 1 mixes))
         output (float-array 4)]
     (dotimes [_ (pool/pool-capacity pool)] (pool/note-on! pool 60 1.0))
@@ -1455,8 +1456,8 @@
       ;; What `poly` used to lose: it redeclared the controls by name alone, so a
       ;; shared control arrived as an ordinary scalar and the fused interface had
       ;; no shared region at all (D50, D52).
-      (let [bundle (host/synth-bundle (assoc shared-voice-description :capacity 2)
-                                      (assoc options :fusion {:slots 2}))]
+      (let [bundle (bundle/synth-bundle (assoc shared-voice-description :capacity 2)
+                                        (assoc options :fusion {:slots 2}))]
         (is (= '[amount] (mapv :name (:shared (:abi (:artifact bundle)))))
             "the fused interface declares the control the voice declared")
         (is (= [{:name "amount" :offset 0 :required? true}] (:shared (:runtime bundle))))
@@ -1585,15 +1586,15 @@
                                       :capacity 2 :max-block-frames 128))
         options {:target :jvm :precision :f32 :containment :off}
         play (fn [program]
-               (let [live (instrument-host/instrument-pool
+               (let [live (instrument-program/instrument-pool
                            program {:containment :off})
-                     instrument-pool (instrument-host/pool-of live)
+                     instrument-pool (instrument-program/pool-of live)
                      block (float-array 128)]
                  (pool/note-on! instrument-pool 60 1.0)
                  (pool/render! instrument-pool block 128 48000.0)
                  (vec block)))
-        plain-program (instrument-host/compile-instrument value options)
-        fused-program (instrument-host/compile-instrument
+        plain-program (instrument-program/compile-instrument value options)
+        fused-program (instrument-program/compile-instrument
                        value (assoc options :fusion {:slots 2}))
         plain (play plain-program)
         fused (play fused-program)]
@@ -1615,39 +1616,39 @@
   ;; lane -- the check cannot pass vacuously.
   (doseq [target [:interpreter :jvm]]
     (testing (name target)
-      (let [program (instrument-host/compile-instrument fixtures/bus-lane-instrument
-                                                        {:target target
-                                                         :containment :off})
+      (let [program (instrument-program/compile-instrument fixtures/bus-lane-instrument
+                                                           {:target target
+                                                            :containment :off})
             bus-abi (:abi (:bus program))]
         (is (= '[post-amount] (mapv :name (:lanes bus-abi)))
             "the chain declares the lane the stage was written with")
         (is (empty? (:controls bus-abi))
             "and a lane-only control leaves the scalar list")
-        (let [live (instrument-host/instrument-pool program {:containment :off})
+        (let [live (instrument-program/instrument-pool program {:containment :off})
               lane (mapv double (range 1 9))
               block (float-array 8)]
-          (instrument-host/note-on! live 60 1.0)
-          (instrument-host/set-bus-lane! live 'post-amount lane)
-          (instrument-host/render! live block 8)
+          (instrument-program/note-on! live 60 1.0)
+          (instrument-program/set-bus-lane! live 'post-amount lane)
+          (instrument-program/render! live block 8)
           (is (= lane (mapv double (vec block)))
               "every frame reads the lane written into the chain's region")
           (testing "and the refusals are loud"
             (is (thrown-with-msg?
                  clojure.lang.ExceptionInfo #"declares no such lane"
-                 (instrument-host/set-bus-lane! live 'nope lane))
+                 (instrument-program/set-bus-lane! live 'nope lane))
                 "a name the chain does not declare is refused")
             (is (thrown-with-msg?
                  clojure.lang.ExceptionInfo #"has no such control"
-                 (instrument-host/set-bus-control! live 'post-amount 1.0))
+                 (instrument-program/set-bus-control! live 'post-amount 1.0))
                 "a lane-only control has no scalar for `set-bus-control!` to set"))))
       (testing "an instrument whose chain has no lane refuses one"
-        (let [program (instrument-host/compile-instrument
+        (let [program (instrument-program/compile-instrument
                        (inst/instrument fixtures/bus-lane-description)
                        {:target target :containment :off})
-              live (instrument-host/instrument-pool program {:containment :off})]
+              live (instrument-program/instrument-pool program {:containment :off})]
           (is (thrown-with-msg?
                clojure.lang.ExceptionInfo #"declares no lanes"
-               (instrument-host/set-bus-lane! live 'amount [1.0]))))))))
+               (instrument-program/set-bus-lane! live 'amount [1.0]))))))))
 
 (deftest a-post-mix-shared-control-follows-its-parameter
   ;; H2, the shared half. A `:shared` post-mix control reads the bus's own
@@ -1658,7 +1659,7 @@
   ;; channel's instance.
   (doseq [target [:interpreter :jvm]]
     (testing (name target)
-      (let [program (instrument-host/compile-instrument
+      (let [program (instrument-program/compile-instrument
                      fixtures/bus-shared-instrument
                      {:target target :containment :off})
             bus-abi (:abi (:bus program))]
@@ -1666,15 +1667,15 @@
             "the chain declares the shared control the stage was written with")
         (is (empty? (:controls bus-abi))
             "and it leaves the scalar list, so no block-rate value stands beside it")
-        (let [live (instrument-host/instrument-pool program {:containment :off})
+        (let [live (instrument-program/instrument-pool program {:containment :off})
               render (fn [frames]
                        (let [block (float-array frames)]
-                         (instrument-host/render! live block frames)
+                         (instrument-program/render! live block frames)
                          (mapv double (vec block))))]
-          (instrument-host/note-on! live 60 1.0)
+          (instrument-program/note-on! live 60 1.0)
           (is (= [1.0 1.0 1.0 1.0] (render 4))
               "the parameter's default fills the region from construction")
-          (instrument-host/set-parameter! live 'post-amount 2.5)
+          (instrument-program/set-parameter! live 'post-amount 2.5)
           (is (= [2.5 2.5 2.5 2.5] (render 4))
               "and setting it reaches the bus, not only the voices"))))))
 
@@ -1688,7 +1689,7 @@
                                       :capacity 8 :max-block-frames 128))
         options {:target :jvm :precision :f32 :containment :off}
         capacity (fn [fusion]
-                   (let [program (instrument-host/compile-instrument
+                   (let [program (instrument-program/compile-instrument
                                   value (cond-> options
                                           fusion (assoc :fusion {:slots fusion})))]
                      (get-in program [:bundle :runtime :capacity])))]

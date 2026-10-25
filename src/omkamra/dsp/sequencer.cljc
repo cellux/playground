@@ -30,7 +30,7 @@
   **Allocation.** `sequencer` allocates the queue, scheduler, and scratch;
   `render!` allocates nothing; `submit!` is the producer side and may allocate."
   (:require [omkamra.dsp.event :as event]
-            [omkamra.dsp.hosts.mixing :as mixing]
+            [omkamra.dsp.numbers :as numbers]
             [omkamra.dsp.schedule :as schedule]
             [omkamra.dsp.synth.pool :as pool]))
 
@@ -148,8 +148,8 @@
                    (merge built-in-handlers handlers)
                    queue (schedule/scheduler queue)
                    (atom 0) max-block-frames
-                   (mixing/real-array f64? max-block-frames)
-                   (mixing/real-array f64? max-block-frames)
+                   (numbers/real-array f64? max-block-frames)
+                   (numbers/real-array f64? max-block-frames)
                    f64?)))))
 
 (defn sequencer-pools

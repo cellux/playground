@@ -1,26 +1,26 @@
-(ns omkamra.dsp.hosts
-  "Compile a synth description into an artifact, a runtime configuration, and the
-  host kernel a pool over it runs on (P10).
+(ns omkamra.dsp.synth.bundle
+  "Compile a synth description into an artifact and its runtime configuration.
 
-  This namespace assembles. The kernels live in `omkamra.dsp.hosts.jvm`,
-  `omkamra.dsp.hosts.interpreter`, `omkamra.dsp.hosts.js`, and
-  `omkamra.dsp.hosts.wasm`, and the plumbing they share — the containment policy
-  and the planar blocks a voice is mixed through — in
-  `omkamra.dsp.hosts.mixing`.
+  This is the world-independent half of assembling a synth: it compiles the
+  description's voice for a target and derives the runtime configuration — the
+  control plan, the lanes and the shared parameters — *from the artifact's own
+  ABI*, so the two cannot disagree. `:runtime` is pure data, so it can travel; the
+  kernel is the world's own and is added beside the bundle, by `omkamra.dsp.hosts.jvm`
+  on the JVM and by the browser's assembler from the same bundle.
 
-  `synth-bundle` is the half that travels: it compiles the voice artifact and
-  derives the runtime configuration *from that artifact's own ABI*, so the
-  control plan's order is the ABI's order by construction rather than by
-  agreement. `compile-synth` adds the JVM-side kernel to it; a browser host
-  builds its own from the same bundle."
+  Two seams keep it portable. The voice is resolved through `:definitions` —
+  `{qualified-id descriptor}`, the same map `dsp/compile` takes — because a world
+  without runtime namespace resolution (ClojureScript, T7) cannot look an id up,
+  where the JVM falls back to `requiring-resolve`. And compilation goes through
+  `omkamra.dsp/compile`, which is each world's own face of the pipeline.
+
+  `:target` defaults to `:jvm`, the world this assembler was written for. It is
+  deliberately present: the descriptor's own default is `:interpreter`, so a
+  bundle must not fall through to it. A browser caller always passes the target
+  it compiles for."
   (:require [omkamra.dsp :as dsp]
             [omkamra.dsp.combinators :as comb]
-            [omkamra.dsp.hosts.fusion :as fusion]
-            [omkamra.dsp.hosts.interpreter :as interpreter-host]
-            [omkamra.dsp.hosts.jvm :as jvm-host]
-            [omkamra.dsp.hosts.mixing :as mixing]
-            [omkamra.dsp.synth :as synth]
-            [omkamra.dsp.synth.pool :as pool]))
+            [omkamra.dsp.synth :as synth]))
 
 (def ^:private realtime-requirements
   "What a voice kernel must not do, for a pool to be allowed to run it. The
@@ -28,89 +28,52 @@
   while the pool is being built, not while audio is running."
   [[:allocations? false] [:locks? false] [:reflection? false] [:io? false]])
 
-(defn- fused-mapping
-  "The base -> fused control mapping a fused kernel applies (D50).
+(defn- value-of
+  "The descriptor a Var or a descriptor value holds."
+  [definition]
+  (if (var? definition) @definition definition))
 
-  A fused kernel is the one component that holds both interfaces: the base one,
-  which the runtime config carries because a bundle crosses to a host that may not
-  have the base artifact, and the fused one, which is the artifact's own. The
-  conversion itself is portable (`fusion/runtime-mapping`), because the browser
-  hosts build the same mapping from the bundle they were handed."
-  [artifact fusion]
-  (fusion/runtime-mapping (get-in artifact [:abi :controls]) fusion))
+(defn- resolve-voice
+  "The Var or descriptor a description's `:voice :definition` names.
 
-(defn host-kernel
-  "The JVM-side `Kernel` for a compiled artifact's target.
+  A description may carry the definition itself — the JVM's own `dsp/defn` yields
+  a Var, a descriptor value stays as it is — or an id to look up. An id is looked
+  up in the caller's `:definitions` first, which is the only way a world without
+  runtime namespace resolution can name one (ClojureScript, T7); the JVM falls
+  back to `requiring-resolve`."
+  [definition {:keys [definitions]}]
+  (cond
+    (or (var? definition) (map? definition))
+    definition
 
-  Only the JVM and the reference interpreter can host a pool here. A JavaScript
-  or Wasm kernel is built by its own host — in the browser, over the artifact
-  `synth-bundle` produces (`omkamra.dsp.hosts.js`) — and arrives with it.
+    (symbol? definition)
+    (or (get definitions definition)
+        #?(:clj (requiring-resolve definition))
+        (synth/fail "a synth voice definition cannot be resolved"
+                    {:definition definition}))
 
-  `:containment` selects the non-finite policy: `:reset` (default, per `PLAN.md`)
-  silences and resets a voice whose block is non-finite and counts it;
-  `:sanitize` contains each sample instead (non-finite -> 0, finite runaway
-  clamped, no reset); `:off` skips containment for the plain, faster loop."
-  ([artifact] (host-kernel artifact {}))
-  ([artifact {:keys [containment fusion] :or {containment :reset}}]
-   (let [containment (mixing/check-containment containment)]
-     (case (:target artifact)
-       :jvm (if fusion
-              (jvm-host/fused-jvm-kernel artifact (fused-mapping artifact fusion)
-                                         containment)
-              (jvm-host/jvm-kernel artifact containment))
-       :interpreter
-       (interpreter-host/interpreter-kernel (:ir artifact) (:abi artifact)
-                                            {:containment containment
-                                             :mapping (when fusion
-                                                        (fused-mapping artifact fusion))})
-       (synth/fail (str "this DSP target has no JVM host kernel; a JavaScript"
-                        " or Wasm kernel is built in the browser"
-                        " (omkamra.dsp.hosts.js)")
-                   {:target (:target artifact)
-                    :supported [:jvm :interpreter]})))))
-
-(defn bus-kernel
-  "The JVM-side bus kernel for a compiled bus artifact's target.
-
-  The post-mix chain is one mono processor compiled like a voice, so the bus
-  kernel is chosen by the same target axis `host-kernel` uses. A JavaScript or
-  Wasm bus kernel is built by its own host in the browser, from the bus
-  artifact's ABI.
-
-  Returns the `{:create-bus, :run-bus!, :reset-bus!, :write-lane!,
-  :write-shared!}` map `omkamra.dsp.hosts.instrument` drives."
-  [artifact]
-  (case (:target artifact)
-    :jvm (jvm-host/jvm-bus-kernel artifact)
-    :interpreter (interpreter-host/interpreter-bus-kernel
-                  (:ir artifact) (:abi artifact)
-                  (get-in artifact [:physical-type :precision]))
-    (synth/fail (str "this DSP target has no JVM-side bus kernel; a JavaScript"
-                     " or Wasm bus kernel is built in the browser"
-                     " (omkamra.dsp.hosts.js)")
-                {:target (:target artifact)
-                 :supported [:jvm :interpreter]})))
+    :else
+    (synth/fail "a synth voice :definition must be an id or a descriptor"
+                {:definition definition})))
 
 (defn synth-bundle
   "Compile a synth description into an artifact and its runtime configuration.
 
   Returns `{:description ..., :runtime ..., :artifact ..., :containment ...,
   :realtime ...}` — everything but the kernel. `:runtime` is pure data, so it can
-  be sent to another host, and the artifact stays with the compiler. This is what
-  a browser host needs: `compile-synth` adds a JVM-side `Kernel` to it, while
-  `omkamra.dsp.hosts.js` builds one from the artifact on the other side.
+  be sent to another host, and the artifact stays with the compiler. The world
+  adds its own kernel beside it: `omkamra.dsp.hosts.jvm/compile-synth` on the JVM, and
+  a browser assembler from the same bundle.
 
   `compile-options` selects the target, precision, and `:containment` policy
   (`:reset` default, or `:sanitize`/`:off`); the entry is always `:process`,
-  because a voice is a generator, not a scalar function."
+  because a voice is a generator, not a scalar function. `:definitions` reaches
+  the voice and its calls, as it does for `dsp/compile`."
   ([description] (synth-bundle description {}))
   ([description compile-options]
    (let [normalized (synth/normalize-description description)
          definition (get-in normalized [:voice :definition])
-         resolved (requiring-resolve definition)
-         _ (when-not resolved
-             (synth/fail "a synth voice definition cannot be resolved"
-                         {:definition definition}))
+         resolved (resolve-voice definition compile-options)
          containment (get compile-options :containment :reset)
          ;; Fusion is the one compile option that is *consumed* here rather than
          ;; passed on: it changes what is compiled (D52). The rest travel to
@@ -158,15 +121,15 @@
          ;; that exists, such a voice is fused without it (an optimisation, not
          ;; correctness).
          guarded? (and fusion (:guard fusion)
-                       (not= :void (:return-type (deref resolved)))
+                       (not= :void (:return-type (value-of resolved)))
                        (some #(= 'gate (:name %)) (:controls abi)))
          voice (if guarded?
-                 (comb/guard (deref resolved))
-                 (deref resolved))
+                 (comb/guard (value-of resolved))
+                 (value-of resolved))
          artifact (if fusion
-                    (dsp/compile (dsp/link (comb/poly voice
-                                                      {:count (:slots fusion)
-                                                       :per-slot per-slot}))
+                    (dsp/compile (comb/poly voice
+                                            {:count (:slots fusion)
+                                             :per-slot per-slot})
                                  (assoc (merge {:target :jvm}
                                                (dissoc compile-options
                                                        :containment :fusion))
@@ -245,21 +208,3 @@
       :artifact artifact
       :containment containment
       :realtime (:realtime artifact)})))
-
-(defn compile-synth
-  "Compile a synth description into an artifact, a runtime configuration, and the
-  JVM-side `Kernel` a pool over that artifact runs on.
-
-  The JavaScript and Wasm targets have no kernel here: their host builds one in
-  the browser (`omkamra.dsp.hosts.js`), and `synth-bundle` is what travels to it."
-  ([description] (compile-synth description {}))
-  ([description compile-options]
-   (let [bundle (synth-bundle description compile-options)]
-     (assoc bundle :kernel (host-kernel (:artifact bundle)
-                                        {:containment (:containment bundle)
-                                         :fusion (:fusion (:runtime bundle))})))))
-
-(defn synth-pool
-  "Create the live pool for a compiled synth."
-  [bundle]
-  (pool/voice-pool (:runtime bundle) (:kernel bundle)))

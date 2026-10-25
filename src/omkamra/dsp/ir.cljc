@@ -11,6 +11,7 @@
             [omkamra.dsp.literals :as literals]
             [omkamra.dsp.names :as names]
             [omkamra.dsp.numbers :as numbers]
+            [omkamra.dsp.targets.capability :as capability]
             [omkamra.dsp.descriptor :as descriptor]))
 
 (def ^:private arithmetic-operators
@@ -3240,15 +3241,6 @@
                    :locals (vec (distinct (declared-locals body))))]
      (assoc ir :effects (collect-effects body)))))
 
-(def calling-targets
-  "Targets whose backend emits a call instead of copying the callee body (D47).
-
-  A target that is not here needs every definition inlined, which is what
-  `inline-calls` has always done for it. `:interpreter` is not a calling target in
-  this sense either: it is never inlined at all, because it executes the call graph
-  and is the oracle the others are compared against."
-  #{:jvm :js :wasm})
-
 (defn- requested-inline-ids
   "The definitions that asked to be copied into their call sites (D47)."
   [lowered]
@@ -3259,23 +3251,25 @@
 (defn prepare-for-target
   "Prepare lowered IR for `target`, compiling `entry` (D47).
 
-  A process on a target that can call keeps its call sites, copying only the
+  A process on a target that emits a call keeps its call sites, copying only the
   definitions it must: the ones that asked (`^:inline`) plus the ones no method can
-  take. Every other compile gets one flat function, exactly as before.
+  take. A target that evaluates the call graph rather than emitting from it — the
+  interpreter — is handed the IR as it is: nothing is inlined for a backend that
+  emits no call at all (`targets.capability/calls?`).
 
-  A **function** entry stays inlined even on a calling target: its class has no
-  state arrays — a function is a pure scalar expression — so there is no arena for
-  a callee's partition to live in. D19's partitions exist on the process path.
+  A **function** entry is inlined even on a calling target: its class has no state
+  arrays — a function is a pure scalar expression — so there is no arena for a
+  callee's partition to live in. D19's partitions exist on the process path.
 
   This is the last thing the compiler does before a target sees the IR, and it is
   the *compiler's* step rather than the JVM entry point's: a backend emits from
   prepared IR whatever world it is running in."
   [target entry lowered]
-  (if (and (= :process entry) (contains? calling-targets target))
-    (inline-calls lowered (into (uncallable-definition-ids lowered)
-                                (requested-inline-ids lowered)))
-    (if (= :interpreter target)
-      lowered
+  (if-not (capability/calls? target)
+    lowered
+    (if (= :process entry)
+      (inline-calls lowered (into (uncallable-definition-ids lowered)
+                                  (requested-inline-ids lowered)))
       (inline-calls lowered))))
 
 (defn validate-runtime-policy!

@@ -28,15 +28,20 @@
 
   `:checks` is the runtime validation a target implements; `:wasm-math` is
   precision-dependent because a lookup table is addressed by a byte stride and so
-  has no f64 form."
+  has no f64 form; `:calls?` is whether the backend emits a call from a call site
+  or evaluates the linked call graph itself (D47)."
   {:interpreter {:entries #{:function :process}
-                 :checks #{:development :none}}
+                 :checks #{:development :none}
+                 :calls? false}
    :jvm {:entries #{:function :process}
-         :checks #{:none}}
+         :checks #{:none}
+         :calls? true}
    :js {:entries #{:function :process}
-        :checks #{:none}}
+        :checks #{:none}
+        :calls? true}
    :wasm {:entries #{:process}
           :checks #{:none}
+          :calls? true
           :wasm-math {:f32 #{:polynomial :table}
                       :f64 #{:polynomial}}}})
 
@@ -49,6 +54,16 @@
   distinguished from the default, so the check below would fire on every build."
   [target]
   (if (= :interpreter target) :development :none))
+
+(defn calls?
+  "Whether `target`'s backend emits a call from a call site, rather than
+  evaluating the linked call graph itself (D47).
+
+  The interpreter executes the graph, so nothing is inlined for it; a
+  code-generating backend emits a call and keeps the callee unless it asked to be
+  copied or no method can take it."
+  [target]
+  (boolean (get-in targets [target :calls?])))
 
 (defn- served-names
   [values]

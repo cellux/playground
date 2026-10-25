@@ -1447,3 +1447,63 @@
              :memory memory
              :state-storage :linear-memory
              :control-storage :parameters}})))
+
+;; ---------------------------------------------------------------------------
+;; Artifact construction
+;; ---------------------------------------------------------------------------
+
+(def assembler
+  "The step that turns a Wasm artifact's WAT into the module a Wasm engine loads.
+
+  A Wasm engine takes bytes and nothing else, so *someone* has to assemble them.
+  That assembler lives in the browser's world (WABT, the pinned npm package), not
+  in the compiler's, so the artifact names the step instead of carrying it: `:bytes`
+  stays nil by design and the consumer that has the named assembler produces the
+  module (D73). The version is recorded so an artifact says which assembler it was
+  compiled for — keep it in step with `package.json`, which
+  `omkamra.dsp.tests.wasm` checks."
+  {:generator :browser-wabt
+   :version "1.0.39"})
+
+(defn- abi-instance
+  "The Wasm instance lifecycle in the target-neutral vocabulary.
+
+  A Wasm instance owns its linear memory, so releasing it is dropping the
+  instance."
+  [abi]
+  (assoc (:instance abi)
+         :factory :instantiate
+         :handle {:kind :wasm-instance
+                  :region :state
+                  :shared? false}
+         :operations {:create :instantiate
+                      :reset :reset
+                      :destroy :release}))
+
+(defn compile-artifact
+  "The Wasm artifact for prepared IR: the WAT, the ABI, and the assembler the
+  consumer must use (D73). The shared keys come from the pipeline's
+  `artifact-base` (P13c, D77)."
+  [{:keys [ir physical-type] :as base}]
+  (let [wat-artifact (lower ir)
+        abi (assoc (:abi base) :instance (abi-instance (:abi base)))
+        wasm-abi (assoc (:abi wat-artifact)
+                        :physical-type physical-type
+                        :instance (:instance abi))]
+    (-> base
+        (assoc :abi abi
+               :module {:format :wat
+                        :exports (:exports wat-artifact)
+                        :memory (:memory wat-artifact)
+                        :abi wasm-abi}
+               :wat (:source wat-artifact)
+               :memory (:memory wat-artifact)
+               :metadata {:abi wasm-abi
+                          :memory (:memory wat-artifact)
+                          :physical-type physical-type
+                          :exports (:exports wat-artifact)}
+               :wasm-abi wasm-abi
+               :binary (assoc assembler
+                              :format :wasm
+                              :source :wat
+                              :bytes nil)))))

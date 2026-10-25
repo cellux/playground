@@ -841,3 +841,30 @@
   it never reaches for the Squint stdlib."
   [js-ir]
   (squint/compile-string (emit-source js-ir) {:elide-imports true}))
+
+;; ---------------------------------------------------------------------------
+;; Artifact construction
+;; ---------------------------------------------------------------------------
+
+(defn- abi-instance
+  "The JavaScript instance lifecycle in the target-neutral vocabulary."
+  [abi]
+  (assoc (:instance abi)
+         :factory :createKernel
+         :handle {:kind :kernel-handle :shared? false}
+         :operations {:create :createKernel
+                      :reset :reset
+                      :destroy :destroy}))
+
+(defn compile-artifact
+  "The JavaScript artifact for prepared IR: the JS IR, the ES module Squint makes
+  of it, and the ABI carrying the JavaScript instance lifecycle. The shared keys
+  come from the pipeline's `artifact-base` (P13c, D77)."
+  [{:keys [entry ir options] :as base}]
+  (let [js-ir (lower (assoc ir :options options))]
+    (-> base
+        (assoc :js-ir js-ir
+               :abi (assoc (:abi base) :instance (abi-instance (:abi base)))
+               :module {:format :es-module
+                        :exports (if (= :process entry) [:createKernel] [:invoke])}
+               :source (emit-module js-ir)))))

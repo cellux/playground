@@ -1,4 +1,4 @@
-(ns omkamra.dsp.hosts.fusion
+(ns omkamra.dsp.fusion
   "Where a pool's control plan lands in a fused voice's interface (M6).
 
   A fused instance is one compiled process holding `slots` copies of a voice, so

@@ -24,11 +24,12 @@ below evaluates in it.
 | `src/omkamra/dsp/tests/suite.clj` | Requires every test namespace; `run-jvm` runs the language suite, `run-browser` the browser suite, `run-everything` both at once. |
 | `src/omkamra/dsp/synth.cljc` | The synth description and the pure-data runtime configuration (P10). |
 | `src/omkamra/dsp/synth/pool.cljc` | Preallocated voices, allocation/stealing, the note lifecycle, block rendering. |
-| `src/omkamra/dsp/hosts.clj` | The assembler: `synth-bundle`, `compile-synth`, and which kernel a target gets. |
-| `src/omkamra/dsp/hosts/*.{clj,cljc,cljs}` | The kernels (`jvm`, `interpreter`, `js`) and the plumbing they share (`mixing`). |
+| `src/omkamra/dsp/synth/bundle.cljc` | The world-independent bundle: a description → artifact + runtime configuration (D95). |
+| `src/omkamra/dsp/hosts/jvm.clj` | The JVM world's assembler: the bundle plus the kernel a pool runs on. |
+| `src/omkamra/dsp/kernels/*.{clj,cljc,cljs}` | One `Kernel` per target (`jvm`, `interpreter`, `js`, `wasm`) and the plumbing they share (`mixing`). |
 | `src/omkamra/dsp/tests/synth.clj` | The synth runtime suite: description, pool, modes, lifecycle, allocation. |
 | `src/omkamra/dsp/instrument.cljc` | The Clojure-level instrument graph: voice, polyphony, post-mix chain (D42). |
-| `src/omkamra/dsp/hosts/instrument.clj` | The instrument lowering (value → program) and its live host. |
+| `src/omkamra/dsp/instrument/program.cljc` | The instrument lowering (value → program) and its live host. |
 | `src/omkamra/dsp/tests/reference.clj` | The P11 reference instrument: matrix, stereo, post-mix chain, allocation. |
 | `src/omkamra/dsp/examples/demo_synth.clj` | The example instrument and one possible host-side modulation wiring (D34). |
 | `src/omkamra/dsp/targets/*.{clj,cljc}` | The four backends; `targets/capability.cljc` declares what each serves. |
@@ -449,7 +450,7 @@ automatic run.
    f64;
 6. the JavaScript AudioWorklet adapter (f32 and f64) and the Wasm adapter
    (f32 and f64);
-7. the **pool hosts** — `omkamra.dsp.hosts.js` and `omkamra.dsp.hosts.wasm`
+7. the **pool hosts** — `omkamra.dsp.kernels.js` and `omkamra.dsp.kernels.wasm`
    driving `omkamra.dsp.synth.pool`, each compared against the interpreter pool
    over the same events (P10d), including a **fused** pool (`{:fusion {:slots
    S}}`, M6c) whose `slots` voices live in one process — checked across a steal
@@ -462,7 +463,7 @@ automatic run.
    not, because its approximated `pow`/`sin` drift through the long resonant
    voice, so per-operation equivalence there is left to the shared process
    matrix. The **fused** instrument (F1, `{:fusion {:slots S}}` threaded by
-   `omkamra.dsp.hosts.instrument`) is checked against the **plain instrument on
+   `omkamra.dsp.instrument.program`) is checked against the **plain instrument on
    the same host** instead: the page fetches `/fused-instrument-bundle` and
    `/fused-instrument-source`, rebuilds the fused voice kernel and the plain one
    over the same bus, and compares. That is what puts the fused host's kernel
@@ -475,7 +476,7 @@ automatic run.
    non-finite sample reach the block.
 
 10. the **worker → worklet event transport** (M1) — a real Web Worker
-    (`omkamra.dsp.hosts.worker`, served from the separate `:omkamra.dsp.hosts.worker`
+    (`omkamra.dsp.worker`, served from the separate `:omkamra.dsp.worker`
     build) posts timestamped events over a `MessageChannel` to an
     `OfflineAudioContext` worklet running the `follow-amount` kernel; the
     rendered block is a step function at the exact event frames;

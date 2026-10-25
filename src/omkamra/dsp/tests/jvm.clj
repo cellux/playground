@@ -10,9 +10,10 @@
                      call-fixture-twice gain one-pole
                      raw-process-noop sine-voice stereo-cross
                      thread-allocation-meter]]
-            [omkamra.dsp.hosts :as hosts]
-            [omkamra.dsp.hosts.fusion :as fusion]
-            [omkamra.dsp.hosts.jvm :as jvm-host]
+            [omkamra.dsp.hosts.jvm :as hosts]
+            [omkamra.dsp.synth.bundle :as bundle]
+            [omkamra.dsp.fusion :as fusion]
+            [omkamra.dsp.kernels.jvm :as jvm-kernels]
             [omkamra.dsp.synth.pool :as pool]))
 
 (deftest the-benchmark-arms-are-really-different-lowerings
@@ -266,10 +267,10 @@
   guard's latch is therefore part of each slot's partition, which is what these
   tests reset."
   [slots]
-  (let [bundle (hosts/synth-bundle (assoc fixtures/echo-voice-description
-                                          :capacity slots :max-block-frames 128
-                                          :stealing :oldest)
-                                   {:target :jvm :precision :f32 :containment :off})
+  (let [bundle (bundle/synth-bundle (assoc fixtures/echo-voice-description
+                                           :capacity slots :max-block-frames 128
+                                           :stealing :oldest)
+                                    {:target :jvm :precision :f32 :containment :off})
         base (:artifact bundle)
         fused (dsp/compile (dsp/link (comb/poly (comb/guard (deref #'fixtures/echo-voice))
                                                 {:count slots
@@ -284,8 +285,8 @@
 (defn- fused-pool
   "A pool over the plain artifact and one over the fused one, same runtime."
   [{:keys [bundle base fused mapping]}]
-  {:plain (pool/voice-pool (:runtime bundle) (jvm-host/jvm-kernel base :off))
-   :fused (pool/voice-pool (:runtime bundle) (jvm-host/fused-jvm-kernel fused mapping :off))})
+  {:plain (pool/voice-pool (:runtime bundle) (jvm-kernels/jvm-kernel base :off))
+   :fused (pool/voice-pool (:runtime bundle) (jvm-kernels/fused-jvm-kernel fused mapping :off))})
 
 (deftest the-fused-mapping-is-the-shape-poly-expands
   ;; `poly` answers a question about *interfaces*: the per-slot controls become

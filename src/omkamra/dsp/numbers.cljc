@@ -9,7 +9,9 @@
   `\"2\"` on the other; a literal's type cannot be recovered from its value on
   either (D78); and a double is eight bytes that only one of the two hosts will
   hand over as bits. Everything a host decides differently about numbers is
-  therefore decided *here*, and nowhere else.
+  therefore decided *here*, and nowhere else — including the primitive array a
+  host puts reals in, and how a value is read back out of whatever a host
+  supplied.
 
   Three rules keep this honest, and they are what a change here has to respect:
 
@@ -289,3 +291,53 @@
   #?(:clj (format "\\%02x" (bit-and 0xff value))
      :cljs (str "\\" (-> (.toString (bit-and 0xff value) 16)
                          (.padStart 2 "0")))))
+
+;; ---------------------------------------------------------------------------
+;; The storage a host puts reals in, and how to read it back
+;; ---------------------------------------------------------------------------
+
+(defn real-array
+  "A primitive array of `length` reals at the target's precision.
+
+  A host that renders a voice needs somewhere to put its samples that the JVM
+  will not box and the browser can hand to a typed view, so the shape of that
+  storage is a host decision like any other."
+  [f64? length]
+  #?(:clj (if f64? (double-array (int length)) (float-array (int length)))
+     :cljs (if f64? (js/Float64Array. length) (js/Float32Array. length))))
+
+(defn value-length
+  "How many values a host-supplied real sequence holds.
+
+  A host hands over a primitive real array — a typed array on the browser — but
+  a test or a slow host may hand over an ordinary sequence, so both are accepted.
+  `count` and `nth` do not work on a JS typed array, which is why the hosts reach
+  their lane values through this pair rather than directly."
+  [values]
+  #?(:clj (count values)
+     :cljs (if (some? (.-length values))
+             (.-length values)
+             (clojure.core/count values))))
+
+(defn value-at
+  "One value of a host-supplied real sequence, however it is stored."
+  [values index]
+  #?(:clj (nth values index)
+     :cljs (if (some? (.-length values))
+             (aget values index)
+             (nth values index))))
+
+(defn values-vector
+  "A host-supplied real sequence as an ordinary vector.
+
+  A host hands over a primitive real array — a typed array on the browser — but
+  a reader that indexes with `nth` (the reference interpreter's control seeding)
+  cannot read a typed array, so a caller that needs an ordinary sequence
+  converts here rather than testing the storage itself."
+  [values]
+  (let [length (value-length values)]
+    (loop [index 0
+           result (transient [])]
+      (if (< index length)
+        (recur (inc index) (conj! result (value-at values index)))
+        (persistent! result)))))

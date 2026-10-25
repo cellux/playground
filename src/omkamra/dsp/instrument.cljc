@@ -4,7 +4,7 @@
 
   This is the **source layer**. Nothing here knows about kernels, storage,
   channel layout, or how many artifacts a target needs — that is the lowering's
-  business (see `omkamra.dsp.hosts.instrument`). The value states *semantics*:
+  business (see `omkamra.dsp.instrument.program`). The value states *semantics*:
 
   * `voice` names the DSP definition the polyphony runs and maps its per-voice
     controls;

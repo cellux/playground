@@ -1,5 +1,5 @@
-(ns omkamra.dsp.hosts.wasm
-  "The Wasm host: a `Kernel` over a Wasm module (P10d).
+(ns omkamra.dsp.kernels.wasm
+  "The Wasm target's kernel: a `Kernel` over a Wasm module (P10d).
 
   A Wasm kernel does not receive the block it renders; it writes into its own
   linear memory. `process` takes the byte offset of the output region and writes
@@ -7,14 +7,15 @@
   typed-array **views** over that region, made once per voice. The block a
   callback is handed and the block the kernel wrote are then the same samples, and
   mixing is arithmetic rather than a copy — which is the one place the Wasm host
-  differs from `omkamra.dsp.hosts.js`, where the kernel is handed the arrays.
+  differs from `omkamra.dsp.kernels.js`, where the kernel is handed the arrays.
 
   A Wasm instance owns its memory, so a voice is an instance: `create-voice`
   instantiates the module, which is why the kernel takes a `WebAssembly.Module`
   rather than bytes."
   (:require [goog.object :as gobj]
-            [omkamra.dsp.hosts.fusion :as fusion]
-            [omkamra.dsp.hosts.mixing :as mixing]
+            [omkamra.dsp.fusion :as fusion]
+            [omkamra.dsp.kernels.mixing :as mixing]
+            [omkamra.dsp.numbers :as numbers]
             [omkamra.dsp.synth.pool :as pool]))
 
 (defn- real-view
@@ -74,7 +75,7 @@
 
   `containment` selects the non-finite policy, as it does for every kernel.
 
-  `:mapping` makes it a *fused* kernel (M6): an `omkamra.dsp.hosts.fusion/
+  `:mapping` makes it a *fused* kernel (M6): an `omkamra.dsp.fusion/
   fused-mapping` from the base voice's controls to the fused interface's. `slots`
   handles then share one module instance -- one linear memory, one state region --
   the pool writes each handle's controls through the mapping, and a reset
@@ -182,7 +183,7 @@
          shared-count (clojure.core/count shared-layout)
          shared-offset (long (get-in memory-layout [:regions :shared :offset] 0))
          shared-region (when (pos? shared-count)
-                         (mixing/real-array f64? (* shared-stride shared-count)))
+                         (numbers/real-array f64? (* shared-stride shared-count)))
          lane-slot (when (pos? lane-count) (+ 3 control-count))
          shared-slot (when (pos? shared-count)
                        (+ 3 control-count (if (pos? lane-count) 1 0)))
@@ -315,10 +316,10 @@
              (throw (ex-info "this DSP voice declares no such shared control"
                              {:control control
                               :controls (vec (sort (keys shared-layout)))})))
-           (let [length (min (mixing/value-length values) shared-stride)]
+           (let [length (min (numbers/value-length values) shared-stride)]
              (dotimes [index length]
                (aset shared-region (+ offset index)
-                     (js/Number (mixing/value-at values index)))))))
+                     (js/Number (numbers/value-at values index)))))))
        (write-voice-lane! [_ voice lane values]
          (let [key (if (string? lane) lane (clojure.core/name lane))
                lane-offset (get lane-layout key)]
@@ -329,13 +330,13 @@
            ;; to the slice its slot *is* (F4); a plain voice has no slot.
            (let [offset (+ (long lane-offset)
                            (* (long (or (:slot voice) 0)) lane-stride lane-count))
-                 length (min (mixing/value-length values) lane-stride)
+                 length (min (numbers/value-length values) lane-stride)
                  ;; The voice's own region is a view into its linear memory, so
                  ;; this writes the values where the module already reads them.
                  target (:lanes voice)]
              (dotimes [index length]
                (aset target (+ offset index)
-                     (js/Number (mixing/value-at values index)))))))
+                     (js/Number (numbers/value-at values index)))))))
        (read-specials! [_ voice target]
          (let [views (:specials voice)]
            (dotimes [position (clojure.core/count views)]
@@ -393,7 +394,7 @@
 
   `memory-layout` is the artifact's `:memory` map and `precision` its physical
   precision. Returns the same `{:create-bus, :run-bus!, :reset-bus!,
-  :write-lane!, :write-shared!}` map as `omkamra.dsp.hosts.js/js-bus-kernel`."
+  :write-lane!, :write-shared!}` map as `omkamra.dsp.kernels.js/js-bus-kernel`."
   [module abi memory-layout precision]
   (let [f64? (= :f64 precision)
         frame-capacity (long (:frame-capacity memory-layout))
@@ -405,13 +406,13 @@
         lane-count (clojure.core/count lane-layout)
         lanes-offset (long (get-in memory-layout [:regions :lanes :offset] 0))
         lane-region (when (pos? lane-count)
-                      (mixing/real-array f64? (* lane-stride lane-count)))
+                      (numbers/real-array f64? (* lane-stride lane-count)))
         shared-stride (long (or (:shared-stride abi) 0))
         shared-layout (mixing/region-layout (:shared abi))
         shared-count (clojure.core/count shared-layout)
         shared-offset (long (get-in memory-layout [:regions :shared :offset] 0))
         shared-region (when (pos? shared-count)
-                        (mixing/real-array f64? (* shared-stride shared-count)))
+                        (numbers/real-array f64? (* shared-stride shared-count)))
         ;; Where each region sits in the generated argument list: the input, the
         ;; output, frames and the sample rate, then the controls, then the
         ;; regions — which for Wasm are this instance's own region offsets.

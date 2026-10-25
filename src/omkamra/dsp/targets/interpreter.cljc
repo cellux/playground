@@ -876,3 +876,36 @@
                        :controls controls
                        :state state}))
 
+;; ---------------------------------------------------------------------------
+;; Artifact construction
+;; ---------------------------------------------------------------------------
+
+(defn compile-artifact
+  "The interpreter artifact for prepared IR.
+
+  The interpreter is not code-generated: it executes the IR, so its artifact is
+  the IR, its ABI, and the executable plus — for a process — the instance
+  lifecycle this world runs it with. The shared keys come from the pipeline's
+  `artifact-base` (P13c, D77)."
+  [{:keys [entry ir] :as base}]
+  (case entry
+    :function
+    (assoc base :invoke (fn [& args] (invoke ir args)))
+
+    :process
+    (let [create-instance
+          (fn []
+            (let [state (create-state ir)]
+              {:state state
+               :reset #(reset-state! ir state)
+               :destroy #(reset-state! ir state)
+               :invoke (fn [input output frames & controls]
+                         (process ir input output frames controls state))
+               :invoke-context
+               (fn [context]
+                 (process-context ir (assoc context :state state)))}))
+          instance (create-instance)]
+      (merge base
+             instance
+             {:initialize (:reset instance)
+              :create-instance create-instance}))))

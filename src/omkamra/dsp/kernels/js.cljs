@@ -1,5 +1,5 @@
-(ns omkamra.dsp.hosts.js
-  "The JavaScript host: a `Kernel` over a generated JavaScript module (P10d).
+(ns omkamra.dsp.kernels.js
+  "The JavaScript target's kernel: a `Kernel` over a generated JavaScript module (P10d).
 
   The module exports `createKernel`, which is called once per voice, so each
   voice is an independent kernel object with its own state. A pool voice is a
@@ -9,8 +9,9 @@
 
   The kernel object also exposes its state arena, which is what makes
   `read-specials!` a single array read rather than a second entry point (D39)."
-  (:require [omkamra.dsp.hosts.fusion :as fusion]
-            [omkamra.dsp.hosts.mixing :as mixing]
+  (:require [omkamra.dsp.fusion :as fusion]
+            [omkamra.dsp.kernels.mixing :as mixing]
+            [omkamra.dsp.numbers :as numbers]
             [omkamra.dsp.synth.pool :as pool]))
 
 (defn js-kernel
@@ -21,7 +22,7 @@
 
   `containment` selects the non-finite policy, as it does for every kernel.
 
-  `:mapping` makes it a *fused* kernel (M6): an `omkamra.dsp.hosts.fusion/
+  `:mapping` makes it a *fused* kernel (M6): an `omkamra.dsp.fusion/
   fused-mapping` from the base voice's controls to the fused interface's. `slots`
   handles then share one generated object -- one instance, one state arena -- the
   pool writes each handle's controls through the mapping, and a reset restores
@@ -99,7 +100,7 @@
                              (:shared abi))
          shared-count (clojure.core/count shared-layout)
          shared-region (when (pos? shared-count)
-                         (mixing/real-array f64? (* shared-stride shared-count)))
+                         (numbers/real-array f64? (* shared-stride shared-count)))
          ;; Where each region sits in the generated argument list: the controls
          ;; first, then the lane region, then the shared region.
          lane-slot (when (pos? lane-count) (+ 3 control-count))
@@ -123,7 +124,7 @@
                                        (if (pos? lane-count) 1 0)
                                        (if (pos? shared-count) 1 0)))
               :lane-region (when (pos? lane-count)
-                             (mixing/real-array f64? (* lane-stride lane-count lane-slots)))
+                             (numbers/real-array f64? (* lane-stride lane-count lane-slots)))
               :scratch (mixing/scratch-buffer f64? channels max-block-frames)
               :reset! (clojure.core/fn [] (.call (.-reset object) object))})
            (let [slot (long (mod (long @created) slots))]
@@ -136,7 +137,7 @@
                                                     (if (pos? lane-count) 1 0)
                                                     (if (pos? shared-count) 1 0)))
                            :lane-region (when (pos? lane-count)
-                                          (mixing/real-array
+                                          (numbers/real-array
                                            f64? (* lane-stride lane-count lane-slots)))
                            :scratch (mixing/scratch-buffer f64? channels
                                                            max-block-frames)
@@ -185,10 +186,10 @@
              (throw (ex-info "this DSP voice declares no such shared control"
                              {:control control
                               :controls (vec (sort (keys shared-layout)))})))
-           (let [length (min (mixing/value-length values) shared-stride)]
+           (let [length (min (numbers/value-length values) shared-stride)]
              (dotimes [index length]
                (aset shared-region (+ offset index)
-                     (js/Number (mixing/value-at values index)))))))
+                     (js/Number (numbers/value-at values index)))))))
        (write-voice-lane! [_ voice lane values]
          (let [key (if (string? lane) lane (clojure.core/name lane))
                lane-offset (get lane-layout key)]
@@ -199,11 +200,11 @@
            ;; to the slice its slot *is* (F4); a plain voice has no slot.
            (let [offset (+ (long lane-offset)
                            (* (long (or (:slot voice) 0)) lane-stride lane-count))
-                 length (min (mixing/value-length values) lane-stride)
+                 length (min (numbers/value-length values) lane-stride)
                  region (:lane-region voice)]
              (dotimes [index length]
                (aset region (+ offset index)
-                     (js/Number (mixing/value-at values index)))))))
+                     (js/Number (numbers/value-at values index)))))))
        (read-specials! [_ voice target]
          (let [state (.-state (:object voice))
                ;; A fused slot reports its own partition's specials (M6 seam 4); a
@@ -260,9 +261,9 @@
         shared-layout (mixing/region-layout (:shared abi))
         shared-count (clojure.core/count shared-layout)
         lane-region (when (pos? lane-count)
-                      (mixing/real-array f64? (* lane-stride lane-count)))
+                      (numbers/real-array f64? (* lane-stride lane-count)))
         shared-region (when (pos? shared-count)
-                        (mixing/real-array f64? (* shared-stride shared-count)))
+                        (numbers/real-array f64? (* shared-stride shared-count)))
         ;; Where each region sits in the generated argument list: the input, the
         ;; output, frames and the sample rate, then the controls, then the
         ;; regions.

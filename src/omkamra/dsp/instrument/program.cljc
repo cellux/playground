@@ -1,4 +1,4 @@
-(ns omkamra.dsp.hosts.instrument
+(ns omkamra.dsp.instrument.program
   "Lower an `omkamra.dsp.instrument` value to a **program**, and run it.
 
   The Clojure instrument states voices, polyphony, and a post-mix chain; this
@@ -16,7 +16,8 @@
   `Kernel` and a bus kernel are, on the JVM or in the browser."
   (:require #?(:clj [omkamra.dsp :as dsp])
             #?(:clj [omkamra.dsp.graph :as graph])
-            #?(:clj [omkamra.dsp.hosts :as hosts])
+            #?(:clj [omkamra.dsp.hosts.jvm :as hosts])
+            #?(:clj [omkamra.dsp.synth.bundle :as bundle])
             #?(:clj [omkamra.dsp.instrument :as instrument])
             [omkamra.dsp.synth.pool :as pool]))
 
@@ -124,7 +125,7 @@
        ([value] (compile-instrument value {}))
        ([value compile-options]
         (let [description (instrument/description value)
-              bundle (hosts/synth-bundle description compile-options)
+              bundle (bundle/synth-bundle description compile-options)
               target (:target (:artifact bundle))
               precision (get-in bundle [:artifact :physical-type :precision])
               bus (lower-bus value)

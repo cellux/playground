@@ -521,7 +521,7 @@ deliverable 5 below.
   alignment, capacity and channel counts per region and *validates* them
   (alignment, whole blocks, non-overlap, state slots inside their regions, pages
   covering what the regions need). Every reader takes the numbers from the ABI:
-  `hosts/wasm.cljs` (which now also refuses a block longer than the declared
+  `kernels/wasm.cljs` (which now also refuses a block longer than the declared
   capacity), the page's process runner and its standalone WAT fixtures, which fetch
   the fixture's metadata instead of assuming 4096. The f32 layout is unchanged
   (1024 frames × 4 bytes *is* the old 4096), f64 gains the frames it should always
@@ -845,9 +845,9 @@ browser, from P13/P14.
   2. a **base → fused control mapping**, so `write-voice-controls!` for one slot
      writes that slot's slice of the fused control array and the shared controls
      once. The kernel owns it: it is the component that has both ABIs. **Done**
-     for the JVM (D50): `hosts/fusion/fused-mapping` is the pure mapping — the same
+     for the JVM (D50): `fusion/fused-mapping` is the pure mapping — the same
      answer on every host that holds both interfaces — and
-     `hosts/jvm/fused-jvm-kernel` applies it through one precomputed row per slot,
+     `kernels/jvm/fused-jvm-kernel` applies it through one precomputed row per slot,
      so the write path is still a single branchless loop. A fused pool now renders
      exactly what a plain pool renders, slot by slot, and the routing bites: with
      the slot term removed the test's fusion is silent where the pool sounds.
@@ -943,8 +943,8 @@ sizes. M6 is opt-in efficiency work layered on top of a complete phase: the pool
 stays the default, and fusion is requested (D45).
 
 **Browser build note.** The worker runtime is the library namespace
-`omkamra.dsp.hosts.worker`; the project runs it as a separate, self-contained
-Shadow build (`:omkamra.dsp.hosts.worker`, `:devtools {:enabled false}`). Shadow's
+`omkamra.dsp.worker`; the project runs it as a separate, self-contained
+Shadow build (`:omkamra.dsp.worker`, `:devtools {:enabled false}`). Shadow's
 documented `:shared`/`:main`/`:web-worker` single-build pattern compiles in
 development but the worker fails at run time (its dev module-append files need
 the `shadow` runtime the worker does not get); release generation is unaffected.
@@ -1212,7 +1212,7 @@ P14, for the reason given under H1.
    mono-only event dispatch ("left for the planar-worklet slice"). Everything a
    pool gives for free, a node makes the page rebuild.
 2. **The browser bus carries neither lanes nor a shared region**:
-   `hosts/js.cljs` and `hosts/wasm.cljs` refuse at bus construction ("this target
+   `kernels/js.cljs` and `kernels/wasm.cljs` refuse at bus construction ("this target
    cannot deliver lanes or a shared region to a bus yet"). The JVM folds the
    post-mix chain into the instrument's own artifact, so it handles them; the
    browser builds the bus as a separate kernel and does not. **Closed (D67).**
@@ -1265,7 +1265,7 @@ interchangeable.
 So the squint-compiled code in the repository today is either emitter output (the
 kernels) or written in squint's own idiom (`defclass`, `aget`/`aset`, `js*`,
 `squint_core`) — the two worklet adapters. No *library* namespace goes through
-squint: `synth/pool.cljc`, `synth.cljc` and `hosts/{js,wasm,mixing,fusion}` are
+squint: `synth/pool.cljc`, `synth.cljc`, `kernels/{js,wasm,mixing}` and `fusion` are
 real ClojureScript, and running them through it would be a semantic change, not a
 portability question.
 

@@ -49,7 +49,7 @@
             [omkamra.dsp.library.filter]
             [omkamra.dsp.library.oscillator]
             [omkamra.dsp.library.pitch]
-            [omkamra.dsp.hosts :as host]
+            [omkamra.dsp.hosts.jvm :as host]
             [omkamra.dsp.synth.pool :as pool]))
 
 ;; ---------------------------------------------------------------------------
@@ -236,7 +236,7 @@
 (defn demo-synth
   "Build the example instrument: a compiled voice, its pool, and the preallocated
   storage the routing needs. `compile-options` is passed to
-  `omkamra.dsp.hosts/compile-synth`."
+  `omkamra.dsp.hosts.jvm/compile-synth`."
   ([] (demo-synth {}))
   ([compile-options]
    (let [bundle (host/compile-synth description compile-options)

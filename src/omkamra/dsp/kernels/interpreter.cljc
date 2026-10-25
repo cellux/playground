@@ -1,5 +1,5 @@
-(ns omkamra.dsp.hosts.interpreter
-  "The reference host: a `Kernel` over the portable interpreter (P10).
+(ns omkamra.dsp.kernels.interpreter
+  "The reference kernel: a `Kernel` over the portable interpreter (P10).
 
   Every call builds a context map and a control vector, which is exactly why this
   is not a real-time host — but it is the same reference semantics every other
@@ -9,8 +9,9 @@
 
   The IR carries the special *mask* but not the slot table, so the ABI comes
   along for `read-specials!` (D39)."
-  (:require [omkamra.dsp.hosts.fusion :as fusion]
-            [omkamra.dsp.hosts.mixing :as mixing]
+  (:require [omkamra.dsp.fusion :as fusion]
+            [omkamra.dsp.kernels.mixing :as mixing]
+            [omkamra.dsp.numbers :as numbers]
             [omkamra.dsp.synth.pool :as pool]
             [omkamra.dsp.targets.interpreter :as interpreter]))
 
@@ -83,7 +84,7 @@
                              (:shared abi))
          shared-count (clojure.core/count shared-layout)
          shared-region (when (pos? shared-count)
-                         (mixing/real-array f64? (* shared-stride shared-count)))
+                         (numbers/real-array f64? (* shared-stride shared-count)))
          ;; A plain kernel gives every voice its own instance, so the key is the
          ;; order the voices were created in. A fused one makes `slots` handles
          ;; share an instance, so the key is the *instance's* and `current` is the
@@ -98,9 +99,9 @@
                (vreset! current
                         {:state (interpreter/create-state ir)
                          :instance-key (inc (quot (long @created) slots))
-                         :values (mixing/real-array true controls)
+                         :values (numbers/real-array true controls)
                          :lane-region (when (pos? lane-count)
-                                        (mixing/real-array f64? lane-region-size))
+                                        (numbers/real-array f64? lane-region-size))
                          :scratch (mixing/scratch-buffer f64? channels max-block-frames)
                          :refs (volatile! slots)}))
              (vswap! created inc)
@@ -122,9 +123,9 @@
            (let [state (interpreter/create-state ir)]
              {:state state
               :instance-key (vswap! created inc)
-              :values (mixing/real-array true controls)
+              :values (numbers/real-array true controls)
               :lane-region (when (pos? lane-count)
-                             (mixing/real-array f64? lane-region-size))
+                             (numbers/real-array f64? lane-region-size))
               :scratch (mixing/scratch-buffer f64? channels max-block-frames)
               :reset! (clojure.core/fn [] (interpreter/reset-state! ir state))})))
        (instance-key [_ voice] (:instance-key voice))
@@ -148,7 +149,7 @@
              (let [row (nth slot-rows (long (:slot voice)))]
                (dotimes [position base-count]
                  (aset target (int (long (nth row position)))
-                       (double (mixing/value-at values position)))))
+                       (double (numbers/value-at values position)))))
              #?(:clj (System/arraycopy ^doubles values 0 target 0 (alength target))
                 :cljs (dotimes [position (.-length target)]
                         (aset target position (aget values position)))))))
@@ -163,20 +164,20 @@
            ;; kernel one slice.
            (let [offset (+ (long lane-offset)
                            (* (long (or (:slot voice) 0)) lane-stride lane-count))
-                 length (min (mixing/value-length values) lane-stride)]
+                 length (min (numbers/value-length values) lane-stride)]
              #?(:clj (if f64?
                        (let [^doubles target (:lane-region voice)]
                          (dotimes [index length]
                            (aset target (int (+ offset index))
-                                 (double (mixing/value-at values index)))))
+                                 (double (numbers/value-at values index)))))
                        (let [^floats target (:lane-region voice)]
                          (dotimes [index length]
                            (aset target (int (+ offset index))
-                                 (float (mixing/value-at values index))))))
+                                 (float (numbers/value-at values index))))))
                 :cljs (let [target (:lane-region voice)]
                         (dotimes [index length]
                           (aset target (+ offset index)
-                                (js/Number (mixing/value-at values index)))))))))
+                                (js/Number (numbers/value-at values index)))))))))
        (write-shared! [_ control values]
          (let [key (if (string? control) control (clojure.core/name control))
                offset (get shared-layout key)]
@@ -184,20 +185,20 @@
              (throw (ex-info "this DSP voice declares no such shared control"
                              {:control control
                               :controls (vec (sort (keys shared-layout)))})))
-           (let [length (min (mixing/value-length values) shared-stride)]
+           (let [length (min (numbers/value-length values) shared-stride)]
              #?(:clj (if f64?
                        (let [^doubles target shared-region]
                          (dotimes [index length]
                            (aset target (int (+ offset index))
-                                 (double (mixing/value-at values index)))))
+                                 (double (numbers/value-at values index)))))
                        (let [^floats target shared-region]
                          (dotimes [index length]
                            (aset target (int (+ offset index))
-                                 (float (mixing/value-at values index))))))
+                                 (float (numbers/value-at values index))))))
                 :cljs (let [target shared-region]
                         (dotimes [index length]
                           (aset target (+ offset index)
-                                (js/Number (mixing/value-at values index)))))))))
+                                (js/Number (numbers/value-at values index)))))))))
        (read-specials! [_ voice target]
          (if fused?
            (let [state (:state voice)
@@ -239,19 +240,19 @@
 
   `bus-ir` is the compiled interpreter IR, `abi` its ABI, and `precision` its
   physical precision. Returns the same `{:create-bus, :run-bus!, :reset-bus!,
-  :write-lane!, :write-shared!}` map as `omkamra.dsp.hosts.js/js-bus-kernel`."
+  :write-lane!, :write-shared!}` map as `omkamra.dsp.kernels.js/js-bus-kernel`."
   [bus-ir abi precision]
   (let [f64? (= :f64 precision)
         lane-stride (long (or (:lane-stride abi) 0))
         lane-layout (mixing/region-layout (:lanes abi))
         lane-count (clojure.core/count lane-layout)
         lane-region (when (pos? lane-count)
-                      (mixing/real-array f64? (* lane-stride lane-count)))
+                      (numbers/real-array f64? (* lane-stride lane-count)))
         shared-stride (long (or (:shared-stride abi) 0))
         shared-layout (mixing/region-layout (:shared abi))
         shared-count (clojure.core/count shared-layout)
         shared-region (when (pos? shared-count)
-                        (mixing/real-array f64? (* shared-stride shared-count)))]
+                        (numbers/real-array f64? (* shared-stride shared-count)))]
     {:create-bus
      (clojure.core/fn [] {:state (interpreter/create-state bus-ir)})
      :run-bus!
@@ -260,7 +261,7 @@
         bus-ir
         (cond-> {:input input :output output :frames frames
                  :sample-rate sample-rate
-                 :controls (mixing/values-vector controls)
+                 :controls (numbers/values-vector controls)
                  :state (:state bus)}
           lane-region (assoc :lanes lane-region)
           shared-region (assoc :shared shared-region))))

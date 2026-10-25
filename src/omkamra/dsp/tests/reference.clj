@@ -16,8 +16,8 @@
             [omkamra.dsp.ir :as ir]
             [omkamra.dsp.library-registry :as library]
             [omkamra.dsp.source :as source]
-            [omkamra.dsp.hosts :as host]
-            [omkamra.dsp.hosts.instrument :as inst-host]
+            [omkamra.dsp.hosts.jvm :as host]
+            [omkamra.dsp.instrument.program :as inst-program]
             [omkamra.dsp.instrument :as inst]
             [omkamra.dsp.library.effect]
             [omkamra.dsp.reference :as reference]
@@ -344,7 +344,7 @@
         "with-effect stores the canonical symbol, whatever the spelling")
     (is (= symbol-value keyword-value)
         "the two spellings build the same instrument value")
-    (let [bus (inst-host/lower-bus keyword-value)]
+    (let [bus (inst-program/lower-bus keyword-value)]
       (is (= '[sample drive] (:params bus)))
       (is (= '[drive] (mapv :name (get-in bus [:process :controls])))))
     (testing "and a hand-built value with a keyword is lowered the same way"
@@ -352,7 +352,7 @@
                                  [:effects]
                                  [{:effect omkamra.dsp.library.effect/distortion
                                    :arguments [:drive]}])]
-        (is (= '[sample drive] (:params (inst-host/lower-bus hand-built))))))))
+        (is (= '[sample drive] (:params (inst-program/lower-bus hand-built))))))))
 
 (deftest the-reference-instrument-does-not-allocate-in-the-audio-path
   ;; The audio path is the pool plus the bus. The matrix is applied on the
@@ -363,9 +363,9 @@
           block (planar-output 128)
           cycle! (fn []
                    (ref/note-on! instrument 60 0.8)
-                   (inst-host/render! instrument block 128)
+                   (inst-program/render! instrument block 128)
                    (ref/note-off! instrument 60)
-                   (inst-host/render! instrument block 128))
+                   (inst-program/render! instrument block 128))
           _ (dotimes [_ 2000] (cycle!))
           iterations 1000
           bytes (allocated-bytes meter (fn [] (dotimes [_ iterations] (cycle!))))
@@ -392,17 +392,17 @@
               ;; only makes the suite slow.
               _ (dotimes [_ 2]
                   (ref/note-on! interpreter 60 0.8)
-                  (inst-host/render! interpreter block 128)
+                  (inst-program/render! interpreter block 128)
                   (ref/note-off! interpreter 60)
-                  (inst-host/render! interpreter block 128))
+                  (inst-program/render! interpreter block 128))
               reference-bytes (allocated-bytes
                                meter
                                (fn []
                                  (dotimes [_ 2]
                                    (ref/note-on! interpreter 60 0.8)
-                                   (inst-host/render! interpreter block 128)
+                                   (inst-program/render! interpreter block 128)
                                    (ref/note-off! interpreter 60)
-                                   (inst-host/render! interpreter block 128))))]
+                                   (inst-program/render! interpreter block 128))))]
           (is (> reference-bytes allowance)
               (str "the interpreter host allocates " reference-bytes
                    " bytes, which must exceed the " allowance " byte allowance")))))

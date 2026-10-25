@@ -26,19 +26,6 @@
             [omkamra.dsp.targets.js :as js-backend]
             [omkamra.dsp.targets.wasm :as wasm-backend]))
 
-(def wasm-assembler
-  "The step that turns a Wasm artifact's WAT into the module a Wasm engine loads.
-
-  A Wasm engine takes bytes and nothing else, so *someone* has to assemble them.
-  That assembler lives in the browser's world (WABT, the pinned npm package), not
-  in this compiler's, so the artifact names the step instead of carrying it: `:bytes`
-  stays nil by design and the consumer that has the named assembler produces the
-  module (D73). The version is recorded so an artifact says which assembler it was
-  compiled for — keep it in step with `package.json`, which
-  `omkamra.dsp.tests.wasm` checks."
-  {:generator :browser-wabt
-   :version "1.0.39"})
-
 ;; ---------------------------------------------------------------------------
 ;; Artifact construction
 ;; ---------------------------------------------------------------------------
@@ -56,16 +43,23 @@
              :js (if f64? :float64-array :float32-array)
              :wasm element-type}}))
 
-(defn artifact
-  [target entry ir abi executable options]
+(defn artifact-base
+  "The artifact keys every target shares: what the pipeline knows before a target
+  adds its own output. A target's `compile-artifact` decorates this (D77)."
+  [target entry ir abi options]
   {:target target
    :entry entry
    :ir ir
    :abi abi
    :physical-type (physical-type-policy ir)
    :realtime (ir/validate-runtime-policy! ir)
-   :options options
-   :invoke executable})
+   :options options})
+
+(defn artifact
+  "The artifact of a target that holds a callable instance: the shared base plus
+  the `:invoke` it is driven through."
+  [target entry ir abi executable options]
+  (assoc (artifact-base target entry ir abi options) :invoke executable))
 
 (defn function-abi
   [ir]
@@ -265,138 +259,6 @@
      :diagnostics (:diagnostics ir)}))
 
 ;; ---------------------------------------------------------------------------
-;; Target compilers
-;; ---------------------------------------------------------------------------
-
-(defn target-instance
-  "Describe a target's instance lifecycle in the target-neutral vocabulary.
-
-  Every target creates, resets, and releases an instance; only the entry-point
-  names differ. The abstract handle kind is what portable IR sees, so no
-  target-specific object (a JVM class, a JS closure, a Wasm instance) leaks into
-  the IR itself."
-  [target abi]
-  (let [base (:instance abi)]
-    (case target
-      :interpreter base
-      :jvm base
-      :js (assoc base
-                 :factory :createKernel
-                 :handle {:kind :kernel-handle :shared? false}
-                 :operations {:create :createKernel
-                              :reset :reset
-                              :destroy :destroy})
-      :wasm (assoc base
-                   :factory :instantiate
-                   :handle {:kind :wasm-instance
-                            :region :state
-                            :shared? false}
-                   :operations {:create :instantiate
-                                :reset :reset
-                                ;; A Wasm instance owns its linear memory, so
-                                ;; releasing it is dropping the instance.
-                                :destroy :release})
-      base)))
-
-(defn compile-js-target
-  [entry lowered abi options]
-  (let [js-ir (js-backend/lower (assoc lowered :options options))]
-    {:target :js
-     :entry entry
-     :ir lowered
-     :js-ir js-ir
-     :abi (assoc abi :instance (target-instance :js abi))
-     :physical-type (physical-type-policy lowered)
-     :realtime (ir/validate-runtime-policy! lowered)
-     :options options
-     :module {:format :es-module
-              :exports (if (= :process entry)
-                         [:createKernel]
-                         [:invoke])}
-     :source (js-backend/emit-module js-ir)}))
-
-(defn compile-function-target
-  [target lowered options]
-  (when (or (seq (:state lowered)) (seq (:scratch lowered)))
-    (throw (ex-info "stateful or local-array DSP definitions require the :process entry"
-                    {:name (:name lowered)})))
-  (case target
-    :interpreter
-    (artifact :interpreter :function lowered (function-abi lowered)
-              (fn [& args]
-                (interpreter/invoke lowered args))
-              options)
-
-    :js (compile-js-target :function lowered (function-abi lowered) options)
-
-    (throw (ex-info "unsupported DSP compilation target"
-                    {:target target
-                     :supported #{:interpreter :jvm :js}}))))
-
-(defn compile-process-target
-  [target lowered options]
-  (case target
-    :interpreter
-    (let [create-instance
-          (fn []
-            (let [state (interpreter/create-state lowered)]
-              {:state state
-               :reset #(interpreter/reset-state! lowered state)
-               :destroy #(interpreter/reset-state! lowered state)
-               :invoke (fn [input output frames & controls]
-                         (interpreter/process lowered input output frames
-                                              controls state))
-               :invoke-context
-               (fn [context]
-                 (interpreter/process-context lowered
-                                              (assoc context :state state)))}))
-          instance (create-instance)]
-      (merge
-       (artifact :interpreter :process lowered (process-abi lowered)
-                 (:invoke instance)
-                 options)
-       instance
-       {:initialize (:reset instance)
-        :create-instance create-instance}))
-
-    :js (compile-js-target :process lowered (process-abi lowered) options)
-
-    :wasm
-    (let [artifact (wasm-backend/lower lowered)
-          physical-type (physical-type-policy lowered)
-          abi (let [abi (process-abi lowered)]
-                (assoc abi :instance (target-instance :wasm abi)))]
-      {:target :wasm
-       :entry :process
-       :ir lowered
-       :abi abi
-       :physical-type physical-type
-       :realtime (ir/validate-runtime-policy! lowered)
-       :options options
-       :module {:format :wat
-                :exports (:exports artifact)
-                :memory (:memory artifact)
-                :abi (assoc (:abi artifact) :physical-type physical-type
-                            :instance (:instance abi))}
-       :wat (:source artifact)
-       :memory (:memory artifact)
-       :metadata {:abi (assoc (:abi artifact) :physical-type physical-type
-                              :instance (:instance abi))
-                  :memory (:memory artifact)
-                  :physical-type physical-type
-                  :exports (:exports artifact)}
-       :wasm-abi (assoc (:abi artifact) :physical-type physical-type
-                        :instance (:instance abi))
-       :binary (assoc wasm-assembler
-                      :format :wasm
-                      :source :wat
-                      :bytes nil)})
-
-    (throw (ex-info "unsupported DSP compilation target"
-                    {:target target
-                     :supported #{:interpreter :jvm :js :wasm}}))))
-
-;; ---------------------------------------------------------------------------
 ;; Option resolution
 ;; ---------------------------------------------------------------------------
 
@@ -497,22 +359,39 @@
   "Compile a lowered, ABI-described definition for one target.
 
   Everything before this step is portable; this step is not, so it is the one
-  open axis of the pipeline. `:interpreter`, `:js` and `:wasm` share the
-  `:default` method, which delegates to the target's own emitter; the JVM backend
-  cannot live here — its bytecode generator `insn` is a JVM library — so the JVM
-  face registers `:jvm` from the side that has it (D77). A host with another
-  backend registers it the same way, which is what makes this a multimethod
-  rather than a `case`.
+  open axis of the pipeline. The `:default` method hands each portable target the
+  shared artifact base (`artifact-base`) and lets that target's own
+  `compile-artifact` add its output, so the artifact's shape stays in the
+  namespace that owns it. The JVM backend cannot live here — its bytecode
+  generator `insn` is a JVM library — so the JVM face registers `:jvm` from the
+  side that has it (D77). A host with another backend registers it the same way,
+  which is what makes this a multimethod rather than a `case`.
 
   The method receives `{:keys [entry lowered abi options]}` and returns the
   artifact."
   (fn [target _context] target))
 
+(defn- check-function-entry!
+  "A function entry is a scalar expression with no arena, so it cannot be a
+  stateful or local-array definition. The interpreter refuses this in its own
+  `invoke`; a code-generating target never gets the check otherwise."
+  [entry lowered]
+  (when (and (= :function entry)
+             (or (seq (:state lowered)) (seq (:scratch lowered))))
+    (throw (ex-info "stateful or local-array DSP definitions require the :process entry"
+                    {:name (:name lowered)}))))
+
 (defmethod compile-target :default
-  [target {:keys [entry lowered options]}]
-  (case entry
-    :function (compile-function-target target lowered options)
-    :process (compile-process-target target lowered options)))
+  [target {:keys [entry lowered abi options]}]
+  (check-function-entry! entry lowered)
+  (let [base (artifact-base target entry lowered abi options)]
+    (case target
+      :interpreter (interpreter/compile-artifact base)
+      :js (js-backend/compile-artifact base)
+      :wasm (wasm-backend/compile-artifact base)
+      (throw (ex-info "unsupported DSP compilation target"
+                      {:target target
+                       :supported #{:interpreter :jvm :js :wasm}})))))
 
 (defn compile
   "Compile a DSP descriptor or linked unit for a target.

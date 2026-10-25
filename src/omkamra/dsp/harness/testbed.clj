@@ -9,8 +9,8 @@
             [omkamra.dsp.harness.conformance :as conformance]
             [omkamra.dsp.harness.fixtures :as fixtures]
             [omkamra.dsp.examples.reference-synth :as reference-synth]
-            [omkamra.dsp.hosts :as hosts]
-            [omkamra.dsp.hosts.instrument :as instrument-host]
+            [omkamra.dsp.synth.bundle :as bundle]
+            [omkamra.dsp.instrument.program :as instrument-program]
             [squint.compiler :as squint]))
 
 (def one-pole (:definition (catalog/case-by-id :one-pole)))
@@ -144,7 +144,7 @@
   The payload is assembled *here*, where the example is named; `conformance`
   builds it from the entries without knowing whose they are."
   [_request]
-  (let [bus (instrument-host/lower-bus reference-synth/reference-instrument)
+  (let [bus (instrument-program/lower-bus reference-synth/reference-instrument)
         payload (conformance/compiled-definition-payload
                  [{:id :voice
                    :definition reference-synth/reference-voice
@@ -386,7 +386,7 @@
 (defn- browser-synth-bundle
   ([target precision] (browser-synth-bundle target precision fixtures/browser-stereo-description))
   ([target precision description]
-   (hosts/synth-bundle description {:target target :precision precision})))
+   (bundle/synth-bundle description {:target target :precision precision})))
 
 (defn- bundle-response
   "Serialize a synth bundle for the page, as EDN.
@@ -437,9 +437,9 @@
    (browser-fused-pair target precision slots fixtures/fused-browser-description))
   ([target precision slots description]
    (let [description (assoc description :capacity slots :max-block-frames 128)]
-     {:base (hosts/synth-bundle description {:target target :precision precision})
-      :fused (hosts/synth-bundle description {:target target :precision precision
-                                              :fusion {:slots slots}})})))
+     {:base (bundle/synth-bundle description {:target target :precision precision})
+      :fused (bundle/synth-bundle description {:target target :precision precision
+                                               :fusion {:slots slots}})})))
 
 (defn fused-pool-bundle
   "Serve what the browser fused pool host needs: the base artifact's ABI and IR
@@ -473,9 +473,9 @@
   slots that are only identities (H4)."
   [target precision slots description]
   (let [description (assoc description :capacity slots :max-block-frames 16)]
-    {:base (hosts/synth-bundle description {:target target :precision precision})
-     :fused (hosts/synth-bundle description {:target target :precision precision
-                                             :fusion {:slots slots :guard false}})}))
+    {:base (bundle/synth-bundle description {:target target :precision precision})
+     :fused (bundle/synth-bundle description {:target target :precision precision
+                                              :fusion {:slots slots :guard false}})}))
 
 (def ^:private stateless-fused-slots 2)
 
@@ -617,8 +617,8 @@
 
 (defn- browser-bus-instrument
   [instrument target precision]
-  (instrument-host/compile-instrument instrument {:target target
-                                                  :precision precision}))
+  (instrument-program/compile-instrument instrument {:target target
+                                                     :precision precision}))
 
 (defn- bus-instrument-bundle
   [request instrument]
@@ -691,10 +691,10 @@
 
 (defn- fused-worklet-artifact
   [target precision slots]
-  (:artifact (hosts/synth-bundle (assoc fixtures/fused-browser-description
-                                        :capacity slots :max-block-frames 128)
-                                 {:target target :precision precision
-                                  :fusion {:slots slots}})))
+  (:artifact (bundle/synth-bundle (assoc fixtures/fused-browser-description
+                                         :capacity slots :max-block-frames 128)
+                                  {:target target :precision precision
+                                   :fusion {:slots slots}})))
 
 (defn squint-fused-worklet
   "The JavaScript adapter over the *fused* kernel (F5)."
@@ -881,9 +881,9 @@
    ;; The full reference synthesizer, so the browser check is an end-to-end check
    ;; of the whole system: the same voice, modulation matrix, and post-mix chain
    ;; the JVM suite renders.
-   (instrument-host/compile-instrument reference-synth/reference-instrument
-                                       (merge {:target target :precision precision}
-                                              options))))
+   (instrument-program/compile-instrument reference-synth/reference-instrument
+                                          (merge {:target target :precision precision}
+                                                 options))))
 
 (def ^:private fused-instrument-slots 2)
 

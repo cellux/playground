@@ -1,4 +1,4 @@
-(ns omkamra.dsp.hosts.worker
+(ns omkamra.dsp.worker
   "Run the sequencer's event production in a Web Worker.
 
   A performance's high-level sequencing — turning a score, a timeline, or a live
@@ -10,7 +10,7 @@
 
   The browser testbed is **one consumer** of this ability, not its owner. Any
   host that can run ClojureScript in a worker is another; the Shadow build
-  declares it as a `:web-worker` module (`:init-fn omkamra.dsp.hosts.worker/init`).
+  declares it as a `:web-worker` module (`:init-fn omkamra.dsp.worker/init`).
 
   The script-to-events logic is plain `.cljc` and runs on either side; only the
   worker plumbing (`js/self`, `#js` messages) is ClojureScript."

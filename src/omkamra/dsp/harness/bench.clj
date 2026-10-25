@@ -50,7 +50,8 @@
             [omkamra.dsp :as dsp]
             [omkamra.dsp.combinators :as comb]
             [omkamra.dsp.harness.fixtures :as fixtures]
-            [omkamra.dsp.hosts :as hosts]
+            [omkamra.dsp.hosts.jvm :as hosts]
+            [omkamra.dsp.synth.bundle :as bundle]
             [omkamra.dsp.synth.pool :as pool])
   (:import [java.util Arrays]))
 
@@ -134,12 +135,12 @@
   `capacity` is a host-side number, which is the pool's other point."
   ([capacity target precision] (pool-arm capacity target precision capacity))
   ([capacity target precision sounding]
-   (let [bundle (hosts/synth-bundle (assoc fixtures/sine-voice-description
-                                           :capacity capacity
-                                           :max-block-frames block-frames)
-                                    {:target target
-                                     :precision precision
-                                     :containment :off})
+   (let [bundle (bundle/synth-bundle (assoc fixtures/sine-voice-description
+                                            :capacity capacity
+                                            :max-block-frames block-frames)
+                                     {:target target
+                                      :precision precision
+                                      :containment :off})
          pool (pool/voice-pool (:runtime bundle)
                                (hosts/host-kernel (:artifact bundle)
                                                   {:containment :off}))
@@ -355,11 +356,11 @@
 (defn- echo-pool-arm
   "A live pool of `voices` echo voices, `sounding` of them playing."
   [voices target precision sounding]
-  (let [bundle (hosts/synth-bundle (assoc fixtures/echo-voice-description
-                                          :capacity voices
-                                          :max-block-frames block-frames)
-                                   {:target target :precision precision
-                                    :containment :off})
+  (let [bundle (bundle/synth-bundle (assoc fixtures/echo-voice-description
+                                           :capacity voices
+                                           :max-block-frames block-frames)
+                                    {:target target :precision precision
+                                     :containment :off})
         pool (pool/voice-pool (:runtime bundle)
                               (hosts/host-kernel (:artifact bundle)
                                                  {:containment :off}))
@@ -376,12 +377,12 @@
   bench that chose its own set would be timing a lowering nobody runs. `guard?`
   selects the per-slot skipping the option applies by default (M6b)."
   [voices target precision guard?]
-  (:artifact (hosts/synth-bundle (assoc fixtures/echo-voice-description
-                                        :capacity voices
-                                        :max-block-frames block-frames)
-                                 {:target target :precision precision
-                                  :containment :off
-                                  :fusion {:slots voices :guard guard?}})))
+  (:artifact (bundle/synth-bundle (assoc fixtures/echo-voice-description
+                                         :capacity voices
+                                         :max-block-frames block-frames)
+                                  {:target target :precision precision
+                                   :containment :off
+                                   :fusion {:slots voices :guard guard?}})))
 
 (defn- echo-context
   "The ABI context for a fused echo artifact: slots below `sounding` open."

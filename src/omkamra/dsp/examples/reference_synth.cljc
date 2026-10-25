@@ -39,7 +39,7 @@
   the result. The effect/pan module returns a record, which the wrapper projects
   into the two channels explicitly (D40)."
   (:require [omkamra.dsp.combinators :as comb]
-            [omkamra.dsp.hosts.instrument :as inst-host]
+            [omkamra.dsp.instrument.program :as inst-program]
             [omkamra.dsp.instrument :as inst]
             [omkamra.dsp.library.delay]
             [omkamra.dsp.library.effect]
@@ -269,7 +269,7 @@
   the modulation matrix, and a post-mix chain of three global effects.
 
   The chain is Clojure-level. The effects are library definitions; the lowering
-  (`omkamra.dsp.hosts.instrument`) decides that they become one mono bus kernel
+  (`omkamra.dsp.instrument.program`) decides that they become one mono bus kernel
   per output channel, run once over the summed voices. Their controls are named
   by the arguments, so they are global — not per voice — and the host sets them.
   The delay is last, so its feedback tail continues after the voices stop."
@@ -307,10 +307,10 @@
        ([value]
         (build-instrument value {}))
        ([value compile-options]
-        (let [program (inst-host/compile-instrument value compile-options)
-              live (inst-host/instrument-pool
+        (let [program (inst-program/compile-instrument value compile-options)
+              live (inst-program/instrument-pool
                     program (select-keys compile-options [:containment]))
-              live-pool (inst-host/pool-of live)
+              live-pool (inst-program/pool-of live)
               plan (vec (:control-plan (get-in program [:bundle :runtime])))
               matrix (or (:routes value) reference/modulation-matrix)]
           ;; The post-mix controls default from the description's `:shared`
@@ -369,17 +369,17 @@
   the modulation matrix.
 
   The matrix loop is `omkamra.dsp.reference/apply-modulation!`, shared with the
-  browser hosts; the pool and bus render is `inst-host/render!`. `output` is a
+  browser hosts; the pool and bus render is `inst-program/render!`. `output` is a
   planar block (an array of channel arrays) for the stereo voice. Allocates
   nothing."
   ([instrument output frames]
    (render! instrument output frames (:sample-rate instrument)))
   ([instrument output frames sample-rate]
    (reference/apply-modulation! instrument)
-   (inst-host/render! instrument output frames sample-rate)
+   (inst-program/render! instrument output frames sample-rate)
    nil))
 
 (defn set-effect-control!
   "Set a global post-mix control by name (for example `'chorus-mix`)."
   [instrument control value]
-  (inst-host/set-bus-control! instrument control value))
+  (inst-program/set-bus-control! instrument control value))

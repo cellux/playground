@@ -1,5 +1,5 @@
-(ns omkamra.dsp.hosts.mixing
-  "The plumbing every host kernel shares: the containment policy, and the planar
+(ns omkamra.dsp.kernels.mixing
+  "The plumbing every kernel shares: the containment policy, and the planar
   blocks a voice renders into and is summed with (P10d).
 
   Every host does the same two things around a voice — render it into its own
@@ -7,7 +7,8 @@
   policy is written once here. The reader conditionals are the only place the
   platforms differ: the JVM branch keeps the primitive hints that stop the audio
   path boxing a sample, because the JVM's mixing runs at the audio rate."
-  (:require [omkamra.dsp.synth :as synth]))
+  (:require [omkamra.dsp.numbers :as numbers]
+            [omkamra.dsp.synth :as synth]))
 
 (def ^:private ^:const containment-ceiling
   "A voice sample beyond this magnitude is a numeric runaway, not a musical
@@ -40,48 +41,6 @@
          (> value containment-ceiling) containment-ceiling
          :else value)
        0.0)))
-
-(defn real-array
-  "A primitive array of `length` reals at the target's precision."
-  [f64? length]
-  #?(:clj (if f64? (double-array (int length)) (float-array (int length)))
-     :cljs (if f64? (js/Float64Array. length) (js/Float32Array. length))))
-
-(defn value-length
-  "How many values a host-supplied real sequence holds.
-
-  A host hands over a primitive real array — a typed array on the browser — but
-  a test or a slow host may hand over an ordinary sequence, so both are accepted.
-  `count` and `nth` do not work on a JS typed array, which is why the hosts reach
-  their lane values through this pair rather than directly."
-  [values]
-  #?(:clj (count values)
-     :cljs (if (some? (.-length values))
-             (.-length values)
-             (clojure.core/count values))))
-
-(defn value-at
-  "One value of a host-supplied real sequence, however it is stored."
-  [values index]
-  #?(:clj (nth values index)
-     :cljs (if (some? (.-length values))
-             (aget values index)
-             (nth values index))))
-
-(defn values-vector
-  "A host-supplied real sequence as an ordinary vector.
-
-  A host hands over a primitive real array — a typed array on the browser — but
-  a reader that indexes with `nth` (the reference interpreter's control seeding)
-  cannot read a typed array, so a caller that needs an ordinary sequence
-  converts here rather than testing the storage itself."
-  [values]
-  (let [length (value-length values)]
-    (loop [index 0
-           result (transient [])]
-      (if (< index length)
-        (recur (inc index) (conj! result (value-at values index)))
-        (persistent! result)))))
 
 (defn region-layout
   "A region's controls by name, with the offset each one's slice starts at.
@@ -124,18 +83,18 @@
         ;; region.
         values (if (number? values) (repeat (long stride) values) values)
         offset (long offset)
-        length (min (value-length values) (long stride))]
+        length (min (numbers/value-length values) (long stride))]
     #?(:clj (if f64?
               (let [^doubles target region]
                 (dotimes [index length]
                   (aset target (int (+ offset index))
-                        (double (value-at values index)))))
+                        (double (numbers/value-at values index)))))
               (let [^floats target region]
                 (dotimes [index length]
                   (aset target (int (+ offset index))
-                        (float (value-at values index))))))
+                        (float (numbers/value-at values index))))))
        :cljs (dotimes [index length]
-               (aset region (+ offset index) (js/Number (value-at values index)))))
+               (aset region (+ offset index) (js/Number (numbers/value-at values index)))))
     region))
 
 (defn planar-block
@@ -144,17 +103,17 @@
   [f64? channels length]
   #?(:clj (into-array (if f64? (Class/forName "[D") (Class/forName "[F"))
                       (repeatedly channels
-                                  (clojure.core/fn [] (real-array f64? length))))
+                                  (clojure.core/fn [] (numbers/real-array f64? length))))
      :cljs (let [block (js/Array. channels)]
              (dotimes [channel channels]
-               (aset block channel (real-array f64? length)))
+               (aset block channel (numbers/real-array f64? length)))
              block)))
 
 (defn scratch-buffer
   "A voice's rendered output: a mono array, or a planar block for stereo (D40)."
   [f64? channels max-block-frames]
   (if (= 1 channels)
-    (real-array f64? max-block-frames)
+    (numbers/real-array f64? max-block-frames)
     (planar-block f64? channels max-block-frames)))
 
 (defn channel-of
