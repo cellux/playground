@@ -5326,6 +5326,147 @@ example is known. D88 — the reference instrument is the single `.cljc` above.
 
 ---
 
+## 2026-10-25 — P13d, part three — the facade thins (D89)
+
+The smallest slice P13d's handoff named, and the one that pays off later: the
+instance lifecycle moved out of `omkamra.dsp` into namespaces of its own, and
+the facade re-exports it (D89). No behaviour changed; the point is a dependency
+that is no longer there.
+
+**Why it was worth doing.** `omkamra.dsp.hosts.jvm` drives a voice and a bus
+instance in its own body, and it required `omkamra.dsp` — the macro namespace
+that also loads the definition forms, the SCI front end and the library registry
+— to call `create-instance`, `reset!`, `destroy!` and `process-unchecked!`. A
+facade every internal host goes through is not a facade. The JVM host now
+requires `omkamra.dsp.instance`; `omkamra.dsp` keeps `compile`, `link` and the
+macros, which already delegated.
+
+**The concept is target-neutral, so the namespace names no target.** The first
+cut put the two raw ABIs in the same namespace and dragged
+`omkamra.dsp.targets.jvm` — and with it the `insn` emitter — in beside the
+generic vocabulary. They are the *only* functions that name a target, because
+they hand a JVM artifact's physical control arrays to the JVM target, so they
+moved to `omkamra.dsp.instance.jvm` and `omkamra.dsp.instance` now requires
+nothing. That is also what would let the generic half become `.cljc` later
+without untangling a target first.
+
+**The re-export is a re-export.** `(def dsp/process! instance/process!)`, not a
+wrapper: one implementation, one docstring, one `:arglists`, and a stack frame
+that names the defining namespace. The little macro that does it quotes
+`:arglists`, because a `def` name's metadata is evaluated by the compiler — the
+same reason `clojure.core/defn` quotes it. The first attempt did not, and failed
+with "Unable to resolve symbol: value". A test in `omkamra.dsp.tests.process`
+pins the identity and the metadata — the seven generic ones against
+`omkamra.dsp.instance`, the two raw ones against `omkamra.dsp.instance.jvm` —
+and under R5 a wrapper in place of the alias was observed to fail it, and
+restoring the alias to pass it.
+
+**Verified.** JVM **281 tests / 2 576 assertions / 0 failures**; browser
+**54/54**; parity **211 cases, no gaps**. `clj-kondo` and `cljfmt` clean on the
+touched paths.
+
+---
+
+## 2026-10-25 — D90 — browser source can spell an `:int`
+
+The one open item P13d left (D88's wrinkle), and it had *two* causes, not one.
+The reader is the first: a ClojureScript runtime has one number type, so `12345`
+and `2.0` arrive as the same value. The second was ours — `box-float-literals`
+tested `(or (double? form) (float? form))`, and in ClojureScript both of those
+*are* `number?` (read from `cljs/core.cljs`), so it boxed every number and turned
+a bare integer into a float.
+
+The fix is one host-independent predicate, `(and (number? form) (not (integer?
+form)))`, and a stated contract: a bare integral literal is an `:int`, and an
+integral float in browser source is written `#dsp/float 2.0`. It changes only one
+path — SCI reading a source *string* in the browser. Clojure's reader and
+Shadow's compile-time reader both keep `Long`/`Double`, so the JVM macro still
+boxes a `.cljc` definition's bare floats, and nothing on the JVM side changed.
+
+Two browser checks pin it: `:source-int`, a bare integer increment that must stay
+`:int` (observed to fail under the old predicate, R5), and `:source-chain`, whose
+integral float is now written `#dsp/float`. The reference synth is deliberately
+**not** annotated: its bare floats are the test corpus for the compile-time path,
+which `reference instrument equivalence` already exercises by compiling the page's
+own capture and comparing descriptors. Annotating it would have made the
+user-facing example noisier and weakened that test to "does a box survive". D90
+records the choice.
+
+**Verified.** JVM **281 tests / 2 576 assertions / 0 failures**; browser
+**54/54**; parity **211 cases, no gaps**. `clj-kondo` and `cljfmt` clean on the
+touched paths.
+
+---
+
+## 2026-10-25 — D91 — a namespace compiles the same pasted as in place
+
+The goal, stated plainly: take a Clojure namespace from Emacs, paste it into a
+browser editor, and get the same artifact as compiling it in the namespace. D90
+did not do that — it made an integral float in browser source need
+`#dsp/float 2.0`, which defeats the point. So D90's contract is superseded (its
+`box-float-literals` predicate stands).
+
+The spelling exists only in the text, and `cljs.tools.reader`'s private
+`read-number` throws it away. The browser front end now reads the source with the
+*real* reader — `read+string` on a source-logging reader returns each form and its
+source text — and evaluates the forms with the text attached, printed back for
+`sci/eval-string*`. The capture became polymorphic: `box-form` boxes from the text
+when a form carries one and from the host value otherwise, so the JVM macro path
+is untouched. `#dsp/float` is now the representation only, plus what a
+hand-written descriptor (which has no text) still needs.
+
+Two wrinkles cost real time. A browser re-reading printed forms stamps its own
+`:line` over the printed one, so the original position travels under
+`:dsp/source-line`/`:dsp/source-column` and `source-of` prefers it — without that
+the descriptors differed on `:source`. And the walk needed care with `#_`
+(`read+string` returns the *following* form with the discard in its text) and with
+`#(...)`/`#?(...)`, whose forms do not match their inner text.
+
+The payoff is a test. `:source-chain` is a bare `(* sample 2.0)` again, and the
+reference synth's own `.cljc` source — `:int` seed and bare integral floats and
+all — is a browser `source equivalence` case with no annotation: the page compiles
+it with SCI and matches the JVM's own reader. The user's sentence, as an
+assertion.
+
+**Verified.** JVM **283 tests / 2 612 assertions / 0 failures**; browser
+**54/54**; parity **211 cases, no gaps**. `clj-kondo` and `cljfmt` clean on the
+touched paths.
+
+---
+
+## 2026-10-25 — D92 — the last atom
+
+D91 left one gap: a body or a state `:next` that was a *bare number*. The
+recovery read a form's own source text, and an atom cannot carry metadata — so a
+bare `2.0` fell back to the host value, and the page read it as `2`. A silent
+difference, which is worse than a loud one.
+
+The fix is to let a form hand its *children's* texts to the walk: `annotate` now
+attaches `:dsp/source-children`, and the capture boxes a bare number with the text
+of the position it came from. Two details carried the weight. The body is a
+suffix of its container's children, so `box-body` takes the last `(count body)`
+texts — and the container is the definition form *except* in the packed
+explicit-spec shape, where the body sits inside the parameter vector, which
+`capture-function` passes instead. And a `:next` is found by re-reading the state
+map's text and walking key/value pairs in reader order, not by the map's iteration
+order, because past eight entries an array-map becomes a hash-map and the orders
+part.
+
+Scope is exactly the positions the capture boxes. `:init` turned out to need
+nothing — `normalize-initializer` coerces it from the declared type — and
+`:process`/`:options` are untouched, since a box there would fail validation.
+
+The proof is the negative control, and it is clean: removing the two call sites —
+and nothing else — fails exactly one case, `:source-atom`, with
+`:expected :float, :actual :int` at `[:body 0]`. That is the pre-D92 bug,
+reproduced by the check that is supposed to catch it.
+
+**Verified.** JVM **284 tests / 2 620 assertions / 0 failures**; browser
+**54/54**; parity **211 cases, no gaps**. `clj-kondo` and `cljfmt` clean on the
+touched paths.
+
+---
+
 ## Handoff — current state
 
 The one entry rewritten in place, and always the last. It holds where we are, what
@@ -5335,38 +5476,29 @@ bullet that is still true two slices later is in the wrong file.
 
 ### Where we are
 
-**P13d is done but for its last slice.** D85–D88 are implemented and verified:
-`dsp/compile` takes a definition or a source string in both worlds; the bus lives
-behind one kernel interface on all four targets; `hosts.instrument` is `.cljc`;
-the reference synth is a single `.cljc` the page compiles its own capture of; and
-a state region's zeros travel as a size (canonical IR 1.77 MB → 40 KB, JS module
-3.65 MB → 11 KB).
+**P13d is done.** D85–D92 are implemented and verified: `dsp/compile` takes a
+definition or a source string in both worlds; the bus lives behind one kernel
+interface on all four targets; `hosts.instrument` is `.cljc`; the reference synth
+is a single `.cljc` the page compiles its own capture of; a state region's zeros
+travel as a size (canonical IR 1.77 MB → 40 KB, JS module 3.65 MB → 11 KB);
+`omkamra.dsp` is a facade again — the instance lifecycle lives in
+`omkamra.dsp.instance` and is re-exported. And the round trip works: the browser
+front end recovers a literal's spelling from the source text — a form's own, and
+the children's for a bare number (D92) — so the reference synth's own `.cljc`
+source compiles the same in the page as on the JVM.
 
-Suite: JVM **280 tests / 2 549 assertions / 0 failures**, browser **54/54**,
+Suite: JVM **284 tests / 2 620 assertions / 0 failures**, browser **54/54**,
 parity **211 cases, no gaps**.
 
 ### What's next
 
-1. **The literal question, and it is a decision, not work** (D88's wrinkle;
-   written up in `PLAN.md` §Open questions, *Can browser source spell an `:int`
-   literal?*). Browser source cannot spell an `:int` literal: the ClojureScript
-   reader cannot tell `12345` from `2.0`, and `literals/box-float-literals` boxes
-   every number. The D78-consistent fix is to box only non-integral numbers — a
-   bare integral literal is an `:int`, an integral float is written `#dsp/float` —
-   but that changes what a browser author must write, so it is held. Nothing
-   blocks on it: it is a spelling contract, not a capability.
-2. **`omkamra.dsp` as a thin facade** (D85's last item): `compile`, `link` and
-   the macros already delegate; the instance lifecycle
-   (`create-instance`/`destroy!`/`process!`/…) still wants its own namespace to
-   re-export.
-3. **Then P13e** (incremental recompilation, caching keyed on
-   `ir/canonical-text`, error classification), then **P14** (artifact-driven
-   worklet installation), then **H1**, **P15**, **P16** per `PHASES.md`.
+1. **P13e** (incremental recompilation, caching keyed on `ir/canonical-text`,
+   error classification), then **P14** (artifact-driven worklet installation),
+   then **H1**, **P15**, **P16** per `PHASES.md`.
 
 ### What shapes the next decision
 
-The {world × input} cells are real and checked for the reference instrument: its
-definition is captured and compiled in both worlds, and its own source is
-evaluated by SCI and by the JVM's reader. What remains is not a missing
-capability but a spelling contract (item 1). Everything else undecided is in
-`PLAN.md` §Open questions.
+P13e is the least-scoped deliverable: the cache key is `ir/canonical-text`, but
+*what* is cached, when it is invalidated, and where the error classification
+boundary between SCI, validation and backend falls are still to be decided.
+Everything else undecided is in `PLAN.md` §Open questions.

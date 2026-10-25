@@ -10,6 +10,8 @@
   (:refer-clojure :exclude [compile defn defstruct fn reset!])
   (:require [omkamra.dsp.capture :as capture]
             [omkamra.dsp.compiler :as compiler]
+            [omkamra.dsp.instance :as instance]
+            [omkamra.dsp.instance.jvm :as instance-jvm]
             [omkamra.dsp.readers]
             [omkamra.dsp.source :as source]
             [omkamra.dsp.targets.jvm :as jvm]))
@@ -239,279 +241,32 @@
    (source/compile definition (merge {:library (library-definitions)}
                                      compile-options))))
 
-(clojure.core/defn- check-live!
-  "Reject use of a process instance that has been destroyed."
-  [holder]
-  (when (and (:live? holder) (not (deref (:live? holder))))
-    (throw (ex-info "this DSP process instance has been destroyed"
-                    {:target (:target holder)})))
-  holder)
+;; The instance lifecycle lives in `omkamra.dsp.instance` (P13d): the JVM host
+;; drives an instance from its own body, and it should not have to load this
+;; macro namespace — the definition forms, the SCI front end, the library
+;; registry — to do it. What stays here is a re-export, not a wrapper, so
+;; `dsp/process!` is the same function as `instance/process!`: one
+;; implementation, one docstring, one `:arglists`, and a stack frame that names
+;; `omkamra.dsp.instance`.
 
-(clojure.core/defn process-instance?
-  "True when `value` is an independent instance from `create-instance`."
-  [value]
-  (boolean (:dsp/instance value)))
+(clojure.core/defmacro ^:private defalias
+  "Intern `name` here, holding the function `target` names, and carry its doc
+  and arglists, so the facade re-exports rather than wraps.
 
-(clojure.core/defn create-instance
-  "Create an independent process instance from a compiled process artifact.
+  The `:arglists` metadata is quoted because a `def` name's metadata is evaluated
+  by the compiler — the reason `clojure.core/defn` quotes it too."
+  [name target]
+  (let [source (meta (resolve target))
+        m (cond-> (select-keys source [:doc])
+            (:arglists source) (assoc :arglists (list 'quote (:arglists source))))]
+    `(def ~(with-meta name m) ~target)))
 
-  The artifact is an immutable program shared by every instance; an instance
-  owns its persistent state and its scratch arena. `:interpreter` and `:jvm`
-  artifacts reuse one compiled code object and allocate a fresh state region
-  per instance, so instantiating never recompiles. Call `destroy!` when the
-  instance is no longer needed; the artifact remains usable either way."
-  [artifact]
-  (when-not (= :process (:entry artifact))
-    (throw (ex-info "only process artifacts can be instantiated"
-                    {:entry (:entry artifact)})))
-  (if-let [factory (:create-instance artifact)]
-    (assoc (factory)
-           :dsp/instance true
-           :artifact artifact
-           :target (:target artifact)
-           :live? (atom true))
-    (throw (ex-info "this DSP target does not support explicit process instances"
-                    {:target (:target artifact)}))))
-
-(clojure.core/defn destroy!
-  "Release the persistent state owned by a process instance.
-
-  The instance is unusable afterwards and further calls through it throw. A
-  plain artifact owns its state for the artifact's lifetime and cannot be
-  destroyed."
-  [holder]
-  (when-not (process-instance? holder)
-    (throw (ex-info "destroy! expects an instance created by create-instance"
-                    {:target (:target holder)})))
-  (when (deref (:live? holder))
-    (when-let [destroy (:destroy holder)]
-      (destroy))
-    (clojure.core/reset! (:live? holder) false))
-  nil)
-
-(clojure.core/defn invoke
-  "Invoke a compiled artifact or instance through its target-specific adapter."
-  [holder & args]
-  (check-live! holder)
-  (apply (:invoke holder) args))
-
-(clojure.core/defn- real-region?
-  "True for a primitive float/double array: a region the host built itself.
-
-  A real-time host writes its regions in place, so the context may carry the
-  region *itself* rather than the named values this adapter would flatten into
-  one. Both are accepted; the difference is who owns the copy."
-  [value]
-  (or (instance? (class (double-array 0)) value)
-      (instance? (class (float-array 0)) value)))
-
-(clojure.core/defn- lane-region
-  "Flatten a `{:lane-name values}` context map into the ABI's single lane region.
-
-  The kernel sees one flat region with compile-time offsets; the host supplies
-  one named sequence per lane. This is the whole of the impedance mismatch, and
-  it costs one copy per call — a real-time host writes the region directly and
-  skips this path, passing the region it already owns as `:lanes`."
-  [artifact context]
-  (let [abi (:abi artifact)
-        lanes (:lanes abi)]
-    (when (and (some :required? lanes) (nil? (:lanes context)))
-      ;; A process with a mandatory (`:lane`) lane has no valid block without
-      ;; its region, so say that here rather than letting a backend report an
-      ;; unknown buffer. A `:has-lane` lane is optional: an absent region is
-      ;; built zeroed, so it reads as "no automation" and the scalar stands.
-      (throw (ex-info "this DSP process declares per-frame lanes"
-                      {:lanes (mapv :name lanes)})))
-    (cond
-      (empty? lanes) context
-      ;; The region is already built: the host owns it and wrote it itself.
-      (real-region? (:lanes context)) context
-      :else
-      (let [stride (long (:lane-stride abi))
-            supplied (:lanes context)
-            f64? (= :f64 (get-in abi [:precision]))
-            region (if f64?
-                     (double-array (* stride (count lanes)))
-                     (float-array (* stride (count lanes))))]
-        (doseq [{:keys [name offset required?]} lanes]
-          ;; The ABI names a lane with a symbol, as it does a control, but accept
-          ;; the keyword spelling too: a key that silently missed would publish
-          ;; zeros, which is the worst possible failure for automation.
-          (let [values (or (get supplied name) (get supplied (keyword name)))]
-            (when (and (nil? values) required?)
-              (throw (ex-info "a DSP lane has no values for this block"
-                              {:lane name :supplied (vec (keys supplied))})))
-            (let [count (min (count values) stride)]
-              (if f64?
-                (let [^doubles target region]
-                  (dotimes [index count]
-                    (aset target (int (+ offset index)) (double (nth values index)))))
-                (let [^floats target region]
-                  (dotimes [index count]
-                    (aset target (int (+ offset index)) (float (nth values index)))))))))
-        (assoc context :lanes region)))))
-
-(clojure.core/defn- shared-region
-  "Flatten a `{:shared-name value}` context map into the ABI's `:shared` region.
-
-  A shared control is block-rate, so a bare number is broadcast across its
-  `:shared-stride` slice and a sequence is written as it comes — which is also
-  what a host writing a per-frame *global* curve wants. The region is one for the
-  whole pool, not one per voice (M5), so this is the copy that a real-time host
-  skips by writing the region directly, passing the region it already owns as
-  `:shared`."
-  [artifact context]
-  (let [abi (:abi artifact)
-        shared (:shared abi)]
-    (cond
-      (empty? shared) context
-      ;; The region is already built: the host owns it and wrote it itself.
-      (real-region? (:shared context)) context
-      :else
-      (let [stride (long (:shared-stride abi))
-            supplied (:shared context)
-            f64? (= :f64 (get-in abi [:precision]))
-            region (if f64?
-                     (double-array (* stride (count shared)))
-                     (float-array (* stride (count shared))))
-            write! (if f64?
-                     (clojure.core/fn [target at value]
-                       (aset ^doubles target (int at) (double value)))
-                     (clojure.core/fn [target at value]
-                       (aset ^floats target (int at) (float value))))]
-        (when (and supplied (not (map? supplied)))
-          (throw (ex-info "a DSP shared region must be a map of control to value"
-                          {:shared supplied})))
-        (doseq [{:keys [name offset required?]} shared]
-          ;; A control name is spelled as a symbol in the ABI; accept the keyword
-          ;; spelling too, since a key that silently missed would publish zeros.
-          (let [value (or (get supplied name) (get supplied (keyword name)))]
-            (cond
-              (nil? value)
-              (when required?
-                (throw (ex-info "a DSP shared control has no value for this block"
-                                {:shared name :supplied (vec (keys supplied))})))
-
-              (number? value)
-              (dotimes [frame stride]
-                (write! region (+ offset frame) value))
-
-              :else
-              (let [count (min (clojure.core/count value) stride)]
-                (dotimes [index count]
-                  (write! region (+ offset index) (nth value index)))))))
-        (assoc context :shared region)))))
-
-(clojure.core/defn process!
-  "Execute a process artifact or instance with its explicit ABI context.
-
-  The context supplies `:output`, `:frames`, `:sample-rate`, and a vector of
-  `:controls` in ABI order, plus `:input` when the process declares an input
-  port. Interpreter and JVM artifacts and instances expose this checked context
-  adapter; generated JS/Wasm modules expose their target-native entry points
-  through the same lifecycle vocabulary.
-
-  `:lanes` carries a per-frame automation region (D28); `:shared` carries the
-  pool-wide shared controls (M5). Either may be absent when the process declares
-  none of that kind, may be a map of control name to values (this adapter then
-  flattens it), or may be the region itself, for a host that already owns and
-  writes one."
-  [holder context]
-  (let [artifact (or (:artifact holder) holder)]
-    (when-not (= :process (:entry artifact))
-      (throw (ex-info "only process artifacts have a process ABI"
-                      {:entry (:entry artifact)})))
-    (check-live! holder)
-    (if-let [invoke-context (:invoke-context holder)]
-      (invoke-context (shared-region artifact (lane-region artifact context)))
-      (throw (ex-info "this DSP target does not expose an explicit process context adapter"
-                      {:target (:target artifact)})))))
-
-(clojure.core/defn process-checked!
-  "Execute a JVM process artifact or instance through its checked raw ABI.
-
-  Unlike `process!`, controls are supplied in their physical reusable arrays:
-  `float-controls` and `int-controls`. It verifies primitive array classes,
-  buffer shape/length, control storage, and the holder's own state before
-  processing."
-  ([holder input output frames sample-rate float-controls int-controls]
-   (process-checked! holder input output frames sample-rate float-controls
-                     int-controls nil))
-  ([holder input output frames sample-rate float-controls int-controls lanes]
-   (process-checked! holder input output frames sample-rate float-controls
-                     int-controls lanes nil))
-  ([holder input output frames sample-rate float-controls int-controls lanes
-    shared]
-   (let [artifact (or (:artifact holder) holder)]
-     (when-not (= :process (:entry artifact))
-       (throw (ex-info "only process artifacts have a process ABI"
-                       {:entry (:entry artifact)})))
-     (when-not (= :jvm (:target artifact))
-       (throw (ex-info "the raw checked process ABI is currently JVM-specific"
-                       {:target (:target artifact)})))
-     (check-live! holder)
-     (jvm/process-checked! holder input output frames sample-rate
-                           float-controls int-controls lanes shared))))
-
-(clojure.core/defn process-unchecked!
-  "Execute a JVM process artifact or instance through its raw primitive ABI.
-
-  This deliberately performs no validation. Callers must provide buffers and
-  physical f32/f64 control arrays matching the artifact ABI. Persistent state
-  is owned by the holder: a plain artifact owns one state region, and each
-  `create-instance` handle owns its own. Use `process-checked!` at
-  setup/development boundaries; retain `:unchecked` and its matching
-  `Dsp*Process` interface in a real-time host when direct dispatch is required."
-  ([holder input output frames sample-rate float-controls int-controls]
-   (process-unchecked! holder input output frames sample-rate float-controls
-                       int-controls nil))
-  ([holder input output frames sample-rate float-controls int-controls lanes]
-   (process-unchecked! holder input output frames sample-rate float-controls
-                       int-controls lanes nil))
-  ([holder input output frames sample-rate float-controls int-controls lanes
-    shared]
-   (let [artifact (or (:artifact holder) holder)]
-     (when-not (= :process (:entry artifact))
-       (throw (ex-info "only process artifacts have a process ABI"
-                       {:entry (:entry artifact)})))
-     (when-not (= :jvm (:target artifact))
-       (throw (ex-info "the raw unchecked process ABI is currently JVM-specific"
-                       {:target (:target artifact)})))
-     (check-live! holder)
-     (jvm/process-unchecked! holder input output frames sample-rate
-                             float-controls int-controls lanes shared))))
-
-(clojure.core/defn initialize!
-  "Initialize a process artifact or instance according to its lifecycle ABI."
-  [holder]
-  (let [artifact (or (:artifact holder) holder)]
-    (when-not (= :process (:entry artifact))
-      (throw (ex-info "only process artifacts have a process lifecycle"
-                      {:entry (:entry artifact)})))
-    (when-not (get-in artifact [:abi :lifecycle :init])
-      (throw (ex-info "this DSP instance does not support initialization"
-                      {:target (:target artifact)})))
-    (check-live! holder)
-    (if-let [initialize (:initialize holder)]
-      (initialize)
-      (throw (ex-info "this DSP target does not expose initialization"
-                      {:target (:target artifact)})))))
-
-(clojure.core/defn reset!
-  "Reset the persistent state of a process artifact or instance.
-
-  Each instance resets only its own state; resetting one instance never
-  disturbs another."
-  [holder]
-  (let [artifact (or (:artifact holder) holder)]
-    (when-not (= :process (:entry artifact))
-      (throw (ex-info "only process artifacts have persistent state"
-                      {:entry (:entry artifact)})))
-    (when-not (get-in artifact [:abi :lifecycle :reset])
-      (throw (ex-info "this DSP instance does not support reset"
-                      {:target (:target artifact)})))
-    (check-live! holder)
-    (if-let [reset (:reset holder)]
-      (reset)
-      (throw (ex-info "this DSP target does not expose reset"
-                      {:target (:target artifact)})))))
+(defalias process-instance? instance/process-instance?)
+(defalias create-instance instance/create-instance)
+(defalias destroy! instance/destroy!)
+(defalias invoke instance/invoke)
+(defalias process! instance/process!)
+(defalias process-checked! instance-jvm/process-checked!)
+(defalias process-unchecked! instance-jvm/process-unchecked!)
+(defalias initialize! instance/initialize!)
+(defalias reset! instance/reset!)

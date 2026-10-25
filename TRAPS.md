@@ -137,3 +137,32 @@ which is the shape the Wasm emitter has always had (`memory.fill` then the
 non-zero stores). The JavaScript arena's `init` does this now; a region's size
 travels in the canonical form (`{:dsp/zeros n}`) so a host knows how much to
 zero-fill.
+
+## T11 — `read+string` folds a `#_` discard into the *next* form's text
+
+**Symptom:** a walk over `read+string` output that asks "is this form's text a
+numeric token?" sees the form after a `#_` with text beginning `#_…`, and so
+misfires; reassembling a form from its text drops or moves the discard.
+
+**Cause:** `read` skips a `#_` form and returns the form *after* it, but
+`read+string` returns the text spanning both — the discard is a prefix of the
+returned text, not a form of its own.
+
+**Remedy:** strip the known prefix macros (`#_`, `#'`, `~@`, `'`, `` ` ``, `~`,
+`@`, `^`) before walking, and re-read the remainder so the reader itself discards
+what it should (D91).
+
+## T12 — carrying a form's metadata through SCI: `eval-form` refuses `ns`, and a re-read moves the position
+
+**Symptom:** `sci/eval-form` on a namespace form fails with a root-binding error
+on `*ns*`; and when forms are printed and re-read to reach `eval-string*`, the
+*browser* reader stamps its own `:line`/`:column` over the printed ones, so data
+two worlds compare differs on a source position (a descriptor's `:source`).
+
+**Cause:** SCI's `eval-form` evaluates a form, not a namespace declaration; and a
+reader re-reading printed forms takes the position from the printed text, not from
+the metadata the printer emitted.
+
+**Remedy:** use `sci/eval-string*` and print with `*print-meta*` true, and carry
+the original position under dedicated keys (`:dsp/source-line`/
+`:dsp/source-column`) that `capture/source-of` prefers (D91).

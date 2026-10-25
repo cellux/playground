@@ -47,10 +47,11 @@
   ;; ends, the same program; that is what makes the source portable rather than a
   ;; copy of it.
   ;;
-  ;; Checked here rather than in the page because a browser's reader has one
-  ;; number type: it cannot keep an `:int` literal (`white-noise`'s seed) apart
-  ;; from an integral float, which is what `#dsp/float` is for (D78). The JVM's
-  ;; reader has no such limit, so SCI and the native evaluator are comparable.
+  ;; Checked on the JVM as well as in the page: here both the native evaluator
+  ;; and SCI run on the JVM, where both readers keep a literal's type. The page
+  ;; runs the same text through SCI in a browser, where the spelling is recovered
+  ;; from the source text instead (D91) — `source equivalence` carries it as a
+  ;; case.
   (let [source-text (conformance/portable-definition-source
                      "omkamra/dsp/examples/reference_synth.cljc"
                      'dsp.reference-source

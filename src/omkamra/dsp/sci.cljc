@@ -17,10 +17,12 @@
   The capture itself stays compiled — the macro is a thin reader of the
   definition site, and `omkamra.dsp.capture` turns the form into a descriptor the
   same way the JVM macro does, so the two produce identical data."
-  (:require [omkamra.dsp.capture :as capture]
+  (:require [clojure.string :as str]
+            [omkamra.dsp.capture :as capture]
             [omkamra.dsp.combinators]
             [omkamra.dsp.readers :as readers]
             [omkamra.dsp.registry :as registry]
+            [omkamra.dsp.source-reader :as source-reader]
             [sci.core :as sci]))
 
 (def ^:private host-namespaces
@@ -85,8 +87,15 @@
     (list 'def name (list 'quote descriptor))))
 
 (defmacro def [name definition]
-  (let [source (merge (select-keys (meta &form) [:line :column])
-                      {:namespace (ns-name *ns*)})]
+  ;; The original line and column travel under their own keys: a browser reader
+  ;; re-reading the printed forms stamps its own over `:line`, and `dsp/def`
+  ;; builds `:source` here rather than through `capture/source-of`.
+  (let [m (meta &form)
+        line (or (:dsp/source-line m) (:line m))
+        column (or (:dsp/source-column m) (:column m))
+        source (cond-> {:namespace (ns-name *ns*)}
+                 line (assoc :line line)
+                 column (assoc :column column))]
     `(def ~name
        (let [d# ~definition
              stamped# (assoc d# :name '~name :source '~source)]
@@ -107,6 +116,19 @@
                          definition))
              {}
              library))
+
+(defn- annotated-source
+  "The source with each form's own text attached, printed back for SCI.
+
+  A browser reader has one number type, so a bare `2.0` reaches the capture as
+  the integer `2` (D91). The text survives, though, so each form is annotated
+  with it and the capture recovers a literal's spelling from the text. Printing
+  the forms with metadata is the whole mechanism: the source is not otherwise
+  changed, and `eval-string*` still sees an ordinary sequence of forms, `ns`
+  included."
+  [source]
+  (binding [*print-meta* true]
+    (str/join "\n" (map pr-str (source-reader/annotate source)))))
 
 (defn evaluate-source
   "Evaluate `source` (a string of forms) and return the definition it names.
@@ -139,7 +161,7 @@
     ;; A source without its own `ns` form lands in `user`, not in the bootstrap's
     ;; last namespace.
     (sci/eval-string* context "(ns user)")
-    (sci/eval-string* context source)
+    (sci/eval-string* context (annotated-source source))
     (let [definitions @captured
           value (or (some (fn [candidate]
                             (when (= definition (registry/definition-id candidate))

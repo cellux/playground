@@ -9,9 +9,10 @@
   read from maps in the audio path: `control-slots` says where each ABI control
   lives in the physical control arrays, and `special-access` where each declared
   special lives in the state arrays (D39)."
-  (:require [omkamra.dsp :as dsp]
-            [omkamra.dsp.hosts.fusion :as fusion]
+  (:require [omkamra.dsp.hosts.fusion :as fusion]
             [omkamra.dsp.hosts.mixing :as mixing]
+            [omkamra.dsp.instance :as instance]
+            [omkamra.dsp.instance.jvm :as instance-jvm]
             [omkamra.dsp.synth.pool :as pool]))
 
 (defn- control-slots
@@ -160,20 +161,20 @@
     (reify pool/Kernel
       (create-voice [_ max-block-frames]
         (if (nil? mapping)
-          (let [instance (dsp/create-instance artifact)]
-            {:instance instance
+          (let [handle (instance/create-instance artifact)]
+            {:instance handle
              :instance-key (vswap! created inc)
              :float-controls (mixing/real-array f64? float-count)
              :int-controls (int-array (int int-count))
              :lane-region (when (pos? lane-count)
                             (mixing/real-array f64? lane-region-size))
              :scratch (mixing/scratch-buffer f64? channels max-block-frames)
-             :reset! (clojure.core/fn [] (dsp/reset! instance))})
+             :reset! (clojure.core/fn [] (instance/reset! handle))})
           (let [slot (long (mod (long @created) slots))]
             (when (zero? slot)
-              (let [instance (dsp/create-instance artifact)]
+              (let [handle (instance/create-instance artifact)]
                 (vreset! current
-                         {:instance instance
+                         {:instance handle
                           :instance-key (inc (quot (long @created) slots))
                           :float-controls (mixing/real-array f64? float-count)
                           :int-controls (int-array (int int-count))
@@ -182,27 +183,27 @@
                           :scratch (mixing/scratch-buffer f64? channels max-block-frames)
                           :refs (volatile! slots)})))
             (vswap! created inc)
-            (let [instance @current]
-              {:instance (:instance instance)
-               :instance-key (:instance-key instance)
+            (let [held @current]
+              {:instance (:instance held)
+               :instance-key (:instance-key held)
                :slot slot
-               :refs (:refs instance)
-               :float-controls (:float-controls instance)
-               :int-controls (:int-controls instance)
-               :lane-region (:lane-region instance)
-               :scratch (:scratch instance)
-               :reset! (:reset! instance)}))))
+               :refs (:refs held)
+               :float-controls (:float-controls held)
+               :int-controls (:int-controls held)
+               :lane-region (:lane-region held)
+               :scratch (:scratch held)
+               :reset! (:reset! held)}))))
       (instance-key [_ voice] (:instance-key voice))
       (destroy-voice! [_ voice]
         (if (nil? mapping)
-          (dsp/destroy! (:instance voice))
+          (instance/destroy! (:instance voice))
           ;; The process outlives the handle: the pool destroys one voice per
           ;; slot, and there is only one instance to release.
           (when (zero? (long (vswap! (:refs voice) dec)))
-            (dsp/destroy! (:instance voice)))))
+            (instance/destroy! (:instance voice)))))
       (reset-voice! [_ voice]
         (if (nil? mapping)
-          (dsp/reset! (:instance voice))
+          (instance/reset! (:instance voice))
           ;; One slot, one partition: a fused instance's slots do not clobber each
           ;; other's state, so stealing or retriggering one is its own business
           ;; (M6a, seam 3).
@@ -289,10 +290,10 @@
       (clear-output! [_ output frames]
         (mixing/clear-channels! f64? channels output frames))
       (mix-voice! [_ voice output frames sample-rate]
-        (dsp/process-unchecked! (:instance voice) nil (:scratch voice) frames
-                                sample-rate (:float-controls voice)
-                                (:int-controls voice) (:lane-region voice)
-                                shared-region)
+        (instance-jvm/process-unchecked! (:instance voice) nil (:scratch voice) frames
+                                         sample-rate (:float-controls voice)
+                                         (:int-controls voice) (:lane-region voice)
+                                         shared-region)
         (mixing/mix-block! containment f64? channels voice output frames)))))
 
 (defn jvm-kernel
@@ -367,7 +368,7 @@
                         (mixing/real-array f64? (* shared-stride shared-count)))]
     {:create-bus
      (fn []
-       {:instance (dsp/create-instance artifact)
+       {:instance (instance/create-instance artifact)
         :float-controls (mixing/real-array f64? float-count)
         :int-controls (int-array (int int-count))})
      :run-bus!
@@ -384,12 +385,12 @@
                (aset-int ^ints (:int-controls bus)
                          (int (aget int-slot position))
                          (long (aget values position)))))))
-       (dsp/process-unchecked! (:instance bus) input output frames
-                               (double sample-rate)
-                               (:float-controls bus) (:int-controls bus)
-                               lane-region shared-region))
+       (instance-jvm/process-unchecked! (:instance bus) input output frames
+                                        (double sample-rate)
+                                        (:float-controls bus) (:int-controls bus)
+                                        lane-region shared-region))
      :reset-bus!
-     (fn [bus] (dsp/reset! (:instance bus)))
+     (fn [bus] (instance/reset! (:instance bus)))
      :write-lane!
      (fn [lane values]
        (when lane-region

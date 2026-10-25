@@ -2,10 +2,33 @@
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is]]
             [omkamra.dsp :as dsp]
+            [omkamra.dsp.instance :as instance]
+            [omkamra.dsp.instance.jvm :as instance-jvm]
             [omkamra.dsp.library.delay :as delay]
             [omkamra.dsp.library.noise :as noise]
             [omkamra.dsp.library.oscillator :as oscillator]
             [omkamra.dsp.harness.fixtures :refer [gain gated-one-pole one-pole ramp-generator]]))
+
+(deftest facade-re-exports-the-instance-lifecycle
+  ;; `omkamra.dsp` is a facade: `dsp/process!` *is* `instance/process!`, the same
+  ;; function rather than a wrapper that could drift from it, and the metadata
+  ;; travels so help and `:arglists` name the one definition. The JVM host
+  ;; requires the instance namespace directly, which is what keeps the facade
+  ;; thin — this pins the other direction.
+  (doseq [[facade implementation]
+          [[#'dsp/process-instance? #'instance/process-instance?]
+           [#'dsp/create-instance #'instance/create-instance]
+           [#'dsp/destroy! #'instance/destroy!]
+           [#'dsp/invoke #'instance/invoke]
+           [#'dsp/process! #'instance/process!]
+           [#'dsp/process-checked! #'instance-jvm/process-checked!]
+           [#'dsp/process-unchecked! #'instance-jvm/process-unchecked!]
+           [#'dsp/initialize! #'instance/initialize!]
+           [#'dsp/reset! #'instance/reset!]]]
+    (is (identical? @facade @implementation)
+        (str (:name (meta facade)) " must be the instance namespace's function"))
+    (is (= (:doc (meta implementation)) (:doc (meta facade))))
+    (is (= (:arglists (meta implementation)) (:arglists (meta facade))))))
 
 (deftest process-abi-runs-single-channel-blocks
   (doseq [target [:interpreter :jvm]]

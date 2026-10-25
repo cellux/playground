@@ -4552,3 +4552,155 @@ now finishes in well under a second.
   therefore checked with SCI on the JVM, where the reader keeps the type. Making
   browser source spell ints (box only non-integral numbers, and write integral
   floats as `#dsp/float`) is a language-contract change and is left open.
+
+## D89 — the instance lifecycle is its own namespace; the facade re-exports it
+
+**Status.** In force.
+
+- The process-instance lifecycle splits by what it *names*. `omkamra.dsp.instance`
+  holds the target-neutral vocabulary — `process-instance?`, `create-instance`,
+  `destroy!`, `invoke`, `process!`, `initialize!`, `reset!` — and requires no
+  target: it drives the `:create-instance`/`:invoke`/`:invoke-context`/
+  `:initialize`/`:reset`/`:destroy` an artifact carries, so the interpreter and
+  the JVM run through it and a browser's kernel does the same job its own way.
+  `omkamra.dsp.instance.jvm` holds the two raw ABIs (`process-checked!`,
+  `process-unchecked!`), which hand a JVM artifact's physical control arrays to
+  `omkamra.dsp.targets.jvm`. The generic namespace also exposes `check-live!`,
+  the holder check the JVM half shares; it is the one public helper the facade
+  does not re-export.
+- The facade `omkamra.dsp` **re-exports** all nine rather than defining or
+  wrapping them, so `dsp/process!` is the same function as `instance/process!`:
+  one implementation, one docstring, one `:arglists`, and a stack frame that
+  names the defining namespace. A test pins the re-export (and its metadata),
+  because a wrapper is otherwise indistinguishable until it drifts.
+- The reason is the host, not the API. `omkamra.dsp.hosts.jvm` drives an instance
+  in its own body, and it used to require the facade — the macro namespace that
+  also pulls the SCI front end, the library registry and the definition forms —
+  to call `create-instance`/`reset!`. It now requires `omkamra.dsp.instance`
+  (and the JVM half for the raw ABI), so the facade is a pure entry point and
+  internal code no longer depends on it.
+- The lifecycle is JVM-only *today* because that is how far it reaches: a browser
+  drives a pool through the `Kernel` protocol (`omkamra.dsp.synth.pool`), and a
+  JavaScript or Wasm kernel is an instance of its target's own making. The split
+  does not prevent `instance` becoming `.cljc` if a browser app ever needs the
+  artifact-level lifecycle — there is now no target dependency in the way.
+- `compile`, `link` and the macros stay in the facade, where they already
+  delegate.
+- **Why a re-export and not a builtin alias.** Clojure has no facility that makes
+  a *qualified* name resolve to another namespace's Var. `:refer`/`refer` shares
+  the Var — a refer would make `ns-resolve` return the implementation's Var — but
+  qualified resolution uses `Namespace.findInternedVar`, which skips refers, so
+  `omkamra.dsp/process!` would not compile. `intern` gives a qualified name but a
+  *new* Var, with a double indirection (`@#'dsp/process!` is a Var, not the
+  function) and no `:doc`/`:arglists`. So the copy is the price of the facade's
+  stable qualified name, and the defining namespace's Var is the one seam a
+  caller can redefine. (This is why `potemkin/import-vars`, were it a
+  dependency, would change nothing here.)
+
+## D90 — browser source spells an `:int` bare and an integral float `#dsp/float`
+
+**Status.** Superseded as to the *spelling contract* by D91; the
+`box-float-literals` predicate it decided stands. (Amends D78.)
+
+- D78 decided a float literal travels as `{:dsp/float 1.0}`, because a platform
+  with one number type cannot carry the type in the value. It did not say what a
+  *reader* does when it cannot tell the spellings apart at all.
+  `box-float-literals` tested `(or (double? form) (float? form))`, and in
+  ClojureScript both `double?` and `float?` are `number?` — so it boxed **every**
+  number: a bare `12345` became a float and an `:int` literal had no spelling in
+  browser source at all.
+- The rule is now `(and (number? form) (not (integer? form)))` — *whether the
+  value has a fractional part*, one predicate for both hosts. On the JVM it boxes
+  `2.0` (a `Double` is not an `integer?`) and leaves `2`; in ClojureScript it
+  boxes `0.5` and leaves `2`. The contract follows:
+  - a bare integral literal is an `:int`, in both worlds;
+  - an integral **float** in browser source is written `#dsp/float 2.0`, because
+    a one-number-type reader reads `2.0` as the integer `2`.
+- This changes only **SCI reading a source string in the browser**. The other
+  paths are unaffected: Clojure's reader (the `:native` evaluator, SCI on the
+  JVM) keeps `Long` vs `Double`; and a `.cljc`/`.cljs` definition is read by
+  Shadow's *compile-time* reader, which runs on the JVM, so the JVM macro boxes
+  its bare floats correctly. `#dsp/float` is therefore a **browser-source-string**
+  spelling, not something a statically-compiled definition needs.
+- **The reference synth is deliberately left in natural spelling.** Its `.cljc`
+  source is the test corpus for the compile-time path: those bare floats are what
+  `reference instrument equivalence` checks, compiling the page's own capture and
+  comparing descriptors with the JVM's. Writing `#dsp/float` into it would make
+  the user-facing example noisier and would replace a test of the reader's type
+  preservation with a test that a box survives. The browser source-string path is
+  `source-cases`: `:source-int` (a bare integer that must stay `:int`) and
+  `:source-chain` (an integral float written `#dsp/float`).
+- **Rejected: a Clojure-typed reader in the browser.** A ClojureScript host has
+  one number type and no `Long`, so no reader running there can keep the
+  distinction — `cljs.core/double?` and `float?` are `number?` for the same
+  reason. A pre-tokenizer that re-tags numeric lexemes before SCI reads them is a
+  second reader that has to stay in step with the real one (strings, comments,
+  chars, regexes), which is more machinery than the spelling contract.
+
+## D91 — the front end recovers a literal's spelling from the source text
+
+**Status.** In force (supersedes D90's spelling contract; the D90 predicate stands).
+
+- The goal is round-tripping, not a contract: a Clojure namespace written in an
+  editor and pasted into a browser app that compiles DSP source must produce the
+  same artifact as compiling it in the namespace. D90 got the `:int` half but
+  made an integral float in browser source need `#dsp/float 2.0` — a user-visible
+  rule that defeats the goal.
+- The spelling exists only in the text. `cljs.tools.reader`'s private
+  `read-number` has the raw string and discards it; a JS number cannot hold it.
+  So the *front end* reads the source with the real reader —
+  `read+string` on a `source-logging-push-back-reader` returns each form **and its
+  source text** — and evaluates the forms with the text attached under
+  `:dsp/source-text` (`omkamra.dsp.source-reader/annotate`, printed back for
+  `sci/eval-string*`).
+- The capture is **polymorphic**: `source-reader/box-form` boxes from the text
+  when a form carries one, and from the host value otherwise. So the JVM macro
+  path — a `.cljc` file Shadow compiles, or Clojure reading a namespace — is
+  untouched, and the SCI path recovers `2.0` from `2.0` and `12345` as an
+  `:int`. `#dsp/float` remains the *representation*, and is still needed where
+  there is no text: hand-written descriptors and transported EDN (D78).
+- Only the structural walk is ours (delimiters, prefixes, `#_`, `#?`); every
+  token is read by the real reader, so there is no second lexer to keep in step.
+  `omkamra.dsp.tests.source-reader` pins the walk against Clojure's reader on a
+  corpus, including `#_` and reader conditionals.
+- Position needed the same treatment: a browser re-reading printed forms stamps
+  its own `:line` over the printed one, so the original line and column travel
+  under `:dsp/source-line`/`:dsp/source-column` and `capture/source-of` (and the
+  SCI `dsp/def`) prefers them. Without that the descriptor's `:source` differed
+  between the worlds.
+- Acceptance: `:source-chain` is a bare `(* sample 2.0)` again, and the reference
+  synth's own `.cljc` source — `:int` seed and bare integral floats and all — is
+  a browser `source equivalence` case with no annotation. The page compiles it
+  with SCI and matches the JVM's own reader, which is the goal stated as a test.
+
+## D92 — a bare number is boxed from the form that encloses it
+
+**Status.** In force (closes the gap D91 left).
+
+- D91 recovered a literal's spelling from the form's *own* source text. An atom
+  cannot carry metadata, so a body or a state `:next` that was a *bare number*
+  fell back to the host value, and the page read `2.0` as `2` — a silently
+  different artifact. That was the one gap D91 recorded.
+- `annotate` now also attaches each collection's children's texts
+  (`:dsp/source-children`, in reader order, a map's flat key/value), and the
+  capture boxes a bare number with the text of the position it came from:
+  `source-reader/box-body` for the body forms, `box-entry` for a state's `:next`.
+- The scope is exactly the two positions the capture *boxes*. `:init` needs none —
+  it is typed by its slot, and `descriptor/normalize-initializer` coerces it from
+  the declared type — and `:process`/`:options` are neither boxed nor
+  text-recovered, because a box there would fail validation.
+- The body is a suffix of its container's children, so `box-body` takes the last
+  `(count body)` child texts. The container is the definition form, except in the
+  packed explicit-spec shape (`[{:params …} body]`), whose body lives inside the
+  parameter vector; `capture-function` passes that vector then.
+- A `:next` is found by re-reading the state map's own text and walking its
+  key/value pairs in reader order, not by the map's iteration order: an array-map
+  becomes a hash-map past eight entries, and the two orders would part.
+- The JVM macro path is still unchanged. It carries no texts, so every helper
+  falls back to the host value, where the type is already right.
+- Proved by `:source-atom` in `source equivalence` — a body of `0.0` and a
+  `:next` of `0.0`. Removing the two call sites and nothing else makes exactly
+  that case fail, with `:expected :float, :actual :int` at `[:body 0]`, which is
+  the pre-D92 bug; with them, the page compiles it and matches the JVM.
+  `omkamra.dsp.tests.source-reader` pins `box-form`, `box-body` and `box-entry`
+  directly.

@@ -245,10 +245,13 @@ omkamra.dsp.numbers              (.cljc)  every host-different numeric decision 
 omkamra.dsp.compiler             (.cljc)  the portable compile pipeline (D81)
 omkamra.dsp.capture              (.cljc)  the reading of a definition form, shared by both worlds (D83)
 omkamra.dsp.source               (.cljc)  one `compile`: a definition, or a source string (D83)
+omkamra.dsp.source-reader        (.cljc)  recover a literal's spelling from source text (D91)
 omkamra.dsp.sci                  (.cljc)  the SCI context the browser evaluates source in (D83)
 omkamra.dsp.registry             (.cljc)  descriptors by id; linking's portable resolver (D83)
 omkamra.dsp.library-registry     (.cljc)  the DSP library as that registry's seed (D83)
 omkamra.dsp                      (.clj/.cljs)  the user-facing facade: macros, and the two world faces
+omkamra.dsp.instance             (.clj)   the target-neutral process-instance lifecycle
+omkamra.dsp.instance.jvm         (.clj)   the JVM target's raw process ABI; the facade re-exports both (D89)
 omkamra.dsp.{descriptor,ir,linker,builtins,literals,readers,names}   the compiler front end
 omkamra.dsp.targets.capability   (.cljc)  what each target serves (D29)
 omkamra.dsp.targets.interpreter  (.cljc)  the portable reference interpreter (the oracle)
@@ -284,7 +287,11 @@ or `:native` (the JVM's own reader and macros); **capture** is the reading both
 kinds of macro call; **sci** builds the context the page evaluates a string in.
 **omkamra.dsp** is the facade, `.clj` and `.cljs` as the two world faces, so a
 browser app gets `dsp/defn` (via `:require-macros`) and `dsp/compile` (via
-`:require`) from one alias (D83).
+`:require`) from one alias (D83). It owns `compile`, `link` and the macros; the
+process-instance lifecycle is not its own. The target-neutral half lives in
+`omkamra.dsp.instance`, the JVM target's raw ABI in `omkamra.dsp.instance.jvm`,
+and the facade re-exports both, so internal code — the JVM host above all — can
+drive an instance without loading the macro namespace (D89).
 
 ### Definitions and normalization
 
@@ -813,22 +820,6 @@ Choices not made yet, each with what decides it.
   an untyped parameter means `:float`) with no conflicts, at the cost of threading
   types down through lowering. Deferred, and safe to revisit because
   `compiler equivalence` would catch the two worlds inferring differently.
-- **Can browser source spell an `:int` literal?** (D88's wrinkle.) ClojureScript
-  has one number type, so its reader cannot tell a bare `12345` (an `:int`) from a
-  bare `2.0` (a float) — exactly the ambiguity `#dsp/float` exists for (D78).
-  Today `literals/box-float-literals`'s ClojureScript branch boxes *every* number,
-  so a bare integral literal is a float and an `:int` literal has **no spelling**
-  in browser source; it is why the reference instrument's own source is checked
-  with SCI on the JVM (`tests/reference.clj`) rather than in the page. The
-  D78-consistent rule is to box only non-integral numbers: a bare integral literal
-  is then an `:int`, and an integral float is written `#dsp/float 2.0`. That makes
-  both spellable, at the cost of annotating the integral floats in the reference
-  synth and in `harness/source-cases.cljc` (`:source-chain`), and of every browser
-  author having to box an integral float. What decides it: it is a *spelling
-  contract*, so it is D78's to amend, not a capability to add — the JVM's reader
-  keeps literal types either way, so nothing on that side changes, and the static
-  ClojureScript capture runs the JVM macro, so it is unaffected too. Only
-  SCI-in-the-browser changes.
 
 ## Prioritized work
 

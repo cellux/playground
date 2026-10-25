@@ -622,6 +622,24 @@
 ;; ---------------------------------------------------------------------------
 ;; Source equivalence (P13d)
 
+(defn- reference-source-case
+  "The reference synth's own source as a source-equivalence case (D91).
+
+  It is the same text its `.cljc` holds — read back, not transcribed — so the
+  page compiles the reference voice with SCI from the source. It carries both
+  spellings the recovery must get right: `white-noise`'s seed is an `:int`, and
+  the bodies are full of bare integral floats (`2.0`, `440.0`, …)."
+  []
+  {:id :reference-source
+   :definition 'dsp.reference-source/reference-voice
+   :entry :process
+   :channels 2
+   :precisions [:f32 :f64]
+   :source (portable-definition-source
+            "omkamra/dsp/examples/reference_synth.cljc"
+            'dsp.reference-source
+            '[[omkamra.dsp :as dsp] [omkamra.dsp.combinators :as comb]])})
+
 (defn source-equivalence-payload
   "The JVM's half of the source equivalence check (P13d).
 
@@ -634,11 +652,12 @@
   The source is evaluated exactly once here, at the entry precision; the
   emissions are per precision because a width is part of what an emitter reads.
 
-  The two evaluators must agree *here*, where both have a reader that keeps a
-  literal's type. A browser's does not (D78), so the reference check that needs
-  it runs on this side; see `portable-definition-source`."
+  The page's reader has one number type, so SCI recovers a literal's spelling
+  from the source text (`omkamra.dsp.source-reader`, D91). The reference synth's
+  own `.cljc` source is a case, so the check proves the round trip on the real
+  example: the same text pasted into an editor compiles to the same artifact."
   []
-  (let [cases source-cases/cases]
+  (let [cases (conj source-cases/cases (reference-source-case))]
     {:cases
      (into {}
            (map (fn [{:keys [id source definition entry channels precisions]}]

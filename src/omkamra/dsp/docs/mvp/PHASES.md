@@ -609,7 +609,7 @@ otherwise.
   WABT was already in the page (D73), so Wasm needs no new browser dependency.
   The `:definition-var` cases stay skipped until P13d's registry — the eight the
   check reports are that gap, counted rather than failed.
-- **P13d — the SCI layer. Done** (D82–D88). The SCI-compatible capture macros,
+- **P13d — the SCI layer. Done** (D82–D92). The SCI-compatible capture macros,
   the browser registry with aliases, refers and source locations, and the bridge
   where SCI calls compiled functions are in place. `omkamra.dsp.capture` is the
   shared reading of a definition form; `omkamra.dsp.registry` /
@@ -624,10 +624,13 @@ otherwise.
   the page's own capture) and its folded post-mix bus here, matching the JVM on
   JavaScript and Wasm. The reference synth is one `.cljc` (`D88`), the bus lives
   behind one kernel interface on all four targets (`D85`), a state region's zeros
-  travel as a size (`D86`), and the compiler names no example (`D87`). **One
-  open item:** browser source cannot spell an `:int` literal — the ClojureScript
-  reader has one number type (D78) — which is a spelling-contract decision, not a
-  capability; see the handoff.
+  travel as a size (`D86`), and the compiler names no example (`D87`). The one
+  open item — browser source could not spell an `:int` literal — is settled:
+  `D90` makes a bare integral literal an `:int`, and `D91` has the browser front
+  end recover an integral float's spelling from the source text, so a namespace
+  compiles the same pasted into an editor as compiled in place. `D92` closes the
+  last gap: a body or a `:next` that is a bare number is boxed from the form that
+  encloses it, so even a definition whose only number is an atom round-trips.
 - **P13e — deliverable 5.** Incremental recompilation, caching keyed on the
   canonical form, and error classification separating SCI, validation and
   backend errors. The least-scoped deliverable; no existing precedent to lean on.

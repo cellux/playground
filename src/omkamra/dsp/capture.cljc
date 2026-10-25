@@ -15,7 +15,7 @@
   what keeps a ClojureScript-compiled capture usable from an SCI macro whose
   expansion is Clojure."
   (:require [clojure.string :as str]
-            [omkamra.dsp.literals :as literals]))
+            [omkamra.dsp.source-reader :as source-reader]))
 
 (defn valid-definition-name?
   [name]
@@ -33,8 +33,14 @@
   position name a definition well enough; a front end that knows a file can layer
   it on beside the descriptor rather than inside it."
   [form ns-name]
-  (merge (select-keys (meta form) [:line :column])
-         {:namespace ns-name}))
+  (let [m (meta form)
+        ;; A browser re-reads printed forms, so its reader's own `:line` is not
+        ;; the original one; the original travels under its own key (D91).
+        line (or (get m source-reader/source-line-key) (:line m))
+        column (or (get m source-reader/source-column-key) (:column m))]
+    (cond-> {:namespace ns-name}
+      (some? line) (assoc :line line)
+      (some? column) (assoc :column column))))
 
 (defn fail
   [message source form path data]
@@ -88,13 +94,17 @@
 (defn box-state-literals
   "Box the float literals of every `:next` state transition, and of nothing else
   in the state declaration: an `:init` is a declared value, typed by the slot it
-  initializes, and needs no box."
+  initializes (`descriptor/normalize-initializer` coerces it from the declared
+  type), and needs no box.
+
+  `source-reader/box-entry` recovers a literal's type from the state map's own
+  source text when it carries one (the SCI path) and from the host value
+  otherwise (the JVM macro path), so this is one of the two places the worlds
+  diverge, and only the SCI path ever sees a text."
   [states]
   (when states
     (mapv (fn [state]
-            (if (contains? state :next)
-              (update state :next literals/box-float-literals)
-              state))
+            (source-reader/box-entry state :next))
           states)))
 
 (defn capture-function
@@ -115,19 +125,24 @@
                                 (= 2 (count params))
                                 (map? (first params))
                                 (contains? (first params) :params)))
-        [spec body]
+        ;; `body-parent` is the form whose children are the body forms, which is
+        ;; how `box-body` finds a *bare number* body's text (D92): the body is a
+        ;; suffix of that form's children. It is the definition form, except in
+        ;; the packed explicit-spec shape, whose body lives inside the parameter
+        ;; vector itself.
+        [spec body body-parent]
         (cond
           (and (vector? params)
                (= 2 (count params))
                (map? (first params))
                (contains? (first params) :params))
-          [(first params) [(second params)]]
+          [(first params) [(second params)] params]
 
           (map? params)
-          [params body]
+          [params body form]
 
           :else
-          [{:params params} body])
+          [{:params params} body form])
         explicit-params? explicit-spec?
         params (:params spec)
         [options body] (if (and (not explicit-params?)
@@ -167,8 +182,8 @@
                ;; Like `clojure.core/defn`, several body forms are an implicit
                ;; `(do ...)`. A single form is left exactly as written, so a
                ;; captured descriptor's `[:body 0]` is still the author's form.
-               :body (mapv literals/box-float-literals
-                           (if (= 1 (count body)) body [(cons 'do body)]))
+               :body (let [boxed (source-reader/box-body body-parent body)]
+                       (if (= 1 (count body)) boxed [(cons 'do boxed)]))
                :source source
                :resolution (resolution references aliases refers)}
         (some? doc) (assoc :doc doc)

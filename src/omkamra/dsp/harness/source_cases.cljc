@@ -12,10 +12,11 @@
   (which links by id, not by Var), a call into the library (which resolves
   through the registry), an explicit `#dsp/float` (whose box must not be
   re-boxed), a stateful definition (whose `:next` transitions are boxed by a
-  different rule than its `:init`), and a *combinator* (which runs while the
-  source is evaluated, so the sandbox has to hold the namespace's functions
-  rather than their descriptors — the same capability the reference synth's
-  `unison` needs).")
+  different rule than its `:init`), an `:int` literal in an integer context
+  (which stays an integer because the recovery reads the spelling — D91), and a
+  *combinator* (which runs while the source is evaluated, so the sandbox has to
+  hold the namespace's functions rather than their descriptors — the same
+  capability the reference synth's `unison` needs).")
 
 (def cases
   [{:id :source-gain
@@ -103,4 +104,39 @@
             :init 0.0
             :next (+ sample (* coefficient previous))}]}
   (+ sample (* coefficient previous)))
+"}
+   {:id :source-int
+    :definition 'source.int/counter
+    :entry :process
+    :channels 1
+    :precisions [:f32 :f64]
+    ;; The `1` in `:next` is an `:int`, and it must stay one: a browser reader
+    ;; has one number type, so without the text recovery it would be boxed as a
+    ;; float and the increment would become `(+ n 1.0)` (D91).
+    :source "(ns source.int
+  (:require [omkamra.dsp :as dsp]))
+
+(dsp/defn counter
+  [sample]
+  {:state [{:name n :type :int :init 0 :next (+ n 1)}]}
+  (+ sample (int->float n)))
+"}
+   {:id :source-atom
+    :definition 'source.atom/silence
+    :entry :process
+    :channels 1
+    :precisions [:f32 :f64]
+    ;; Both numbers the capture boxes are *bare*: the body is a number, and a
+    ;; state's `:next` is a number. An atom cannot carry its own text, so the
+    ;; browser recovers them from the form that encloses them — the body from
+    ;; the definition's children, the transition from its state map (D92).
+    ;; Without that the page would read both as `0`, and the descriptors would
+    ;; differ.
+    :source "(ns source.atom
+  (:require [omkamra.dsp :as dsp]))
+
+(dsp/defn silence
+  [sample]
+  {:state [{:name held :init 0.0 :next 0.0}]}
+  0.0)
 "}])

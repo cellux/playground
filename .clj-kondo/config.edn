@@ -22,4 +22,9 @@
 
   ;; `dsp/def` binds a value produced by ordinary Clojure (the combinators), so
   ;; lint it as a `def`. Its body has no DSP data, unlike `dsp/defn`/`dsp/fn`.
-  omkamra.dsp/def clojure.core/def}}
+  omkamra.dsp/def clojure.core/def
+
+  ;; The facade re-exports the instance lifecycle (`dsp/process!` is
+  ;; `omkamra.dsp.instance/process!`), so lint each alias as a `def`: the first
+  ;; argument is the interned name, not a value expression.
+  omkamra.dsp/defalias clojure.core/def}}

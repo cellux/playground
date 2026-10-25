@@ -28,6 +28,7 @@
             [omkamra.dsp.tests.process]
             [omkamra.dsp.tests.reference]
             [omkamra.dsp.tests.sequencer]
+            [omkamra.dsp.tests.source-reader]
             [omkamra.dsp.tests.synth]
             [omkamra.dsp.tests.wasm]))
 
@@ -54,6 +55,7 @@
     omkamra.dsp.tests.synth
     omkamra.dsp.tests.reference
     omkamra.dsp.tests.sequencer
+    omkamra.dsp.tests.source-reader
     omkamra.dsp.tests.harness])
 
 (defn run-jvm
