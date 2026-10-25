@@ -5577,10 +5577,14 @@ and `worker` by nobody — it is a Shadow `:web-worker` entry. So `mixing` went 
 `instrument` to `instrument/program`, and `worker` to the top level as the build
 entry it is.
 
-`mixing`'s numeric half — the typed array, and how to read a value back out of
-whatever a host supplied — went to `numbers`, where a host's numeric decisions
-already live. What is left in `kernels/mixing` is exactly what its docstring says:
-regions, containment, summing.
+`mixing` turned out not to be one subject, so it was cut by subject instead of
+renamed: its numeric half — the typed array, and how to read a value back out of
+whatever a host supplied — went to `numbers`, and its region half — where a pool's
+lanes and shared values actually live — became `kernels/regions`. What is left is
+what the name says: rendering a voice into scratch and summing it into the block,
+under the containment policy. `kernels/common` was on the table and lost: it would
+say what code is shared *by*, not what it does, and would be the only
+subject-less namespace in the tree.
 
 One incidental find: the browser suite failed 47/48 on the first run and passed on
 the second. The page build was still being rebuilt with the renamed namespaces, so

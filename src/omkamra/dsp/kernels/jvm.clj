@@ -11,6 +11,7 @@
   special lives in the state arrays (D39)."
   (:require [omkamra.dsp.fusion :as fusion]
             [omkamra.dsp.kernels.mixing :as mixing]
+            [omkamra.dsp.kernels.regions :as regions]
             [omkamra.dsp.instance :as instance]
             [omkamra.dsp.instance.jvm :as instance-jvm]
             [omkamra.dsp.numbers :as numbers]
@@ -358,12 +359,12 @@
         f64? (= :f64 (:precision artifact))
         abi (:abi artifact)
         lane-stride (long (or (:lane-stride abi) 0))
-        lane-layout (mixing/region-layout (:lanes abi))
+        lane-layout (regions/region-layout (:lanes abi))
         lane-count (count lane-layout)
         lane-region (when (pos? lane-count)
                       (numbers/real-array f64? (* lane-stride lane-count)))
         shared-stride (long (or (:shared-stride abi) 0))
-        shared-layout (mixing/region-layout (:shared abi))
+        shared-layout (regions/region-layout (:shared abi))
         shared-count (count shared-layout)
         shared-region (when (pos? shared-count)
                         (numbers/real-array f64? (* shared-stride shared-count)))]
@@ -395,15 +396,15 @@
      :write-lane!
      (fn [lane values]
        (when lane-region
-         (mixing/write-region! lane-region
-                               (mixing/region-offset lane-layout lane :lane)
-                               lane-stride values f64?))
+         (regions/write-region! lane-region
+                                (regions/region-offset lane-layout lane :lane)
+                                lane-stride values f64?))
        nil)
      :write-shared!
      (fn [control values]
        (when shared-region
-         (mixing/write-region! shared-region
-                               (mixing/region-offset shared-layout control
-                                                     :shared-control)
-                               shared-stride values f64?))
+         (regions/write-region! shared-region
+                                (regions/region-offset shared-layout control
+                                                       :shared-control)
+                                shared-stride values f64?))
        nil)}))

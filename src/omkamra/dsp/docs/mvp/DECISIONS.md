@@ -4830,10 +4830,16 @@ now finishes in well under a second.
 - The four that shared the old tree were not one kind of thing, and the requires
   settled it: `mixing`/`fusion` are required by every kernel, `instrument` by the
   portable reference synth, and `worker` by nobody.
-- `mixing`'s host-different numeric half — `real-array`, `value-length`,
-  `value-at`, `values-vector` — moved to `omkamra.dsp.numbers`, which is defined as
-  where a host's numeric decisions live. What is left in `kernels.mixing` is
-  exactly what its docstring claims: regions, containment, summing.
+- `mixing` was not one subject, so it was cut by subject rather than renamed. Its
+  host-different numeric half — `real-array`, `value-length`, `value-at`,
+  `values-vector` — moved to `omkamra.dsp.numbers`, which is defined as where a
+  host's numeric decisions live, and its region half — `region-layout`,
+  `region-offset`, `write-region!` — became `omkamra.dsp.kernels.regions`. What is
+  left in `kernels.mixing` is exactly what its docstring claims: rendering a voice
+  into scratch, summing it into the block, and the containment policy. Renaming it
+  to `kernels.common` was considered and rejected — that name says what code is
+  shared *by* rather than what it does, and would have been the only subject-less
+  namespace in the tree.
 - Local aliases follow their namespaces: `*-host` → `*-kernels`, and the
   instrument program's → `*-program`.
 - Module references were rewritten in place everywhere, including in

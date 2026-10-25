@@ -266,7 +266,8 @@ omkamra.dsp.reference            (.cljc)  the reference synthesizer
 omkamra.dsp.fusion               (.cljc)  where a pool's controls land in a fused voice (M6)
 omkamra.dsp.hosts.jvm            (.clj)   the JVM world's assembler: a bundle + its kernel -> a pool
 omkamra.dsp.kernels.{jvm,interpreter,js,wasm}   one `Kernel` per target (js/wasm are .cljs)
-omkamra.dsp.kernels.mixing       (.cljc)  the plumbing every kernel shares: regions, containment, summing
+omkamra.dsp.kernels.mixing       (.cljc)  rendering a voice into scratch, summing it into the block
+omkamra.dsp.kernels.regions      (.cljc)  the flat regions a pool writes automation into
 omkamra.dsp.instrument.program   (.cljc)  the instrument program + live host; drives a bus kernel (D85)
 omkamra.dsp.worker               (.cljc)  off-thread sequencing; a Shadow `:web-worker` entry
 omkamra.dsp.worklet_adapters.js  (.cljs)  the AudioWorklet adapter

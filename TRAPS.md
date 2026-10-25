@@ -166,3 +166,19 @@ the metadata the printer emitted.
 **Remedy:** use `sci/eval-string*` and print with `*print-meta*` true, and carry
 the original position under dedicated keys (`:dsp/source-line`/
 `:dsp/source-column`) that `capture/source-of` prefers (D91).
+
+## T13 — reloading a *new* namespace does not reload its new dependents
+
+**Symptom:** a namespace is added, and existing namespaces gain a `:require` of it.
+`(tools/reload 'the.new.ns)` reports success, and the suite then runs green — on
+the **old** versions of those existing namespaces, which never saw the new one.
+
+**Cause:** the reload tool schedules dependents from the **loaded** graph. The
+existing namespaces were compiled before the new dependency existed, so nothing
+links them to the new namespace and nothing queues them. The result only hints at
+it: `:stale {:count n, :sample [...]}` lists the namespaces it knows changed but
+did not reload.
+
+**Remedy:** reload each *edited* namespace by name — its own file changed, so it is
+picked up — or restart the JVM. Do not trust a green suite that ran while `:stale`
+was non-empty.

@@ -11,6 +11,7 @@
   `read-specials!` a single array read rather than a second entry point (D39)."
   (:require [omkamra.dsp.fusion :as fusion]
             [omkamra.dsp.kernels.mixing :as mixing]
+            [omkamra.dsp.kernels.regions :as regions]
             [omkamra.dsp.numbers :as numbers]
             [omkamra.dsp.synth.pool :as pool]))
 
@@ -255,10 +256,10 @@
   (let [f64? (= :f64 (:precision abi))
         control-count (clojure.core/count (:controls abi))
         lane-stride (long (or (:lane-stride abi) 0))
-        lane-layout (mixing/region-layout (:lanes abi))
+        lane-layout (regions/region-layout (:lanes abi))
         lane-count (clojure.core/count lane-layout)
         shared-stride (long (or (:shared-stride abi) 0))
-        shared-layout (mixing/region-layout (:shared abi))
+        shared-layout (regions/region-layout (:shared abi))
         shared-count (clojure.core/count shared-layout)
         lane-region (when (pos? lane-count)
                       (numbers/real-array f64? (* lane-stride lane-count)))
@@ -299,14 +300,14 @@
      :write-lane!
      (clojure.core/fn [lane values]
        (when lane-region
-         (mixing/write-region! lane-region
-                               (mixing/region-offset lane-layout lane :lane)
-                               lane-stride values f64?))
+         (regions/write-region! lane-region
+                                (regions/region-offset lane-layout lane :lane)
+                                lane-stride values f64?))
        nil)
      :write-shared!
      (clojure.core/fn [control values]
        (when shared-region
-         (mixing/write-region! shared-region
-                               (mixing/region-offset shared-layout control :shared-control)
-                               shared-stride values f64?))
+         (regions/write-region! shared-region
+                                (regions/region-offset shared-layout control :shared-control)
+                                shared-stride values f64?))
        nil)}))
