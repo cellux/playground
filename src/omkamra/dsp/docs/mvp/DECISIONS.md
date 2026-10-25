@@ -4704,3 +4704,35 @@ now finishes in well under a second.
   the pre-D92 bug; with them, the page compiles it and matches the JVM.
   `omkamra.dsp.tests.source-reader` pins `box-form`, `box-body` and `box-entry`
   directly.
+
+## D93 — P13e is dropped: the cache does not pay, and the diagnostics are P15's
+
+**Status.** In force (P13's slice 5 is decided-not-built, not omitted).
+
+- P13e bundled three things (PLAN §4): incremental recompilation, descriptor/IR
+  caching keyed on `ir/canonical-text`, and error classification separating SCI
+  from DSP-validation and backend errors. The first two are dropped; the third
+  moves to P15, which already owns structured diagnostics.
+- **Incremental recompilation is real, but the cache is in the wrong place.** A
+  linked unit holds every transitively reachable definition and `lower-unit`
+  lowers them all, so editing a voice re-links, re-lowers and re-emits the whole
+  unit — the reference voice's unit is 17 definitions, 13 of them unchanged
+  library ones. A per-definition cache would hit only the descriptor and IR, and
+  the phases measured on the dev JVM (reference voice → JS, 17 definitions) are:
+  link 9.5 ms, lower 6.7 ms, emit ~58 ms, total ~74 ms. Emission is ~80% and is
+  **whole-program** — `emit-module` lowers and emits the entire unit, and the
+  Wasm artifact is one module — so one definition's emission is not reachable by
+  a cache key at all. A one-definition compile is 9 ms end to end. And the
+  descriptor half is already cached in effect: capture happens once, when the
+  `dsp/defn` form is evaluated, and lives in a Var or in the registry.
+- **Nothing depends on it.** The phase graph is P14 ← P12+P13, P15 ← P9+artifacts,
+  P16 ← P11+P12+P14, H1 ← P13→P14. P14 needs the compiler-in-browser, which is
+  P13a–P13d and done; no phase names P13e. It was the only slice of P13 off the
+  critical path.
+- **The error classification is P15's deliverable 2** — "structured diagnostics
+  carrying source location, definition ID, dependency path, IR path, target,
+  precision, offending form, and expected/actual types" subsumes it. Doing it in
+  P13e would be a duplicate, or a prefix built out of order.
+- **If compilation ever needs to be faster, the leverage is emission.** The
+  emitters would have to produce per-definition pieces plus an assembly step
+  before a cache could reach the 80%. That is its own decision, not this slice.

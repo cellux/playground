@@ -566,8 +566,10 @@ otherwise.
    emitters (or semantically identical browser implementations).
 4. A JVM/browser equivalence test: equivalent source yields byte-identical
    normalized descriptors and portable IR.
-5. Incremental recompilation, descriptor/IR caching, and error classification
-   separating SCI, validation, and backend errors.
+5. ~~Incremental recompilation, descriptor/IR caching, and error classification
+   separating SCI, validation, and backend errors.~~ **Dropped (D93)**: the
+   caching was measured and does not pay, and the classification is P15's
+   structured diagnostics. Nothing depends on it.
 
 **Slices** (D77 records the architecture and the evidence for it).
 
@@ -631,9 +633,12 @@ otherwise.
   compiles the same pasted into an editor as compiled in place. `D92` closes the
   last gap: a body or a `:next` that is a bare number is boxed from the form that
   encloses it, so even a definition whose only number is an atom round-trips.
-- **P13e — deliverable 5.** Incremental recompilation, caching keyed on the
-  canonical form, and error classification separating SCI, validation and
-  backend errors. The least-scoped deliverable; no existing precedent to lean on.
+- **P13e — deliverable 5. Dropped** (D93). Incremental recompilation and
+  descriptor/IR caching were measured and do not pay — the cacheable phases are
+  about a fifth of a recompile, and emission, which dominates, is whole-program
+  and out of a per-definition cache's reach. The error classification moves to
+  P15, which owns structured diagnostics. Nothing depends on this slice; P14
+  needs only P13a–P13d, so P13's goal is met.
 
 ---
 
@@ -671,6 +676,8 @@ after conformance holds.
    unsupported capabilities in the audio path.
 2. Structured diagnostics carrying source location, definition ID, dependency
    path, IR path, target, precision, offending form, and expected/actual types.
+   This is where the SCI / DSP-validation / backend error boundary from P13e
+   lands (D93).
 3. Optional debug dumps for normalized descriptors, linked units, portable IR,
    target IR, emitted source/WAT, and ABI layouts.
 4. Conservative optimization: precision-aware constant folding, dead-local and

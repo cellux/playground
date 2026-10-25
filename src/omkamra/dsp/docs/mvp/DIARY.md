@@ -5467,6 +5467,32 @@ touched paths.
 
 ---
 
+## 2026-10-25 — D93 — P13e is dropped
+
+The question was whether the last P13 slice earns its keep. It bundled three
+things: incremental recompilation, descriptor/IR caching, and error
+classification. Two don't pay, and the third belongs elsewhere.
+
+The A/B case is real in the architecture: a linked unit holds every reachable
+definition and `lower-unit` lowers them all, so editing the reference voice
+re-links, re-lowers and re-emits 17 definitions — 13 of them untouched library
+ones. But the measurement puts the cache in the wrong place. Link 9.5 ms, lower
+6.7 ms, emit ~58 ms, total ~74 ms; emission is ~80%, and `emit-module` is
+whole-program, so a per-definition cache key cannot reach it. A one-definition
+compile is 9 ms. And capture is already effectively cached — it happens once, at
+`dsp/defn` evaluation.
+
+Nothing depends on the slice: P14 needs P13's compiler-in-browser, which is done.
+And the error classification is P15's deliverable 2 almost verbatim, so building
+it here would be a duplicate. If compilation ever needs to be faster, the leverage
+is emission, and that needs its own decision.
+
+**Verified.** Docs only; no code changed. JVM **284 tests / 2 620 assertions / 0
+failures**; browser **54/54**; parity **211 cases, no gaps** were green at the
+measurement.
+
+---
+
 ## Handoff — current state
 
 The one entry rewritten in place, and always the last. It holds where we are, what
@@ -5476,9 +5502,9 @@ bullet that is still true two slices later is in the wrong file.
 
 ### Where we are
 
-**P13d is done.** D85–D92 are implemented and verified: `dsp/compile` takes a
-definition or a source string in both worlds; the bus lives behind one kernel
-interface on all four targets; `hosts.instrument` is `.cljc`; the reference synth
+**P13 is done** — P13a–P13d implemented and verified, P13e dropped (D93).
+`dsp/compile` takes a definition or a source string in both worlds; the bus lives
+behind one kernel interface on all four targets; `hosts.instrument` is `.cljc`; the reference synth
 is a single `.cljc` the page compiles its own capture of; a state region's zeros
 travel as a size (canonical IR 1.77 MB → 40 KB, JS module 3.65 MB → 11 KB);
 `omkamra.dsp` is a facade again — the instance lifecycle lives in
@@ -5492,13 +5518,12 @@ parity **211 cases, no gaps**.
 
 ### What's next
 
-1. **P13e** (incremental recompilation, caching keyed on `ir/canonical-text`,
-   error classification), then **P14** (artifact-driven worklet installation),
-   then **H1**, **P15**, **P16** per `PHASES.md`.
+1. **P14** (artifact-driven worklet installation), then **H1**, **P15**,
+   **P16** per `PHASES.md`. P13 is complete; P13e is dropped (D93).
 
 ### What shapes the next decision
 
-P13e is the least-scoped deliverable: the cache key is `ir/canonical-text`, but
-*what* is cached, when it is invalidated, and where the error classification
-boundary between SCI, validation and backend falls are still to be decided.
-Everything else undecided is in `PLAN.md` §Open questions.
+P14's choice is named in `PLAN.md` §Open questions: the artifact's byte transport
+(a data URL, a `Uint8Array` message, or a blob URL) and whether `:wat` ships in
+every artifact — both decided when the artifact becomes what a worklet is
+installed from. Everything else undecided is in `PLAN.md` §Open questions.

@@ -824,10 +824,12 @@ Choices not made yet, each with what decides it.
 ## Prioritized work
 
 The plan's priority areas, stated as scope; `PHASES.md` owns the ordering and the
-status of each. As of P13d: **1** language and library, **2** the event and voice
+status of each. As of P13: **1** language and library, **2** the event and voice
 ABI, and **3** process instances are delivered across P1-P11; **4** browser-side
-compilation is P13, with P13a–P13d done (P13e, incremental recompilation and
-caching, remains); **5** artifact-driven installation is P14;
+compilation is P13, and its slices P13a–P13d are done; the remaining slice,
+P13e, is **dropped** (D93 — incremental recompilation and caching measured as not
+paying, and the error classification belongs to P15);
+**5** artifact-driven installation is P14;
 **6** Wasm artifacts and the memory ABI is P12 and is done; **7** safety and
 diagnostics is P15; **8** conformance and release gates is P16.
 
@@ -903,9 +905,11 @@ normalized descriptor and portable IR for equivalent source.
 The browser compiler must emit JavaScript or WAT, pass WAT through WABT, and
 install the resulting AudioWorklet without a server-side compiler. Compilation
 and worklet attachment must remain separate from audio-thread execution.
-Support incremental recompilation, descriptor/IR caching, clear source
-locations, and errors that distinguish SCI errors from DSP validation and
-backend errors.
+Keep clear source locations, and distinguish SCI errors from DSP validation and
+backend errors (that boundary is P15's structured diagnostics). Incremental
+recompilation and descriptor/IR caching were dropped (D93): measured, the
+cacheable phases are a fifth of a recompile, and emission — which dominates — is
+whole-program.
 
 ### 5. Make worklet installation artifact-driven
 
