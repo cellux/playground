@@ -662,6 +662,13 @@
 
 (def ^{:align true} nine-bytes (vec (repeat 9 1)))
 (def ^{:align true} twenty-one-bytes (vec (repeat 21 1)))
+(def metadata-address 0x3600)
+(def ^{:at metadata-address} metadata-address-bytes [1 2 3])
+(def ^{:at 0x3700 :size 16} reserved-bytes [])
+(def ^{:at 0x3800 :size 4} sized-bytes [1 2 3 4 5])
+(def ^{:at 0x3900 :size 4} short-sized-bytes [6 7])
+(def ^{:at 0x3a00 :size 4} sized-reservation [8 9])
+(def ^{:at 0x3a03} overlapping-byte [10])
 
 (defn- placed-asset
   "The linked start address of implicit asset `sym` in a small object."
@@ -682,6 +689,24 @@
          (:constraints (assembler/build-asset 't {:data (vec (repeat 21 1))
                                                   :align true})))
       "define-asset accepts :align true too"))
+
+(deftest asset-metadata-expressions-are-evaluated
+  (is (= metadata-address (placed-asset 'metadata-address-bytes))
+      "an inline asset may name its placement address in metadata"))
+
+(deftest empty-vector-assets-can-reserve-uninitialized-memory
+  (is (= 0x3700 (placed-asset 'reserved-bytes))
+      "a sized empty vector has a relocatable address")
+  (let [artifact (link-forms '((lda (< reserved-bytes))) {})
+        segment-addresses (set (map :start-address (:segments artifact)))]
+    (is (not (contains? segment-addresses 0x3700))
+        "uninitialized storage emits no bytes")))
+
+(deftest sized-vector-assets-reserve-the-whole-area
+  (is (= :overlap
+         (error-reason
+          #(link-forms '((lda (< sized-reservation))
+                         (lda (< overlapping-byte))) {})))))
 
 ;; string assets --------------------------------------------------------------
 
@@ -708,6 +733,14 @@
         segment (first (filter #(= (long address) (long (:start-address %)))
                                (:segments artifact)))]
     (mapv #(bit-and (int %) 0xff) (:bytes segment))))
+
+(deftest sized-vector-assets-reserve-and-initialize-a-prefix
+  (is (= 0x3800 (placed-asset 'sized-bytes))
+      "a sized vector has a relocatable address")
+  (is (= [1 2 3 4] (asset-bytes 'sized-bytes))
+      "initialization is truncated to the requested size")
+  (is (= [6 7] (asset-bytes 'short-sized-bytes))
+      "the uninitialized suffix emits no bytes"))
 
 (deftest a-string-var-is-an-asset-in-the-charset-it-names
   (is (= [1 2 0x20 3 0x31 0x3A 0x39 0x27 26] (asset-bytes 'screen-coded-string))

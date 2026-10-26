@@ -321,7 +321,17 @@ cross a page:
 (def ^{:align true} curve [0 1 2 …])   ; LDA curve,X never crosses a page
 ```
 
-A Var holding a **string** is an asset too: the text stays text in the source
+A vector with `:size` metadata reserves linker-allocated memory. Its first
+`min(count, :size)` bytes are emitted as initialization data; the remainder is
+left uninitialized. It is useful for tables partly or wholly filled by startup
+code:
+
+```clojure
+(def ^{:size 1024} glyph-table [])
+(def ^{:size 16} table [1 2 3])
+```
+
+The size must be a positive integer. A Var holding a **string** is an asset too: the text stays text in the source
 and `:charset` says how to translate it. `:ascii` (the default) is the code
 point, `:petscii` the KERNAL byte (letters at `$41`, upper and lower case
 folded) and `:screen-codes` the VIC's video-matrix byte (letters at `$01`, `@`
@@ -347,10 +357,11 @@ collide with, and a reader finds the end of the stream with a single `CMP`:
 count `:align true` rounds up.
 
 A Var's metadata carries the same placement `define-asset` does: `:align` and
-`:at`/`:address`.
+`:at`/`:address`. Values for the asset metadata keys may be expressions in the
+Var's defining namespace.
 
-Use `define-asset` for what a bare Var cannot express — a file-backed
-`:resource`, or placement (`:at`, `:constraints`).
+Use `define-asset` for file-backed `:resource` assets or explicit asset
+specifications.
 
 ```clojure
 (def colors [0 1 2 255])

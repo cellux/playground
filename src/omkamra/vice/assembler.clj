@@ -24,6 +24,8 @@
 
 (defrecord Asset [name data constraints resource])
 
+(def ^:private sized-asset-size-key ::sized-asset-size)
+
 (defn asset?
   "True when `x` is an asset descriptor."
   [x]
@@ -49,8 +51,10 @@
 
   A plain `def` of such a value is an asset: referencing it in operand position
   places the bytes and resolves to their address, exactly like a `define-asset`
-  with inline data. `define-asset` stays for what it adds: file-backed
-  `:resource` assets and `:constraints`/`:at` placement."
+  with inline data. A vector with `:size` metadata is a sized asset: its
+  initialized prefix is emitted and the rest is left uninitialized.
+  `define-asset` stays for file-backed `:resource` assets and explicit asset
+  specifications."
   [x]
   (and (sequential? x)
        (seq x)
@@ -128,6 +132,25 @@
   [x]
   (or (string? x) (inline-bytes? x)))
 
+(defn- sized-asset?
+  "True when `value` names a sized inline asset Var."
+  [v value]
+  (and v
+       (vector? value)
+       (contains? (meta v) :size)))
+
+(defn- sized-asset-size
+  "Return the requested size for a sized vector asset, or nil otherwise."
+  [name value metadata]
+  (when (and (vector? value) (contains? metadata :size))
+    (let [size (:size metadata)]
+      (when-not (and (integer? size) (pos? (long size)))
+        (throw (ex-info "Sized asset :size must be a positive integer"
+                        {:reason :invalid-asset-size
+                         :asset name
+                         :size size})))
+      (long size))))
+
 (defn- inline-asset-bytes
   "The bytes of a Var's inline value, or nil when it is not inline asset data."
   [name value meta]
@@ -135,6 +158,28 @@
     (string? value) (normalize-asset-bytes (encode-string name value (:charset meta)))
     (inline-bytes? value) (normalize-asset-bytes value)
     :else nil))
+
+(def ^:private evaluable-asset-metadata
+  "Var metadata keys whose values may be assembler expressions."
+  #{:at :address :align :charset :terminator :size})
+
+(defn- evaluate-asset-metadata
+  "Evaluate the whitelisted asset metadata in its Var's namespace.
+
+  Clojure merges source metadata with compiler metadata on a Var, so this
+  deliberately evaluates only the assembler-owned keys rather than every
+  value returned by `meta`."
+  [v]
+  (let [metadata (meta v)
+        ns-obj (:ns metadata)]
+    (reduce (fn [metadata key]
+              (if (contains? metadata key)
+                (assoc metadata key
+                       (binding [*ns* ns-obj]
+                         (eval (get metadata key))))
+                metadata))
+            metadata
+            evaluable-asset-metadata)))
 
 (defn- next-power-of-two
   "The smallest power of two ≥ `n` (at least 1)."
@@ -187,16 +232,33 @@
   "The asset for a Var whose value is inline asset data, named after the Var.
 
   The Var's metadata may select the string's `:charset`, append a
-  `:terminator` byte and place the asset (`:align`, `:at`/`:address`); `:align
+  `:terminator` byte, place the asset (`:align`, `:at`/`:address`), or size a
+  vector's initialized prefix and uninitialized suffix with `:size`; `:align
   true` means the next power of two ≥ the byte count, terminator included."
   [name value meta]
-  (when-let [bytes (inline-asset-bytes name value meta)]
-    (let [bytes (if-some [terminator (terminator-byte meta)]
-                  (append-terminator bytes terminator)
-                  bytes)]
-      (->Asset name bytes
-               (resolve-align (var-constraints meta) (alength ^bytes bytes))
-               nil))))
+  (let [bytes (inline-asset-bytes name value meta)
+        size (sized-asset-size name value meta)]
+    (cond
+      size
+      (let [bytes (or bytes (byte-array 0))
+            bytes (if-some [terminator (terminator-byte meta)]
+                    (append-terminator bytes terminator)
+                    bytes)
+            bytes (byte-array (take size bytes))]
+        (assoc (->Asset name bytes
+                        (resolve-align (var-constraints meta) size)
+                        nil)
+               sized-asset-size-key size))
+
+      bytes
+      (let [bytes (if-some [terminator (terminator-byte meta)]
+                    (append-terminator bytes terminator)
+                    bytes)]
+        (->Asset name bytes
+                 (resolve-align (var-constraints meta) (alength ^bytes bytes))
+                 nil))
+
+      :else nil)))
 
 (defn- namespace-directory
   "The classpath directory of a namespace's source file, or nil.
@@ -598,7 +660,9 @@
                  (str "Unable to resolve assembly symbol " sym)
                  {:symbol sym} sym index)
 
-          (or (asset? value) (inline-asset? value))
+          (or (asset? value)
+              (inline-asset? value)
+              (sized-asset? v value))
           (qualify-var v)
 
           (fn? value)
@@ -624,6 +688,7 @@
                       value (when v (deref v))]
                   (boolean (and v (or (asset? value)
                                       (inline-asset? value)
+                                      (sized-asset? v value)
                                       (and (map? value) (:object-id value))))))
     (vector? x) (boolean (some #(references-assembly-symbol? ctx %) x))
     (seq? x) (boolean (some #(references-assembly-symbol? ctx %) x))
@@ -645,7 +710,9 @@
     (symbol? x) (let [v (resolve-var ctx x)
                       value (when v (deref v))]
                   (cond
-                    (and v (or (asset? value) (inline-asset? value)))
+                    (and v (or (asset? value)
+                               (inline-asset? value)
+                               (sized-asset? v value)))
                     (qualify-var v)
                     (and v (map? value) (:object-id value))
                     (object-entry-label value x index)
@@ -2066,10 +2133,15 @@
       (when-let [v (try
                      (requiring-resolve sym)
                      (catch Throwable _ nil))]
-        (let [value (deref v)]
+        (let [value (deref v)
+              metadata (meta v)
+              metadata (if (or (inline-asset? value)
+                               (sized-asset? v value))
+                         (evaluate-asset-metadata v)
+                         metadata)]
           (if (asset? value)
             value
-            (implicit-asset sym value (meta v)))))))
+            (implicit-asset sym value metadata))))))
 
 (defn- discover-assets
   [objects options]
@@ -2146,13 +2218,15 @@
 (defn- asset-section-spec
   [asset regions]
   (let [data (:data asset)
-        bytes (when data (vec data))]
+        bytes (when data (vec data))
+        size (or (get asset sized-asset-size-key)
+                 (count bytes))]
     {:kind :asset
      :key (:name asset)
      :asset asset
      :base :object
      :align (long (or (get-in asset [:constraints :align]) 1))
-     :size (count bytes)
+     :size (long size)
      :bytes (or bytes [])
      :regions regions}))
 
@@ -2382,7 +2456,7 @@
 
 (defn- build-segments
   [placed-sections]
-  (let [sorted (sort-by first placed-sections)
+  (let [sorted (sort-by first (remove (comp empty? second) placed-sections))
         merged (reduce (fn [acc [base bytes]]
                          (if-let [[previous-base previous-bytes] (peek acc)]
                            (if (= (+ (long previous-base) (count previous-bytes))
