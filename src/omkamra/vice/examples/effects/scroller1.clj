@@ -153,6 +153,11 @@
   (lda (> irq))
   (sta [0x0315])
 
+  ;; wait until just before the irq line to minimize screen artifacts
+  (ldx (- scroller-raster-line 2))
+  :0 (cpx [0xD012])
+  (bne :0b)
+
   ;; enable interrupts
   (cli)
 
