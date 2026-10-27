@@ -15,10 +15,8 @@
 
   ;; clear any pending VIC interrupts
   (lda 0xff)
+  (ora [0xDC0D])
   (sta [0xD019])
-
-  ;; clear any pending CIA interrupts
-  (lda [0xDC0D])
 
   ;; disable CIA-1 timer IRQs so that they don't clash with the VIC raster
   ;; interrupt

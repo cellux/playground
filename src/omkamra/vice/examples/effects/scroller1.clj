@@ -125,6 +125,7 @@
 
   ;; clear any pending interrupts
   (lda 0xff)
+  (ora [0xDC0D])
   (sta [0xD019])
 
   ;; disable CIA-1 timer IRQs so that they don't clash with the VIC
