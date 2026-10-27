@@ -190,7 +190,7 @@
   (dec screen-columns))
 
 ;; The scroller's two tables. `scroller-text` is a plain Var holding a string:
-;; the assembler turns it into bytes with the `:charset` metadata (screen codes
+;; the assembler turns it into bytes with the `:encoding` metadata (screen codes
 ;; — the VIC reads the video matrix) and places it like any other data. It is
 ;; transcribed from the capture (the runs of spaces are part of the stream, not
 ;; formatting) and, because the pointer walks it a page at a time, it is page
@@ -201,7 +201,7 @@
   and dark grey, five columns each, twice."
   (vec (mapcat #(repeat 5 %) [0x01 0x0F 0x0C 0x0B 0x01 0x0F 0x0C 0x0B])))
 
-(def ^{:charset :screen-codes :align true} scroller-text
+(def ^{:encoding :screen-codes :align true} scroller-text
   "The scroller's text stream — exactly two pages, so the pointer's page walk
   covers it and the handler knows where to wrap."
   (str "CRACKED ON THE 21ST OF NOVEMBER 1987...   "

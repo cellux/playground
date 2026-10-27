@@ -61,7 +61,7 @@
        (every? #(and (integer? %) (<= 0 (long %) 255)) x)))
 
 ;; A `def` of a string is an asset too: the string is translated to bytes with
-;; the `:charset` its metadata names, so text can live in the source as text.
+;; the `:encoding` its metadata names, so text can live in the source as text.
 ;; `$20-$3F` (space through `?`) hold the same code in every set below, so the
 ;; encoders differ only in the letters.
 
@@ -75,13 +75,13 @@
   (+ (long base) (if (<= 65 code 90) (- code 65) (- code 97))))
 
 (defn- unencodable!
-  [charset ch]
-  (throw (ex-info (str "No " (name charset) " code for character " (pr-str ch))
+  [encoding ch]
+  (throw (ex-info (str "No " (name encoding) " code for character " (pr-str ch))
                   {:reason :unencodable-character
-                   :charset charset :character ch})))
+                   :encoding encoding :character ch})))
 
-(def ^:private charsets
-  "String encoders selected by a `def`'s `:charset` metadata (`:ascii` by
+(def ^:private encodings
+  "String encoders selected by a `def`'s `:encoding` metadata (`:ascii` by
   default): `:ascii` is the code point, `:petscii` the KERNAL byte (letters at
   `$41`, `\n` at `$0D`) and `:screen-codes` the VIC's video-matrix byte
   (letters at `$01`, `@` at `$00`)."
@@ -115,17 +115,17 @@
            s))})
 
 (defn- encode-string
-  "Translate the string `s` to bytes with `charset`, for the asset `name`."
-  [name s charset]
-  (let [charset (or charset :ascii)]
+  "Translate the string `s` to bytes with `encoding`, for the asset `name`."
+  [name s encoding]
+  (let [encoding (or encoding :ascii)]
     (when (empty? s)
       (throw (ex-info (str "Empty string asset " name)
                       {:reason :empty-asset :asset name})))
-    (if-let [encode (get charsets charset)]
+    (if-let [encode (get encodings encoding)]
       (encode s)
-      (throw (ex-info (str "Unknown :charset " (pr-str charset) " on " name)
-                      {:reason :unknown-charset :asset name :charset charset
-                       :known (vec (sort (keys charsets)))})))))
+      (throw (ex-info (str "Unknown :encoding " (pr-str encoding) " on " name)
+                      {:reason :unknown-encoding :asset name :encoding encoding
+                       :known (vec (sort (keys encodings)))})))))
 
 (defn- inline-asset?
   "True when `x` is inline asset data: bytes, or a string to encode."
@@ -155,13 +155,13 @@
   "The bytes of a Var's inline value, or nil when it is not inline asset data."
   [name value meta]
   (cond
-    (string? value) (normalize-asset-bytes (encode-string name value (:charset meta)))
+    (string? value) (normalize-asset-bytes (encode-string name value (:encoding meta)))
     (inline-bytes? value) (normalize-asset-bytes value)
     :else nil))
 
 (def ^:private evaluable-asset-metadata
   "Var metadata keys whose values may be assembler expressions."
-  #{:at :address :align :charset :terminator :size})
+  #{:at :address :align :encoding :terminator :size})
 
 (defn- evaluate-asset-metadata
   "Evaluate the whitelisted asset metadata in its Var's namespace.
@@ -209,7 +209,7 @@
 
   A string or byte-vector asset may end in a sentinel: `:terminator 0xff`
   appends that byte after the encoded data, so a reader can find the end of a
-  stream with a single `CMP` instead of carrying an end pointer. The charset
+  stream with a single `CMP` instead of carrying an end pointer. The encoding
   never has to be able to spell the value, so a code the encoder cannot produce
   (`$ff` in `:screen-codes`) becomes a marker that real text cannot collide
   with."
@@ -231,7 +231,7 @@
 (defn- implicit-asset
   "The asset for a Var whose value is inline asset data, named after the Var.
 
-  The Var's metadata may select the string's `:charset`, append a
+  The Var's metadata may select the string's `:encoding`, append a
   `:terminator` byte, place the asset (`:align`, `:at`/`:address`), or size a
   vector's initialized prefix and uninitialized suffix with `:size`; `:align
   true` means the next power of two ≥ the byte count, terminator included."

@@ -275,6 +275,13 @@
 
 (def default-autostart-timeout-ms 5000)
 (def default-program-start-timeout-ms 30000)
+(def default-reset-timeout-ms 30000)
+
+;; The stock C64 BASIC warm-start/READY entry reached after reset. Waiting
+;; here ensures KERNAL screen initialization has completed before a new PRG is
+;; installed. `$E5D0-$E5D8` is part of screen clearing, not an idle loop.
+(def default-reset-range [0xA474 0xA474])
+(def default-reset-mode :power-cycle)
 
 (defn- fail
   [message data]
@@ -419,10 +426,56 @@
                     :op bm/MON_CHECKPOINT_OP_EXECUTE
                     :temporary? true})]
     (reset! checkpoint installed)
-    (bm/reset! conn {:what 1})
+    (bm/reset! conn {:what bm/MON_RESET_POWER_CYCLE})
     (wait-for-stop-at! conn (:number installed) address timeout-ms)
     (reset! checkpoint nil)
     address))
+
+(defn reset-to-range!
+  "Reset the machine and stop within inclusive `address-range`.
+
+  `reset-mode` is `:cpu` (the short reset, default) or `:power-cycle` (the
+  full reset). `address-range` is `[start end]` and `checkpoint` receives the
+  temporary checkpoint descriptor while waiting."
+  ([conn address-range checkpoint timeout-ms]
+   (reset-to-range! conn address-range checkpoint timeout-ms default-reset-mode))
+  ([conn [start end] checkpoint timeout-ms reset-mode]
+   (when-not (and (integer? start)
+                  (integer? end)
+                  (<= 0 start end 0xffff))
+     (throw (IllegalArgumentException.
+             "reset-to-range! expects an inclusive [start end] address range")))
+   (let [reset-type (case reset-mode
+                      :cpu bm/MON_RESET_CPU
+                      :power-cycle bm/MON_RESET_POWER_CYCLE
+                      (throw (IllegalArgumentException.
+                              "reset-mode must be :cpu or :power-cycle")))
+         installed (bm/checkpoint-set!
+                    conn
+                    {:start start
+                     :end end
+                     :stop? true
+                     :enabled? true
+                     :op bm/MON_CHECKPOINT_OP_EXECUTE
+                     :temporary? true})]
+     (reset! checkpoint installed)
+     (try
+       (bm/reset! conn {:what reset-type})
+       (or (bm/await-event
+            conn
+            (fn [{:keys [response-type response]}]
+              (and (= bm/MON_RESPONSE_STOPPED response-type)
+                   (<= start (:pc response) end)))
+            timeout-ms)
+           (fail "VICE did not reach the requested execution range"
+                 {:start start :end end :timeout-ms timeout-ms
+                  :reset-mode reset-mode}))
+       (reset! checkpoint nil)
+       (finally
+         (when-let [number (:number @checkpoint)]
+           (try
+             (bm/checkpoint-delete! conn {:number number})
+             (catch Throwable _ nil))))))))
 
 (defn autostart!
   "Autostart `input` (a PRG/D64 path) and return when RUN is under way."

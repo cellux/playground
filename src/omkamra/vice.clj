@@ -12,13 +12,15 @@
   6. follow their references into `omkamra.vice.reader`, `dedupe`, `segments`,
      `disassembly`, `report`, and the other stage namespaces for full data.
 
-  Lifecycle control (`start!`, `connect!`, `with-conn`, and `stop!`) is useful
-  when a caller needs to drive VICE directly. `capture!` owns the monitor and
+  Lifecycle control (`start!`, `run!`, `reload!`, `connect!`, `with-conn`, and
+  `stop!`) is useful when a caller needs to drive VICE directly. `capture!`
+  owns the monitor and
   asynchronous recording lifecycle for the higher-level capture workflow.
 
   This namespace intentionally contains lightweight proxies. Detailed options,
   data formats, and low-level operations are documented by the implementation
   namespaces named by each function's docstring."
+  (:refer-clojure :exclude [run!])
   (:require
    [omkamra.vice.analysis :as analysis]
    [omkamra.vice.core :as core]))
@@ -62,6 +64,30 @@
    (core/start!))
   ([options]
    (core/start! options)))
+
+(defn reload!
+  "Reset and run an artifact inside an existing VICE instance.
+
+  `target` may be a relocatable assembler object or linked artifact. The
+  instance is reset, waits until BASIC reaches READY, writes a generated PRG
+  into BASIC memory, and invokes its SYS stub with BASIC-compatible call/return
+  semantics. See
+  `omkamra.vice.core/reload!` for options including
+  `:reset-range` and `:reset-timeout-ms`."
+  ([instance target]
+   (core/reload! instance target))
+  ([instance target options]
+   (core/reload! instance target options)))
+
+(defn run!
+  "Run an artifact, starting VICE or reusing an explicit `:instance`.
+
+  Without `:instance`, this uses the normal fresh-instance `start!` path. With
+  it, this delegates to `reload!`. No global instance is stored by this API."
+  ([target]
+   (core/run! target))
+  ([target options]
+   (core/run! target options)))
 
 (defn connect!
   "Claim an instance's exclusive VICE binary-monitor connection.

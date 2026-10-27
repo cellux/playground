@@ -19,9 +19,9 @@
             [omkamra.vice.examples.effects.common :as common]))
 
 ;; The text lives in the source as a string: the assembler encodes it to
-;; screen-code bytes (the VIC's video-matrix byte) through the `:charset`
+;; screen-code bytes (the VIC's video-matrix byte) through the `:encoding`
 ;; metadata and places it like any other data.
-(def ^{:charset :screen-codes :terminator 0xff} scrolltext
+(def ^{:encoding :screen-codes :terminator 0xff} scrolltext
   (str "THIS SCROLLER EXPLAINS ITSELF. A RASTER INTERRUPT WAITS EACH FRAME "
        "FOR THE BEAM TO REACH THE SCROLL ROW. IT SETS THE FINE SCROLL "
        "REGISTER FOR A FEW HUNDRED CYCLES, NUDGING THE DISPLAY ONE PIXEL, SO "

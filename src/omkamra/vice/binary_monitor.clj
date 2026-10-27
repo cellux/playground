@@ -70,6 +70,10 @@
 (def MON_CMD_RESET 0xcc)
 (def MON_CMD_AUTOSTART 0xdd)
 
+;; VICE binary-monitor reset modes.
+(def MON_RESET_CPU 0)
+(def MON_RESET_POWER_CYCLE 1)
+
 ;; monitor command responses
 
 (def MON_RESPONSE_MEM_GET 0x01)

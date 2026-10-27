@@ -332,14 +332,14 @@ code:
 ```
 
 The size must be a positive integer. A Var holding a **string** is an asset too: the text stays text in the source
-and `:charset` says how to translate it. `:ascii` (the default) is the code
+and `:encoding` says how to translate it. `:ascii` (the default) is the code
 point, `:petscii` the KERNAL byte (letters at `$41`, upper and lower case
 folded) and `:screen-codes` the VIC's video-matrix byte (letters at `$01`, `@`
 at `$00`); `$20-$3F` — space through `?` — is the same in all three. A
-character the set has no code for is an error, as is an unknown `:charset`.
+character the set has no code for is an error, as is an unknown `:encoding`.
 
 ```clojure
-(def ^{:charset :screen-codes :align true} credits "CRACKED ON THE 21ST …")
+(def ^{:encoding :screen-codes :align true} credits "CRACKED ON THE 21ST …")
 ```
 
 `:terminator` appends one byte after the encoded data. The charset never has
@@ -348,7 +348,7 @@ in `:screen-codes` — is available as a sentinel that real text can never
 collide with, and a reader finds the end of the stream with a single `CMP`:
 
 ```clojure
-(def ^{:charset :screen-codes :terminator 0xff} text "ONE PIXEL PER FRAME …")
+(def ^{:encoding :screen-codes :terminator 0xff} text "ONE PIXEL PER FRAME …")
                          ; the data now ends in $ff, which the encoder can
                          ; never emit by accident
 ```

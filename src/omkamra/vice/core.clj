@@ -8,6 +8,8 @@
 
   * `assemble`/`link` build a program;
   * `start!` launches a fresh instance, optionally autostarting a program;
+  * `run!` starts a program or reloads it into an explicit instance;
+  * `reload!` resets and injects a linked artifact into an instance;
   * `connect!` opens the instance's exclusive binary-monitor connection
     (close it with `omkamra.vice.binary-monitor/close!`);
   * `with-conn` scopes a connection;
@@ -17,6 +19,7 @@
 
   The analysis pipeline and its projections remain available in their own
   namespaces."
+  (:refer-clojure :exclude [run!])
   (:require
    [clojure.java.io :as io]
    [omkamra.vice.assembler :as assembler]
@@ -31,6 +34,16 @@
 
 (def default-connect-timeout-ms driver/default-connect-timeout-ms)
 (def default-connect-retry-ms driver/default-connect-retry-ms)
+(def default-reset-range driver/default-reset-range)
+(def default-reset-timeout-ms driver/default-reset-timeout-ms)
+(def default-reset-mode driver/default-reset-mode)
+
+(def ^:private pc-register-id 3)
+;; Keep this outside the PRG unpacker's `$0334` scratch area.
+(def ^:private default-reload-trampoline-address 0x02f0)
+(def ^:private reload-trampoline-length 6)
+(def ^:private basic-text-pointer-address 0x002b)
+(def ^:private basic-pointer-block-length 8)
 
 ;; Assembly ------------------------------------------------------------------
 
@@ -123,6 +136,154 @@
    (if-let [target (:artifact options)]
      (start-program! target options)
      (driver/start! (start-options options)))))
+
+(declare connect!)
+
+(defn- reload-trampoline-bytes
+  [entry return-address]
+  ;; JSR entry; JMP return-address. The JSR gives an entry routine ending in
+  ;; RTS the same stack contract it has when invoked by BASIC SYS.
+  (byte-array
+   (map unchecked-byte
+        [0x20 (bit-and entry 0xff) (bit-shift-right entry 8)
+         0x4c (bit-and return-address 0xff) (bit-shift-right return-address 8)])))
+
+(defn- little-endian-bytes
+  [address]
+  [(bit-and address 0xff)
+   (bit-shift-right address 8)])
+
+(defn- prg-body
+  ^bytes [^bytes image]
+  (let [length (- (alength image) 2)
+        body (byte-array length)]
+    (System/arraycopy image 2 body 0 length)
+    body))
+
+(defn- prg-stub-address
+  [^bytes body]
+  (when (< (alength body) 2)
+    (throw (ex-info "Generated PRG has no BASIC line link"
+                    {:reason :invalid-prg})))
+  (+ (bit-and (int (aget body 0)) 0xff)
+     (bit-shift-left (bit-and (int (aget body 1)) 0xff) 8)
+     2))
+
+(defn- inject-prg!
+  "Write a generated PRG and enter it through BASIC RUN.
+
+  The PRG contains the same self-relocating SYS stub used by fresh-instance
+  startup, so linked code and assets follow the normal LOAD/RUN layout. Its
+  SYS stub is invoked with a JSR trampoline so the entry routine receives the
+  same return-stack contract as a BASIC SYS call."
+  [conn artifact options reset-range]
+  (let [load-address prg/default-load-address
+        image (prg/prg-bytes artifact)
+        body (prg-body image)
+        body-end (+ load-address (alength body))
+        stub-address (prg-stub-address body)
+        trampoline-address (or (:trampoline-address options)
+                               default-reload-trampoline-address)
+        return-address (or (:return-address options) (first reset-range))
+        trampoline (reload-trampoline-bytes stub-address return-address)
+        pointers (byte-array
+                  (map unchecked-byte
+                       (concat (little-endian-bytes load-address)
+                               (mapcat little-endian-bytes
+                                       (repeat 3 body-end)))))]
+    (when (> body-end 0x10000)
+      (throw (ex-info "Generated PRG does not fit in C64 memory"
+                      {:reason :prg-too-large
+                       :load-address load-address
+                       :body-length (alength body)})))
+    (bm/mem-set! conn {:start load-address
+                       :end (dec body-end)
+                       :memspace 0
+                       :bank 0
+                       :data body})
+    ;; TXTTAB, VARTAB, ARYTAB, and STREND. This is the BASIC state normally
+    ;; established by LOAD before RUN scans the program at TXTTAB.
+    (bm/mem-set! conn {:start basic-text-pointer-address
+                       :end (+ basic-text-pointer-address
+                               (dec basic-pointer-block-length))
+                       :memspace 0
+                       :bank 0
+                       :data pointers})
+    (bm/mem-set! conn {:start trampoline-address
+                       :end (+ trampoline-address (dec reload-trampoline-length))
+                       :memspace 0
+                       :bank 0
+                       :data trampoline})
+    (bm/registers-set! conn {:memspace 0
+                             :register-values [[pc-register-id
+                                                trampoline-address]]})))
+
+(defn reload!
+  "Reset and run `target` inside an existing VICE instance.
+
+  `target` may be a relocatable assembler object or a linked artifact. The
+  instance is reset, waits for `:reset-range` (defaulting to the stock C64
+  BASIC READY entry), writes the generated PRG into BASIC memory, and
+  invokes its SYS stub with the same call/return contract as BASIC RUN.
+
+  Options:
+
+  * `:link-options` — linker options for a relocatable object;
+  * `:reset-range` — inclusive `[start end]` execution range;
+  * `:reset-timeout-ms` — timeout while waiting for the reset range;
+  * `:reset-mode` — `:cpu` (default) or `:power-cycle`;
+  * `:trampoline-address` — scratch address for the monitor RUN trampoline;
+  * `:return-address` — address reached if the RUN path returns.
+
+  The returned descriptor is the same instance with its artifact metadata
+  updated. A monitor connection or capture already owned by the instance is
+  rejected by `connect!`."
+  ([instance target]
+   (reload! instance target {}))
+  ([instance target options]
+   (let [link-options (if (assembler/object? target)
+                        (:link-options options)
+                        {})
+         artifact (assembler/link target link-options)]
+     (when-not (assembler/artifact? artifact)
+       (throw (IllegalArgumentException.
+               "reload! target must be a relocatable object or linked artifact")))
+     (let [conn (connect! instance)]
+       (try
+         (let [checkpoint (atom nil)]
+           (driver/reset-to-range!
+            conn
+            (or (:reset-range options) default-reset-range)
+            checkpoint
+            (or (:reset-timeout-ms options) default-reset-timeout-ms)
+            (or (:reset-mode options) default-reset-mode))
+           (inject-prg!
+            conn
+            artifact
+            options
+            (or (:reset-range options) default-reset-range))
+           (bm/resume! conn))
+         (finally
+           (bm/close! conn))))
+     (assoc instance
+            :artifact artifact
+            :entry-point (:entry-point artifact)
+            :link-options link-options
+            :from-pc nil))))
+
+(defn run!
+  "Run `target`, starting VICE or reusing an explicit instance.
+
+  With `:instance`, this delegates to `reload!`; otherwise it starts a fresh
+  instance using the normal `start!` artifact/autostart path. This function
+  does not maintain global instance state."
+  ([target]
+   (run! target {}))
+  ([target options]
+   (if-let [instance (:instance options)]
+     (reload! instance target options)
+     (start! (assoc (dissoc options :instance)
+                    :artifact target)))))
 
 (defn connect!
   "Claim `instance`'s binary monitor and return the connection.

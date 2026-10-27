@@ -42,11 +42,11 @@
             [omkamra.vice.examples.effects.common :as common]))
 
 ;; The text lives in the source as a string: the assembler encodes it to
-;; screen-code bytes (the VIC's video-matrix byte) through the `:charset`
+;; screen-code bytes (the VIC's video-matrix byte) through the `:encoding`
 ;; metadata and places it like any other data. Only screen codes 0-63 name a
 ;; big character, which is exactly the range `:screen-codes` gives to letters,
 ;; digits and `$20-$3f`.
-(def ^{:charset :screen-codes :terminator 0xff} scrolltext
+(def ^{:encoding :screen-codes :terminator 0xff} scrolltext
   (str "THIS SCROLLER USES A 2X2 CHARSET. EVERY ON-SCREEN CHARACTER IS FOUR "
        "ORDINARY CHARACTERS, SO THE 2K CHARSET HOLDS ONLY 64 BIG CHARACTERS. "
        "THE INIT ROUTINE DOUBLES THE ROM CHARSET, TURNING EACH PIXEL INTO A "
@@ -236,9 +236,9 @@
   (sta [charset-dst-hi])
   (lda 64)
   (sta [charset-count])
-  :charset-outer
+  :encoding-outer
   (ldx 0)                        ; X = source row within the character
-  :charset-inner
+  :encoding-inner
   (txa)
   (tay)
   (lda [[charset-src] y])
@@ -249,16 +249,16 @@
   (lsr a)
   (tay)
   (lda [nibble-bitmaps y])
-  (sta [(inc :charset-hi)])             ; patch LDA operand
+  (sta [(inc :encoding-hi)])             ; patch LDA operand
   (pla)
   (and 0x0F)
   (tay)
   (lda [nibble-bitmaps y])
-  (sta [(inc :charset-lo)])             ; patch LDA operand
+  (sta [(inc :encoding-lo)])             ; patch LDA operand
   (txa)
   (asl a)                               ; left offset = 2 * source row
   (tay)
-  :charset-hi
+  :encoding-hi
   (lda 0x00)
   (sta [[charset-dst] y])
   (iny)
@@ -267,14 +267,14 @@
   (clc)
   (adc 0x0f)                         ; right offset = left offset + 16
   (tay)
-  :charset-lo
+  :encoding-lo
   (lda 0x00)
   (sta [[charset-dst] y])
   (iny)
   (sta [[charset-dst] y])
   (inx)
   (cpx 0x08)
-  (bne :charset-inner)
+  (bne :encoding-inner)
   (lda [charset-src-lo])
   (clc)
   (adc 0x08)
@@ -290,7 +290,7 @@
   (inc [charset-dst-hi])
   :0
   (dec [charset-count])
-  (bne :charset-outer)
+  (bne :encoding-outer)
 
   (pla)                            ; pop original $01 value from stack
   (sta [0x01])

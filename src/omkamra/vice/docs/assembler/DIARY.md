@@ -547,15 +547,15 @@ earlier entries.
     (`:no-object-entry`). This lets a handler be little more than `JSR`s to
     per-effect objects.
   - String assets: a Var holding a string is an implicit asset, translated to
-    bytes by its `:charset` metadata — `:ascii` (default, the code point),
+    bytes by its `:encoding` metadata — `:ascii` (default, the code point),
     `:petscii` (letters at `$41`, case folded, `\n` at `$0D`) or
     `:screen-codes` (letters at `$01`, `@` at `$00`); `$20-$3F` is the same in
-    all three. Unknown charsets (`:unknown-charset`), characters a set cannot
+    all three. Unknown charsets (`:unknown-encoding`), characters a set cannot
     encode (`:unencodable-character`) and empty strings (`:empty-asset`) are
     errors. A Var's metadata also carries placement, so `:at`/`:address` joins
     `:align`.
 - **Tests run:** `assembler-test` (60 tests / 170 assertions, including string
-  encodings, `:charset` errors, `:at` metadata and `:align true`),
+  encodings, `:encoding` errors, `:at` metadata and `:align true`),
   `fairlight-legendary-intro-test` (17 / 85); `clj-kondo` and `cljfmt` clean.
   The reimplementation was re-captured
   (`captures/fairlight-legendary-reimpl-step4b`, since pruned — only the
@@ -571,7 +571,7 @@ earlier entries.
   the wrap page in `$3B` and the handler wraps at whatever address the linker
   chose — three bytes of zero page instead of a magic `$CC`. Only the
   VIC-addressed assets (screen `$C400`, charset `$C800`, colour RAM `$D800`)
-  stay pinned, because `$D018` and the VIC bank fix them. `:charset` is named
+  stay pinned, because `$D018` and the VIC bank fix them. `:encoding` is named
   for the set the string is written *into*, and stays distinct from the C64
   `charset` asset.
 - **Next step:** Fairlight intro steps 5 (palette/timing polish) and 6 (SID

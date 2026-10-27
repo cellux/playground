@@ -572,7 +572,7 @@ costs are harmless, because the bands and the scroller wait for their exact
 raster lines.
 
 - `scroller-text` is a plain Var holding a **string**: the assembler
-  translates it to bytes with the Var's `:charset` metadata (`:screen-codes` —
+  translates it to bytes with the Var's `:encoding` metadata (`:screen-codes` —
   the VIC reads the video matrix) and places it like any other data. It is
   verified byte-for-byte against the capture's `$CA00-$CBFF` (512 bytes), and
   `:align true` keeps it a page pair, because `$39/$3A` walks it two pages at a
@@ -771,9 +771,9 @@ Asset notes:
   address. The band tables are therefore `(def red-band [0x02 0x0A …])`, with
   `define-asset` kept for the file-backed and address-pinned assets;
 - string assets: a Var holding a string is an implicit asset too, translated to
-  bytes by its `:charset` metadata — `:ascii` (default), `:petscii` (letters at
+  bytes by its `:encoding` metadata — `:ascii` (default), `:petscii` (letters at
   `$41`) or `:screen-codes` (letters at `$01`, for the VIC's video matrix).
-  `scroller-text` uses `^{:charset :screen-codes :align true}`;
+  `scroller-text` uses `^{:encoding :screen-codes :align true}`;
 - implicit-asset metadata: `:align` (and `true` for the next power of two) and
   `:at`/`:address`, the same placement `define-asset` accepts;
 - object Var references: a symbol resolving to a `define-asm` object is its

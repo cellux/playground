@@ -268,7 +268,7 @@
 
 (deftest the-scroller-text-is-a-string-in-screen-codes
   ;; The text is a plain Var holding a string; the assembler translates it with
-  ;; the Var's `:charset` metadata and pins it with `:at`, because the pointer
+  ;; the Var's `:encoding` metadata and pins it with `:at`, because the pointer
   ;; `$39/$3A` walks it a page at a time and wraps from $CBFF back to $CA00.
   (is (= 512 (count intro/scroller-text)) "two pages")
   (is (= "CRACKED ON THE 21ST OF NOVEMBER 1987...   "

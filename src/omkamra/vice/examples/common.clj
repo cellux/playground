@@ -1,41 +1,74 @@
 (ns omkamra.vice.examples.common
   "Shared runner helpers for clean-room C64 examples.
 
-  An example namespace contains assembly objects, asset declarations, optional
-  code-generation functions, and a short parameterized `run!` that delegates
-  here. These helpers stay thin: `omkamra.vice/start!` owns process startup,
-  linking, autostart, and the `:from-pc` start checkpoint."
+  Example namespaces own assembly objects and delegate their `run!` functions
+  here. The first run starts VICE through `omkamra.vice`; later runs reuse the
+  same emulator through the public `omkamra.vice/run!` and `reload!` APIs."
   (:refer-clojure :exclude [run!])
   (:require [omkamra.vice :as vice]))
 
+(defonce ^:private running-instance (atom nil))
+
+(defn- alive?
+  [instance]
+  (and instance
+       (when-let [process (:process instance)]
+         (.isAlive ^Process process))))
+
+(defn- start-options
+  [options]
+  (let [extra-args (or (:extra-args options)
+                       (:options options)
+                       [])]
+    (assoc options
+           :extra-args
+           (into (vec extra-args)
+                 ["-sounddev" "alsa"]))))
+
 (defn run!
-  "Link (if needed) and run an example program on a fresh VICE instance.
+  "Link and run an example.
 
-  `target` is a relocatable object or a linked artifact. Options are passed to
-  `omkamra.vice/start!`. With an object, `:link-options` applies; every other
-  option is a start option. Example runs use the ALSA sound device; any caller
-  supplied extra arguments are preserved.
+  The first call starts a VICE instance and autostarts the artifact through a
+  temporary PRG, preserving the normal `omkamra.vice` startup behavior. If
+  that instance is still alive, later calls reset and reuse it through
+  `omkamra.vice/reload!`.
 
-  Returns an instance descriptor suitable for inspection and cleanup."
+  `:reset-range` and `:reset-timeout-ms` control reusable-instance reset.
+  Other options are passed to `omkamra.vice/run!` on the first call."
   ([target]
    (run! target {}))
   ([target options]
-   (let [extra-args (or (:extra-args options)
-                        (:options options)
-                        [])]
-     (vice/start! (assoc options
-                         :artifact target
-                         :extra-args (into (vec extra-args)
-                                           ["-sounddev" "alsa"]))))))
+   (locking running-instance
+     (let [current @running-instance]
+       (cond
+         (alive? current)
+         (try
+           (let [instance (vice/run! target (assoc options :instance current))]
+             (reset! running-instance instance)
+             instance)
+           (catch Throwable error
+             (reset! running-instance nil)
+             (vice/stop! current)
+             (throw error)))
+
+         :else
+         (do
+           (when current
+             (vice/stop! current))
+           (let [instance (vice/run! target (start-options options))]
+             (reset! running-instance instance)
+             instance)))))))
 
 (defn stop!
-  "Stop the instance's capture, close its connection, and terminate its VICE
-  process."
+  "Stop an effect instance and clear it from the reusable runner."
   [instance]
-  (vice/stop! instance))
+  (locking running-instance
+    (when (identical? instance @running-instance)
+      (reset! running-instance nil))
+    (vice/stop! instance)))
 
 (defmacro with-run
-  "Run `target`, bind the instance to `runtime`, and always tear it down.
+  "Run `target`, bind its instance to `runtime`, and always stop it.
 
   ```clojure
   (with-run [runtime my-object {:connect-timeout-ms 15000}]

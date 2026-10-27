@@ -41,11 +41,11 @@
             [omkamra.vice.examples.effects.common :as common]))
 
 ;; The text lives in the source as a string: the assembler encodes it to
-;; screen-code bytes (the VIC's video-matrix byte) through the `:charset`
+;; screen-code bytes (the VIC's video-matrix byte) through the `:encoding`
 ;; metadata and places it like any other data. Only screen codes 0-63 name a
 ;; big character, which is exactly the range `:screen-codes` gives to letters,
 ;; digits and `$20-$3f`.
-(def ^{:charset :screen-codes :terminator 0xff} scrolltext
+(def ^{:encoding :screen-codes :terminator 0xff} scrolltext
   (str "THIS SCROLLER USES A 4X4 CHARSET. EVERY ON-SCREEN CHARACTER IS SIXTEEN "
        "ORDINARY CHARACTERS, SO A NAIVE CHARSET WOULD NEED EIGHT KILOBYTES. "
        "BUT SCALING EACH PIXEL TO A FOUR BY FOUR BLOCK LEAVES ONLY SIXTEEN "

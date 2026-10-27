@@ -719,12 +719,12 @@
 
 ;; string assets --------------------------------------------------------------
 
-(def ^{:charset :screen-codes :at 0x3000} screen-coded-string "AB C1:9'Z")
-(def ^{:charset :petscii :at 0x3100} petscii-coded-string "Ab1!")
+(def ^{:encoding :screen-codes :at 0x3000} screen-coded-string "AB C1:9'Z")
+(def ^{:encoding :petscii :at 0x3100} petscii-coded-string "Ab1!")
 (def ^{:at 0x3200} ascii-coded-string "Hi!")
 (def ^{:align true} aligned-string "abc")
-(def ^{:charset :ebcdic} unknown-charset-string "hi")
-(def ^{:charset :screen-codes} unencodable-string "ok\ttab")
+(def ^{:encoding :ebcdic} unknown-encoding-string "hi")
+(def ^{:encoding :screen-codes} unencodable-string "ok\ttab")
 (def empty-string-asset "")
 
 (defn- asset-bytes
@@ -751,7 +751,7 @@
   (is (= [6 7] (asset-bytes 'short-sized-bytes))
       "the uninitialized suffix emits no bytes"))
 
-(deftest a-string-var-is-an-asset-in-the-charset-it-names
+(deftest a-string-var-is-an-asset-in-the-encoding-it-names
   (is (= [1 2 0x20 3 0x31 0x3A 0x39 0x27 26] (asset-bytes 'screen-coded-string))
       ":screen-codes: letters run from $01, $20-$3F are unchanged")
   (is (= [0x41 0x42 0x31 0x21] (asset-bytes 'petscii-coded-string))
@@ -764,8 +764,8 @@
   (is (= 0 (mod (placed-asset 'aligned-string) 4)) ":align true still applies"))
 
 (deftest a-string-asset-rejects-what-it-cannot-encode
-  (is (= :unknown-charset
-         (error-reason #(link-forms '((lda (< unknown-charset-string))) {}))))
+  (is (= :unknown-encoding
+         (error-reason #(link-forms '((lda (< unknown-encoding-string))) {}))))
   (is (= :unencodable-character
          (error-reason #(link-forms '((lda (< unencodable-string))) {}))))
   (is (= :empty-asset
@@ -773,7 +773,7 @@
 
 ;; terminators ----------------------------------------------------------------
 
-(def ^{:charset :screen-codes :at 0x3300 :terminator 0xff} terminated-string "AB")
+(def ^{:encoding :screen-codes :at 0x3300 :terminator 0xff} terminated-string "AB")
 (def ^{:at 0x3400 :terminator 0xff} terminated-bytes [7 8])
 (def ^{:align true :terminator 0xff} terminated-five-bytes "abcd")
 (def ^{:at 0x3500 :terminator 256} out-of-range-terminator "AB")
@@ -792,7 +792,7 @@
 
 (deftest an-asset-may-end-in-a-terminator-byte
   (is (= [1 2 0xff] (asset-bytes 'terminated-string))
-      ":terminator appends a code the charset itself cannot spell")
+      ":terminator appends a code the encoding itself cannot spell")
   (is (= [7 8 0xff] (asset-bytes 'terminated-bytes))
       ":terminator appends to a byte-vector asset too"))
 
