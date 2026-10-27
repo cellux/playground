@@ -76,6 +76,15 @@
                 {:ns 'omkamra.vice.assembler-test})]
     (is (= '[(lda (%meta {:role :operand} [8192]))] (:source object)))))
 
+(deftest include-is-an-asset-alias
+  (let [object (assembler/assemble
+                '((%include charset-asset))
+                {:ns 'omkamra.vice.assembler-test})]
+    (is (= '[(%asset omkamra.vice.assembler-test/charset-asset)]
+           (:source object)))
+    (is (= ['omkamra.vice.assembler-test/charset-asset]
+           (get-in object [:dependencies :assets])))))
+
 ;; Label diagnostics ---------------------------------------------------------
 
 (deftest forward-and-backward-labels

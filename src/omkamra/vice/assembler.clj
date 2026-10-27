@@ -371,7 +371,7 @@
 
 (def ^:private directive-names
   #{"%entry" "%label" "%labels" "%db" "%dw" "%align" "%region" "%org"
-    "%reserve" "%meta" "%volatile" "%opcode" "%asset"})
+    "%reserve" "%meta" "%volatile" "%opcode" "%asset" "%include"})
 
 (defn- directive-symbol? [x]
   (and (symbol? x) (contains? directive-names (name x))))
@@ -863,6 +863,9 @@
       [(list '%opcode (normalize-operand ctx (first args) index))]
 
       "%asset"
+      [(list '%asset (normalize-operand ctx (first args) index))]
+
+      "%include"
       [(list '%asset (normalize-operand ctx (first args) index))]
 
       "%meta"
