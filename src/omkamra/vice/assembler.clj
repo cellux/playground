@@ -619,18 +619,16 @@
   "External label naming `obj`'s entry point.
 
   An object referenced by its Var (or that Var's symbol) resolves to its entry:
-  the `%entry` label when declared, otherwise the default entry label named
-  after the object (see `with-object-entry-label`). Both are qualified with the
-  object's namespace, and `assemble` exports that label, so the reference rides
-  the external-label machinery."
+  the `%entry` label when declared, otherwise the implicit default entry at
+  the first instruction. Both are qualified with the object's namespace, and
+  `assemble` exports that name through the external-label machinery."
   [obj sym index]
   (let [id (:object-id obj)
         entry (:entry obj)
         self-label (keyword (name id))]
     (cond
       entry (keyword (namespace id) (name entry))
-      (contains? (:labels obj) self-label)
-      (keyword (namespace id) (name self-label))
+      (:default-entry obj) (keyword (namespace id) (name self-label))
       :else
       (fail! :no-object-entry
              (str "Object " id " has no entry point")
@@ -1710,33 +1708,6 @@
                         (:items section))]
       (when (seq offsets) (apply min offsets)))))
 
-(defn- with-object-entry-label
-  "Give a `define-asm` object its default entry label.
-
-  An object is named by its `:object-id`, e.g. `:ns/irq`. When it declares no
-  `%entry` and contains an instruction, a label named after the object (`:irq`)
-  is added at its first instruction, so `(jsr ::irq)` and a reference to the
-  object's Var both resolve to the entry. A label that already carries the
-  object's name must name that first instruction."
-  [sections object-id entry source]
-  (let [self-label (keyword (name object-id))
-        first-offset (first-instruction-offset sections)
-        present? (contains? (:labels (first sections)) self-label)]
-    (cond
-      present?
-      (if (= first-offset (get-in sections [0 :labels self-label]))
-        sections
-        (fail! :object-entry-label-mismatch
-               (str "Label " self-label " must name the object's first "
-                    "instruction")
-               {:object-id object-id :label self-label}
-               source -1))
-
-      (and (nil? entry) first-offset)
-      (update-in sections [0 :labels] assoc self-label first-offset)
-
-      :else sections)))
-
 (defn assemble
   "Assemble quoted source data into a relocatable object.
 
@@ -1779,14 +1750,15 @@
          object-id (:object-id options)
          self-label (when object-id (keyword (name object-id)))
          ;; The entry is always public: the explicit `%entry` label, or the
-         ;; default label named after the object (which `define-asm` adds at
-         ;; the first instruction).
+         ;; default entry at the first instruction. The implicit default entry
+         ;; is exported without adding a local label to the object.
          default-entry (when (and object-id (nil? entry)
                                   (some? (first-instruction-offset sections)))
                          self-label)
-         sections (if object-id
-                    (with-object-entry-label sections object-id entry source)
-                    sections)
+         default-entry-target
+         (when default-entry
+           {:section 0
+            :offset (first-instruction-offset sections)})
          exports (cond-> (set (:exports program))
                    entry (conj entry)
                    default-entry (conj default-entry))
@@ -1801,6 +1773,7 @@
       :source forms
       :sections sections
       :labels label-map
+      :default-entry default-entry-target
       :exports (vec (sort exports))
       :relocations relocations
       :constraints (:constraints program)
@@ -2358,6 +2331,15 @@
           [label (+ (long (get placement [object (:index section)]))
                     (long offset))])))
 
+(defn- external-label-address
+  [object placement label]
+  (or (get (label-addresses object placement) (keyword (name label)))
+      (when-let [{:keys [section offset]} (:default-entry object)]
+        (when (= (keyword (name (:object-id object)))
+                 (keyword (name label)))
+          (+ (long (get placement [object section]))
+             (long offset))))))
+
 (defn- expression-addresses
   "The addresses of the labels and assets an operand expression references."
   [form {:keys [object-labels external-owners placement asset-placement]}]
@@ -2366,8 +2348,7 @@
                 (cond
                   (and (keyword? x) (namespace x))
                   (when-let [owner (get external-owners x)]
-                    (when-let [address (get (label-addresses owner placement)
-                                            (keyword (name x)))]
+                    (when-let [address (external-label-address owner placement x)]
                       [x address]))
 
                   (keyword? x)
@@ -2409,8 +2390,7 @@
       :label (get object-labels (:name target))
       :external
       (let [owner (get external-owners (:name target))]
-        (get (label-addresses owner placement)
-             (keyword (name (:name target)))))
+        (external-label-address owner placement (:name target)))
       :asset (get asset-placement (:name target))
       :expression (expression-value (:form target) context))))
 

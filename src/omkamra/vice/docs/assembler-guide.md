@@ -259,13 +259,13 @@ linker and two objects in one namespace may freely reuse a private name.
 
 An object can also be referenced by its Var: a symbol (or `(< sym)` / `(> sym)`)
 that resolves to a value produced by `define-asm` normalizes to that object's
-entry. The entry is the `%entry` label when declared, otherwise a default entry
-label named after the object — `(define-asm irq …)` gets `:irq` — which
-`define-asm` adds at the object's first instruction. The entry label is always
-exported, so a Var reference needs no explicit `::`. A label already carrying
-the object's name must name that first instruction; a pure-data object has no
-first instruction and therefore no default entry, so referencing it without a
-`%entry` fails with `:no-object-entry`.
+entry. The entry is the `%entry` label when declared. If no `%entry` is
+declared, an object containing instructions gets an external-only default
+entry named after the object — `(define-asm irq …)` exports `:current-ns/irq`
+without adding a local `:irq` label. A Var reference therefore needs no
+explicit `::`; an explicit qualified reference uses `::irq`. A pure-data
+object has no default entry and referencing it without a `%entry` fails with
+`:no-object-entry`.
 
 ## SCI expression environment
 
@@ -393,9 +393,10 @@ resolves to its linked start address.
 
 `define-asm` binds a named object, assigns a namespaced-keyword `:object-id`
 derived from the Var, and registers it for dependency discovery. When the body
-declares no `%entry` and contains an instruction, it also gets a default entry
-label named after the Var (see above), so the object can be referenced by that
-Var as well as by a namespaced label.
+declares no `%entry` and contains an instruction, it also gets an
+external-only default entry named after the Var (see above), so the object can
+be referenced by that Var or its qualified label without gaining an implicit
+local label.
 
 ## Linker and placement
 

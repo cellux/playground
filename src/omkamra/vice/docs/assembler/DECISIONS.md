@@ -128,11 +128,12 @@ Decisions are never deleted. A decision whose answer changes is marked
   - Unqualified labels stay implicitly exported (status quo).
   - A label is exported only when declared namespace-qualified (`::foo` /
     `:ns/foo`); unqualified labels are private to their object.
-- **Proposed default:** declaration-controlled visibility. The linker's
+- **Proposed default:** declaration-controlled visibility. The linker’s
   external resolution searches an object's `:exports`, which holds the
-  qualified declarations plus the entry label. Object entry labels (`%entry`
-  or the default label named after the object) are always exported, so
-  referencing an object through its Var needs no explicit qualification.
+  qualified declarations plus the entry name. Explicit `%entry` labels remain
+  local labels; an implicit default entry is exported by name without adding a
+  local label, so referencing an object through its Var needs no explicit
+  qualification.
 - **Consequences:** a non-entry label must be declared `::foo` to be referenced
   from another namespace; private names may be reused freely across objects in
   one namespace; a label may only be exported into the object's own namespace

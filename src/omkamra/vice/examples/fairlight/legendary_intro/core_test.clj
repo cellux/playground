@@ -158,18 +158,18 @@
 
 (deftest the-handler-is-a-separate-object
   ;; `intro` names the handler through its Var, which resolves to the handler
-  ;; object's default entry label; the linker discovers and places it.
+  ;; object's external-only default entry; the linker discovers and places it.
   (is (= (sort [:omkamra.vice.examples.fairlight.legendary-intro.core/irq
                 :omkamra.vice.examples.fairlight.legendary-intro.music/init])
          (sort (:objects (:dependencies intro/intro)))))
   (is (nil? (:entry intro/irq)))
-  (is (contains? (:labels intro/irq) :irq))
+  (is (= {:section 0 :offset 0} (:default-entry intro/irq)))
+  (is (nil? (get (:labels intro/irq) :irq)))
   (let [artifact (linked)
         handler (first (filter #(= (keyword intro-ns "irq") (:object-id %))
                                (:objects artifact)))]
-    (is (= (get-in handler [:placement :sections 0 :base])
-           (get (:labels handler) :irq))
-        "the default entry label is at the handler's first instruction")))
+    (is (some? handler))
+    (is (nil? (get (:labels handler) :irq)))))
 
 (deftest the-irq-is-installed-on-raster-line-1
   (let [bytes (code-bytes (linked))

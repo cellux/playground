@@ -540,12 +540,11 @@ earlier entries.
     what an indexed table needs so `LDA table,X` cannot cross a page. Accepted
     in `define-asset` maps and in a bytes Var's metadata, beside an explicit
     `:align n`.
-  - Object Var references resolve to the object's entry label: its `%entry`, or
-    a default label named after the object, added at its first instruction. A
-    label already carrying the object's name must name that first instruction
-    (`:object-entry-label-mismatch`); a pure-data object has no entry
-    (`:no-object-entry`). This lets a handler be little more than `JSR`s to
-    per-effect objects.
+  - Object Var references resolve to the object's entry: its `%entry`, or an
+    external-only default entry named after the object. The implicit default
+    entry is recorded separately at the first instruction rather than added as
+    a local label; a pure-data object has no entry (`:no-object-entry`). This
+    lets a handler be little more than `JSR`s to per-effect objects.
   - String assets: a Var holding a string is an implicit asset, translated to
     bytes by its `:encoding` metadata — `:ascii` (default, the code point),
     `:petscii` (letters at `$41`, case folded, `\n` at `$0D`) or

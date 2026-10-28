@@ -533,11 +533,13 @@
                       {:ns 'omkamra.vice.assembler-test
                        :object-id :omkamra.vice.assembler-test/data-only}))
 
-(deftest define-asm-adds-a-default-entry-label
+(deftest define-asm-records-an-external-only-default-entry
   (is (nil? (:entry default-entry-object)))
   (is (= {:section 0 :offset 0}
-         (get (:labels default-entry-object) :default-entry-object)))
-  (testing "an object that declares %entry gets no default label"
+         (:default-entry default-entry-object)))
+  (is (nil? (get (:labels default-entry-object) :default-entry-object)))
+  (testing "an object that declares %entry gets no implicit default entry"
+    (is (nil? (:default-entry entry-object)))
     (is (nil? (get (:labels entry-object) :entry-object)))))
 
 (deftest object-vars-resolve-to-their-entry
@@ -552,20 +554,10 @@
                                      (:object-id %))
                                  (:objects artifact)))]
       (is (some? handler))
-      (is (= 0x904 (get (:labels handler) :default-entry-object))))))
-
-(deftest object-name-label-must-name-the-first-instruction
-  (is (= :object-entry-label-mismatch
-         (error-reason
-          #(assembler/assemble '((rts) :irq (rts))
-                               {:ns 'omkamra.vice.assembler-test
-                                :object-id :omkamra.vice.assembler-test/irq}))))
-  (testing "naming the first instruction is accepted"
-    (is (= [:irq]
-           (keys (:labels
-                  (assembler/assemble '(:irq (rts))
-                                      {:ns 'omkamra.vice.assembler-test
-                                       :object-id :omkamra.vice.assembler-test/irq})))))))
+      (is (nil? (get (:labels handler) :default-entry-object)))
+      (is (= [0x20 0x04 0x09 0x60 0xA9 0x01 0x60]
+             (mapv #(bit-and (int %) 0xff)
+                   (:bytes (first (:segments artifact)))))))))
 
 (deftest object-without-entry-cannot-be-referenced
   (is (nil? (get (:labels data-only-object) :data-only)))
@@ -866,7 +858,7 @@
 (deftest entry-labels-are-exported
   (testing "an explicit %entry label"
     (is (contains? (set (:exports entry-object)) :start)))
-  (testing "the default entry label named after the object"
+  (testing "the external-only default entry named after the object"
     (is (contains? (set (:exports default-entry-object))
                    :default-entry-object))))
 

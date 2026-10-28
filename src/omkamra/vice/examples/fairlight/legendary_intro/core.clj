@@ -394,8 +394,9 @@
 
 (assembler/define-asm irq
   ;; The per-frame handler, in its own object so `intro` can name it. It has no
-  ;; `%entry`: `define-asm` gives it the default entry label `:irq` at its first
-  ;; instruction, so `(lda (< irq))` resolves here. All it does is acknowledge
+  ;; `%entry`: `define-asm` gives it an external-only default entry named `irq`
+  ;; at its first instruction, so the `intro` Var reference resolves here. All
+  ;; it does is acknowledge
   ;; the interrupt and run the frame's effects in order.
   ;; One interrupt per frame, on line 1.
   (lda 0x01) (sta [0xD019])          ; acknowledge
@@ -504,7 +505,8 @@
   (sta [0xD012])
   (sta [0xD01A])
   (lda 0x7F) (sta [0xDC0D])
-  ;; The handler object, resolved through its Var to its default entry label.
+  ;; The handler object, resolved through its Var to its external-only default
+  ;; entry.
   (lda (< irq)) (sta [0x0314])
   (lda (> irq)) (sta [0x0315])
   (cli)
