@@ -44,7 +44,7 @@
   "Link a relocatable assembler object and its dependencies into an artifact.
 
   The artifact can be passed to `start!` or `capture!`. See
-  `omkamra.vice.assembler/link` for placement, range, and dependency options."
+  `omkamra.vice.assembler/link` for placement-region and dependency options."
   ([object]
    (core/link object))
   ([object options]

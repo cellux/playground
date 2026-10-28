@@ -232,7 +232,7 @@ object/asset dependencies, and returns a segment-based artifact.
 - Constraint-based placement:
   - `%region ADDRESS` exact start; `%region [START END]` half-open interval;
   - `%align`; `%org` bypasses automatic placement;
-  - default first-fit ranges in the specified order;
+  - default first-fit regions in the specified order;
   - linker options override object constraints/global policy.
 - Relocation resolution and validation after placement (widths, addressing-mode
   assumptions, relative branch range) and overlap/unsatisfiable-layout errors.

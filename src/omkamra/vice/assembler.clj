@@ -2022,27 +2022,64 @@
 
 ;; Linker --------------------------------------------------------------------
 
-(def default-placement-ranges
-  "First-fit placement ranges used when an object has no `%region`.
+(def default-regions
+  "First-fit placement regions used when an object has no `%region`.
 
   The BASIC `SYS` page is omitted; an explicit region or `%org` can still
   request it deliberately."
-  [[0xc000 0xd000]
-   [0x0900 0xa000]
-   [0xa000 0xc000]
-   [0xe000 0x10000]])
+  [{:start 0xc000 :end 0xd000}
+   {:start 0x0900 :end 0xa000}
+   {:start 0xa000 :end 0xc000}
+   {:start 0xe000 :end 0x10000}])
 
-(def default-reserved-ranges
-  "Intervals automatic placement keeps clear unless `:reserved` overrides them.
+(def reserved-regions
+  "Regions automatic placement keeps clear unless `:reserved` overrides them.
 
   `$0800-$08ff` is the BASIC `SYS` harness page a self-relocating PRG builds
   at `$0801`: the `10 SYS ...` line at `$0801` and the relocation stub at
   `$080d`. Explicit `%region`/`%org` placement may request it deliberately."
-  [[0x0800 0x0900]])
+  [{:start 0x0800 :end 0x0900}])
 
 (defn- link-fail!
   [reason message data]
   (throw (ex-info message (assoc data :reason reason))))
+
+(defn- normalize-link-region
+  [region]
+  (cond
+    (and (map? region) (integer? (:start region)))
+    (let [start (long (:start region))
+          end (:end region)]
+      (when (and (some? end) (not (integer? end)))
+        (link-fail! :invalid-region
+                    "Link option :regions must contain integer bounds"
+                    {:region region}))
+      (when-not (<= 0 start (long (or end start)) 0x10000)
+        (link-fail! :invalid-region
+                    "Link option :regions must contain valid memory regions"
+                    {:region region}))
+      (cond-> {:start start}
+        (some? end) (assoc :end (long end))))
+
+    (and (vector? region) (= 2 (count region))
+         (every? integer? region))
+    (normalize-link-region {:start (first region) :end (second region)})
+
+    (integer? region)
+    (normalize-link-region {:start region})
+
+    :else
+    (link-fail! :invalid-region
+                "Link option :regions must contain addresses or [start end] regions"
+                {:region region})))
+
+(defn- normalize-link-regions
+  [regions]
+  (when-not (sequential? regions)
+    (link-fail! :invalid-region
+                "Link option :regions must be sequential"
+                {:regions regions}))
+  (mapv normalize-link-region regions))
 
 (defn- option-registry
   [options]
@@ -2172,16 +2209,22 @@
                (< (long occupied-start) (+ (long start) (long size)))))
         occupied))
 
+(defn- region-interval
+  [region]
+  (if (map? region)
+    [(long (:start region)) (long (:end region))]
+    (mapv long region)))
+
 (defn- first-fit
-  [occupied alignment size ranges]
-  (some (fn [[start end]]
+  [occupied alignment size regions]
+  (some (fn [{:keys [start end]}]
           (loop [candidate (long start)]
             (let [candidate (round-up candidate (long alignment))]
               (cond
                 (> (+ candidate (long size)) (long end)) nil
                 (overlaps? occupied candidate size) (recur (inc candidate))
                 :else candidate))))
-        ranges))
+        regions))
 
 (defn- section-bytes
   [section]
@@ -2286,11 +2329,12 @@
                              :objects (mapv :object-id referrers)})))))
 
 (defn- place-section
-  [occupied spec ranges hard-reserved soft-reserved]
+  [occupied spec default-regions explicit-regions reserved-regions]
   (let [alignment (long (:align spec))
         size (long (:size spec))
-        explicit-occupied (into occupied hard-reserved)
-        automatic-occupied (into explicit-occupied soft-reserved)]
+        explicit-occupied (into occupied (map region-interval explicit-regions))
+        automatic-occupied (into explicit-occupied
+                                 (map region-interval reserved-regions))]
     (if (integer? (:base spec))
       (let [base (long (:base spec))]
         (when-not (zero? (mod base alignment))
@@ -2303,16 +2347,19 @@
                       {:address base :size size}))
         [base (conj occupied [base (+ base size)])])
 
-      (let [regions (:regions spec)
-            exact (first (filter #(nil? (:end %)) regions))
-            intervals (if (seq regions)
-                        (mapv (fn [region]
-                                [(long (:start region))
-                                 (long (or (:end region)
-                                           (+ (:start region) size)))])
-                              regions)
-                        ranges)
-            blocked (if (seq regions) explicit-occupied automatic-occupied)]
+      (let [explicit-regions (:regions spec)
+            exact (first (filter #(nil? (:end %)) explicit-regions))
+            regions (if (seq explicit-regions)
+                      explicit-regions
+                      default-regions)
+            intervals (mapv (fn [region]
+                              (if (some? (:end region))
+                                region
+                                (assoc region :end (+ (:start region) size))))
+                            regions)
+            blocked (if (seq explicit-regions)
+                      explicit-occupied
+                      automatic-occupied)]
         (if exact
           (let [base (long (:start exact))]
             (when-not (zero? (mod base alignment))
@@ -2328,19 +2375,19 @@
           (if-let [base (first-fit blocked alignment size intervals)]
             [base (conj occupied [base (+ base size)])]
             (link-fail! :unsatisfiable-placement
-                        "No free range satisfies an object's constraints"
+                        "No free region satisfies an object's constraints"
                         {:align alignment
                          :size size
-                         :ranges intervals})))))))
+                         :regions intervals})))))))
 
 (defn- place-all
-  [specs ranges hard-reserved soft-reserved]
+  [specs default-regions explicit-regions reserved-regions]
   (loop [specs specs
          occupied []
          placement {}]
     (if-let [spec (first specs)]
-      (let [[base occupied] (place-section occupied spec ranges
-                                           hard-reserved soft-reserved)]
+      (let [[base occupied] (place-section occupied spec default-regions
+                                           explicit-regions reserved-regions)]
         (recur (rest specs) occupied (assoc placement (:key spec) base)))
       placement)))
 
@@ -2504,11 +2551,11 @@
   - `:entry` — select the entry label, overriding object `%entry`;
   - `:objects` — additional named objects (map or collection) for resolution;
   - `:assets` — asset descriptors (map of qualified symbol to asset);
-  - `:regions` — fallback placement regions for objects and assets that name
-    none; an object inherits the region of the object that links it in, and an
-    asset inherits that of the object that links it in;
-  - `:ranges` — override the default first-fit ranges;
-  - `:reserved` — override the default reserved intervals.
+  - `:regions` — override the default placement regions; objects and assets
+    without their own region use these as a fallback, while an object inherits
+    the region of the object that links it in and an asset inherits that of the
+    object that links it in;
+  - `:reserved` — override the default reserved regions.
 
   Passing an artifact returns it unchanged (linking is idempotent)."
   ([primary]
@@ -2517,14 +2564,21 @@
    (if (artifact? primary)
      primary
      (do
+       (when (contains? options :ranges)
+         (link-fail! :removed-option
+                     "Link option :ranges was removed; use :regions"
+                     {:option :ranges}))
        (when-not (object? primary)
          (link-fail! :not-an-object
                      "link expects a relocatable object"
                      {:value primary}))
        (let [{:keys [objects external-owners]} (discover-objects primary options)
              assets (discover-assets objects options)
-             ranges (or (:ranges options) default-placement-ranges)
-             fallback (:regions options)
+             placement-regions (if (contains? options :regions)
+                                 (normalize-link-regions (:regions options))
+                                 default-regions)
+             fallback (when (contains? options :regions)
+                        placement-regions)
              parents (object-parents objects external-owners)
              object-regions (effective-object-regions objects parents fallback)
              referrers (asset-referrers objects)
@@ -2536,14 +2590,15 @@
                                                           fallback))
                                assets)
              reserved-option? (contains? options :reserved)
-             hard-reserved (vec (concat (if reserved-option?
-                                          (or (:reserved options) [])
-                                          [])
-                                        (mapcat #(get-in % [:constraints :reserved])
-                                                objects)))
-             soft-reserved (if reserved-option? [] default-reserved-ranges)
-             placement (place-all (concat object-specs asset-specs) ranges
-                                  hard-reserved soft-reserved)
+             explicit-regions (vec (concat (if reserved-option?
+                                             (or (:reserved options) [])
+                                             [])
+                                           (mapcat #(get-in % [:constraints :reserved])
+                                                   objects)))
+             automatic-reserved-regions (if reserved-option? [] reserved-regions)
+             placement (place-all (concat object-specs asset-specs)
+                                  placement-regions explicit-regions
+                                  automatic-reserved-regions)
              asset-placement (into {} (map (fn [asset] [(:name asset)
                                                         (get placement (:name asset))])
                                            assets))
@@ -2615,4 +2670,4 @@
                            :start-address (get asset-placement (:name asset))
                            :constraints (:constraints asset)})
                         assets)
-          :constraints {:ranges ranges}})))))
+          :constraints {:regions placement-regions}})))))

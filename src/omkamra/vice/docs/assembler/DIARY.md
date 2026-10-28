@@ -228,8 +228,8 @@ earlier entries.
     - asset discovery from qualified symbols, resolved through `:assets` or the
       Var namespace;
     - constraint-based placement: fixed `%org` sections, exact and interval
-      `%region` constraints, `%align`, default first-fit ranges, and `:ranges`/
-      `:regions` option overrides; overlap and unsatisfiable-layout errors;
+      `%region` constraints, `%align`, default first-fit regions, and `:regions`
+      option overrides; overlap and unsatisfiable-layout errors;
     - relocation resolution and validation: 16-bit addresses, zero-page
       addresses, low/high bytes, and relative branch displacement range;
     - segment generation (ascending, abutting sections merged) as JVM byte
@@ -239,7 +239,7 @@ earlier entries.
     `link` is idempotent on an artifact.
   - Extended `omkamra.vice.assembler-test` with linking, dependency discovery,
     ambiguity/unresolved errors, asset placement, placement (default, region,
-    range override, `%org`), placement failures, relocation validation, and
+    region override, `%org`), placement failures, relocation validation, and
     entry selection.
 - **Tests run:**
   - `omkamra.vice.assembler-test`: 40 tests, 127 assertions, 0 failures.
@@ -257,8 +257,8 @@ earlier entries.
     object therefore yields one contiguous image, matching the plan.
   - `:objects` accepts a map or collection so tests and callers can link
     without touching the global registry.
-  - `:regions` overrides every object's `%region`; `:ranges` overrides the
-    default placement policy.
+  - `:regions` overrides the default placement policy and supplies fallback
+    regions for objects and assets without explicit placement constraints.
 - **Next step:** Phase 6 — VICE runner.
 
 ## Phase 6 — VICE runner

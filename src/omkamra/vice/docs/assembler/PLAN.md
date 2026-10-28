@@ -230,13 +230,13 @@ Implement constraint-based placement rather than requiring fixed origins. Constr
 
 `%region ADDRESS` requires that object’s exact start address. `%region [START END]` constrains placement to the half-open interval `START <= address < END`, while respecting alignment and object size. `%org ADDRESS` creates an explicitly addressed fragment and therefore bypasses automatic placement for that fragment; it is primarily used by disassembled sparse objects. `%require-size` is not part of the first DSL because object size is known after assembly. Linker options can override object constraints and global placement policy.
 
-For objects without `%region`, use first-fit placement across these default ranges, in order:
+For objects without `%region`, use first-fit placement across these default regions, in order:
 
 ```clojure
-[[0xc000 0xd000]
- [0x0900 0xa000]
- [0xa000 0xc000]
- [0xe000 0x10000]]
+[{:start 0xc000 :end 0xd000}
+ {:start 0x0900 :end 0xa000}
+ {:start 0xa000 :end 0xc000}
+ {:start 0xe000 :end 0x10000}]
 ```
 
 Reject overlaps and unsatisfiable layouts. Preserve the segment boundaries and placement metadata for diagnostics, inspection, direct injection, and future PRG generation. The final entry point must be in normally visible CPU RAM after a fresh VICE startup; startup code may later change the C64 mapping before accessing data beneath ROM.
@@ -300,7 +300,7 @@ Add focused unit tests for:
 - SCI expression evaluation, standard namespace lookup, and one-argument low/high relocation operators;
 - source metadata propagation and useful diagnostics;
 - inline/resource assets, deduplicated dependencies, constraints, and asset-address relocations;
-- object linking, alignment, default first-fit range order, segment generation, overlap, and unsatisfiable layouts.
+- object linking, alignment, default first-fit region order, segment generation, overlap, and unsatisfiable layouts.
 
 Add integration tests with VICE where available for fresh startup, RAM-bank discovery, segment injection, CPU-visible entry-point verification, program-counter setup, resume, and cleanup. Keep unit tests independent of a live emulator and use test doubles around the binary monitor for failure-path testing.
 

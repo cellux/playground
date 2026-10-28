@@ -414,15 +414,18 @@ segment-based artifact. An artifact given back to `link` is returned
 unchanged.
 
 Placement uses the object's `%region` constraints, `%align`, and (for objects
-without a region) the default first-fit ranges:
+without a region) the default first-fit regions:
 
 ```clojure
-[[0xc000 0xd000] [0x0900 0xa000] [0xa000 0xc000] [0xe000 0x10000]]
+[{:start 0xc000 :end 0xd000}
+ {:start 0x0900 :end 0xa000}
+ {:start 0xa000 :end 0xc000}
+ {:start 0xe000 :end 0x10000}]
 ```
 
 Link options override object constraints and policy: `:entry` selects the
-entry label, `:regions` overrides every object's `%region`, and `:ranges`
-overrides the default ranges. Unresolved/ambiguous external labels,
+entry label, and `:regions` replaces the default placement regions and serves
+as the fallback for objects and assets without an explicit region. Unresolved/ambiguous external labels,
 duplicate object ids, multiple entry declarations, overlaps, unsatisfiable
 layouts, zero-page overflow, and out-of-range branch displacements are
 reported as errors.
@@ -437,7 +440,7 @@ reported as errors.
             :labels {:start 0x0800}
             :placement {:sections [{:index 0 :base 0x0800 :size 18}]}}]
  :assets [{:name my.ns/colors :start-address 0x0812}]
- :constraints {:ranges [...]}}
+ :constraints {:regions [...]}}
 ```
 
 Segments are emitted in ascending start-address order and abutting sections
@@ -451,7 +454,7 @@ wrappers). `run!` is polymorphic:
 
 ```clojure
 (vice/run! artifact {:connect-timeout-ms 15000})
-(vice/run! object {:link-options {:ranges [[0x5000 0x6000]]}
+(vice/run! object {:link-options {:regions [{:start 0x5000 :end 0x6000}]}
                    :run-options {:connect-timeout-ms 15000}})
 ```
 

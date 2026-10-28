@@ -99,9 +99,9 @@
   (with-fake-vice*
     (fn [_ _ _]
       (let [instance (vice/start! {:artifact (simple-object)
-                                   :link-options {:ranges [[0x5000 0x6000]]}})]
+                                   :link-options {:regions [{:start 0x5000 :end 0x6000}]}})]
         (is (= 0x5000 (:entry-point instance)))
-        (is (= {:ranges [[0x5000 0x6000]]} (:link-options instance)))))))
+        (is (= {:regions [{:start 0x5000 :end 0x6000}]} (:link-options instance)))))))
 
 (deftest start!-from-pc-moves-the-start-checkpoint
   (with-fake-vice*

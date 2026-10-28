@@ -348,7 +348,7 @@
                      '((%org 0x1000)
                        (lda [plain-bytes]))
                      {:ns 'omkamra.vice.assembler-test})
-                    {:ranges [[0x1000 0x2000]]})
+                    {:regions [{:start 0x1000 :end 0x2000}]})
           asset (first (:assets artifact))]
       (is (= ['omkamra.vice.assembler-test/plain-bytes] (mapv :name (:assets artifact))))
       (is (= [7 8 9] (linked-bytes-at artifact (:start-address asset) 3))))))
@@ -382,7 +382,7 @@
                      '((%org 0x1000)
                        (syntax-quoted-macro :loop inline-asset))
                      {:ns 'omkamra.vice.assembler-test})
-                    {:ranges [[0x1000 0x2000]]})]
+                    {:regions [{:start 0x1000 :end 0x2000}]})]
       (is (= [0xa2 0x00                 ; LDX #$00
               0xbd]                     ; LDA abs,X
              (mapv #(bit-and (int %) 0xff)
@@ -1004,17 +1004,22 @@
                                               (link-forms
                                                '((%region [0x3000 0x4000]) (rts))
                                                {}))))))))))
-  (testing "range override"
+  (testing "region override"
     (is (= 0x5000
            (:base (first (:sections
                           (:placement (first (:objects
                                               (link-forms '((rts))
-                                                          {:ranges [[0x5000 0x6000]]}))))))))))
+                                                          {:regions [{:start 0x5000
+                                                                      :end 0x6000}]}))))))))))
   (testing "org bypasses placement"
     (let [artifact (link-forms '((%org 0x2000) :fixed (rts)) {})]
       (is (= 0x2000 (:start-address (first (:segments artifact))))))))
 
 (deftest placement-failures
+  (is (= :removed-option
+         (error-reason
+          (fn []
+            (link-forms '((rts)) {:ranges [[0x5000 0x6000]]})))))
   (is (= :overlap
          (error-reason
           (fn []
