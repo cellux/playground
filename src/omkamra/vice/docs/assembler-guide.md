@@ -161,6 +161,7 @@ own.
 (%region [0x0800 0xa000]) ; object must fit this half-open interval
 (%org 0x4000)            ; fixed-address fragment, bypasses placement
 (%reserve [0x0800 0x0900]) ; keep the linker out of a range; emits no bytes
+(%splice (repeat 64 '(nop))) ; evaluate and splice forms
 (%meta {:block 12} (lda [0x2000])) ; annotate a value or form
 (%volatile value)        ; transparent wrapper, rendered as ?? by serialize-asm
 ```
@@ -174,6 +175,12 @@ objects may reuse the same private name.
 fills at runtime. It takes an address and a length, or a `[start end]` interval
 like `%region`. It occupies the range (so no object or asset is placed there,
 and an overlap is an error) but emits no bytes.
+
+`%splice` evaluates one expression in the defining namespace's assembler
+expression environment. The result must be a sequence of assembly forms; those
+forms are inserted at that position and normalized just like the result of an
+assembly macro returning a vector. This is useful for generated repeated forms,
+for example `(%splice (repeat 64 '(nop)))`.
 
 `%labels` gives a block of forms its own local labels. Each named label and
 its references inside the body are replaced by a unique keyword, so an

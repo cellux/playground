@@ -45,6 +45,21 @@
                                    {:ns 'omkamra.vice.assembler-test})]
     (is (= '[(rts)] (:source object)))))
 
+(deftest splice-directive-evaluates-and-splices
+  (let [object (assembler/assemble
+                '((%splice (repeat 3 (quote (nop)))))
+                {:ns 'omkamra.vice.assembler-test})]
+    (is (= '[(nop) (nop) (nop)]
+           (:source object))))
+  (testing "the result must be a sequence"
+    (is (= :invalid-splice
+           (try
+             (assembler/assemble '((%splice 1))
+                                 {:ns 'omkamra.vice.assembler-test})
+             nil
+             (catch clojure.lang.ExceptionInfo error
+               (:reason (ex-data error))))))))
+
 (deftest directives-are-normalized
   (let [object (assembler/assemble
                 '((%db [5 10 20])

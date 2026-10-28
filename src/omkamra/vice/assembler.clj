@@ -371,7 +371,7 @@
 
 (def ^:private directive-names
   #{"%entry" "%label" "%labels" "%db" "%dw" "%align" "%region" "%org"
-    "%reserve" "%meta" "%volatile" "%opcode" "%asset" "%include"})
+    "%reserve" "%meta" "%volatile" "%splice" "%opcode" "%asset" "%include"})
 
 (defn- directive-symbol? [x]
   (and (symbol? x) (contains? directive-names (name x))))
@@ -871,7 +871,20 @@
         [(list '%meta m (normalize-annotated ctx target index))])
 
       "%volatile"
-      [(list '%volatile (normalize-operand ctx (first args) index))])))
+      [(list '%volatile (normalize-operand ctx (first args) index))]
+
+      "%splice"
+      (do
+        (when-not (= 1 (count args))
+          (fail! :invalid-splice
+                 "(%splice ...) takes exactly one expression"
+                 {:form form} form index))
+        (let [result (eval-expression ctx (first args) index)]
+          (when-not (sequential? result)
+            (fail! :invalid-splice
+                   "(%splice ...) expression must evaluate to a sequence of assembly forms"
+                   {:form form :value result} form index))
+          (mapcat #(normalize-statement ctx % index) result))))))
 
 (defn- normalize-directive
   [ctx form index]
