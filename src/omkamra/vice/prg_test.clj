@@ -29,6 +29,17 @@
 (def ^:private table-entry-length 6)
 (def ^:private table-terminator-length 6)
 
+(defn- compressible-artifact
+  []
+  (assembler/link
+   (assembler/assemble
+    (list '(%entry :start)
+          '(%org 0xc000)
+          :start
+          '(jmp :start)
+          (list '%db (vec (take 1000 (cycle [0x11 0x22 0x33 0x44])))))
+    {:ns 'omkamra.vice.prg-test})))
+
 (deftest basic-sys-line-is-plainly-formatted
   (let [prg (prg/prg-bytes (one-segment-artifact))
         byte-at (fn [offset]
@@ -92,6 +103,39 @@
         forms @#'prg/mover-forms
         sized (count (assemble (forms scratch 0x0e00 direction) scratch))]
     (assemble (forms (+ scratch sized) 0x0e00 direction) scratch)))
+
+(deftest lzss-compressor-round-trips-and-compresses-repetition
+  (let [compress @#'prg/lzss-compress
+        decompress @#'prg/lzss-decompress
+        bytes (vec (take 4096 (cycle [0x11 0x22 0x33 0x44])))
+        packed (compress bytes)]
+    (is (= bytes (decompress packed (count bytes))))
+    (is (< (count packed) 500)
+        "long repeated data is represented mostly by two-byte matches")))
+
+(deftest compressed-prg-is-smaller-and-keeps-the-unpacker-in-scratch
+  (let [artifact (compressible-artifact)
+        raw (prg/prg-bytes artifact)
+        compressed (prg/prg-bytes artifact {:compression :lzss})
+        prepared (@#'prg/prepare-compressed-layout
+                  (:segments artifact) prg/default-payload-address)
+        layout (:layout prepared)
+        payload-length (reduce + (map :stored-len layout))
+        mover-length (- (alength ^bytes compressed) 2
+                        (- prg/default-payload-address prg/default-load-address)
+                        payload-length)]
+    (is (some #(= :lzss (:mode %)) layout))
+    (is (< (alength ^bytes compressed) (alength ^bytes raw)))
+    (is (<= (+ prg/default-scratch-address mover-length)
+            prg/default-scratch-end))))
+
+(deftest prg-rejects-unknown-compression
+  (is (= :unknown-compression
+         (try
+           (prg/prg-bytes (one-segment-artifact) {:compression :unknown})
+           nil
+           (catch clojure.lang.ExceptionInfo error
+             (:reason (ex-data error)))))))
 
 (deftest copy-direction-picks-the-smallest-correct-loop
   (let [choose @#'prg/copy-direction]

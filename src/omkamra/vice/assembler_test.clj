@@ -15,6 +15,10 @@
   (assembler/->Asset 'omkamra.vice.assembler-test/region-asset
                      (vec (range 4)) nil nil))
 
+(def fixed-placement-asset
+  (assembler/->Asset 'omkamra.vice.assembler-test/fixed-placement-asset
+                     [0xaa] {:at 0xc000} nil))
+
 (assembler/define-asm entry-object
   (%entry :start)
   :start
@@ -991,6 +995,12 @@
                                               (link-forms
                                                '((%region 0x0800) (rts))
                                                {}))))))))))
+  (testing "fixed assets are claimed before automatic sections"
+    (let [artifact (link-forms '((%asset fixed-placement-asset) (rts)) {})
+          asset (first (:assets artifact))
+          section (first (:sections (:placement (first (:objects artifact)))))]
+      (is (= 0xc000 (:start-address asset)))
+      (is (= 0xc001 (:base section)))))
   (testing "exact and interval regions"
     (is (= 0x4000
            (:base (first (:sections

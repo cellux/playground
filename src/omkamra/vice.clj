@@ -59,7 +59,8 @@
   an assembler object or linked artifact, autostarts it through a temporary
   PRG, and returns while the program runs. See `omkamra.vice.core/start!` for
   startup options such as `:executable`, `:address`, `:port`, `:extra-args`,
-  `:from-pc`, `:link-options`, and timeout settings. Use `stop!` for cleanup."
+  `:from-pc`, `:link-options`, `:prg-options` (including LZSS compression), and
+  timeout settings. Use `stop!` for cleanup."
   ([]
    (core/start!))
   ([options]

@@ -82,7 +82,8 @@
     (when-not (assembler/artifact? artifact)
       (throw (IllegalArgumentException.
               "start! :artifact expects a relocatable object or a linked artifact")))
-    (let [temp-input (prg/write-temp-artifact-prg! artifact)]
+    (let [prg-options (:prg-options options)
+          temp-input (prg/write-temp-artifact-prg! artifact prg-options)]
       (try
         (let [instance (driver/start! (start-options options))]
           (try
@@ -106,6 +107,7 @@
                    :artifact artifact
                    :entry-point (:entry-point artifact)
                    :link-options link-options
+                   :prg-options prg-options
                    :from-pc (:from-pc options))
             (catch Throwable error
               (driver/stop! instance)
@@ -123,8 +125,10 @@
   instance, autostart the program, and return the descriptor while the program
   runs.
 
-  `:from-pc` selects the execution checkpoint at which startup stops before the
-  program is resumed. `:port` (default: an ephemeral port), `:executable`,
+  `:prg-options` configures self-relocating PRG generation, including
+  `{:compression :lzss}`. `:from-pc` selects the execution checkpoint at which
+  startup stops before the program is resumed. `:port` (default: an ephemeral
+  port), `:executable`,
   `:address`, `:extra-args`, `:connect-timeout-ms`, `:connect-retry-ms`,
   `:autostart-timeout-ms`, and `:program-start-timeout-ms` are honored.
 
@@ -178,7 +182,7 @@
   same return-stack contract as a BASIC SYS call."
   [conn artifact options reset-range]
   (let [load-address prg/default-load-address
-        image (prg/prg-bytes artifact)
+        image (prg/prg-bytes artifact (:prg-options options))
         body (prg-body image)
         body-end (+ load-address (alength body))
         stub-address (prg-stub-address body)

@@ -94,11 +94,12 @@
       (doseq [[asset address] {:charset 0xC800 :screen 0xC400 :color-ram 0xD800}]
         (is (= address (asset-address artifact (symbol intro-ns (name asset))))
             (str asset " stays at its VIC address"))))
-    (testing "everything else is the linker's to place"
+    (testing "everything else is placed in the first default region"
       (doseq [asset [:band-table :sprite-curve-bytes :sprite-bar-shades
                      :scroller-colors :scroller-text]]
-        (is (< (asset-address artifact (symbol intro-ns (name asset))) 0xC000)
-            (str asset " is placed by the linker, in low RAM"))))
+        (let [address (asset-address artifact (symbol intro-ns (name asset)))]
+          (is (<= 0xC000 address 0xCFFF)
+              (str asset " is placed in the default $C000 region")))))
     (testing "assets"
       (is (= #{:charset :screen :color-ram :band-table :sprite-curve-bytes
                :sprite-bar-shades :scroller-colors :scroller-text}

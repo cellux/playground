@@ -757,10 +757,11 @@
             (fail "Capture :full-capture? is meaningless for an artifact" {}))
         ;; An artifact becomes a self-relocating PRG; the input path then
         ;; autostarts it and gates the trace at the entry point.
-        temp-input (when artifact (prg/write-temp-artifact-prg! artifact))
+        temp-input (when artifact
+                     (prg/write-temp-artifact-prg! artifact (:prg-options options)))
         options (if artifact
                   (-> options
-                      (dissoc :artifact :link-options)
+                      (dissoc :artifact :link-options :prg-options)
                       (assoc :input temp-input)
                       (assoc :from-pc (or (:from-pc options)
                                           (:entry-point artifact))))

@@ -68,9 +68,9 @@
                               (when-let [on-close (get c bm/on-close-key)]
                                 (on-close)))
                   prg/write-temp-artifact-prg!
-                  (fn [_artifact]
+                  (fn [_artifact & [options]]
                     (let [file (java.io.File/createTempFile "vice-test" ".prg")]
-                      (swap! state assoc :temp-prg file)
+                      (swap! state assoc :temp-prg file :prg-options options)
                       (.getPath file)))]
       (f state conn instance))))
 
@@ -102,6 +102,15 @@
                                    :link-options {:regions [{:start 0x5000 :end 0x6000}]}})]
         (is (= 0x5000 (:entry-point instance)))
         (is (= {:regions [{:start 0x5000 :end 0x6000}]} (:link-options instance)))))))
+
+(deftest start!-passes-prg-options-to-the-generator
+  (with-fake-vice*
+    (fn [state _ _]
+      (let [options {:compression :lzss}
+            instance (vice/start! {:artifact (assembler/link (simple-object))
+                                   :prg-options options})]
+        (is (= options (:prg-options @state)))
+        (is (= options (:prg-options instance)))))))
 
 (deftest start!-from-pc-moves-the-start-checkpoint
   (with-fake-vice*

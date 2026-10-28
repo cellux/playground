@@ -2382,7 +2382,11 @@
 
 (defn- place-all
   [specs default-regions explicit-regions reserved-regions]
-  (loop [specs specs
+  ;; Claim constrained sections before automatic first-fit sections. Otherwise
+  ;; an unconstrained object can occupy a fixed asset's address before the
+  ;; asset is visited, making an otherwise valid layout depend on discovery
+  ;; order.
+  (loop [specs (sort-by #(if (seq (:regions %)) 0 1) specs)
          occupied []
          placement {}]
     (if-let [spec (first specs)]
