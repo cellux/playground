@@ -126,7 +126,8 @@
   runs.
 
   `:prg-options` configures self-relocating PRG generation, including
-  `{:compression :lzss}`. `:from-pc` selects the execution checkpoint at which
+  `{:compression :lzss}` or `{:compression :zx0}`. `:from-pc` selects the
+  execution checkpoint at which
   startup stops before the program is resumed. `:port` (default: an ephemeral
   port), `:executable`,
   `:address`, `:extra-args`, `:connect-timeout-ms`, `:connect-retry-ms`,

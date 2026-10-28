@@ -27,7 +27,8 @@
   they disagree — so destinations may sit anywhere in RAM, including inside the
   loaded image, without corrupting an unread source."
   (:require [clojure.java.io :as io]
-            [omkamra.vice.assembler :as assembler]))
+            [omkamra.vice.assembler :as assembler]
+            [omkamra.vice.zx0 :as zx0]))
 
 (def default-load-address 0x0801)
 (def default-payload-address 0x0900)
@@ -484,6 +485,180 @@
     (vec (concat prologue dispatch raw-select raw-label backward forward
                  decompressor tail))))
 
+(defn- zx0-mover-forms
+  "Mixed raw-copy/ZX0 unpacker used by `:compression :zx0` PRGs.
+
+  The ZX0 decoder is a translation of DMSC's 148-byte MIT-licensed mode-2
+  decoder. Zero-page `$f5-$fe` holds offset, source, destination, bit reserve,
+  Elias high byte, and match pointer."
+  [table entry {:keys [compressed? raw-direction]}]
+  (let [prologue
+        `[(sei)
+          (ldx 0x00)
+          (ldy 0x00)
+          :next
+          (lda [~(+ table 2) x]) (sta [0xf5])
+          (lda [~(+ table 3) x]) (sta [0xf6])
+          (ora [0xf5])
+          (bne :nonempty)
+          (jmp :done)
+          :nonempty
+          (lda [~table x]) (sta [0xf9])
+          (lda [~(+ table 1) x]) (sta [0xfa])
+          (lda [~(+ table 4) x]) (sta [0xf7])
+          (lda [~(+ table 5) x]) (sta [0xf8])]
+        dispatch
+        (cond
+          (and compressed? raw-direction)
+          `[(lda [~(+ table 6) x])
+            (beq :raw)
+            (txa) (pha)
+            (lda 0x00) (sta [0xf5]) (sta [0xf6])
+            (lda 0x80) (sta [0xfb])
+            (jsr :zx0-decompress)
+            (pla) (tax)
+            (jmp :advance)]
+
+          compressed?
+          `[(txa) (pha)
+            (lda 0x00) (sta [0xf5]) (sta [0xf6])
+            (lda 0x80) (sta [0xfb])
+            (jsr :zx0-decompress)
+            (pla) (tax)
+            (jmp :advance)]
+
+          :else
+          `[(jmp :raw)])
+        raw-select
+        (when (= raw-direction :both)
+          `[:raw
+            (lda [0xfa]) (cmp [0xf8]) (bcc :raw-forward) (bne :raw-backward)
+            (lda [0xf9]) (cmp [0xf7]) (bcc :raw-forward)
+            (jmp :raw-backward)])
+        raw-label
+        (when (and raw-direction (not= raw-direction :both))
+          `[:raw])
+        backward
+        (when (and raw-direction (not= raw-direction :forward))
+          `[:raw-backward
+            (lda [0xf7]) (clc) (adc [0xf5]) (sta [0xf7])
+            (lda [0xf8]) (adc [0xf6]) (sta [0xf8])
+            (lda [0xf9]) (clc) (adc [0xf5]) (sta [0xf9])
+            (lda [0xfa]) (adc [0xf6]) (sta [0xfa])
+            :raw-copy-back
+            (lda [0xf7]) (bne :raw-src-down) (dec [0xf8])
+            :raw-src-down
+            (dec [0xf7])
+            (lda [0xf9]) (bne :raw-dst-down) (dec [0xfa])
+            :raw-dst-down
+            (dec [0xf9])
+            (lda [[0xf7] y]) (sta [[0xf9] y])
+            (lda [0xf5]) (bne :raw-back-count) (dec [0xf6])
+            :raw-back-count
+            (dec [0xf5])
+            (lda [0xf5]) (ora [0xf6])
+            (bne :raw-copy-back)
+            (jmp :advance)])
+        forward
+        (when (and raw-direction (not= raw-direction :backward))
+          `[:raw-forward
+            :raw-copy-forward
+            (lda [[0xf7] y]) (sta [[0xf9] y])
+            (inc [0xf7]) (bne :raw-src-up) (inc [0xf8])
+            :raw-src-up
+            (inc [0xf9]) (bne :raw-dst-up) (inc [0xfa])
+            :raw-dst-up
+            (lda [0xf5]) (bne :raw-forward-count) (dec [0xf6])
+            :raw-forward-count
+            (dec [0xf5])
+            (lda [0xf5]) (ora [0xf6])
+            (bne :raw-copy-forward)
+            (jmp :advance)])
+        decoder
+        (when compressed?
+          `[:zx0-decompress
+            :zx0-literal
+            (jsr :zx0-get-elias)
+            :zx0-copy-literal
+            (jsr :zx0-get-byte)
+            (jsr :zx0-put-byte)
+            (bne :zx0-copy-literal)
+            (dec [0xfc])
+            (bpl :zx0-copy-literal)
+            (asl [0xfb])
+            (bcs :zx0-new-offset)
+            (jsr :zx0-get-elias-carry)
+            :zx0-copy
+            (lda [0xf9]) (sbc [0xf5]) (sta [0xfd])
+            (lda [0xfa]) (sbc [0xf6]) (sta [0xfe])
+            :zx0-copy-match
+            (lda [[0xfd] y])
+            (inc [0xfd]) (bne :zx0-match-src) (inc [0xfe])
+            :zx0-match-src
+            (jsr :zx0-put-byte)
+            (bne :zx0-copy-match)
+            (dec [0xfc])
+            (bpl :zx0-copy-match)
+            (asl [0xfb])
+            (bcc :zx0-literal)
+            :zx0-new-offset
+            (jsr :zx0-get-elias)
+            (beq :zx0-exit)
+            (dex) (stx [0xf6])
+            (jsr :zx0-get-byte)
+            (lsr [0xf6])
+            (ror ~'a)
+            (sta [0xf5])
+            (ror [0xfb])
+            (jsr :zx0-get-elias-carry)
+            (inx)
+            (bne :zx0-length-ready)
+            (inc [0xfc])
+            :zx0-length-ready
+            (bne :zx0-copy)
+            :zx0-get-elias
+            (clc)
+            :zx0-get-elias-carry
+            (lda 0x01)
+            (sty [0xfc])
+            :zx0-elias-loop
+            (rol [0xfb])
+            (bne :zx0-have-bit)
+            (tax)
+            (jsr :zx0-get-byte)
+            (rol ~'a)
+            (sta [0xfb])
+            (txa)
+            :zx0-have-bit
+            (bcs :zx0-elias-data)
+            (tax)
+            :zx0-exit
+            (rts)
+            :zx0-elias-data
+            (asl [0xfb])
+            (rol ~'a)
+            (rol [0xfc])
+            (bcc :zx0-elias-loop)
+            :zx0-get-byte
+            (lda [[0xf7] y])
+            (inc [0xf7]) (bne :zx0-byte-ready) (inc [0xf8])
+            :zx0-byte-ready
+            (rts)
+            :zx0-put-byte
+            (sta [[0xf9] y])
+            (inc [0xf9]) (bne :zx0-output-ready) (inc [0xfa])
+            :zx0-output-ready
+            (dex)
+            (rts)])
+        tail
+        `[:advance
+          (inx) (inx) (inx) (inx) (inx) (inx) (inx)
+          (jmp :next)
+          :done
+          (jmp ~entry)]]
+    (vec (concat prologue dispatch raw-select raw-label backward forward
+                 decoder tail))))
+
 (defn- stub-forms
   "The stub: copy `mover-length` bytes from `mover-image` to `scratch`, JMP there.
   A 16-bit count, because the unpacker and its table can exceed one page."
@@ -607,22 +782,27 @@
     (build-prg-image load-address payload-address scratch-address payload mover)))
 
 (defn- compressed-candidates
-  [segments]
-  (mapv (fn [segment]
-          (let [bytes (mapv u8 (:bytes segment))
-                packed (lzss-compress bytes)
-                compressed? (< (count packed) (count bytes))]
-            (when (and compressed?
-                       (not= bytes (lzss-decompress packed (count bytes))))
-              (throw (ex-info "Internal PRG compression verification failed"
-                              {:reason :compression-verification-failed
-                               :start-address (:start-address segment)})))
-            {:dst (long (:start-address segment))
-             :len (count bytes)
-             :raw-bytes bytes
-             :packed-bytes packed
-             :mode (if compressed? :lzss :raw)}))
-        (sort-by :start-address segments)))
+  [segments compression]
+  (let [[compress decompress]
+        (case compression
+          :lzss [lzss-compress lzss-decompress]
+          :zx0 [zx0/compress zx0/decompress])]
+    (mapv (fn [segment]
+            (let [bytes (mapv u8 (:bytes segment))
+                  packed (if (seq bytes) (compress bytes) bytes)
+                  compressed? (< (count packed) (count bytes))]
+              (when (and compressed?
+                         (not= bytes (decompress packed (count bytes))))
+                (throw (ex-info "Internal PRG compression verification failed"
+                                {:reason :compression-verification-failed
+                                 :compression compression
+                                 :start-address (:start-address segment)})))
+              {:dst (long (:start-address segment))
+               :len (count bytes)
+               :raw-bytes bytes
+               :packed-bytes packed
+               :mode (if compressed? compression :raw)}))
+          (sort-by :start-address segments))))
 
 (defn- assign-compressed-sources
   [candidates payload-address]
@@ -630,9 +810,9 @@
          offset 0
          layout []]
     (if-let [candidate (first candidates)]
-      (let [bytes (if (= :lzss (:mode candidate))
-                    (:packed-bytes candidate)
-                    (:raw-bytes candidate))
+      (let [bytes (if (= :raw (:mode candidate))
+                    (:raw-bytes candidate)
+                    (:packed-bytes candidate))
             stored-length (count bytes)]
         (recur (rest candidates)
                (+ offset stored-length)
@@ -649,13 +829,13 @@
   forward-only. Cross-segment source overlap is handled by `copy-order`. If
   compaction creates a dependency cycle, the generator conservatively falls
   back to the proven raw mover."
-  [segments payload-address]
-  (loop [candidates (compressed-candidates segments)]
+  [segments payload-address compression]
+  (loop [candidates (compressed-candidates segments compression)]
     (let [layout (assign-compressed-sources candidates payload-address)
           unsafe (into #{}
                        (keep-indexed
                         (fn [index {:keys [dst len src stored-len mode]}]
-                          (when (and (= mode :lzss)
+                          (when (and (not= mode :raw)
                                      (overlaps? dst len src stored-len))
                             index)))
                        layout)]
@@ -666,7 +846,7 @@
                          candidate))
                      (range)
                      candidates))
-        (when (some #(= :lzss (:mode %)) layout)
+        (when (some #(not= :raw (:mode %)) layout)
           (try
             {:layout layout
              :order (copy-order layout)}
@@ -675,20 +855,21 @@
                 (throw error)))))))))
 
 (defn- compressed-prg-bytes
-  [artifact load-address payload-address scratch-address]
+  [artifact load-address payload-address scratch-address compression]
   (if-let [{:keys [layout order]}
-           (prepare-compressed-layout (:segments artifact) payload-address)]
+           (prepare-compressed-layout (:segments artifact) payload-address
+                                      compression)]
     (let [entry (long (:entry-point artifact))
           raw-layout (filterv #(= :raw (:mode %)) layout)
           raw-direction (when (seq raw-layout) (copy-direction raw-layout))
-          compressed? (some #(= :lzss (:mode %)) layout)
+          compressed? (some #(not= :raw (:mode %)) layout)
           payload (vec (mapcat :bytes layout))
           table (vec (mapcat (fn [i]
                                (let [{:keys [dst len src mode]} (layout i)]
                                  [(u8 dst) (hi dst)
                                   (u8 len) (hi len)
                                   (u8 src) (hi src)
-                                  (if (= mode :lzss) 1 0)]))
+                                  (if (= mode :raw) 0 1)]))
                              order))
           table (into table (repeat compressed-table-entry-length 0x00))
           table-offset (* compressed-table-entry-length (count layout))]
@@ -699,13 +880,16 @@
                          :maximum (quot 0xff compressed-table-entry-length)})))
       (let [mover-options {:compressed? (boolean compressed?)
                            :raw-direction raw-direction}
+            mover-forms (case compression
+                          :lzss compressed-mover-forms
+                          :zx0 zx0-mover-forms)
             code-length
             (count (assemble-bytes
-                    (compressed-mover-forms scratch-address entry mover-options)
+                    (mover-forms scratch-address entry mover-options)
                     scratch-address))
             table-address (+ scratch-address code-length)
             code (assemble-bytes
-                  (compressed-mover-forms table-address entry mover-options)
+                  (mover-forms table-address entry mover-options)
                   scratch-address)
             mover (into code table)]
         (check-scratch-size! scratch-address mover)
@@ -719,10 +903,10 @@
   - `:load-address` — BASIC load address, default `$0801`;
   - `:payload-address` — packed segment payload, default `$0900`;
   - `:scratch-address` — unpacker destination, default `$0334`;
-  - `:compression` — `:none` (default) or `:lzss`.
+  - `:compression` — `:none` (default), `:lzss`, or `:zx0`.
 
-  LZSS compression is performed independently per segment. Segments that do
-  not become smaller, cannot safely expand in place, or produce a cyclic copy
+  Compression is performed independently per segment. Segments that do not
+  become smaller, cannot safely expand in place, or produce a cyclic copy
   dependency remain raw. The generated unpacker must fit in `$0334-$07e7`."
   ([artifact] (prg-bytes artifact {}))
   ([artifact {:keys [load-address payload-address scratch-address compression]
@@ -735,7 +919,10 @@
          scratch-address (long scratch-address)]
      (case compression
        :none (legacy-prg-bytes artifact load-address payload-address scratch-address)
-       :lzss (compressed-prg-bytes artifact load-address payload-address scratch-address)
+       :lzss (compressed-prg-bytes artifact load-address payload-address
+                                   scratch-address :lzss)
+       :zx0 (compressed-prg-bytes artifact load-address payload-address
+                                  scratch-address :zx0)
        (throw (ex-info "Unknown PRG compression mode"
                        {:reason :unknown-compression
                         :compression compression}))))))

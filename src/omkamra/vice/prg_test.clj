@@ -8,7 +8,8 @@
   undercounting the code and burying the table inside the code."
   (:require [clojure.test :refer [deftest is testing]]
             [omkamra.vice.assembler :as assembler]
-            [omkamra.vice.prg :as prg]))
+            [omkamra.vice.prg :as prg]
+            [omkamra.vice.zx0 :as zx0]))
 
 (defn- u8 [x] (bit-and (long x) 0xff))
 
@@ -118,7 +119,7 @@
         raw (prg/prg-bytes artifact)
         compressed (prg/prg-bytes artifact {:compression :lzss})
         prepared (@#'prg/prepare-compressed-layout
-                  (:segments artifact) prg/default-payload-address)
+                  (:segments artifact) prg/default-payload-address :lzss)
         layout (:layout prepared)
         payload-length (reduce + (map :stored-len layout))
         mover-length (- (alength ^bytes compressed) 2
@@ -128,6 +129,17 @@
     (is (< (alength ^bytes compressed) (alength ^bytes raw)))
     (is (<= (+ prg/default-scratch-address mover-length)
             prg/default-scratch-end))))
+
+(deftest zx0-compressor-round-trips-and-builds-a-prg
+  (let [artifact (compressible-artifact)
+        raw (prg/prg-bytes artifact)
+        compressed (prg/prg-bytes artifact {:compression :zx0})
+        packed (zx0/compress
+                (vec (take 4096 (cycle [0x11 0x22 0x33 0x44]))))]
+    (is (= (vec (take 4096 (cycle [0x11 0x22 0x33 0x44])))
+           (zx0/decompress packed 4096)))
+    (is (< (alength ^bytes compressed) (alength ^bytes raw)))
+    (is (pos? (alength ^bytes compressed)))))
 
 (deftest prg-rejects-unknown-compression
   (is (= :unknown-compression
