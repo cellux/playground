@@ -417,7 +417,7 @@ Placement uses the object's `%region` constraints, `%align`, and (for objects
 without a region) the default first-fit ranges:
 
 ```clojure
-[[0x0800 0xa000] [0xc000 0xd000] [0xa000 0xc000] [0xe000 0x10000]]
+[[0xc000 0xd000] [0x0900 0xa000] [0xa000 0xc000] [0xe000 0x10000]]
 ```
 
 Link options override object constraints and policy: `:entry` selects the

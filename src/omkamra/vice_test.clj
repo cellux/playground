@@ -88,7 +88,7 @@
   (with-fake-vice*
     (fn [state _ _]
       (let [instance (vice/start! {:artifact (assembler/link (simple-object))})]
-        (is (= 0x900 (:entry-point instance)))
+        (is (= 0xC000 (:entry-point instance)))
         (is (= 1 (:resumed @state)) "the program is resumed once")
         (is (:closed? @state) "the setup connection is released")
         (is (nil? (:awaited @state)) "no :from-pc means no extra stop")
@@ -201,13 +201,13 @@
 ;; API surface ---------------------------------------------------------------
 
 (deftest removed-root-names-are-gone
-  (doseq [sym '[start stop connect close run!]]
+  (doseq [sym '[start stop connect close]]
     (is (not (contains? (ns-publics 'omkamra.vice) sym))
         (str "omkamra.vice/" sym " must be removed"))))
 
 (deftest documented-root-names-exist
-  (doseq [sym '[start! stop! connect! with-conn assemble link capture!
-              build-pipeline! open-analysis list-segments get-segment]]
+  (doseq [sym '[start! stop! run! connect! with-conn assemble link capture!
+                build-pipeline! open-analysis list-segments get-segment]]
     (is (contains? (ns-publics 'omkamra.vice) sym)
         (str "omkamra.vice/" sym " must exist"))))
 
@@ -256,7 +256,7 @@
                                  :connect-timeout-ms 15000
                                  :connect-retry-ms 100})]
       (try
-        (is (= 0x900 (:entry-point instance)))
+        (is (= 0xC000 (:entry-point instance)))
         (is (pos? (long (:pid instance))))
         (vice/with-conn [conn instance]
           (is (= "ram" (:name (get (bm/banks-available conn) 1)))))

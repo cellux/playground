@@ -2023,19 +2023,21 @@
 ;; Linker --------------------------------------------------------------------
 
 (def default-placement-ranges
-  "First-fit placement ranges used when an object has no `%region`."
-  [[0x0800 0xa000]
-   [0xc000 0xd000]
+  "First-fit placement ranges used when an object has no `%region`.
+
+  The BASIC `SYS` page is omitted; an explicit region or `%org` can still
+  request it deliberately."
+  [[0xc000 0xd000]
+   [0x0900 0xa000]
    [0xa000 0xc000]
    [0xe000 0x10000]])
 
 (def default-reserved-ranges
-  "Intervals the linker keeps clear unless `:reserved` overrides them.
+  "Intervals automatic placement keeps clear unless `:reserved` overrides them.
 
   `$0800-$08ff` is the BASIC `SYS` harness page a self-relocating PRG builds
   at `$0801`: the `10 SYS ...` line at `$0801` and the relocation stub at
-  `$080d`. A linked object must never land there, whatever its own `%region`
-  says, or loading the PRG scrambles the line BASIC returns to."
+  `$080d`. Explicit `%region`/`%org` placement may request it deliberately."
   [[0x0800 0x0900]])
 
 (defn- link-fail!
@@ -2284,16 +2286,18 @@
                              :objects (mapv :object-id referrers)})))))
 
 (defn- place-section
-  [occupied spec ranges]
+  [occupied spec ranges hard-reserved soft-reserved]
   (let [alignment (long (:align spec))
-        size (long (:size spec))]
+        size (long (:size spec))
+        explicit-occupied (into occupied hard-reserved)
+        automatic-occupied (into explicit-occupied soft-reserved)]
     (if (integer? (:base spec))
       (let [base (long (:base spec))]
         (when-not (zero? (mod base alignment))
           (link-fail! :unaligned-org
                       (str "Fixed address " base " breaks alignment " alignment)
                       {:address base :align alignment}))
-        (when (overlaps? occupied base size)
+        (when (overlaps? explicit-occupied base size)
           (link-fail! :overlap
                       (str "Section at " base " overlaps an earlier section")
                       {:address base :size size}))
@@ -2307,7 +2311,8 @@
                                  (long (or (:end region)
                                            (+ (:start region) size)))])
                               regions)
-                        ranges)]
+                        ranges)
+            blocked (if (seq regions) explicit-occupied automatic-occupied)]
         (if exact
           (let [base (long (:start exact))]
             (when-not (zero? (mod base alignment))
@@ -2320,7 +2325,7 @@
                           (str "Section at " base " overlaps an earlier section")
                           {:address base :size size}))
             [base (conj occupied [base (+ base size)])])
-          (if-let [base (first-fit occupied alignment size intervals)]
+          (if-let [base (first-fit blocked alignment size intervals)]
             [base (conj occupied [base (+ base size)])]
             (link-fail! :unsatisfiable-placement
                         "No free range satisfies an object's constraints"
@@ -2329,12 +2334,13 @@
                          :ranges intervals})))))))
 
 (defn- place-all
-  [specs ranges occupied]
+  [specs ranges hard-reserved soft-reserved]
   (loop [specs specs
-         occupied occupied
+         occupied []
          placement {}]
     (if-let [spec (first specs)]
-      (let [[base occupied] (place-section occupied spec ranges)]
+      (let [[base occupied] (place-section occupied spec ranges
+                                           hard-reserved soft-reserved)]
         (recur (rest specs) occupied (assoc placement (:key spec) base)))
       placement)))
 
@@ -2529,11 +2535,15 @@
                                  (asset-effective-regions % referrers object-regions
                                                           fallback))
                                assets)
-             reserved (vec (concat (or (:reserved options)
-                                       default-reserved-ranges)
-                                   (mapcat #(get-in % [:constraints :reserved])
-                                           objects)))
-             placement (place-all (concat object-specs asset-specs) ranges reserved)
+             reserved-option? (contains? options :reserved)
+             hard-reserved (vec (concat (if reserved-option?
+                                          (or (:reserved options) [])
+                                          [])
+                                        (mapcat #(get-in % [:constraints :reserved])
+                                                objects)))
+             soft-reserved (if reserved-option? [] default-reserved-ranges)
+             placement (place-all (concat object-specs asset-specs) ranges
+                                  hard-reserved soft-reserved)
              asset-placement (into {} (map (fn [asset] [(:name asset)
                                                         (get placement (:name asset))])
                                            assets))

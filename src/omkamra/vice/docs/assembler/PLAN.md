@@ -233,8 +233,8 @@ Implement constraint-based placement rather than requiring fixed origins. Constr
 For objects without `%region`, use first-fit placement across these default ranges, in order:
 
 ```clojure
-[[0x0800 0xa000]
- [0xc000 0xd000]
+[[0xc000 0xd000]
+ [0x0900 0xa000]
  [0xa000 0xc000]
  [0xe000 0x10000]]
 ```
