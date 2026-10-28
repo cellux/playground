@@ -303,7 +303,7 @@ read as classpath resources, so a file is found whether it is under `src/` or
 ```clojure
 (define-asset colors [0 1 2 255])
 (define-asset charset {:resource "assets/charset.bin"
-                       :constraints {:align 256}})
+                       :align 256})
 (define-asset screen {:resource "./screen.bin" :at 0xC400})
 ```
 
@@ -311,9 +311,10 @@ read as classpath resources, so a file is found whether it is under `src/` or
   the classpath). A path starting with `./` or `../` is resolved against the
   defining namespace's directory instead, e.g. `./screen.bin` next to
   `core.clj`.
-- Constraints may be given as `:constraints {:align n}` / `{:regions [...]}`
-  or as a top-level `:at ADDRESS` (alias `:address`), which pins the asset's
-  start address. `:align true` means the next power of two ≥ the byte count.
+- Placement options are direct asset-map keys: `:align`, `:regions`, and
+  `:at` (alias `:address`). `:at`/`:address` pins the asset's start address;
+  `:align true` means the next power of two ≥ the byte count. The old nested
+  `:constraints` option is rejected.
 - `(%asset name)` includes an asset in the link without emitting bytes; use it
   when only the placement matters.
 
@@ -373,7 +374,7 @@ specifications.
 ```clojure
 (def colors [0 1 2 255])
 
-(define-asset charset {:resource "assets/charset.bin" :constraints {:align 256}})
+(define-asset charset {:resource "assets/charset.bin" :align 256})
 ```
 
 Referencing an asset Var from an expression also adds the asset and its

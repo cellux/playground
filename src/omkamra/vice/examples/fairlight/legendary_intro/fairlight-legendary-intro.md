@@ -762,7 +762,8 @@ Asset notes:
 
 - `(%asset name)` — include an asset in the link without emitting bytes;
 - asset placement `:at ADDRESS` (or `:address ADDRESS`) directly on the
-  asset map, or `:constraints {:at ADDRESS}`;
+  asset map, alongside the other direct placement options such as `:align` and
+  `:regions`;
 - namespace-relative `:resource` paths: a value starting with `./` or `../`
   is resolved against the defining namespace's directory (here
   `./charset.bin` finds the file in `legendary_intro/`);

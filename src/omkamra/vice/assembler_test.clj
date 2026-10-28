@@ -268,7 +268,7 @@
 
 (assembler/define-asset resource-asset
   {:resource "omkamra/vice/assembler_test/bytes.bin"
-   :constraints {:align 256}})
+   :align 256})
 
 (deftest expressions-evaluate
   (is (= '[(lda 3)
@@ -393,6 +393,26 @@
          (mapv (fn [b] (bit-and (int b) 0xff)) (seq (:data resource-asset)))))
   (is (= {:align 256} (:constraints resource-asset)))
   (is (= "omkamra/vice/assembler_test/bytes.bin" (:resource resource-asset))))
+
+(deftest asset-placement-options-are-top-level
+  (is (= {:align 256 :regions [{:start 0x2000 :end 0x3000}] :at 0x2400}
+         (:constraints
+          (assembler/build-asset
+           'placement
+           {:data [1 2 3]
+            :align 256
+            :regions [{:start 0x2000 :end 0x3000}]
+            :at 0x2400})))))
+
+(deftest nested-asset-constraints-are-rejected
+  (is (= :nested-asset-constraints
+         (try
+           (assembler/build-asset 'legacy
+                                  {:data [1]
+                                   :constraints {:align 256}})
+           nil
+           (catch clojure.lang.ExceptionInfo error
+             (:reason (ex-data error)))))))
 
 (deftest asset-dependencies
   (let [object (assembler/assemble

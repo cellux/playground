@@ -248,7 +248,7 @@ Provide a `define-asset` macro which binds an asset descriptor to a Clojure Var:
 ```clojure
 (define-asset charset [0 1 2 3])
 (define-asset charset {:resource "charset.bin"
-                       :constraints {:alignment 256}})
+                       :align 256})
 ```
 
 Inline values accept sequential byte-sized integers and are normalized to byte data. Resource paths are classpath-root-relative (for example, `"assets/charset.bin"`) and are read as Java classpath resources using the defining namespace’s classloader. Asset descriptors may carry placement constraints; linker options can override them.

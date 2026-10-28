@@ -310,10 +310,10 @@
 
   Assets are kept with the source and read as classpath resources, so a file
   is found whether it lives under `src/` or `resources/`. `spec` is either a
-  sequence of byte-sized integers, or a map with `:data` or `:resource`, plus
-  optional `:constraints` or a top-level `:at`/`:address`. A `:resource`
-  starting with `./` or `../` is resolved relative to the defining namespace's
-  directory; otherwise it is classpath-root-relative."
+  sequence of byte-sized integers, or a map with `:data` or `:resource` and
+  direct placement options such as `:align`, `:regions`, and `:at`/`:address`.
+  A `:resource` starting with `./` or `../` is resolved relative to the
+  defining namespace's directory; otherwise it is classpath-root-relative."
   ([asset spec]
    (build-asset asset spec nil))
   ([asset spec ns-dir]
@@ -322,20 +322,23 @@
      (->Asset asset (normalize-asset-bytes spec) nil nil)
 
      (map? spec)
-     (let [{:keys [data resource constraints at address align]} spec
-           constraints (cond-> (or constraints {})
-                         (or at address) (assoc :at (or at address))
-                         (contains? spec :align) (assoc :align align))
-           bytes (cond
-                   (sequential? data) (normalize-asset-bytes data)
-                   resource (read-asset-resource asset resource ns-dir)
-                   :else nil)]
-       (when-not bytes
-         (throw (ex-info "An asset map requires :data bytes or a :resource"
-                         {:reason :invalid-asset :asset asset :spec spec})))
-       (->Asset asset bytes
-                (resolve-align constraints (alength ^bytes bytes))
-                (when resource (resolve-resource-path resource ns-dir))))
+     (let [{:keys [data resource at address]} spec]
+       (when (contains? spec :constraints)
+         (throw (ex-info "Asset placement options must be top-level; :constraints is not supported"
+                         {:reason :nested-asset-constraints
+                          :asset asset :spec spec})))
+       (let [constraints (cond-> (select-keys spec [:align :regions])
+                           (or at address) (assoc :at (or at address)))
+             bytes (cond
+                     (sequential? data) (normalize-asset-bytes data)
+                     resource (read-asset-resource asset resource ns-dir)
+                     :else nil)]
+         (when-not bytes
+           (throw (ex-info "An asset map requires :data bytes or a :resource"
+                           {:reason :invalid-asset :asset asset :spec spec})))
+         (->Asset asset bytes
+                  (resolve-align constraints (alength ^bytes bytes))
+                  (when resource (resolve-resource-path resource ns-dir)))))
 
      :else
      (throw (ex-info "Invalid asset specification"
@@ -1817,9 +1820,10 @@
   "Bind an asset descriptor to `name`.
 
   `spec` is a sequence of byte-sized integers, or a map with inline `:data`
-  bytes or a `:resource`, plus optional `:constraints`. Assets are kept with
-  the source and read as classpath resources; a `:resource` starting with
-  `./` or `../` is resolved relative to this namespace's directory."
+  bytes or a `:resource`, plus direct placement options such as `:align`,
+  `:regions`, and `:at`/`:address`. Assets are kept with the source and read
+  as classpath resources; a `:resource` starting with `./` or `../` is
+  resolved relative to this namespace's directory."
   [name spec]
   (let [ns-name (str *ns*)
         qualified (symbol ns-name (str name))
