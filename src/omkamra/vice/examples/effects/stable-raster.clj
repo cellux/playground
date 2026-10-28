@@ -5,7 +5,7 @@
              :refer [define-asm]]
             [omkamra.vice.examples.effects.common :as common]))
 
-(def irq-line 0x7c)
+(def irq-line 0x7d)
 
 (define-asm irq
   (%align 0x0100)
@@ -69,11 +69,10 @@
   (bne :1f)
   :0
   (nop)
-  (nop)
+  (eor [0xff])
   :1
   (inc [0x07e6 x])
   (ldy 0x06)
-  (ror [0xD3FF])
   (stx [0xD021])
   (sty [0xD021])
   (stx [0xD021])
