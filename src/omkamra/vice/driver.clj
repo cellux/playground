@@ -246,8 +246,17 @@
                            {:reason :vice-exited :pid (:pid instance)}))))
        (let [conn (try
                     (let [conn (connect! instance (or handle-event (fn [_ _] nil)))]
-                      (bm/ping conn)
-                      conn)
+                      (try
+                        (bm/ping conn)
+                        conn
+                        (catch Throwable error
+                          ;; A monitor connection can succeed before VICE is
+                          ;; ready to answer requests. Do not leave that
+                          ;; partially initialized connection attached while
+                          ;; retrying: it can keep VICE in monitor mode and
+                          ;; make the next attempt look like a frozen startup.
+                          (bm/close! conn)
+                          (throw error))))
                     (catch Throwable _ nil))]
          (cond
            conn conn

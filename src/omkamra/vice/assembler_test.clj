@@ -7,6 +7,14 @@
 
 (def screen-address 0x0400)
 
+(def ^{:size 8 :at 0x3c00} macro-address-asset [])
+
+(defn macro-uses-addressed-vector
+  []
+  (let [address ^{:clj-kondo/ignore [:type-mismatch]}
+        (+ macro-address-asset 3)]
+    `[(lda [~address])]))
+
 (def charset-asset
   (assembler/->Asset 'omkamra.vice.assembler-test/charset
                      (vec (range 8)) nil nil))
@@ -26,6 +34,12 @@
   (jsr :helper)
   :helper
   (lda <:start)
+  (rts))
+
+(assembler/define-asm documented-object
+  "An assembly object with a Var docstring."
+  (%entry :start)
+  :start
   (rts))
 
 ;; Source normalization ------------------------------------------------------
@@ -48,6 +62,12 @@
   (let [object (assembler/assemble '(rts)
                                    {:ns 'omkamra.vice.assembler-test})]
     (is (= '[(rts)] (:source object)))))
+
+(deftest assembly-macro-resolves-fixed-address-vector
+  (let [object (assembler/assemble
+                '((macro-uses-addressed-vector))
+                {:ns 'omkamra.vice.assembler-test})]
+    (is (= '[(lda [0x3c03])] (:source object)))))
 
 (deftest splice-directive-evaluates-and-splices
   (let [object (assembler/assemble
@@ -245,6 +265,12 @@
   (let [forms '[(lda 0x56) (rts)]]
     (is (= (assembler/serialize-clj forms)
            (assembler/serialize-clj {:kind :object :source forms})))))
+
+(deftest define-asm-docstring
+  (is (= "An assembly object with a Var docstring."
+         (:doc (meta #'documented-object))))
+  (is (= '[(%entry :start) :start (rts)]
+         (:source documented-object))))
 
 (deftest define-asm-identity
   (is (= :omkamra.vice.assembler-test/entry-object (:object-id entry-object)))
@@ -567,6 +593,15 @@
   (jsr default-entry-object)
   (rts))
 
+(def explicit-entry-after-data
+  (assembler/assemble
+   '((%db [0xaa])
+     (%entry :start)
+     :start
+     (rts))
+   {:ns 'omkamra.vice.assembler-test
+    :object-id :omkamra.vice.assembler-test/explicit-entry-after-data}))
+
 (def data-only-object
   (assembler/assemble '((%db [1 2 3]))
                       {:ns 'omkamra.vice.assembler-test
@@ -580,6 +615,11 @@
   (testing "an object that declares %entry gets no implicit default entry"
     (is (nil? (:default-entry entry-object)))
     (is (nil? (get (:labels entry-object) :entry-object)))))
+
+(deftest link-uses-first-instruction-as-primary-entry
+  (is (= 0xC000 (:entry-point (assembler/link default-entry-object))))
+  (testing "an explicit entry still wins over the first instruction"
+    (is (= 0xC001 (:entry-point (assembler/link explicit-entry-after-data))))))
 
 (deftest object-vars-resolve-to-their-entry
   (testing "the Var reference becomes an external label for the entry"

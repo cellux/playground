@@ -492,6 +492,34 @@
   (when-let [ns (:namespace ctx)]
     (ns-resolve ns sym)))
 
+(defn- fixed-asset-address
+  "Return the fixed address of a vector-valued asset Var, if it has one.
+
+  Assembly macros are ordinary Clojure functions, so their host-side
+  calculations dereference Vars before the assembler sees the returned forms.
+  During that short expansion window a vector asset pinned with `:at` or
+  `:address` behaves like its address; direct operand references still retain
+  the Var and therefore keep their normal relocation and dependency behavior."
+  [v]
+  (when (and (bound? v) (vector? (var-get v)))
+    (let [metadata (evaluate-asset-metadata v)]
+      (cond
+        (contains? metadata :at) (:at metadata)
+        (contains? metadata :address) (:address metadata)))))
+
+(defn- macro-address-bindings
+  "Vars to rebind while an assembly macro performs host-side calculations."
+  [ns-obj]
+  (if-not ns-obj
+    {}
+    (into {}
+          (keep (fn [v]
+                  (when-some [address (fixed-asset-address v)]
+                    [v address])))
+          (distinct (concat (vals (ns-interns ns-obj))
+                            (mapcat (comp vals ns-interns)
+                                    (vals (ns-aliases ns-obj))))))))
+
 (defn- qualify-var [v]
   (let [m (meta v)]
     (symbol (str (ns-name (:ns m))) (str (:name m)))))
@@ -757,7 +785,9 @@
              {:symbol head} form index)
 
       :else
-      (let [result (apply (deref v) (rest form))]
+      (let [macro (deref v)
+            result (with-redefs-fn (macro-address-bindings (:namespace ctx))
+                     #(apply macro (rest form)))]
         (cond
           (nil? result) []
           (vector? result) (mapcat #(normalize-statement ctx % index) result)
@@ -1805,10 +1835,17 @@
   "Assemble `body` immediately into a relocatable object.
 
   Binds the object to `name`, and assigns it a namespaced-keyword `:object-id`
-  derived from the fully qualified Var name."
+  derived from the fully qualified Var name. A leading string in `body` is
+  used as the docstring of the defined Var and is not assembled."
   [name & body]
   (let [ns-name (str *ns*)
-        object-id (keyword ns-name (str name))]
+        object-id (keyword ns-name (str name))
+        docstring (when (string? (first body))
+                    (first body))
+        body (if docstring (next body) body)
+        name (if docstring
+               (with-meta name (assoc (meta name) :doc docstring))
+               name)]
     `(do
        (def ~name
          (assemble '~body {:ns '~(symbol ns-name)
@@ -2532,7 +2569,7 @@
 ;; Link ----------------------------------------------------------------------
 
 (defn- entry-point
-  [primary options label-addresses]
+  [primary options label-addresses placement]
   (let [declarations (:entries primary)
         explicit (:entry options)]
     (when (and (nil? explicit) (> (count declarations) 1))
@@ -2540,12 +2577,19 @@
                   "Object declares multiple entry points; select one"
                   {:entries declarations}))
     (let [label (or explicit (:entry primary))]
-      (if (nil? label)
-        nil
+      (cond
+        label
         (or (get label-addresses (keyword (name label)))
             (link-fail! :unresolved-entry
                         (str "Entry label " label " is not defined")
-                        {:entry label}))))))
+                        {:entry label}))
+
+        (:default-entry primary)
+        (let [{:keys [section offset]} (:default-entry primary)]
+          (+ (long (get placement [primary section]))
+             (long offset)))
+
+        :else nil))))
 
 (defn link
   "Link a primary object and its transitive dependencies into an artifact.
@@ -2649,7 +2693,7 @@
                    asset-specs)
              placed (concat resolved resolved-assets)
              primary-labels (label-addresses primary placement)
-             entry (entry-point primary options primary-labels)
+             entry (entry-point primary options primary-labels placement)
              segment-source (mapv (fn [{:keys [base bytes]}]
                                     [base (vec bytes)])
                                   placed)]
