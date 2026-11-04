@@ -42,7 +42,8 @@
     (is (str/includes? script "unsupported package manager"))
     (is (str/includes? script "\"rsnapshot\""))
     (is (str/includes? script "\"curl\""))
-    (is (str/includes? script "\"8.5.0\""))))
+    (is (str/includes? script "\"8.5.0\""))
+    (is (str/includes? script "return \"\".join(map(str, parts))"))))
 
 (deftest emit-scripts-reject-unknown-plugins
   (let [bad-config (assoc sample-config :plugins {::hostname/plugin {:hostname "a" :fqdn "a.example.com"}

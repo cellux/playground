@@ -25,16 +25,16 @@
           (in "debian" id-like-parts))
     (return "apt"))
   (raise (RuntimeError
-          (str "unsupported package manager for os id="
-               os-id
-               ", id_like="
-               id-like))))
+          (::helpers/concat-strings ["unsupported package manager for os id="
+                                     os-id
+                                     ", id_like="
+                                     id-like]))))
 
 (py/define (format-apt-package-spec package-spec)
   (assign! name (py-at package-spec "name"))
   (assign! version (package-spec.get "version"))
   (if version
-    (return (str name "=" version)))
+    (return (::helpers/concat-strings [name "=" version])))
   (return name))
 
 (py/define (install-packages-with-apt package-specs)
@@ -42,7 +42,7 @@
     (return nil))
   (assign! argv ["apt-get" "install" "-y"])
   (for package-spec package-specs
-    (argv.append (::format-apt-package-spec package-spec)))
+       (argv.append (::format-apt-package-spec package-spec)))
   (::helpers/run-command-checked argv))
 
 (py/define (apply-pkg-plugin plugin-config facts)
@@ -52,7 +52,7 @@
     [(::install-packages-with-apt package-specs)
      (::helpers/emit-event "pkg" "ok" "packages ensured via apt")]
     (raise (RuntimeError
-            (str "unsupported package manager: " manager)))))
+            (::helpers/concat-strings ["unsupported package manager: " manager])))))
 
 (def plugin
   {:fact-dependencies #{::os-release/fact}

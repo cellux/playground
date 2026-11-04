@@ -9,19 +9,19 @@
    [:fqdn string?]])
 
 (py/define (ensure-hosts-entry fqdn hostname)
-  (assign! desired (str "127.0.1.1 " fqdn " " hostname))
+  (assign! desired (::helpers/concat-strings ["127.0.1.1 " fqdn " " hostname]))
   (assign! original-lines [])
   (with [(open "/etc/hosts" "r" :encoding "utf-8") f]
-    (for line f
-      (original-lines.append (line.rstrip "\n"))))
+        (for line f
+             (original-lines.append (line.rstrip "\n"))))
   (assign! new-lines [])
   (assign! replaced false)
   (for line original-lines
-    (if (and (not replaced)
-             (line.startswith "127.0.1.1 "))
-      [(new-lines.append desired)
-       (assign! replaced true)]
-      (new-lines.append line)))
+       (if (and (not replaced)
+                (line.startswith "127.0.1.1 "))
+         [(new-lines.append desired)
+          (assign! replaced true)]
+         (new-lines.append line)))
   (if (not replaced)
     (new-lines.append desired))
   (if (!= new-lines original-lines)
@@ -46,17 +46,17 @@
   (assign! current-hostname (::helpers/run-command-checked ["hostname"]))
   (if (!= current-hostname desired-hostname)
     (raise (RuntimeError
-            (str "hostname verification failed: expected "
-                 desired-hostname
-                 ", got "
-                 current-hostname))))
+            (::helpers/concat-strings ["hostname verification failed: expected "
+                                       desired-hostname
+                                       ", got "
+                                       current-hostname]))))
   (assign! current-fqdn (::helpers/run-command-checked ["hostname" "--fqdn"]))
   (if (!= current-fqdn desired-fqdn)
     (raise (RuntimeError
-            (str "fqdn verification failed: expected "
-                 desired-fqdn
-                 ", got "
-                 current-fqdn))))
+            (::helpers/concat-strings ["fqdn verification failed: expected "
+                                       desired-fqdn
+                                       ", got "
+                                       current-fqdn]))))
   (::helpers/emit-event "hostname"
                         (if-else changed "changed" "unchanged")
                         "hostname reconciled"))
