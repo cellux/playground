@@ -123,6 +123,9 @@
  {:dev
   {:jvm-opts ["-Djdk.attach.allowAttachSelf"
               "-XX:+EnableDynamicAgentLoading"]
+   :main-opts ["-m" "nrepl.cmdline"
+               "--middleware"
+               "[cider.nrepl/cider-middleware refactor-nrepl.middleware/wrap-refactor]"]
    :extra-deps {nrepl/nrepl {:mvn/version "1.8.0"}
                 cider/cider-nrepl {:mvn/version "0.63.1"}
                 refactor-nrepl/refactor-nrepl {:mvn/version "3.14.0"}
