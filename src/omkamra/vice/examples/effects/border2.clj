@@ -1,5 +1,31 @@
 (ns omkamra.vice.examples.effects.border2
-  "Opening the sideborder."
+  "Turn off the left and right borders.
+
+  When the screen is enabled ($D011 DEN bit is enabled), the VIC chip
+  turns off the border at cycle 17/18 and turns it back on at cycle
+  56/57 on every rasterline of the 40x25 screen.
+
+  The actual off/on cycles depend on the value of CSEL (bit 3) in
+  $D016:
+
+  CSEL=0 (38 columns mode): cycle 18 off, cycle 56 on
+  CSEL=1 (40 columns mode): cycle 17 off, cycle 57 on
+
+  To open the sideborders:
+
+  1. Start with CSEL=1 (40 columns mode)
+  2. Set CSEL=0 in cycle 56
+  3. Set CSEL=1 in a later cycle
+
+  When the VIC arrives to cycle 56, CSEL is still 1 as the CPU sets it
+  to 0 only in the second phase of the clock cycle (the first phase is
+  used by the VIC). As the VIC sees CSEL=1, it does not turn on the
+  border in cycle 56.
+
+  By the time the VIC gets to cycle 57, CSEL is already 0. As the VIC
+  sees CSEL=0, it does not turn on the border in cycle 57 either.
+
+  Thus the sideborder disappears."
   (:refer-clojure :exclude [run!])
   (:require [omkamra.vice.assembler :as assembler
              :refer [define-asm]]
@@ -112,36 +138,39 @@
   ;; save SP of first IRQ handler for restore at end
   (stabilize-raster (inc :restore-sp))
 
-  ;; To open the sideborder, we have to change the CSEL field (bit 3)
-  ;; in $D016 from 1 to 0 in cycle 56.
+  ;; at the left edge of rasterline $33 (first visible line)
+  ;;
+  ;; this is a badline so we don't need to spend too many cycles
 
-  (ldy 25)
-  (ldx 0x07)
-  (lda 0x08)
+  (ldy 25)                              ; 25 screen rows
+  (ldx 0x00)                            ; CSEL=0 (38 columns mode)
+  (lda 0x08)                            ; CSEL=1 (40 columns mode)
+
+  ;; just before the right sideborder on rasterline $33
 
   :loop
-  (stx [0xD016])                        ; row #0 (badline)
+  (stx [0xD016])                        ; line #0 (badline)
   (sta [0xD016])
   (waste-cycles 55)
-  (stx [0xD016])                        ; row #1
+  (stx [0xD016])                        ; line #1
   (sta [0xD016])
   (waste-cycles 55)
-  (stx [0xD016])                        ; row #2
+  (stx [0xD016])                        ; line #2
   (sta [0xD016])
   (waste-cycles 55)
-  (stx [0xD016])                        ; row #3
+  (stx [0xD016])                        ; line #3
   (sta [0xD016])
   (waste-cycles 55)
-  (stx [0xD016])                        ; row #4
+  (stx [0xD016])                        ; line #4
   (sta [0xD016])
   (waste-cycles 55)
-  (stx [0xD016])                        ; row #5
+  (stx [0xD016])                        ; line #5
   (sta [0xD016])
   (waste-cycles 55)
-  (stx [0xD016])                        ; row #6
+  (stx [0xD016])                        ; line #6
   (sta [0xD016])
   (waste-cycles 55)
-  (stx [0xD016])                        ; row #7
+  (stx [0xD016])                        ; line #7
   (sta [0xD016])
   ;; here we wait much less to compensate for the
   ;; cycles lost due to the upcoming badline
