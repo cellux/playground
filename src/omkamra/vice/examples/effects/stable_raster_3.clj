@@ -1,12 +1,12 @@
 (ns omkamra.vice.examples.effects.stable-raster-3
-  "Neutralize jitter by compensating 4-2-1 cycles per rasterline.
+  "Neutralize jitter by compensating 4/2/1 cycles on successive rasterlines.
 
-  In stable-raster-2 we compensated one cycle per rasterline, so we
-  had to spend 8 rasterlines to neutralize all possible jitter
+  In stable-raster-2 we compensated only one cycle per rasterline, so
+  we had to spend 8 rasterlines to neutralize all possible jitter
   values (1-8).
 
-  In this example we `pull back` the timing of the CMP $D012
-  instructions such that the probability of the two branches becomes
+  In this example we `pull back` the CMP $D012 instructions on the
+  timeline such that the probability of the two branches becomes
   50%/50%. If the read cycle of the CMP happens on the current
   rasterline then we waste 4, 2 or 1 cycles, halving the jitter at
   each step. This method lets us stabilize the raster on 3 consecutive
