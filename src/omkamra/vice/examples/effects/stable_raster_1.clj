@@ -1,4 +1,4 @@
-(ns omkamra.vice.examples.effects.stable-raster
+(ns omkamra.vice.examples.effects.stable-raster-1
   "Get rid of random jitter caused by uncontrolled IRQ timing.
 
   When an IRQ is triggered, the CPU finishes execution of the current
@@ -148,7 +148,7 @@
   ;; RTI. In particular, the cursor remains movable while the effect runs.
   (jmp 0xEA31))
 
-(define-asm stable-raster
+(define-asm stable-raster-1
   (%entry :start)
   ;; Keep the code, text and state in RAM above BASIC.
   (%region [0xC000 0xD000])
@@ -189,4 +189,4 @@
 
 (defn run!
   [& args]
-  (apply common/run! stable-raster args))
+  (apply common/run! stable-raster-1 args))
