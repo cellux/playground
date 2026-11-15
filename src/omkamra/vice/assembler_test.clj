@@ -15,6 +15,10 @@
         (+ macro-address-asset 3)]
     `[(lda [~address])]))
 
+(defn evaluated-generator
+  [n]
+  (vec (repeat (long n) '(nop))))
+
 (def charset-asset
   (assembler/->Asset 'omkamra.vice.assembler-test/charset
                      (vec (range 8)) nil nil))
@@ -69,20 +73,17 @@
                 {:ns 'omkamra.vice.assembler-test})]
     (is (= '[(lda [0x3c03])] (:source object)))))
 
-(deftest splice-directive-evaluates-and-splices
-  (let [object (assembler/assemble
-                '((%splice (repeat 3 (quote (nop)))))
-                {:ns 'omkamra.vice.assembler-test})]
+(deftest function-calls-evaluate-and-expand
+  (testing "ordinary generator arguments are evaluated"
+    (is (= (vec (repeat 13 '(nop)))
+           (:source (assembler/assemble
+                     '((evaluated-generator (- 17 4)))
+                     {:ns 'omkamra.vice.assembler-test})))))
+  (testing "ordinary functions may return lazy sequences of forms"
     (is (= '[(nop) (nop) (nop)]
-           (:source object))))
-  (testing "the result must be a sequence"
-    (is (= :invalid-splice
-           (try
-             (assembler/assemble '((%splice 1))
-                                 {:ns 'omkamra.vice.assembler-test})
-             nil
-             (catch clojure.lang.ExceptionInfo error
-               (:reason (ex-data error))))))))
+           (:source (assembler/assemble
+                     '((repeat 3 (quote (nop))))
+                     {:ns 'omkamra.vice.assembler-test}))))))
 
 (deftest directives-are-normalized
   (let [object (assembler/assemble
@@ -383,8 +384,8 @@
       (is (= ['omkamra.vice.assembler-test/plain-bytes] (mapv :name (:assets artifact))))
       (is (= [7 8 9] (linked-bytes-at artifact (:start-address asset) 3))))))
 
-(defn syntax-quoted-macro
-  "An assembly macro in the idiomatic style: syntax-quote, no `list` calls.
+(defmacro syntax-quoted-macro
+  "A raw assembly macro in the idiomatic style: syntax-quote, no `list` calls.
 
   Syntax-quote qualifies its symbols, so the expansion arrives as
   `…-test/ldx`, `…-test/x` and so on. The assembler accepts a qualified
@@ -1178,7 +1179,7 @@
                                             {})))))))
 
 (deftest operand-expressions-take-qualified-constants
-  ;; Syntax-quote inside an assembly macro qualifies every name, including the
+  ;; Syntax-quote inside an assembly generator qualifies every name, including the
   ;; namespace's own constants. Those are constants, not asset references.
   (let [object (assemble-only '((%org 0x2000)
                                 :here

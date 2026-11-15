@@ -118,7 +118,7 @@ Support metadata-based source locations (`:file`, `:line`, `:column`) when prese
 
 There is no assembly-level `%require` form. Ordinary Clojure `require` establishes aliases before an assembly source is defined. During assembly, a symbol is resolved in the Clojure namespace captured by the assembly form using standard Clojure namespace/alias lookup rules.
 
-Only ordinary symbols can trigger Clojure namespace lookup. Keywords are labels or symbolic values, and directives, mnemonics, registers, mode markers, and other assembler builtins are recognized by the assembler grammar and are not looked up as Vars. Every non-builtin ordinary symbol is looked up in any position. In operator position, the resolved function is invoked through SCI as an assembly macro; its result is recursively reprocessed as assembly data. In operand position, the resolved value is substituted and then processed according to operand rules.
+Only ordinary symbols can trigger Clojure namespace lookup. Keywords are labels or symbolic values, and directives, mnemonics, registers, mode markers, and other assembler builtins are recognized by the assembler grammar and are not looked up as Vars. Every non-builtin ordinary symbol is looked up in any position. In operator position, a resolved Clojure macro receives raw argument forms while an ordinary function receives arguments evaluated through SCI; either result is recursively reprocessed as assembly data. Returned vectors and sequences are spliced directly. In operand position, the resolved value is substituted and then processed according to operand rules.
 
 For example:
 
@@ -288,7 +288,7 @@ Add focused unit tests for:
 - disassembler output as one normalized assembly object per segment file, paired `.clj`/`.asm` persistence, all overlapping fixed-address variants, synthesized labels, available-byte data directives, volatile operands, metadata annotations, and serializer reuse;
 - primary-object linking and automatic transitive object/asset dependency discovery;
 - polymorphic `run!` behavior for artifacts versus relocatable objects and separate link/run options;
-- builtin versus ordinary-symbol resolution and recursive SCI assembly macros;
+- builtin versus ordinary-symbol resolution, evaluated assembly generators, and raw Clojure macros;
 - all supported 6510 addressing forms and opcode selection;
 - shared ISA consistency between assembler and disassembler;
 - immediate, zero-page, absolute, indexed, indirect, accumulator, implied, and relative encodings;

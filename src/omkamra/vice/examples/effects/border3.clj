@@ -37,7 +37,7 @@
           (= n 2) (recur (- n 2) (conj w '(cmp 0x00)))
           :else (throw (ex-info "Cannot waste a single cycle" {})))))
 
-(defn stabilize-raster
+(defmacro stabilize-raster
   [sp-offset]
   `[;; First stage: arm a second IRQ two lines later, save the stack
     ;; pointer so the real handler can discard this frame, enable
@@ -55,7 +55,7 @@
     (tsx)
     (stx [~sp-offset])
     (cli)
-    (%splice (repeat 64 '(nop)))
+    (repeat 64 '(nop))
     ;; We should never get here, but if we do, make it visible.
     :0
     (inc [0x07e7])
@@ -71,7 +71,7 @@
     (beq :2f)
     :2])
 
-(defn setup-raster-irq
+(defmacro setup-raster-irq
   [irq-line irq-handler]
   `[;; disable interrupts
     (sei)

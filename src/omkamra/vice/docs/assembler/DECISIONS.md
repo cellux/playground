@@ -58,18 +58,17 @@ Decisions are never deleted. A decision whose answer changes is marked
 
 ### D3 — Macro argument passing
 
-- **Status:** accepted
+- **Status:** superseded by D9
 - **Context:** an operator-position ordinary symbol resolves to a host
-  function invoked as an assembly macro.
+  function invoked as an assembly generator.
 - **Options:**
-  - Raw, quoted argument forms (syntax-macro style); the macro returns
+  - Raw, quoted argument forms (syntax-macro style); the generator returns
     assembly data that is recursively reprocessed.
-  - Operands evaluated through SCI before the call.
-- **Proposed default:** raw argument forms. Assembly macros are
-  structural/code-generating, so they need the unevaluated syntax; values are
-  obtained explicitly through the SCI expression path.
-- **Consequences:** macros cannot rely on argument evaluation; the curated SCI
-  environment is only entered where an expression is syntactically expected.
+  - Arguments evaluated through SCI before the call.
+- **Proposed default:** raw argument forms.
+- **Consequences:** ordinary functions and Clojure macros were not distinguished,
+  so every generator received raw forms and callers needed a separate splice
+  directive for evaluated generation.
 - **Relevant phases:** 2, 3.
 
 ### D4 — `%meta` normalization
@@ -158,3 +157,20 @@ Decisions are never deleted. A decision whose answer changes is marked
   macro that uses them is hygienic without `%labels`; `serialize-clj` prints
   the generated unique names, as it already does for `%labels`.
 - **Relevant phases:** 4, 5.
+
+### D9 — Assembly generator invocation
+
+- **Status:** accepted
+- **Context:** operator-position calls need both ordinary value generation and
+  structural generation without making callers wrap ordinary function calls in
+  a separate splice directive.
+- **Decision:** a Var with Clojure's `:macro` metadata is invoked as a macro,
+  receiving `&form`, an empty `&env`, and raw argument forms. Any other resolved
+  function receives each argument evaluated through the curated SCI expression
+  environment. The returned assembly form, vector, or sequence is recursively
+  normalized.
+- **Consequences:** use `defmacro` for generators that need labels, assets, or
+  other raw assembly syntax; use `defn`/`fn` for ordinary evaluated arguments.
+  The `%splice` directive is removed. Vectors and lazy sequences can be
+  returned directly from ordinary generators.
+- **Relevant phases:** 2, 3.

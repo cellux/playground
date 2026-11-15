@@ -161,7 +161,6 @@ own.
 (%region [0x0800 0xa000]) ; object must fit this half-open interval
 (%org 0x4000)            ; fixed-address fragment, bypasses placement
 (%reserve [0x0800 0x0900]) ; keep the linker out of a range; emits no bytes
-(%splice (repeat 64 '(nop))) ; evaluate and splice forms
 (%meta {:block 12} (lda [0x2000])) ; annotate a value or form
 (%volatile value)        ; transparent wrapper, rendered as ?? by serialize-asm
 ```
@@ -176,20 +175,14 @@ fills at runtime. It takes an address and a length, or a `[start end]` interval
 like `%region`. It occupies the range (so no object or asset is placed there,
 and an overlap is an error) but emits no bytes.
 
-`%splice` evaluates one expression in the defining namespace's assembler
-expression environment. The result must be a sequence of assembly forms; those
-forms are inserted at that position and normalized just like the result of an
-assembly macro returning a vector. This is useful for generated repeated forms,
-for example `(%splice (repeat 64 '(nop)))`.
-
 `%labels` gives a block of forms its own local labels. Each named label and
 its references inside the body are replaced by a unique keyword, so an
 assembly macro can write its labels as plain keywords and still be hygienic
 across expansions:
 
 ```clojure
-(defn load-table
-  "Assembly macro: load `table`'s bytes into A, one per iteration."
+(defmacro load-table
+  "Raw assembly macro: load `table`'s bytes into A, one per iteration."
   [table]
   `(%labels [:loop]
      (ldx 0x00)
@@ -227,18 +220,22 @@ Keywords are labels/values; directives, mnemonics, registers, `%zp`, and mode
 markers are assembler builtins. Every other ordinary symbol is looked up in
 the captured namespace using standard Clojure namespace/alias rules:
 
-- in **operator** position, the resolved function is invoked as an **assembly
-  macro** with its raw argument forms; the result is recursively reprocessed;
+- in **operator** position, a resolved `defmacro` Var is invoked with raw
+  argument forms, while a resolved ordinary function receives arguments
+  evaluated through SCI; either result is recursively reprocessed as assembly
+  data;
 - in **operand** position, the resolved value is substituted.
 
-Macros are ordinary functions, so they can be written with syntax-quote.
-Qualified mnemonics and directives are accepted by their name part, and a
-qualified index register (`my.ns/x`, which is what syntax-quote produces) is
-canonicalised to `x`:
+Ordinary generator functions can return vectors or lazy sequences of
+assembly forms. Use `defmacro` only when a generator needs its
+arguments as raw assembly syntax, such as labels or asset
+references. Qualified mnemonics and directives are accepted by their
+name part, and a qualified index register (`my.ns/x`, which is what
+syntax-quote produces) is canonicalised to `x`:
 
 ```clojure
-(defn load-table
-  "Assembly macro: load `table`'s bytes into A, one per iteration."
+(defmacro load-table
+  "Raw assembly macro: load `table`'s bytes into A, one per iteration."
   [label table]
   `[(ldx 0x00)
     ~label

@@ -159,8 +159,9 @@ ordinary Clojure require/alias drives external label and constant resolution.
 
 - Curated SCI context: arithmetic, numeric/bit ops, collection helpers,
   byte/word construction; no arbitrary JVM interop, no unrelated namespaces.
-- Operator-position ordinary symbols invoke resolved host functions as
-  assembly macros; the result is recursively reprocessed.
+- Operator-position ordinary symbols invoke resolved Clojure macros with raw
+  forms or ordinary functions with SCI-evaluated arguments; their results are
+  recursively reprocessed as assembly data.
 - Operand-position ordinary symbols are resolved through standard
   `ns-resolve`/alias lookup and substituted; asset Vars and constants are
   distinguished.

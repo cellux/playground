@@ -374,7 +374,7 @@
 
 (def ^:private directive-names
   #{"%entry" "%label" "%labels" "%db" "%dw" "%align" "%region" "%org"
-    "%reserve" "%meta" "%volatile" "%splice" "%opcode" "%asset" "%include"})
+    "%reserve" "%meta" "%volatile" "%opcode" "%asset" "%include"})
 
 (defn- directive-symbol? [x]
   (and (symbol? x) (contains? directive-names (name x))))
@@ -410,9 +410,9 @@
   (and (symbol? x) (valid-mnemonic? (parse-mnemonic x))))
 
 (defn- register-symbol?
-  ;; By name, not identity: a syntax-quoted macro expansion qualifies its
-  ;; symbols (`my.ns/x`), and assembly macros are ordinary functions, so they
-  ;; are the main way index operands get written.
+  ;; By name, not identity: a syntax-quoted generator expansion qualifies its
+  ;; symbols (`my.ns/x`), and generated assembly forms are the main way index
+  ;; operands get written.
   [x]
   (and (symbol? x) (contains? #{"x" "y"} (name x))))
 
@@ -508,7 +508,7 @@
         (contains? metadata :address) (:address metadata)))))
 
 (defn- macro-address-bindings
-  "Vars to rebind while an assembly macro performs host-side calculations."
+  "Vars to rebind while an assembly generator performs host-side calculations."
   [ns-obj]
   (if-not ns-obj
     {}
@@ -769,29 +769,53 @@
 
 ;; Statement normalization ---------------------------------------------------
 
-(defn- normalize-macro
+(defn- normalize-generated-result
+  "Normalize the assembly forms returned by a function or macro call.
+
+  A list whose first item is a symbol is one assembly statement, such as
+  `(nop)` or `(other-generator ...)`. Other sequences are collections
+  of statements; this lets ordinary functions return lazy sequences
+  from helpers such as `repeat` and `mapcat`."
+  [ctx result index]
+  (cond
+    (nil? result) []
+    (and (seq? result) (symbol? (first result)))
+    (normalize-statement ctx result index)
+    (sequential? result)
+    (mapcat #(normalize-statement ctx % index) result)
+    :else
+    (normalize-statement ctx result index)))
+
+(defn- normalize-assembly-call
   [ctx form index]
   (let [head (first form)
         v (resolve-var ctx head)]
     (cond
       (nil? v)
       (fail! :unresolved-symbol
-             (str "Unable to resolve assembly macro " head)
+             (str "Unable to resolve assembly generator " head)
              {:symbol head} form index)
 
       (not (fn? (deref v)))
-      (fail! :not-a-macro
-             (str head " does not resolve to an assembly macro")
+      (fail! :not-a-generator
+             (str head " does not resolve to an assembly generator")
              {:symbol head} form index)
 
       :else
-      (let [macro (deref v)
+      (let [assembly-fn (deref v)
+            raw-args (rest form)
             result (with-redefs-fn (macro-address-bindings (:namespace ctx))
-                     #(apply macro (rest form)))]
-        (cond
-          (nil? result) []
-          (vector? result) (mapcat #(normalize-statement ctx % index) result)
-          :else (normalize-statement ctx result index))))))
+                     #(if (:macro (meta v))
+                        ;; Clojure macro Vars expect the source form and a
+                        ;; lexical environment before their raw arguments.
+                        (apply assembly-fn form {} raw-args)
+                        ;; Ordinary functions are evaluated through the same
+                        ;; curated SCI environment used by operand expressions.
+                        (apply assembly-fn
+                               (map (fn [arg]
+                                      (eval-expression ctx arg index))
+                                    raw-args))))]
+        (normalize-generated-result ctx result index)))))
 
 (defn- with-form-meta
   [result form]
@@ -810,7 +834,7 @@
   "Normalize `(%labels [names...] body...)`.
 
   Each declared local label and its references, within `body`, are replaced by
-  a unique keyword, so an assembly macro can write its labels as plain keywords
+  a unique keyword, so an assembly generator can write its labels as plain keywords
   (`:loop`) yet stay hygienic across expansions. Scopes are independent, so a
   nested `%labels` keeps its own labels."
   [ctx args form index]
@@ -904,20 +928,7 @@
         [(list '%meta m (normalize-annotated ctx target index))])
 
       "%volatile"
-      [(list '%volatile (normalize-operand ctx (first args) index))]
-
-      "%splice"
-      (do
-        (when-not (= 1 (count args))
-          (fail! :invalid-splice
-                 "(%splice ...) takes exactly one expression"
-                 {:form form} form index))
-        (let [result (eval-expression ctx (first args) index)]
-          (when-not (sequential? result)
-            (fail! :invalid-splice
-                   "(%splice ...) expression must evaluate to a sequence of assembly forms"
-                   {:form form :value result} form index))
-          (mapcat #(normalize-statement ctx % index) result))))))
+      [(list '%volatile (normalize-operand ctx (first args) index))])))
 
 (defn- normalize-directive
   [ctx form index]
@@ -946,7 +957,7 @@
     [(check-label-namespace ctx form form index)]
 
     (symbol? form)
-    (normalize-macro ctx (list form) index)
+    (normalize-assembly-call ctx (list form) index)
 
     (seq? form)
     (let [head (first form)]
@@ -958,7 +969,7 @@
         [(normalize-instruction ctx form index)]
 
         (symbol? head)
-        (normalize-macro ctx form index)
+        (normalize-assembly-call ctx form index)
 
         :else
         (fail! :invalid-statement

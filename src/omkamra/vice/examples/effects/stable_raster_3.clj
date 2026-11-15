@@ -43,7 +43,7 @@
   (ldx 0xe6)
 
   (lda [0xD012])
-  (%splice (waste-cycles (- 17 4)))
+  (waste-cycles (- 17 4))
   (cmp [0xD012])
   (bne :1f)
   (waste-cycles 5)
@@ -57,7 +57,7 @@
   (dex)
 
   (lda [0xD012])
-  (%splice (waste-cycles (- 38 2)))
+  (waste-cycles (- 38 2))
   (cmp [0xD012])
   (bne :1f)
   (waste-cycles 3)
@@ -71,7 +71,7 @@
   (dex)
 
   (lda [0xD012])
-  (%splice (waste-cycles (- 38 1)))
+  (waste-cycles (- 38 1))
   (cmp [0xD012])
   (beq :1f)
   (inc [0x0701 x])

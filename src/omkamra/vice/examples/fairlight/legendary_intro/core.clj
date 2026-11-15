@@ -216,7 +216,7 @@
        "L8R           "))
 
 (defn draw-bands
-  "Assembly macro: paint `band-table` onto `$D021`, one entry per raster line,
+  "Assembly generator: paint `band-table` onto `$D021`, one entry per raster line,
   from the line the opening wait lands on.
 
   The opening wait is exact. Each following entry is written when `$D012`
@@ -246,8 +246,8 @@
     (cpx band-length)
     (bne :loop)))
 
-(defn shift-row-left
-  "Assembly macro: shift the `scroller-shift-columns` bytes of the scroller row
+(defmacro shift-row-left
+  "Raw assembly macro: shift the `scroller-shift-columns` bytes of the scroller row
   at `base` one column left — column 1 into column 0. The video matrix and the
   colour row shift the same way; only what enters the last column differs, so
   that is left to the caller. `%labels` keeps the loop label unique per

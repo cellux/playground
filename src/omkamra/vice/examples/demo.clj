@@ -2,7 +2,7 @@
   "A minimal clean-room C64 example.
 
   It demonstrates the complete intended flow: an inline asset, a small
-  code-generation macro, a relocatable assembly object, and a parameterized
+  code-generation function, a relocatable assembly object, and a parameterized
   `run!` that delegates to the shared example runner. It never touches the
   VICE process or monitor directly."
   (:refer-clojure :exclude [run!])
@@ -13,10 +13,10 @@
 (assembler/define-asset border-colors [0 6 14 3 1])
 
 (defn repeat-instructions
-  "Assembly macro: expand to `n` copies of `(lda value)`.
+  "Assembly generator: expand to `n` copies of `(lda value)`.
 
-  Assembly macros receive their raw argument forms and return assembly data,
-  which is recursively reprocessed."
+  Ordinary generator functions receive evaluated arguments and return assembly
+  data, which is recursively reprocessed."
   [n value]
   (vec (repeat (long n) (list 'lda value))))
 

@@ -129,7 +129,7 @@
 (defn stream-bytes [events] (vec (mapcat event-bytes events)))
 
 (defn tune-data
-  "Assembly macro: the tune image — the three voice pointers, then the streams
+  "Assembly generator: the tune image — the three voice pointers, then the streams
   back to back — placed wherever the linker puts it.
 
   The pointers are words referring to the streams' own labels, so the whole
@@ -173,13 +173,13 @@
   0x9E)
 
 (defn sid-init-data
-  "Assembly macro: `:sid-init`, the register values `init` writes to
+  "Assembly generator: `:sid-init`, the register values `init` writes to
   `$D400-$D418`."
   []
   [:sid-init (list '%db (vec sid-init))])
 
 (defn control-data
-  "Assembly macro: the voices' gate-off control bytes — the `$D404`, `$D40B`
+  "Assembly generator: the voices' gate-off control bytes — the `$D404`, `$D40B`
   and `$D412` values out of `sid-init` — which the player ORs the gate bit
   into when a voice sounds."
   []
