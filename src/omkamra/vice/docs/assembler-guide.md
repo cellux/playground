@@ -64,10 +64,14 @@ mark a memory operand.
 (jmp :label)          ; direct to label
 (jmp [:label])        ; indirect through the pointer at :label
 (asl a)               ; accumulator      -> 0A
+(asl)                 ; accumulator shorthand (same opcode)
 (sei)                 ; implied          -> 78
 (nop.3a)              ; exact dotted opcode
 (%opcode 0xea)        ; raw opcode byte
 ```
+
+`ASL`, `LSR`, `ROL`, and `ROR` also accept a bare form such as `(asl)` as
+shorthand for their accumulator form `(asl a)`.
 
 A concrete address in `$00-$FF` infers zero page when the opcode supports it;
 an unresolved symbolic operand defaults to absolute; `%zp` forces zero page.

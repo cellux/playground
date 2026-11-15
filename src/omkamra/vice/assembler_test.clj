@@ -214,6 +214,18 @@
     (is (= :acc (assembler/infer-mode 'asl 'a)))
     (is (= :imp (assembler/infer-mode 'nop nil)))
     (is (= :rel (assembler/infer-mode 'bne :loop))))
+  (testing "accumulator shifts accept an omitted A"
+    (doseq [mnemonic '[asl lsr rol ror]]
+      (is (= :acc (assembler/infer-mode mnemonic nil)))
+      (let [shorthand (assembler/assemble (list (list mnemonic))
+                                          {:ns 'omkamra.vice.assembler-test})
+            explicit (assembler/assemble (list (list mnemonic 'a))
+                                         {:ns 'omkamra.vice.assembler-test})
+            instruction (fn [object]
+                          (select-keys (first (get-in object [:sections 0 :items]))
+                                       [:mnemonic :mode :opcode]))]
+        (is (= (instruction explicit)
+               (instruction shorthand))))))
   (testing "dotted mnemonics take their mode from the exact opcode"
     (is (= :imp (assembler/infer-mode 'nop.3a nil))))
   (testing "unsupported shapes are rejected"

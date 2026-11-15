@@ -1071,7 +1071,12 @@
     (cond
       forced-opcode (aget ^objects isa/mode-by-opcode forced-opcode)
 
-      (nil? operand) (supported! modes :imp mnemonic)
+      (nil? operand)
+      ;; An accumulator opcode also accepts the conventional omitted-A form;
+      ;; the ISA table's :acc entry is the registration for that shorthand.
+      (if (contains? modes :acc)
+        (supported! modes :acc mnemonic)
+        (supported! modes :imp mnemonic))
 
       (= operand 'a) (supported! modes :acc mnemonic)
 
