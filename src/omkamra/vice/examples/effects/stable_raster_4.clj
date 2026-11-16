@@ -46,20 +46,18 @@
 (define-asm irq
   (%align 0x0100)
 
-  ;; these extra cycles ensure that 62-$DC04 falls between 0x30-0x37
-  (waste-cycles 3)
+  ;; Experiments have shown that with this IRQ routine the value of
+  ;; 62-$DC04 falls into the 0x2d..0x34 range. By subtracting $DC04
+  ;; from (62 - 0x2d), we get the amount of jitter between 0-7.
 
-  ;; this code does not handle the $DC04 = 62 case (but that's fine)
-
-  (lda 62)                              ; 62 - [62..1] -> [0..61]
+  (lda (- 62 0x2d))
   (sec)
-  (sbc [0xDC04])                        ; A = cycle number (0..61)
+  (sbc [0xDC04])                        ; A = jitter amount (0..7)
   (tax)
 
-  ;; the only varying bits in A should be bits 0-2, otherwise this won't work
-
   ;; compensate jitter
-  (and 0x07)
+
+  ;; (and 0x07) ; this was only necessary until the value 0x2D was found
   (sta [(inc :0f)])
   :0
   (bcs :1f)
@@ -119,7 +117,7 @@
   (dec [0xD020])
 
   (txa)
-  (display-byte 30 24)                  ; cycle number (0..61)
+  (display-byte 30 24)                  ; jitter amount
 
   (lda irq-line)
   (sta [0xD012])
@@ -145,16 +143,21 @@
 
   (lda 0x20)
   :0
-  (cmp [0xD012])  ; 1 (only the last read cycle is on the target line)
-  (bne :0b)       ; 2 (when we are on the target line)
-  (waste-cycles (- 63 1 2 6 5 6 3 4))   ; 36
-  (inc [(inc :attempts-lo)])            ; 6
+  ;; we are looking for a configuration where the last read cycle of
+  ;; the following CMP instruction falls on cycle 1 of rasterline 0x20
+  (cmp [0xD012])                        ; 1
+  (bne :0b)                             ; 2
+  ;; push the read cycle of the second CMP to cycle 63 of rasterline
+  ;; 0x20 - if that read returns 0x20, we are stable
+  (waste-cycles (- 63 1 2 6 5 6 3 4))
+  ;; count the number of rounds we needed to find the right config
+  (inc [(inc :rounds-lo)])              ; 6
   (bne :1f)
-  (waste-cycles 3)                      ; 2 (BNE not taken) + 3
-  (inc [(inc :attempts-hi)])            ; 6
+  (waste-cycles 3)                      ; 2 (BNE not taken) + 3 = 5
+  (inc [(inc :rounds-hi)])              ; 6
   (jmp :2f)                             ; 3
   :1
-  (waste-cycles 2)                      ; 3 (BNE taken) + 2
+  (waste-cycles 2)                      ; 3 (BNE taken) + 2 = 5
   (waste-cycles 6)                      ; 6
   (waste-cycles 3)                      ; 3
   :2
@@ -163,25 +166,40 @@
 
   ;; show how many rounds were needed to stabilize
 
-  :attempts-hi
+  :rounds-hi
   (lda 0)
   (display-byte 0 0)
-  :attempts-lo
+  :rounds-lo
   (lda 0)
   (display-byte 2 0)
 
-  ;; set up CIA timer
+  ;; set up CIA timer A such that the timer loops exactly once per
+  ;; rasterline:
+  ;;
+  ;; Cycle #         $DC04 (CIA timer A LO)
+  ;;       1         62
+  ;;       2         61
+  ;;       3         60
+  ;;       4         59
+  ;;       5         58
+  ;;     ...        ...
+  ;;      61         02
+  ;;      62         01
+  ;;      63         62         ; this should be 00 but the timer wraps around
 
-  (waste-cycles 32)
+  (seq
+   (let [delay 32]
+     ;; fit the timer setup into exactly one rasterline
+     `((waste-cycles ~delay)
 
-  (lda 62)                     ; 62,61,60,...,03,02,01,62,62,61,60,...
-  (sta [0xDC04])
-  (lda 0)
-  (sta [0xDC05])
-  (lda 0x11)
-  (sta [0xDC0E])
+       (lda 62)                         ; 2
+       (sta [0xDC04])                   ; 4
+       (lda 0)                          ; 2
+       (sta [0xDC05])                   ; 4
+       (lda 0x11)                       ; 2
+       (sta [0xDC0E])                   ; 4
 
-  (waste-cycles 8)
+       (waste-cycles ~(- 63 6 6 6 delay)))))
 
   ;; verify that timer values 62..01 correspond to rasterline cycles 1..62
 
@@ -189,10 +207,10 @@
   :0
   (cmp [0xD012])
   (bne :0b)
-  (waste-cycles 52)
+  (waste-cycles 54)
   (cmp [0xD012])        ; the read cycle of this CMP falls on cycle 63
   (beq :1f)             ; 1..3
-  (sta [0x07e7])
+  (sta [0x07e7])        ; indicates if the read happened on the next line
   :1
   ;; $DC04 = 62,61,60,...,03,02,01,62,62,61,60,...
   (lda 63)            ; 4..5
