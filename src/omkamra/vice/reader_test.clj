@@ -7,7 +7,7 @@
   (:require [clojure.test :refer [deftest is testing]]
             [omkamra.vice.contract :as contract]
             [omkamra.vice.event :as event]
-            [omkamra.vice.isa :as isa]
+            [omkamra.assembler.6502 :as mos6502]
             [omkamra.vice.reader :as reader]
             [omkamra.vice.recorder :as recorder]
             [omkamra.vice.store :as store])
@@ -18,56 +18,56 @@
 
 (deftest isa-vocabulary
   (testing "the full 6510 opcode table is present"
-    (is (= 256 (count isa/opcode-table))))
+    (is (= 256 (count mos6502/opcode-table))))
   (testing "decode returns the instruction bytes used for operand resolution"
     (is (= {:pc 0x1000 :opcode 0x9d :bytes [0x9d 0xa8 0xd8]
             :mnemonic "STA" :mode :absx :width 3}
-           (isa/decode 0x1000 [0x9d 0xa8 0xd8]))))
+           (mos6502/decode 0x1000 [0x9d 0xa8 0xd8]))))
   (testing "instruction effects are classified"
-    (is (= :store (isa/category "STA")))
-    (is (= :rmw (isa/category "INC")))
-    (is (= :push (isa/category "PHP")))
-    (is (= :pull (isa/category "PLA")))
-    (is (= :jsr (isa/category "JSR")))
-    (is (= :brk (isa/category "BRK")))
-    (is (= :rts (isa/category "RTS")))
-    (is (= :rti (isa/category "RTI")))
-    (is (= :jmp (isa/category "JMP")))
-    (is (= :branch (isa/category "BNE")))
-    (is (= :other (isa/category "LDA")))))
+    (is (= :store (mos6502/category "STA")))
+    (is (= :rmw (mos6502/category "INC")))
+    (is (= :push (mos6502/category "PHP")))
+    (is (= :pull (mos6502/category "PLA")))
+    (is (= :jsr (mos6502/category "JSR")))
+    (is (= :brk (mos6502/category "BRK")))
+    (is (= :rts (mos6502/category "RTS")))
+    (is (= :rti (mos6502/category "RTI")))
+    (is (= :jmp (mos6502/category "JMP")))
+    (is (= :branch (mos6502/category "BNE")))
+    (is (= :other (mos6502/category "LDA")))))
 
 (deftest isa-values-and-stack-effects
   (testing "store values including unstable high-byte masking"
-    (is (= 0x42 (isa/store-value "STA" {:a 0x42} 0x2000)))
-    (is (= 0x03 (isa/store-value "SAX" {:a 0x0f :x 0x03} 0x2000)))
-    (is (= 0x21 (isa/store-value "AHX" {:a 0xff :x 0xff} 0x20ff))))
+    (is (= 0x42 (mos6502/store-value "STA" {:a 0x42} 0x2000)))
+    (is (= 0x03 (mos6502/store-value "SAX" {:a 0x0f :x 0x03} 0x2000)))
+    (is (= 0x21 (mos6502/store-value "AHX" {:a 0xff :x 0xff} 0x20ff))))
   (testing "read-modify-write final values"
-    (is (= 0x00 (isa/rmw-value "INC" 0xff false)))
-    (is (= 0x02 (isa/rmw-value "ASL" 0x01 false)))
-    (is (= 0x81 (isa/rmw-value "ROR" 0x03 true))))
+    (is (= 0x00 (mos6502/rmw-value "INC" 0xff false)))
+    (is (= 0x02 (mos6502/rmw-value "ASL" 0x01 false)))
+    (is (= 0x81 (mos6502/rmw-value "ROR" 0x03 true))))
   (testing "branch decisions use the instruction's own flags"
-    (is (isa/branch-taken? "BNE" {:flags 0x00}))
-    (is (not (isa/branch-taken? "BNE" {:flags 0x02})))
-    (is (isa/branch-taken? "BEQ" {:flags 0x02}))
-    (is (isa/branch-taken? "BCS" {:flags 0x01})))
+    (is (mos6502/branch-taken? "BNE" {:flags 0x00}))
+    (is (not (mos6502/branch-taken? "BNE" {:flags 0x02})))
+    (is (mos6502/branch-taken? "BEQ" {:flags 0x02}))
+    (is (mos6502/branch-taken? "BCS" {:flags 0x01})))
   (testing "stack pointer effects"
-    (is (= 0xfd (isa/sp-after "PHA" 0xfe 0)))
-    (is (= 0xfd (isa/sp-after "JSR" 0xff 0)))
-    (is (= 0xfc (isa/sp-after "BRK" 0xff 0)))
-    (is (= 0x01 (isa/sp-after "RTS" 0xff 0)))
-    (is (= 0x42 (isa/sp-after "TXS" 0xff 0x42)))))
+    (is (= 0xfd (mos6502/sp-after "PHA" 0xfe 0)))
+    (is (= 0xfd (mos6502/sp-after "JSR" 0xff 0)))
+    (is (= 0xfc (mos6502/sp-after "BRK" 0xff 0)))
+    (is (= 0x01 (mos6502/sp-after "RTS" 0xff 0)))
+    (is (= 0x42 (mos6502/sp-after "TXS" 0xff 0x42)))))
 
 (deftest isa-operand-resolution
   (let [read (fn [address] (case address 0x10 0x34 0x11 0x12 0x20 0x56 0x21 0x78 0))]
     (testing "indexed and absolute modes"
-      (is (= 0x0200 (isa/resolve-address read {:mode :abs :bytes [0xad 0x00 0x02]} {})))
-      (is (= 0x0203 (isa/resolve-address read {:mode :absx :bytes [0xbd 0x00 0x02]} {:x 3})))
-      (is (= 0x02ff (isa/resolve-address read {:mode :absy :bytes [0xb9 0x00 0x02]} {:y 0xff}))))
+      (is (= 0x0200 (mos6502/resolve-address read {:mode :abs :bytes [0xad 0x00 0x02]} {})))
+      (is (= 0x0203 (mos6502/resolve-address read {:mode :absx :bytes [0xbd 0x00 0x02]} {:x 3})))
+      (is (= 0x02ff (mos6502/resolve-address read {:mode :absy :bytes [0xb9 0x00 0x02]} {:y 0xff}))))
     (testing "zero-page indirect modes read the replay memory"
-      (is (= 0x1234 (isa/resolve-address read {:mode :indx :bytes [0xa1 0x10]} {:x 0})))
-      (is (= 0x1235 (isa/resolve-address read {:mode :indy :bytes [0xb1 0x10]} {:y 1}))))
+      (is (= 0x1234 (mos6502/resolve-address read {:mode :indx :bytes [0xa1 0x10]} {:x 0})))
+      (is (= 0x1235 (mos6502/resolve-address read {:mode :indy :bytes [0xb1 0x10]} {:y 1}))))
     (testing "JMP indirect wraps within the pointer page"
-      (is (= 0x1234 (isa/jmp-indirect-target read [0x6c 0x10 0x00]))))))
+      (is (= 0x1234 (mos6502/jmp-indirect-target read [0x6c 0x10 0x00]))))))
 
 ;; Synthetic capture ---------------------------------------------------------
 

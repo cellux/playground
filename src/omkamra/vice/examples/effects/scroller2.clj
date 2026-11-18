@@ -38,8 +38,9 @@
   `$EA31`, so the KERNAL keyboard and cursor service keeps running. The rest of
   the screen is left untouched, on the ROM charset."
   (:refer-clojure :exclude [run!])
-  (:require [omkamra.vice.assembler :as assembler :refer [define-asm]]
-            [omkamra.vice.examples.effects.common :as common]))
+  (:require
+   [omkamra.assembler.6502 :as mos6502 :refer [define-asm]]
+   [omkamra.vice.examples.effects.common :as common]))
 
 ;; The text lives in the source as a string: the assembler encodes it to
 ;; screen-code bytes (the VIC's video-matrix byte) through the `:encoding`

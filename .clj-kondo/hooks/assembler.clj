@@ -14,7 +14,12 @@
   [context]
   (define-var context))
 
-(defn define-asset
-  "`define-asset` binds a Var; its specification is asset data."
+(defn define-resource
+  "`define-resource` binds a Var; its path and metadata are asset data."
   [context]
   (define-var context))
+
+(defn asm
+  "`asm` returns deferred assembly data; its body is not code to lint."
+  [context]
+  {:node (api/token-node nil)})

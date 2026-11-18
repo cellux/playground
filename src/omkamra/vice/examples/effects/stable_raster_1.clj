@@ -52,9 +52,9 @@
   page-boundary crossing do not cause unwanted surprises in the
   timing."
   (:refer-clojure :exclude [run!])
-  (:require [omkamra.vice.assembler :as assembler
-             :refer [define-asm]]
-            [omkamra.vice.examples.effects.common :as common]))
+  (:require
+   [omkamra.assembler.6502 :as mos6502 :refer [define-asm]]
+   [omkamra.vice.examples.effects.common :as common]))
 
 (def irq-line 0x7d)
 

@@ -27,9 +27,9 @@
 
   Thus the sideborder disappears."
   (:refer-clojure :exclude [run!])
-  (:require [omkamra.vice.assembler :as assembler
-             :refer [define-asm]]
-            [omkamra.vice.examples.effects.common :as common]))
+  (:require
+   [omkamra.assembler.6502 :as mos6502 :refer [define-asm]]
+   [omkamra.vice.examples.effects.common :as common]))
 
 ;; rasterline where we want first IRQ to trigger
 (def irq-line 0x30)

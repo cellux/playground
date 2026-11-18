@@ -49,7 +49,7 @@
   (:require [clojure.java.io :as io]
             [omkamra.vice.analysis.core :as analysis]
             [omkamra.vice.contract :as contract]
-            [omkamra.vice.isa :as isa]
+            [omkamra.assembler.6502 :as mos6502]
             [omkamra.vice.reader :as reader]
             [omkamra.vice.store :as store])
   (:import [java.io BufferedOutputStream DataOutputStream FileOutputStream
@@ -198,7 +198,7 @@
   [state ^longs buffer]
   (let [pc (aget buffer reader/ev-pc)
         opcode (aget buffer reader/ev-b0)
-        width (aget ^ints isa/width-by-opcode opcode)
+        width (aget ^ints mos6502/width-by-opcode opcode)
         b1 (aget buffer reader/ev-b1)
         b2 (aget buffer reader/ev-b2)
         key (bit-or (bit-shift-left pc 8) opcode)
@@ -456,14 +456,14 @@
 
 (defn- add-targets! [state ^longs buffer]
   (let [opcode (aget buffer reader/ev-b0)
-        ^String mnemonic (aget ^objects isa/mnemonic-by-opcode opcode)
-        mode (aget ^objects isa/mode-by-opcode opcode)
+        ^String mnemonic (aget ^objects mos6502/mnemonic-by-opcode opcode)
+        mode (aget ^objects mos6502/mode-by-opcode opcode)
         pc (aget buffer reader/ev-pc)
         b1 (aget buffer reader/ev-b1)
         b2 (aget buffer reader/ev-b2)
         target (cond
-                 (contains? isa/branch-mnemonics mnemonic)
-                 (isa/relative-target pc b1)
+                 (contains? mos6502/branch-mnemonics mnemonic)
+                 (mos6502/relative-target pc b1)
                  (and (contains? #{"JMP" "JSR"} mnemonic)
                       (= mode :abs))
                  (bit-or b1 (bit-shift-left b2 8))
@@ -474,8 +474,8 @@
 
 (defn- maybe-port! [state ^long index ^longs buffer]
   (let [opcode (aget buffer reader/ev-b0)
-        ^String mnemonic (aget ^objects isa/mnemonic-by-opcode opcode)
-        mode (aget ^objects isa/mode-by-opcode opcode)
+        ^String mnemonic (aget ^objects mos6502/mnemonic-by-opcode opcode)
+        mode (aget ^objects mos6502/mode-by-opcode opcode)
         b1 (aget buffer reader/ev-b1)
         b2 (aget buffer reader/ev-b2)
         x (aget buffer reader/ev-x)
@@ -494,8 +494,8 @@
   handler can be resolved."
   [state ^longs buffer]
   (let [opcode (aget buffer reader/ev-b0)
-        ^String mnemonic (aget ^objects isa/mnemonic-by-opcode opcode)
-        mode (aget ^objects isa/mode-by-opcode opcode)
+        ^String mnemonic (aget ^objects mos6502/mnemonic-by-opcode opcode)
+        mode (aget ^objects mos6502/mode-by-opcode opcode)
         b1 (aget buffer reader/ev-b1)
         b2 (aget buffer reader/ev-b2)
         x (aget buffer reader/ev-x)
@@ -526,7 +526,7 @@
         cycle (aget buffer reader/ev-cycle)
         opcode (aget buffer reader/ev-b0)
         x (aget buffer reader/ev-x)
-        ^String mnemonic (aget ^objects isa/mnemonic-by-opcode opcode)
+        ^String mnemonic (aget ^objects mos6502/mnemonic-by-opcode opcode)
         entry? (interrupt-entry? state sp)
         state (cond
                 (:pending-brk state)
@@ -562,7 +562,7 @@
     (assoc state
            :last-index index
            :seen-prev? true
-           :prev-sp-after (isa/sp-after mnemonic sp x))))
+           :prev-sp-after (mos6502/sp-after mnemonic sp x))))
 
 (declare process-event!)
 

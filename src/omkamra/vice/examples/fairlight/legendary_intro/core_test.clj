@@ -1,7 +1,8 @@
 (ns omkamra.vice.examples.fairlight.legendary-intro.core-test
   "Guards the example's assembly and linking without starting VICE."
   (:require [clojure.test :refer [deftest is testing]]
-            [omkamra.vice.assembler :as assembler]
+            [omkamra.assembler :as assembler]
+            [omkamra.vice.platform :as platform]
             [omkamra.vice.examples.fairlight.legendary-intro.core :as intro]
             [omkamra.vice.examples.fairlight.legendary-intro.music :as music]))
 
@@ -12,7 +13,15 @@
   "omkamra.vice.examples.fairlight.legendary-intro.music")
 
 (defn- linked []
-  (assembler/link intro/intro))
+  (platform/link intro/intro))
+
+(defn- object-of
+  "The assembled root object of an assembly descriptor.
+
+  `define-asm` binds a deferred descriptor; assembling it yields the object
+  whose source, labels, entry, and dependencies the assertions inspect."
+  [descriptor]
+  (assembler/object-graph->object (assembler/assemble descriptor)))
 
 (defn- bytes-at
   "The linked bytes starting at `address`."
@@ -75,7 +84,7 @@
 (defn- music-labels
   "The music object's labels, relative to its own start."
   []
-  (:labels (first (:sections music/music))))
+  (:labels (first (:sections (object-of music/music)))))
 
 (defn- music-address
   "The linked address of the label `label` inside the music object."
@@ -139,7 +148,7 @@
       (is (some? (find-subsequence bytes [0x8D 0x1B 0xD0])))))) ; STA $D01B
 
 (deftest the-generated-bitmap-region-is-reserved
-  (is (= [[0xC3C0 0xC400]] (:reserved (:constraints intro/intro)))
+  (is (= [[0xC3C0 0xC400]] (:reserved (:constraints (object-of intro/intro))))
       "the linker keeps out of the region `intro` fills at runtime"))
 
 (deftest the-init-configures-the-sprites
@@ -162,10 +171,10 @@
   ;; object's external-only default entry; the linker discovers and places it.
   (is (= (sort [:omkamra.vice.examples.fairlight.legendary-intro.core/irq
                 :omkamra.vice.examples.fairlight.legendary-intro.music/init])
-         (sort (:objects (:dependencies intro/intro)))))
-  (is (nil? (:entry intro/irq)))
-  (is (= {:section 0 :offset 0} (:default-entry intro/irq)))
-  (is (nil? (get (:labels intro/irq) :irq)))
+         (sort (:objects (:dependencies (object-of intro/intro))))))
+  (is (nil? (:entry (object-of intro/irq))))
+  (is (= {:section 0 :offset 0} (:default-entry (object-of intro/irq))))
+  (is (nil? (get (:labels (object-of intro/irq)) :irq)))
   (let [artifact (linked)
         handler (first (filter #(= (keyword intro-ns "irq") (:object-id %))
                                (:objects artifact)))]
@@ -249,7 +258,7 @@
                 :omkamra.vice.examples.fairlight.legendary-intro.core/sprite-bar
                 :omkamra.vice.examples.fairlight.legendary-intro.core/volume
                 :omkamra.vice.examples.fairlight.legendary-intro.music/play])
-         (sort (:objects (:dependencies intro/irq)))))
+         (sort (:objects (:dependencies (object-of intro/irq))))))
   (let [artifact (linked)
         bytes (handler-bytes artifact)
         jsr (fn [address]

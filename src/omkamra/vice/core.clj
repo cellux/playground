@@ -22,10 +22,11 @@
   (:refer-clojure :exclude [run!])
   (:require
    [clojure.java.io :as io]
-   [omkamra.vice.assembler :as assembler]
+   [omkamra.assembler :as assembler]
    [omkamra.vice.binary-monitor :as bm]
    [omkamra.vice.capture :as capture]
    [omkamra.vice.driver :as driver]
+   [omkamra.vice.platform :as platform]
    [omkamra.vice.prg :as prg]))
 
 (def default-executable driver/default-executable)
@@ -45,25 +46,26 @@
 (def ^:private basic-text-pointer-address 0x002b)
 (def ^:private basic-pointer-block-length 8)
 
-;; Assembly ------------------------------------------------------------------
+;; Program preparation -------------------------------------------------------
 
-(defn assemble
-  "Assemble quoted source data into a relocatable object.
+(defn program-link-options
+  "The placement options a program link uses: C64 defaults plus `:link-options`."
+  [options]
+  (merge platform/link-defaults (:link-options options)))
 
-  See `omkamra.vice.assembler/assemble`."
-  ([source]
-   (assembler/assemble source))
-  ([source options]
-   (assembler/assemble source options)))
+(defn artifact-of
+  "Link a program target into an artifact.
 
-(defn link
-  "Link a relocatable object and its dependencies into a linked artifact.
-
-  See `omkamra.vice.assembler/link`."
-  ([object]
-   (assembler/link object))
-  ([object options]
-   (assembler/link object options)))
+  `target` may be a deferred assembly descriptor, an assembled object graph, a
+  relocatable object, or an already linked artifact. C64 placement defaults
+  come from `omkamra.vice.platform`; `:link-options` overrides them."
+  [target options]
+  (if (assembler/artifact? target)
+    target
+    (let [link-options (program-link-options options)]
+      (if (assembler/descriptor? target)
+        (assembler/build target link-options)
+        (assembler/link target link-options)))))
 
 ;; Instance lifecycle --------------------------------------------------------
 
@@ -76,44 +78,40 @@
   "Link `target` when it is a relocatable object, autostart it on a fresh
   instance, and return the instance descriptor once the program runs."
   [target options]
-  (let [object? (assembler/object? target)
-        link-options (if object? (:link-options options) {})
-        artifact (if object? (assembler/link target link-options) target)]
-    (when-not (assembler/artifact? artifact)
-      (throw (IllegalArgumentException.
-              "start! :artifact expects a relocatable object or a linked artifact")))
-    (let [prg-options (:prg-options options)
-          temp-input (prg/write-temp-artifact-prg! artifact prg-options)]
-      (try
-        (let [instance (driver/start! (start-options options))]
-          (try
-            (let [conn (driver/connect-until-ready!
-                        instance
-                        (select-keys options [:connect-timeout-ms :connect-retry-ms]))]
-              (try
-                (let [start-pc (driver/prepare-program-start! conn temp-input options)
-                      checkpoint (atom nil)]
+  (let [link-options (:link-options options)
+        artifact (artifact-of target options)
+        prg-options (:prg-options options)
+        temp-input (prg/write-temp-artifact-prg! artifact prg-options)]
+    (try
+      (let [instance (driver/start! (start-options options))]
+        (try
+          (let [conn (driver/connect-until-ready!
+                      instance
+                      (select-keys options [:connect-timeout-ms :connect-retry-ms]))]
+            (try
+              (let [start-pc (driver/prepare-program-start! conn temp-input options)
+                    checkpoint (atom nil)]
                   ;; `:from-pc` moves the startup stop from the BASIC RUN entry
                   ;; to the requested address; otherwise execution resumes right
                   ;; after the RUN checkpoint.
-                  (when (and start-pc (:from-pc options))
-                    (driver/await-pc! conn start-pc checkpoint
-                                      (or (:program-start-timeout-ms options)
-                                          driver/default-program-start-timeout-ms)))
-                  (bm/resume! conn))
-                (finally
-                  (bm/close! conn))))
-            (assoc instance
-                   :artifact artifact
-                   :entry-point (:entry-point artifact)
-                   :link-options link-options
-                   :prg-options prg-options
-                   :from-pc (:from-pc options))
-            (catch Throwable error
-              (driver/stop! instance)
-              (throw error))))
-        (finally
-          (io/delete-file temp-input true))))))
+                (when (and start-pc (:from-pc options))
+                  (driver/await-pc! conn start-pc checkpoint
+                                    (or (:program-start-timeout-ms options)
+                                        driver/default-program-start-timeout-ms)))
+                (bm/resume! conn))
+              (finally
+                (bm/close! conn))))
+          (assoc instance
+                 :artifact artifact
+                 :entry-point (:entry-point artifact)
+                 :link-options link-options
+                 :prg-options prg-options
+                 :from-pc (:from-pc options))
+          (catch Throwable error
+            (driver/stop! instance)
+            (throw error))))
+      (finally
+        (io/delete-file temp-input true)))))
 
 (defn start!
   "Start a fresh VICE instance.
@@ -246,13 +244,8 @@
   ([instance target]
    (reload! instance target {}))
   ([instance target options]
-   (let [link-options (if (assembler/object? target)
-                        (:link-options options)
-                        {})
-         artifact (assembler/link target link-options)]
-     (when-not (assembler/artifact? artifact)
-       (throw (IllegalArgumentException.
-               "reload! target must be a relocatable object or linked artifact")))
+   (let [link-options (:link-options options)
+         artifact (artifact-of target options)]
      (let [conn (connect! instance)]
        (try
          (let [checkpoint (atom nil)]

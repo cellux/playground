@@ -15,8 +15,9 @@
   KERNAL IRQ tail at `$EA31`, so the KERNAL keyboard and cursor service keeps
   running."
   (:refer-clojure :exclude [run!])
-  (:require [omkamra.vice.assembler :as assembler]
-            [omkamra.vice.examples.effects.common :as common]))
+  (:require
+   [omkamra.assembler.6502 :as mos6502]
+   [omkamra.vice.examples.effects.common :as common]))
 
 ;; The text lives in the source as a string: the assembler encodes it to
 ;; screen-code bytes (the VIC's video-matrix byte) through the `:encoding`
@@ -43,7 +44,7 @@
 ;; value written to $D016 (0-7) for smooth scroll of last row
 (def scroll-value [0])
 
-(assembler/define-asm irq
+(mos6502/define-asm irq
   ;; the IRQ handler starts at approx. char 27 in the row (with a bit
   ;; of jitter due to the volatile IRQ context)
   ;;
@@ -111,7 +112,7 @@
   ;; RTI. In particular, the cursor remains movable while the effect runs.
   (jmp 0xEA31))
 
-(assembler/define-asm scroller1
+(mos6502/define-asm scroller1
   (%entry :start)
   ;; Keep the whole effect in RAM above BASIC ($C000-$CFFF), so BASIC programs
   ;; can still be written while it runs. The `irq` object, the text asset and

@@ -8,7 +8,7 @@
             [clojure.string :as str]
             [clojure.test :refer [deftest is]]
             [omkamra.vice :as vice]
-            [omkamra.vice.assembler :as assembler]
+            [omkamra.assembler.6502 :as mos6502]
             [omkamra.vice.binary-monitor :as bm]
             [omkamra.vice.driver :as driver]
             [omkamra.vice.prg :as prg]))
@@ -31,14 +31,13 @@
    driver/state-key (atom {:connection nil :capture nil})})
 
 (defn- simple-object []
-  (assembler/assemble
-   '((%entry :start)
-     :start
-     (lda 0x00)
-     :loop
-     (inc 0x0400)
-     (jmp :loop))
-   {:ns 'omkamra.vice-test}))
+  (mos6502/asm* '((%entry :start)
+                  :start
+                  (lda 0x00)
+                  :loop
+                  (inc 0x0400)
+                  (jmp :loop))
+                {:namespace 'omkamra.vice-test}))
 
 (defn- with-fake-vice*
   [f]
@@ -87,7 +86,7 @@
 (deftest start!-artifact-autostarts-and-releases-the-monitor
   (with-fake-vice*
     (fn [state _ _]
-      (let [instance (vice/start! {:artifact (assembler/link (simple-object))})]
+      (let [instance (vice/start! {:artifact (simple-object)})]
         (is (= 0xC000 (:entry-point instance)))
         (is (= 1 (:resumed @state)) "the program is resumed once")
         (is (:closed? @state) "the setup connection is released")
@@ -101,13 +100,15 @@
       (let [instance (vice/start! {:artifact (simple-object)
                                    :link-options {:regions [{:start 0x5000 :end 0x6000}]}})]
         (is (= 0x5000 (:entry-point instance)))
-        (is (= {:regions [{:start 0x5000 :end 0x6000}]} (:link-options instance)))))))
+        (is (= {:regions [{:start 0x5000 :end 0x6000}]}
+               (:link-options instance))
+            "the caller's :link-options are recorded verbatim")))))
 
 (deftest start!-passes-prg-options-to-the-generator
   (with-fake-vice*
     (fn [state _ _]
       (let [options {:compression :lzss}
-            instance (vice/start! {:artifact (assembler/link (simple-object))
+            instance (vice/start! {:artifact (simple-object)
                                    :prg-options options})]
         (is (= options (:prg-options @state)))
         (is (= options (:prg-options instance)))))))
@@ -115,13 +116,15 @@
 (deftest start!-from-pc-moves-the-start-checkpoint
   (with-fake-vice*
     (fn [state _ _]
-      (vice/start! {:artifact (assembler/link (simple-object)) :from-pc 0x0900})
+      (vice/start! {:artifact (simple-object) :from-pc 0x0900})
       (is (= 0x0900 (:awaited @state))))))
 
 (deftest start!-rejects-non-assembly-artifact
   (with-fake-vice*
     (fn [state _ _]
-      (is (thrown? IllegalArgumentException (vice/start! {:artifact :not-assembly})))
+      (is (= :not-linkable
+             (try (vice/start! {:artifact :not-assembly}) nil
+                  (catch clojure.lang.ExceptionInfo e (:reason (ex-data e))))))
       (is (nil? (:started @state)) "nothing is launched for an invalid artifact"))))
 
 (deftest start!-stops-process-and-removes-temp-prg-on-connect-failure
@@ -130,7 +133,7 @@
       (with-redefs [driver/connect-until-ready!
                     (fn [_ _] (throw (ex-info "no monitor" {:reason :no-monitor})))]
         (is (thrown? clojure.lang.ExceptionInfo
-                     (vice/start! {:artifact (assembler/link (simple-object))}))))
+                     (vice/start! {:artifact (simple-object)}))))
       (is (some? (:stopped @state)))
       (is (not (.exists ^java.io.File (:temp-prg @state)))))))
 
@@ -139,7 +142,7 @@
     (fn [state _ _]
       (with-redefs [driver/start! (fn [_] (throw (ex-info "no vice" {})))]
         (is (thrown? clojure.lang.ExceptionInfo
-                     (vice/start! {:artifact (assembler/link (simple-object))}))))
+                     (vice/start! {:artifact (simple-object)}))))
       (is (not (.exists ^java.io.File (:temp-prg @state)))))))
 
 ;; connect! and stop! --------------------------------------------------------
@@ -210,12 +213,14 @@
 ;; API surface ---------------------------------------------------------------
 
 (deftest removed-root-names-are-gone
-  (doseq [sym '[start stop connect close]]
+  ;; The assembler left `omkamra.vice`: programs are built with
+  ;; `omkamra.assembler.6502` and linked through `omkamra.vice.platform`.
+  (doseq [sym '[start stop connect close assemble link]]
     (is (not (contains? (ns-publics 'omkamra.vice) sym))
         (str "omkamra.vice/" sym " must be removed"))))
 
 (deftest documented-root-names-exist
-  (doseq [sym '[start! stop! run! connect! with-conn assemble link capture!
+  (doseq [sym '[start! stop! run! connect! with-conn capture!
                 build-pipeline! open-analysis list-segments get-segment]]
     (is (contains? (ns-publics 'omkamra.vice) sym)
         (str "omkamra.vice/" sym " must exist"))))

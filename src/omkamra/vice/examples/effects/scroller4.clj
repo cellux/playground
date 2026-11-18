@@ -14,9 +14,9 @@
   bytes directly from RAM while the normal KERNAL interrupt tail continues to
   run each frame."
   (:refer-clojure :exclude [run!])
-  (:require [omkamra.vice.assembler :as assembler
-             :refer [define-asm]]
-            [omkamra.vice.examples.effects.common :as common]))
+  (:require
+   [omkamra.assembler.6502 :as mos6502 :refer [define-asm]]
+   [omkamra.vice.examples.effects.common :as common]))
 
 ;; The text lives in the source as a string: the assembler encodes it to
 ;; screen-code bytes (the VIC's video-matrix byte) through the `:encoding`

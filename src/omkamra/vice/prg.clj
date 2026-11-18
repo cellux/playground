@@ -27,7 +27,8 @@
   they disagree — so destinations may sit anywhere in RAM, including inside the
   loaded image, without corrupting an unread source."
   (:require [clojure.java.io :as io]
-            [omkamra.vice.assembler :as assembler]
+            [omkamra.assembler :as assembler]
+            [omkamra.assembler.6502 :as mos6502]
             [omkamra.vice.zx0 :as zx0]))
 
 (def default-load-address 0x0801)
@@ -687,11 +688,12 @@
 (defn- assemble-bytes
   "Assemble `forms` as a `%org address` fragment and return its bytes."
   [forms address]
-  (let [object (assembler/assemble (into [(list '%org (long address))] forms)
-                                   {:ns (the-ns 'omkamra.vice.prg)})
+  (let [descriptor (mos6502/asm* (into [(list '%org (long address))] forms)
+                                 {:namespace 'omkamra.vice.prg})
         ;; The stub has to live in the harness page the default reserve keeps
-        ;; clear, so `prg`'s own fragments are linked without that reserve.
-        artifact (assembler/link object {:reserved []})
+        ;; clear, so `prg`'s own fragments are linked without any reserve.
+        artifact (assembler/link (assembler/assemble descriptor)
+                                 {:reserved []})
         segment (first (filter #(= (long address) (long (:start-address %)))
                                (:segments artifact)))]
     (when-not segment

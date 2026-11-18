@@ -53,9 +53,9 @@
   patterns into $3FFF during the FLD - this is supposed to give a hint
   of water swirling on the two sides of the boat."
   (:refer-clojure :exclude [run!])
-  (:require [omkamra.vice.assembler :as assembler
-             :refer [define-asm]]
-            [omkamra.vice.examples.effects.common :as common]))
+  (:require
+   [omkamra.assembler.6502 :as mos6502 :refer [define-asm]]
+   [omkamra.vice.examples.effects.common :as common]))
 
 (def top-rows 4)
 (def middle-rows 17)

@@ -1,11 +1,11 @@
 (ns omkamra.vice.examples.demo-test
   "Guards the example fixture's assembly and linking without starting VICE."
   (:require [clojure.test :refer [deftest is]]
-            [omkamra.vice.assembler :as assembler]
+            [omkamra.vice.platform :as platform]
             [omkamra.vice.examples.demo :as demo]))
 
 (deftest example-links-into-one-image
-  (let [artifact (assembler/link demo/border-cycle)
+  (let [artifact (platform/link demo/border-cycle)
         bytes (vec (:bytes (first (:segments artifact))))]
     (is (= 0xC000 (:entry-point artifact)))
     (is (= 1 (count (:segments artifact))))

@@ -26,7 +26,8 @@
   original's own values are within 0.8 cents of that, i.e. the same notes.
   `ticks` is the player's unit: one tick is 10 frames (the player only
   advances a voice every tenth call)."
-  (:require [omkamra.vice.assembler :as assembler]))
+  (:require
+   [omkamra.assembler.6502 :as mos6502]))
 
 (def clock-hz
   "PAL C64 clock, for note name -> SID oscillator value."
@@ -185,7 +186,7 @@
   []
   (list '%db (mapv #(nth sid-init %) [4 11 18])))
 
-(assembler/define-asm music
+(mos6502/define-asm music
   (%entry :init)
 
   ;; State. X indexes the voices, so these rows are what `lda [:row x]`

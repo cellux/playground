@@ -1,9 +1,9 @@
-(ns omkamra.vice.isa-test
-  "Tests for the shared 6510 vocabulary: mode metadata, documented vs
-  undocumented status, and opcode selection used by both the assembler and
-  the disassembler."
+(ns omkamra.assembler.6502-isa-test
+  "Tests for the 6502/6510 vocabulary: mode metadata, documented vs
+  undocumented status, and opcode selection used by the assembler, the
+  disassembler, and VICE capture analysis."
   (:require [clojure.test :refer [deftest is testing]]
-            [omkamra.vice.isa :as isa]))
+            [omkamra.assembler.6502 :as isa]))
 
 (deftest opcode-table-is-complete
   (is (= 256 (count isa/opcode-table)))

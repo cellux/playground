@@ -2,9 +2,9 @@
   "Stabilize the raster, then set up CIA timer A to count the number of
   cycles within a rasterline."
   (:refer-clojure :exclude [run!])
-  (:require [omkamra.vice.assembler :as assembler
-             :refer [define-asm]]
-            [omkamra.vice.examples.effects.common :as common]))
+  (:require
+   [omkamra.assembler.6502 :as mos6502 :refer [define-asm]]
+   [omkamra.vice.examples.effects.common :as common]))
 
 (def irq-line 0x20)
 
@@ -42,8 +42,7 @@
     (waste-cycles (- 52 1))
     (cmp [0xD012])
     (beq :1f)
-    :1
-    ))
+    :1))
 
 (def hex-digits [0x30 0x31 0x32 0x33
                  0x34 0x35 0x36 0x37

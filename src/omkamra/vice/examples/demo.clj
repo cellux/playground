@@ -6,11 +6,12 @@
   `run!` that delegates to the shared example runner. It never touches the
   VICE process or monitor directly."
   (:refer-clojure :exclude [run!])
-  (:require [omkamra.vice.assembler :as assembler]
-            [omkamra.vice.examples.common :as common]))
+  (:require
+   [omkamra.assembler.6502 :as mos6502]
+   [omkamra.vice.examples.common :as common]))
 
 ;; An asset kept with the source: a border-colour cycle.
-(assembler/define-asset border-colors [0 6 14 3 1])
+(def border-colors [0 6 14 3 1])
 
 (defn repeat-instructions
   "Assembly generator: expand to `n` copies of `(lda value)`.
@@ -21,7 +22,7 @@
   (vec (repeat (long n) (list 'lda value))))
 
 ;; The example object: disable interrupts, then cycle the border colour.
-(assembler/define-asm border-cycle
+(mos6502/define-asm border-cycle
   (%entry :start)
   :start
   (sei)

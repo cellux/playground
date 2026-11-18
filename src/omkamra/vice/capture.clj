@@ -29,13 +29,14 @@
   A stop commits the non-empty final chunk and finalizes the manifest. Any
   failure destroys the reserved capture directory."
   (:require [clojure.java.io :as io]
-            [omkamra.vice.assembler :as assembler]
+            [omkamra.assembler :as assembler]
             [omkamra.vice.binary-monitor :as bm]
             [omkamra.vice.driver :as driver]
             [omkamra.vice.prg :as prg]
             [omkamra.vice.trace :as trace]
             [omkamra.vice.contract :as contract]
             [omkamra.vice.event :as event]
+            [omkamra.vice.platform :as platform]
             [omkamra.vice.recorder :as recorder]
             [omkamra.vice.snapshot :as snapshot])
   (:import [java.io Reader]
@@ -743,11 +744,15 @@
   [options]
   (let [target (:artifact options)
         artifact (when target
-                   (if (assembler/object? target)
-                     (assembler/link target (:link-options options))
-                     target))
+                   (if (assembler/artifact? target)
+                     target
+                     (let [link-options (merge platform/link-defaults
+                                               (:link-options options))]
+                       (if (assembler/descriptor? target)
+                         (assembler/build target link-options)
+                         (assembler/link target link-options)))))
         _ (when (and artifact (not (assembler/artifact? artifact)))
-            (fail "Capture :artifact expects a relocatable object or a linked artifact"
+            (fail "Capture :artifact expects an assembly descriptor, an object graph, a relocatable object, or a linked artifact"
                   {:artifact target}))
         _ (when (and artifact (:instance options))
             (fail "Capture accepts either :artifact or :instance, not both" {}))

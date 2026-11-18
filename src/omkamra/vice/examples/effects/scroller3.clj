@@ -36,9 +36,9 @@
   acknowledges the raster IRQ and jumps to the KERNAL IRQ tail at `$EA31`, so
   the KERNAL keyboard and cursor service keeps running."
   (:refer-clojure :exclude [run!])
-  (:require [omkamra.vice.assembler :as assembler
-             :refer [define-asm]]
-            [omkamra.vice.examples.effects.common :as common]))
+  (:require
+   [omkamra.assembler.6502 :as mos6502 :refer [define-asm]]
+   [omkamra.vice.examples.effects.common :as common]))
 
 ;; The text lives in the source as a string: the assembler encodes it to
 ;; screen-code bytes (the VIC's video-matrix byte) through the `:encoding`
@@ -127,7 +127,7 @@
   [])
 
 (define-asm make-charset
-  (%asset tile-pool)
+  (%include tile-pool)
   ;; Scale the ROM charset 4x4 and deduplicate it. A tile's content is fixed
   ;; by its 2x2 source pattern, so the charset needs only the 16-pattern pool;
   ;; what the ROM decides is *which* pattern every character selects at every

@@ -23,9 +23,9 @@
   cycle 17/18 and turned back on at cycle 56/57 of every rasterline,
   including those which ordinarily lie in the top and bottom borders."
   (:refer-clojure :exclude [run!])
-  (:require [omkamra.vice.assembler :as assembler
-             :refer [define-asm]]
-            [omkamra.vice.examples.effects.common :as common]))
+  (:require
+   [omkamra.assembler.6502 :as mos6502 :refer [define-asm]]
+   [omkamra.vice.examples.effects.common :as common]))
 
 (define-asm border1
   (%entry :start)

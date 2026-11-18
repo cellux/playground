@@ -7,7 +7,8 @@
   table address assembles the six indexed table reads as zero-page (2 bytes),
   undercounting the code and burying the table inside the code."
   (:require [clojure.test :refer [deftest is testing]]
-            [omkamra.vice.assembler :as assembler]
+            [omkamra.assembler :as assembler]
+            [omkamra.assembler.6502 :as mos6502]
             [omkamra.vice.prg :as prg]
             [omkamra.vice.zx0 :as zx0]))
 
@@ -20,12 +21,12 @@
   []
   (assembler/link
    (assembler/assemble
-    '((%entry :start)
-      (%org 0x2000)
-      :start
-      (lda 0x00)
-      (rts))
-    {:ns 'omkamra.vice.prg-test})))
+    (mos6502/asm* '((%entry :start)
+                    (%org 0x2000)
+                    :start
+                    (lda 0x00)
+                    (rts))
+                  {:namespace 'omkamra.vice.prg-test}))))
 
 (def ^:private table-entry-length 6)
 (def ^:private table-terminator-length 6)
@@ -34,12 +35,12 @@
   []
   (assembler/link
    (assembler/assemble
-    (list '(%entry :start)
-          '(%org 0xc000)
-          :start
-          '(jmp :start)
-          (list '%db (vec (take 1000 (cycle [0x11 0x22 0x33 0x44])))))
-    {:ns 'omkamra.vice.prg-test})))
+    (mos6502/asm* (list '(%entry :start)
+                        '(%org 0xc000)
+                        :start
+                        '(jmp :start)
+                        (list '%db (vec (take 1000 (cycle [0x11 0x22 0x33 0x44])))))
+                  {:namespace 'omkamra.vice.prg-test}))))
 
 (deftest basic-sys-line-is-plainly-formatted
   (let [prg (prg/prg-bytes (one-segment-artifact))

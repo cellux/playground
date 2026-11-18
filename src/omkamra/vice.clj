@@ -4,7 +4,8 @@
   Start here when an agent needs to build a program, launch or control VICE,
   capture an execution, or inspect a finalized capture. The normal workflow is:
 
-  1. use `assemble`/`link` when the program is assembler source;
+  1. build a program with `omkamra.assembler.6502/define-asm` and
+     `omkamra.vice.core/start!`/`run!`/`capture!`;
   2. use `capture!` to create and finalize a dataset;
   3. use `build-pipeline!` explicitly to create the analysis generations needed;
   4. use `open-analysis` to open the finalized capture and any committed stages;
@@ -25,39 +26,15 @@
    [omkamra.vice.analysis :as analysis]
    [omkamra.vice.core :as core]))
 
-;; Program preparation -------------------------------------------------------
-
-(defn assemble
-  "Assemble quoted source data into a relocatable object.
-
-  The returned object can be passed to `link`, `start!` as `:artifact`, or
-  `capture!` as `:artifact`. See `omkamra.vice.assembler/assemble` for source
-  forms, labels, macros, and options.
-
-  See `omkamra.vice.core/assemble` for the delegated implementation."
-  ([source]
-   (core/assemble source))
-  ([source options]
-   (core/assemble source options)))
-
-(defn link
-  "Link a relocatable assembler object and its dependencies into an artifact.
-
-  The artifact can be passed to `start!` or `capture!`. See
-  `omkamra.vice.assembler/link` for placement-region and dependency options."
-  ([object]
-   (core/link object))
-  ([object options]
-   (core/link object options)))
-
 ;; Instance lifecycle --------------------------------------------------------
 
 (defn start!
   "Start a fresh VICE instance and return its instance descriptor.
 
   With no options this launches a blank emulator. With `:artifact` it accepts
-  an assembler object or linked artifact, autostarts it through a temporary
-  PRG, and returns while the program runs. See `omkamra.vice.core/start!` for
+  an assembly descriptor, an assembled object graph, a relocatable object, or a
+  linked artifact, autostarts it through a temporary PRG, and returns while the
+  program runs. See `omkamra.vice.core/start!` for
   startup options such as `:executable`, `:address`, `:port`, `:extra-args`,
   `:from-pc`, `:link-options`, `:prg-options` (including LZSS or ZX0
   compression), and timeout settings. Use `stop!` for cleanup."
@@ -69,7 +46,7 @@
 (defn reload!
   "Reset and run an artifact inside an existing VICE instance.
 
-  `target` may be a relocatable assembler object or linked artifact. The
+  `target` may be an assembly descriptor, object graph, object, or artifact. The
   instance is reset, waits until BASIC reaches READY, writes a generated PRG
   into BASIC memory, and invokes its SYS stub with BASIC-compatible call/return
   semantics. See
@@ -127,8 +104,8 @@
   "Start asynchronous capture and return its instance descriptor.
 
   Provide one source: `:input` for an existing `.prg`/`.d64`, `:artifact` for
-  an assembler object or linked artifact, or `:instance` for a running VICE
-  instance. Use `:dataset-root` for the output and `omkamra.vice.capture`
+  an assembly descriptor, object graph, object, or artifact, or `:instance` for
+  a running VICE instance. Use `:dataset-root` for the output and `omkamra.vice.capture`
   functions—especially `status`, `connection`, `stop-async!`, and `stop!`—to
   monitor and finalize it. A finalized dataset is required before analysis.
 

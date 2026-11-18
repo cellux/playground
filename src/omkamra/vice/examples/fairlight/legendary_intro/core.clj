@@ -39,7 +39,8 @@
   before anything touches the VIC, both as in the original. It advances its
   voices only every tenth frame; the volume fade runs in between, every frame."
   (:refer-clojure :exclude [run!])
-  (:require [omkamra.vice.assembler :as assembler]
+  (:require [omkamra.assembler :as assembler]
+            [omkamra.assembler.6502 :as mos6502]
             [omkamra.vice.examples.common :as common]
             ;; Referenced only through its labels — `::music/init`, `::music/play`
             ;; — inside bodies the assembler reads as data, which is invisible to
@@ -47,14 +48,11 @@
             ^{:clj-kondo/ignore [:unused-namespace]}
             [omkamra.vice.examples.fairlight.legendary-intro.music :as music]))
 
-(assembler/define-asset charset
-  {:resource "./charset.bin" :at 0xC800})
+(assembler/define-resource ^{:at 0xC800} charset "./charset.bin")
 
-(assembler/define-asset screen
-  {:resource "./screen.bin" :at 0xC400})
+(assembler/define-resource ^{:at 0xC400} screen "./screen.bin")
 
-(assembler/define-asset color-ram
-  {:resource "./color.bin" :at 0xD800})
+(assembler/define-resource ^{:at 0xD800} color-ram "./color.bin")
 
 (defn- row-line
   "First raster line of character row `row` on screen: 25 rows with YSCROLL 3,
@@ -288,7 +286,7 @@
 ;; handler reads as the frame's running order. The 12 cycles a call costs are
 ;; harmless — the bands and the scroller wait for their exact raster lines.
 
-(assembler/define-asm sprite-bar
+(mos6502/define-asm sprite-bar
   ;; One Y for all eight sprites, from the curve, indexed by the frame counter.
   (inc [frame-counter])
   (ldx [frame-counter])
@@ -315,7 +313,7 @@
   :sprite-done
   (rts))
 
-(assembler/define-asm volume
+(mos6502/define-asm volume
   ;; The SID volume fade. One byte does three jobs, as in the original: it is
   ;; the value written to `$D418`, the fade counter, and the immediate operand
   ;; of the `LDA` below, patched in place. It starts at `$10` — volume 0 with
@@ -338,13 +336,13 @@
   (sta [0xD418])
   (rts))
 
-(assembler/define-asm bands
+(mos6502/define-asm bands
   ;; The two rasterbar bands, on the credit rows they back: one table and one
   ;; loop, exactly as the original has it.
   (draw-bands)
   (rts))
 
-(assembler/define-asm scroller
+(mos6502/define-asm scroller
   ;; Row 20 (`$C720`, colour `$DB20`). The row is split in at line 210: `$09`
   ;; is the fine scroll, 0-7, and doubles as the wrap counter. XSCROLL takes
   ;; effect at once, so the write has to land on an exact line; 210 and the
@@ -392,7 +390,7 @@
   (sta [(+ color-ram scroller-row-offset scroller-shift-columns)])
   (rts))
 
-(assembler/define-asm irq
+(mos6502/define-asm irq
   ;; The per-frame handler, in its own object so `intro` can name it. It has no
   ;; `%entry`: `define-asm` gives it an external-only default entry named `irq`
   ;; at its first instruction, so the `intro` Var reference resolves here. All
@@ -407,11 +405,11 @@
   (jsr scroller)
   (jmp 0xEA31))                       ; KERNAL IRQ tail: UDTIM, keyboard, RTI
 
-(assembler/define-asm intro
+(mos6502/define-asm intro
   (%entry :start)
-  (%asset charset)
-  (%asset screen)
-  (%asset color-ram)
+  (%include charset)
+  (%include screen)
+  (%include color-ram)
   :start
   (sei)                              ; no interrupts while setting up
   ;; The SID player's own initialisation comes first, as in the original: it

@@ -16,7 +16,7 @@
   including variants that overlap at the same address; labels are synthesized
   for block starts and direct control-flow targets; volatile operands are
   wrapped in `(%volatile ...)`; block/segment/role annotation is attached with
-  `(%meta ...)`. The shared `assembler/serialize-clj` and
+  `(%meta ...)`. The shared `assembler/serialize-data` and
   `assembler/serialize-asm` functions render the object.
 
   Files:
@@ -35,10 +35,10 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [omkamra.vice.analysis.core :as analysis]
-            [omkamra.vice.assembler :as assembler]
+            [omkamra.assembler :as assembler]
             [omkamra.vice.contract :as contract]
             [omkamra.vice.dedupe :as dedupe]
-            [omkamra.vice.isa :as isa]
+            [omkamra.assembler.6502 :as mos6502]
             [omkamra.vice.parallel :as parallel]
             [omkamra.vice.store :as store]))
 
@@ -326,16 +326,16 @@
   "The signed displacement encoded in a relative instruction's template.
 
   `:template` holds the operand bytes only (no opcode), and for a relative
-  branch the displacement is `template[0]`; `isa/relative-operand` expects the
+  branch the displacement is `template[0]`; `mos6502/relative-operand` expects the
   displacement at index 1, so it is padded here."
   [template]
-  (isa/relative-operand [0 (nth template 0 0)]))
+  (mos6502/relative-operand [0 (nth template 0 0)]))
 
 (defn- instruction-target
   "The direct control-flow target of an instruction, or nil."
   [{:keys [pc opcode template]}]
-  (let [mnemonic (aget ^objects isa/mnemonic-by-opcode opcode)
-        mode (aget ^objects isa/mode-by-opcode opcode)
+  (let [mnemonic (aget ^objects mos6502/mnemonic-by-opcode opcode)
+        mode (aget ^objects mos6502/mode-by-opcode opcode)
         lo (bit-and (long (nth template 0 0)) 0xff)
         hi (bit-and (long (nth template 1 0)) 0xff)
         word (bit-or lo (bit-shift-left hi 8))]
@@ -348,7 +348,7 @@
   "The address an instruction reads/writes, for hardware remarks (nil for
   immediates and implied/accumulator forms)."
   [{:keys [pc opcode template]}]
-  (let [mode (aget ^objects isa/mode-by-opcode opcode)
+  (let [mode (aget ^objects mos6502/mode-by-opcode opcode)
         lo (bit-and (long (nth template 0 0)) 0xff)
         hi (bit-and (long (nth template 1 0)) 0xff)
         word (bit-or lo (bit-shift-left hi 8))]
@@ -396,9 +396,9 @@
 (defn- instruction-form
   [instruction label-map]
   (let [{:keys [pc opcode template volatile-mask]} instruction
-        mnemonic (aget ^objects isa/mnemonic-by-opcode opcode)
-        mode (aget ^objects isa/mode-by-opcode opcode)
-        preferred (isa/preferred-opcode mnemonic mode)
+        mnemonic (aget ^objects mos6502/mnemonic-by-opcode opcode)
+        mode (aget ^objects mos6502/mode-by-opcode opcode)
+        preferred (mos6502/preferred-opcode mnemonic mode)
         base-sym (symbol (str/lower-case mnemonic))
         lo (bit-and (long (nth template 0 0)) 0xff)
         hi (bit-and (long (nth template 1 0)) 0xff)
@@ -426,7 +426,7 @@
         ;; the form is re-assembled (a small absolute address would otherwise
         ;; become zero page); a dotted mnemonic pins the exact opcode and mode.
         inferred (try
-                   (assembler/infer-mode base-sym operand-form)
+                   (assembler/infer-mode :6502 base-sym operand-form)
                    (catch Throwable _ mode))
         exact? (and (= opcode preferred) (= inferred mode))
         mnemonic-sym (if exact?
@@ -576,7 +576,8 @@
 (defn- build-object
   [blocks extra-meta header]
   (let [{:keys [forms form-addresses form-operands]} (blocks->forms blocks extra-meta)]
-    (-> (assembler/assemble forms {})
+    (-> (assembler/object-graph->object
+         (assembler/assemble (mos6502/asm* forms)))
         (assoc :form-addresses form-addresses
                :form-operands form-operands
                :comment header)
@@ -588,7 +589,7 @@
   [blocks extra-meta header]
   (let [object (build-object blocks extra-meta header)]
     {:object object
-     :clj-text (assembler/serialize-clj object)
+     :clj-text (assembler/serialize-data object)
      :asm-text (assembler/serialize-asm object)}))
 
 (defn- render-segment

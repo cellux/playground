@@ -16,9 +16,9 @@
   On line 250 ($FA) we set RSEL=0, then back to RSEL=1 on line
   252 ($FC). This opens the top and bottom borders as well."
   (:refer-clojure :exclude [run!])
-  (:require [omkamra.vice.assembler :as assembler
-             :refer [define-asm]]
-            [omkamra.vice.examples.effects.common :as common]))
+  (:require
+   [omkamra.assembler.6502 :as mos6502 :refer [define-asm]]
+   [omkamra.vice.examples.effects.common :as common]))
 
 ;; rasterline where we want first IRQ to trigger
 (def irq-line 12)

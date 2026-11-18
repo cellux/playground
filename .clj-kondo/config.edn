@@ -1,5 +1,6 @@
-{:hooks {:analyze-call {omkamra.vice.assembler/define-asm hooks.assembler/define-asm
-                         omkamra.vice.assembler/define-asset hooks.assembler/define-asset
+{:hooks {:analyze-call {omkamra.assembler.6502/define-asm hooks.assembler/define-asm
+                         omkamra.assembler.6502/asm hooks.assembler/asm
+                         omkamra.assembler/define-resource hooks.assembler/define-resource
                          omkamra.cgen.core/defn hooks.cgen/defn
                          omkamra.cgen.core/fn hooks.cgen/anonymous-fn
                          omkamra.dsp/defn hooks.dsp/defn

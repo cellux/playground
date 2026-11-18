@@ -21,9 +21,9 @@
   source. The handler ends in the KERNAL IRQ tail at `$EA31`, keeping the
   clock and keyboard alive."
   (:refer-clojure :exclude [run!])
-  (:require [omkamra.vice.assembler :as assembler
-             :refer [define-asm]]
-            [omkamra.vice.examples.effects.common :as common]))
+  (:require
+   [omkamra.assembler.6502 :as mos6502 :refer [define-asm]]
+   [omkamra.vice.examples.effects.common :as common]))
 
 ;; The text lives in the source as a string and the assembler encodes
 ;; it to screen-code bytes. Screen codes 0-63 identify one of the

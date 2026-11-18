@@ -24,7 +24,7 @@
             [clojure.java.io :as io]
             [omkamra.vice.contract :as contract]
             [omkamra.vice.event :as event]
-            [omkamra.vice.isa :as isa]
+            [omkamra.assembler.6502 :as mos6502]
             [omkamra.vice.store :as store])
   (:import [java.nio.file Files]))
 
@@ -488,7 +488,7 @@
   predicate used to avoid allocating records for irrelevant reads."
   [state event event-index next-event read-predicate]
   (let [{:keys [pc instruction-bytes a x sp flags]} event
-        ins (isa/decode pc instruction-bytes)
+        ins (mos6502/decode pc instruction-bytes)
         mnemonic (:mnemonic ins)
         reads (volatile! [])
         mk-read (fn [address]
@@ -498,7 +498,7 @@
                  (when (and read-predicate (read-predicate address))
                    (vswap! reads conj (mk-read address)))
                  value))
-        sp-after (isa/sp-after mnemonic sp x)
+        sp-after (mos6502/sp-after mnemonic sp x)
         next-pc (bit-and (+ pc (:width ins)) 0xffff)
         base {:sp-after sp-after :mutations []}
         mk (fn [address value kind]
@@ -506,22 +506,22 @@
         stack (fn [delta]
                 (bit-and (+ 0x100 sp delta) 0xffff))
         result
-        (case (isa/category mnemonic)
+        (case (mos6502/category mnemonic)
           :store
-          (let [address (isa/resolve-address read ins event)]
+          (let [address (mos6502/resolve-address read ins event)]
             (assoc base
-                   :mutations [(mk address (isa/store-value mnemonic event address)
+                   :mutations [(mk address (mos6502/store-value mnemonic event address)
                                    :store)]
                    :successor next-pc))
 
           :rmw
           (if (= (:mode ins) :acc)
             (assoc base :successor next-pc)
-            (let [address (isa/resolve-address read ins event)
+            (let [address (mos6502/resolve-address read ins event)
                   old (read address)]
               (assoc base
                      :mutations [(mk address
-                                     (isa/rmw-value mnemonic old (isa/carry? event))
+                                     (mos6502/rmw-value mnemonic old (mos6502/carry? event))
                                      :read-modify-write)]
                      :successor next-pc)))
 
@@ -535,7 +535,7 @@
 
           :jsr
           (let [return (+ pc 2)
-                target (isa/absolute-operand instruction-bytes)]
+                target (mos6502/absolute-operand instruction-bytes)]
             (assoc base
                    :mutations [(mk (stack 0) (bit-shift-right return 8) :stack-push)
                                (mk (stack -1) (bit-and return 0xff) :stack-push)]
@@ -574,19 +574,19 @@
           :jmp
           (assoc base
                  :successor (if (= (:mode ins) :ind)
-                              (isa/jmp-indirect-target read instruction-bytes)
-                              (isa/absolute-operand instruction-bytes)))
+                              (mos6502/jmp-indirect-target read instruction-bytes)
+                              (mos6502/absolute-operand instruction-bytes)))
 
           :branch
           (assoc base
-                 :successor (if (isa/branch-taken? mnemonic event)
-                              (isa/relative-target
+                 :successor (if (mos6502/branch-taken? mnemonic event)
+                              (mos6502/relative-target
                                pc (bit-and (int (nth instruction-bytes 1 0)) 0xff))
                               next-pc))
 
           (do
-            (when (isa/reads-memory? mnemonic)
-              (when-let [address (isa/resolve-address read ins event)]
+            (when (mos6502/reads-memory? mnemonic)
+              (when-let [address (mos6502/resolve-address read ins event)]
                 (read address)))
             (assoc base :successor next-pc)))]
     (assoc result :reads @reads)))
@@ -624,11 +624,11 @@
        (let [previous (event-at-index reader (resolve-chunk reader (dec index))
                                       (dec index))
              current (event-at-index reader (resolve-chunk reader index) index)
-             ins (isa/decode (:pc previous) (:instruction-bytes previous))]
+             ins (mos6502/decode (:pc previous) (:instruction-bytes previous))]
          (= (:sp current)
-            (bit-and (- (isa/sp-after (:mnemonic ins)
-                                      (:sp previous)
-                                      (:x previous))
+            (bit-and (- (mos6502/sp-after (:mnemonic ins)
+                                          (:sp previous)
+                                          (:x previous))
                         3)
                      0xff)))))
 

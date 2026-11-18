@@ -7,7 +7,8 @@
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
-            [omkamra.vice.assembler :as assembler]
+            [omkamra.assembler :as assembler]
+            [omkamra.assembler.6502 :as mos6502]
             [omkamra.vice.dedupe :as dedupe]
             [omkamra.vice.disassembly :as disassembly]
             [omkamra.vice.synthetic-test-support :as synthetic]))
@@ -112,7 +113,8 @@
       (is (str/includes? (slurp (io/file dir (:asm-file segment)))
                          ".org $")))
     (testing "the canonical forms re-assemble cleanly"
-      (is (map? (assembler/assemble forms {}))))))
+      (is (assembler/object? (assembler/object-graph->object
+                              (assembler/assemble (mos6502/asm* forms))))))))
 
 (deftest instruction-forms-preserve-encoding-shape
   (let [label-map {0x1000 :L1000}
@@ -142,7 +144,9 @@
                                                  :template [0x2d 0]
                                                  :volatile-mask 0}
                                                 {})
-                              object (assembler/assemble [instruction] {})]
+                              object (assembler/object-graph->object
+                                      (assembler/assemble
+                                       (mos6502/asm* [instruction])))]
                           (-> object :sections first :items first :opcode)))]
         ;; STA $002D,X must not be re-read as the shorter STA $2D,X
         (is (= 0x9d (roundtrip 0x9d)))
