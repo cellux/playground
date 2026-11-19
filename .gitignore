@@ -1,3 +1,4 @@
+/.cache/refs/
 /.clj-kondo/.cache/
 /captures/
 /classes/

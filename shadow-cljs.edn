@@ -59,4 +59,15 @@
    :modules
    {:main
     {:init-fn omkamra.dsp.worker/init
-     :web-worker true}}}}}
+     :web-worker true}}}
+
+  ;; The omkamra.body examples: one page that mounts the default mannequin
+  ;; skin, poses it with controls, plays a clip and resolves multi-limb
+  ;; intent. Served by omkamra.dev.on-demand-http at /omkamra/body/examples.
+  :omkamra.body.examples
+  {:target :browser
+   :output-dir ".dev/cljs/omkamra/body/examples"
+   :asset-path "/omkamra/body/examples"
+   :modules
+   {:main
+    {:init-fn omkamra.body.examples/init}}}}}
