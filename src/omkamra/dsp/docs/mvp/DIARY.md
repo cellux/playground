@@ -5302,7 +5302,7 @@ zero at a time, Squint taking 4.7 s to compile the literal. The idea is the
 linker's, one level down: a zero region needs no bytes anywhere. The canonical
 form now carries `{:dsp/zeros n}`, the JS arena is the zero-filled shape of the
 right length, and `init` zero-fills and *then* writes the non-zero initializers —
-so `reset` puts the zeros back rather than trusting a fresh region (T10).
+so `reset` puts the zeros back rather than trusting a fresh region (D86).
 Canonical 1.77 MB → 40 KB, JS module 3.65 MB → 11 KB, emission 4.7 s → 0.16 s;
 the WAT was already compact (P12b).
 

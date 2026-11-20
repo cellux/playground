@@ -6,9 +6,14 @@ A trap differs from a rule: [`RULES.md`](RULES.md) says what to do; this file
 records what the toolchain or runtime will do regardless of intent. Each entry
 names the symptom, explains the cause, and gives the shortest remedy.
 
+Keep this file repository-wide. A new trap belongs here only when it describes a
+real, non-obvious failure mode that is likely to recur, applies beyond a
+project-specific implementation detail, and has a concrete symptom, cause, and
+remedy. Put project-specific behavior in that project's documentation instead.
+
 Once established, traps are appended and never renumbered, so citations remain
-stable. If a trap stops applying, mark it superseded and append the reason rather
-than deleting or reusing its number.
+stable. If a trap stops applying or belongs elsewhere, mark it superseded and
+point to its canonical replacement rather than deleting or reusing its number.
 
 ## T1 — `js` is a reserved ClojureScript alias
 
@@ -75,9 +80,9 @@ output after a *helper* namespace the macro requires changes. `shadow/compile`
 reports `0 compiled` and the page runs the old behaviour, even though the helper
 was edited.
 
-**Cause:** Shadow tracks the macro namespace itself (`omkamra.dsp`) as a build
-input, but not the `.cljc` namespaces that macro namespace requires. A change
-there does not invalidate the consuming files.
+**Cause:** Shadow tracks the macro namespace itself as a build input, but not
+necessarily the `.cljc` namespaces that macro namespace requires. A change there
+does not invalidate the consuming files.
 
 **Remedy:** clear the build's cache (`.shadow-cljs/builds/<build-id>/`) and
 recompile when a macro's helper changes, or touch the consuming file.
@@ -93,8 +98,7 @@ compiler's own state. There is no runtime namespace to look a name up in, and
 `ns-publics`/`ns-interns` accept only a literal quoted symbol.
 
 **Remedy:** write one literal `(ns-publics 'the.namespace)` per namespace, or use
-an explicit registry rather than reflection. This is why the browser links
-through a registry (D83).
+an explicit registry rather than reflection.
 
 ## T8 — `:file` in a macro form differs between the two readers
 
@@ -104,8 +108,8 @@ in the page except for a `:file` key.
 **Cause:** Clojure's reader does not stamp a macro form with `:file`;
 ClojureScript's (Shadow's) does.
 
-**Remedy:** do not put `:file` into data two worlds compare. A portable source
-location is namespace+line+column (D84).
+**Remedy:** do not put `:file` into data that must compare across the two
+readers. Use a portable source location such as namespace, line, and column.
 
 ## T9 — `tools/reload` refuses a whole-session reload after a large change
 
@@ -120,25 +124,7 @@ dependency order. When a multimethod's own namespace is reloaded, re-register th
 methods other namespaces added to it (reload those too). Restart the JVM only if
 a targeted reload is not enough.
 
-## T10 — a compacted zero region breaks `reset` unless the bootstrap zero-fills
-
-**Symptom:** after a state region's zeros stop being written (a `.bss`
-compaction — D86), a voice sounds wrong *after a reset*: state that should be
-zero holds whatever the voice last wrote. A conformance plan that resets between
-blocks shows it first.
-
-**Cause:** instantiation and `reset` run the same "write the initializers"
-routine. If that routine writes only the *non-zero* initializers, because a fresh
-region is already zeroed, then `reset` over a region the voice has since written
-leaves it dirty — the routine relied on zeroes it no longer writes.
-
-**Remedy:** the routine must zero the region first and then write the `.data`,
-which is the shape the Wasm emitter has always had (`memory.fill` then the
-non-zero stores). The JavaScript arena's `init` does this now; a region's size
-travels in the canonical form (`{:dsp/zeros n}`) so a host knows how much to
-zero-fill.
-
-## T11 — `read+string` folds a `#_` discard into the *next* form's text
+## T10 — `read+string` folds a `#_` discard into the *next* form's text
 
 **Symptom:** a walk over `read+string` output that asks "is this form's text a
 numeric token?" sees the form after a `#_` with text beginning `#_…`, and so
@@ -150,24 +136,9 @@ returned text, not a form of its own.
 
 **Remedy:** strip the known prefix macros (`#_`, `#'`, `~@`, `'`, `` ` ``, `~`,
 `@`, `^`) before walking, and re-read the remainder so the reader itself discards
-what it should (D91).
+what it should.
 
-## T12 — carrying a form's metadata through SCI: `eval-form` refuses `ns`, and a re-read moves the position
-
-**Symptom:** `sci/eval-form` on a namespace form fails with a root-binding error
-on `*ns*`; and when forms are printed and re-read to reach `eval-string*`, the
-*browser* reader stamps its own `:line`/`:column` over the printed ones, so data
-two worlds compare differs on a source position (a descriptor's `:source`).
-
-**Cause:** SCI's `eval-form` evaluates a form, not a namespace declaration; and a
-reader re-reading printed forms takes the position from the printed text, not from
-the metadata the printer emitted.
-
-**Remedy:** use `sci/eval-string*` and print with `*print-meta*` true, and carry
-the original position under dedicated keys (`:dsp/source-line`/
-`:dsp/source-column`) that `capture/source-of` prefers (D91).
-
-## T13 — reloading a *new* namespace does not reload its new dependents
+## T11 — reloading a *new* namespace does not reload its new dependents
 
 **Symptom:** a namespace is added, and existing namespaces gain a `:require` of it.
 `(tools/reload 'the.new.ns)` reports success, and the suite then runs green — on
