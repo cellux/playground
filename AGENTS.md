@@ -71,35 +71,35 @@ new JVM per command.
 
 ## Discover project features
 
-Read an entrypoint namespace before exploring its implementation. Its public
-functions are the discovery API, and its docstrings point to lower-level
-namespaces when necessary.
+Project-local guidance is self-identifying. A project-root `AGENTS.md` begins
+with YAML frontmatter containing the one-line fields
+`playground-project: <project-id>` and
+`playground-description: <short description>`. Keep the description on one line
+so the inventory search below can display it directly.
 
-- `omkamra.dev.systems` — discover and control the Integrant systems in
-  `dev.edn`.
-- `omkamra.dev.on-demand-http` — inspect and control the `:on-demand-http`
-  Ring/Shadow server, including route resolution and server configuration.
-- `omkamra.dev.frontend` — discover browser builds and connected runtimes,
-  rebuild a running Shadow build, and evaluate ClojureScript.
-- `omkamra.dev.playwright` — drive a real browser through a curated subset of
-  spel: launch a headless session, navigate, wait, evaluate JavaScript, inspect
-  and interact with elements, and capture screenshots.
-- `omkamra.dev.tools` — reload namespaces and create persistent aliases.
-- `omkamra.vice` — assemble, run, capture, and inspect VICE workflows; follow
-  its docstrings into the analysis and capture namespaces.
-- `omkamra.supercollider` — start or wrap SuperCollider sessions, create
-  players, define SynthDefs/UGens, and run performances. Use
-  `omkamra.supercollider.player` to manipulate an existing player.
+To inventory the projects available under `/workspace`, grep their marked
+`AGENTS.md` files:
 
-When using an entrypoint through `clojure_eval`:
+```bash
+grep -RIn \
+  --exclude-dir=.git \
+  --include='AGENTS.md' \
+  -E '^playground-(project|description):[[:space:]]*' \
+  /workspace
+```
+
+For a task in a particular area, narrow the search to that path, read the
+matching project `AGENTS.md`, and follow its feature-discovery map. Do not
+maintain a repository-wide list of projects here or load guidance for unrelated
+projects.
+
+When an entrypoint namespace is named, read it before exploring its
+implementation. Its public functions are the discovery API, and its docstrings
+point to lower-level namespaces when necessary. When using an entrypoint through
+`clojure_eval`:
 
 1. Require the namespace.
 2. Inspect `(ns-publics 'the.namespace)`.
 3. Inspect the `:doc` and `:arglists` metadata of the relevant Vars.
 4. Treat that public documentation as the source of truth; inspect an
    implementation namespace only when it directs you there.
-
-The `:on-demand-http` system resolves Ring handlers by the URI convention in
-`omkamra.dev.on-demand-http/resolve-handler`. It starts compatible Shadow
-watchers when a page or generated asset is requested. Do not start a separate
-watcher process.
